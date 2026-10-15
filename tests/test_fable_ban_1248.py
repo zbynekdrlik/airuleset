@@ -136,3 +136,61 @@ class TestDoctrine(TestCase):
         self.assertIn("**Fable**", ban)
         self.assertIn("worse than Opus 5.5", ban)
         self.assertIn("#1248", ban)
+
+
+class TestReviewFixes(TestCase):
+    """#1248 review round: the Workflow scan reads only a real `model` option,
+    in every shape a script writes it; the Job 41 remedy and the doctrine never
+    point at Fable; the design-by audit counts the Opus 5.5 main compliant."""
+
+    def _wf(self, script):
+        return _hook({"tool_name": "Workflow", "tool_input": {"script": script}})
+
+    def test_workflow_option_shapes_blocked(self):
+        for script in ('agent("r", {"model": "fable"})', "agent('r', {model : 'fable'})",
+                       "opts.model = 'fable'\nawait agent('r', opts)",
+                       "agent('r', {\n  model:\n    'claude-fable-5-1'\n})",
+                       "agent('r', {model: 'global.anthropic.claude-fable-5-1'})"):
+            rc, err = self._wf(script)
+            self.assertEqual(rc, 2, (script, err))
+
+    def test_agent_rare_fable_spellings_blocked(self):
+        for v in ("anthropic/claude-fable-5-1", "fable-5.1", "fable5",
+                  "global.anthropic.claude-fable-5-1"):
+            rc, err = _hook({"tool_name": "Agent", "tool_input": {"model": v}})
+            self.assertEqual(rc, 2, (v, err))
+
+    def test_prompt_text_naming_fable_is_not_a_model_option(self):
+        script = ("await agent('Write the hand-off. Self-review-model: fable is the "
+                  "odoo-erp template line.', {model: 'claude-opus-5-5'})")
+        rc, err = self._wf(script)
+        self.assertEqual(rc, 0, err)
+
+    def test_job41_remedy_names_the_managed_model(self):
+        find = lambda projects_dir, cwd: ("/t/r.jsonl", 0.0)  # noqa: E731
+        out = model_float_audit_job(0.0, {}, [("%p", "/r")], "/proj",
+                                    lambda p: "claude-fable-5-1", find,
+                                    lambda main, now: [], due_fn=lambda *a, **k: True)
+        self.assertEqual(len(out), 1, out)
+        self.assertIn("/model -> %s" % airuleset.MANAGED_MODEL, out[0])
+        import inspect
+        import cli_model_audit
+        self.assertNotIn("-> Fable", inspect.getsource(cli_model_audit))
+
+    def test_design_by_audit_counts_the_opus55_main_compliant(self):
+        from test_audit_design_by_1061 import _make_runner, ab  # puts scripts/ on sys.path
+        runner = _make_runner([(1, "t1"), (2, "t2")], {
+            1: [{"body": "Design-by: main claude-opus-5-5", "created_at": "2026-10-15T10:00:00Z"}],
+            2: [{"body": "Design-by: main claude-opus-4-8", "created_at": "2026-10-15T10:00:00Z"}]})
+        v = ab.audit_design_by("o/r", issues_runner=runner, comments_runner=runner)
+        self.assertEqual([x["number"] for x in v], [2])
+
+    def test_doctrine_never_calls_the_main_or_its_review_fable(self):
+        stale = re.compile(r"Fable (main|MAIN|review|id)|\(Fable\)|Fable MAIN")
+        for rel in ("modules/quality/architecture-first.md", "skills/autopilot/SKILL.md",
+                    "agents/implementer.md", "agents/autopilot-worker.md",
+                    "skills/completion-report-deep/DEEP.md", "skills/meeting-analysis/SKILL.md",
+                    "goal_registry.py"):
+            with open(os.path.join(REPO, rel), encoding="utf-8") as fh:
+                hits = [i for i, ln in enumerate(fh, 1) if stale.search(ln)]
+            self.assertEqual(hits, [], rel)

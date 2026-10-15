@@ -55,6 +55,7 @@ class TestModelAwarenessConversion(TestCase):
     def test_tier_table_stays(self):
         self.assertIn("claude-fable-*", self.module)  # #1248: named as BANNED
         self.assertIn("claude-opus-4-8", self.module)
+        self.assertIn("claude-sonnet-5-5", self.module)
 
     def test_banned_opus5_stays(self):
         self.assertIn("Opus 5", self.module)
@@ -310,7 +311,7 @@ class TestModelAwarenessB2(TestCase):
     def test_721_burn_narrative_not_in_module(self):
         self.assertNotIn("burn only SHIFTED, it did not shrink", self.module)
 
-    def test_fable51_is_the_fleet_tier(self):
+    def test_opus55_main_and_fable_banned(self):
         # #1119: Opus 5.5 replaced Fable 5.1 as the managed MAIN; #1248 (owner
         # 2026-10-15): Fable (claude-fable-*) is a documented BANNED dispatch id.
         self.assertIn("Opus 5.5", self.module)
