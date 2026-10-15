@@ -46,8 +46,8 @@ MANAGED_MODEL = MODEL_TIERS["opus5"] + "[1m]"
 
 # The former main (pre-#1119), BANNED as a dispatch value since #1248 (owner
 # 2026-10-15: "nechcem aby sa aktualne fable puzival je horsi ako opus 5.5").
-# Kept by name ONLY so gates/designdispatch.py still accepts a design comment
-# the old Fable main stamped; it is NOT a MODEL_TIERS member.
+# Kept by name ONLY so gates/designdispatch.py (and the design-by audit) still
+# accept a design comment the old Fable main stamped; NOT a MODEL_TIERS member.
 FORMER_MAIN_MODEL = "claude-fable-5-1"
 
 # Per-PROJECT main model (#1246, owner 14.10.2026: "potrebujem aby pz-server

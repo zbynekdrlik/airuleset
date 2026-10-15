@@ -466,7 +466,7 @@ round-scope dispatch lock) — and releases it the moment that cycle's push has 
    version-bump→RED, and do NOT re-do an already-committed member. Only on a truly fresh start do you
    **version bump FIRST** (`version-bumping.md`) before any feature code.
 2. **READ THE MAIN'S DESIGN — DO NOT AUTHOR IT (UNCONDITIONAL, once per issue; #1061).** The
-   DESIGN and ARCHITECTURE of every ticket are authored by the Fable MAIN session, NEVER by you —
+   DESIGN and ARCHITECTURE of every ticket are authored by the MAIN session, NEVER by you —
    the owner's standing rule (#871, owner escalation 2026-09-17: "návrh implementácie robí slabý
    model!!" is a hard violation). Before you were dispatched, the main posted the ticket's design
    comment — **root cause** traced in the code + **the chosen approach** + **the rejected
@@ -493,7 +493,7 @@ round-scope dispatch lock) — and releases it the moment that cycle's push has 
    `# airuleset:design-by-ok <reason>`, logged). Your job is the faithful IMPLEMENTATION of the
    main's decided design. (Historical: the worker USED to author the design here; #1061 reversed
    that after the owner tied the recurring low quality + client complaints to design being done by
-   the Opus worker instead of the Fable main. The design-first discipline is unchanged — it just
+   the Opus worker instead of the main. The design-first discipline is unchanged — it just
    lives with the main now, where the stronger model does the precise thinking.) Never satisfy this
    step by naming a skill — a skill body does NOT reach a dispatched worker (probes, 2026-07-27);
    read the actual `Design-by: main` comment and grep the actual code.
@@ -697,7 +697,7 @@ them all):
 issues: #<A> <title>, #<B> <title>, … (one PR closes all)
 plan: <per issue, N/N acceptance-criteria items from the issue body fulfilled — your own self-audit in plain words vs what the ticket asked for. This is what the supervisor's `✅ /plan-check: N/N fulfilled` line relays — it is NOT independently re-run by the supervisor, so an honest self-audit here is the only thing backing that line.>
 validated: <per issue: how you proved each is still real: repro/test/MCP/curl, ALSO posted as its own `gh issue comment <N>` per STEP 0 above — a durable artifact, checked by the extended #136/#213 gate | "OBSOLETE — closed: <what>">
-approach: <per issue, the MAIN's decided design you implemented: the `Design-by: main` comment URL/id (root cause + chosen approach + rejected alternative + Triage: + Architektúra:, authored by the Fable main), AND your own `Anchors-confirmed:` comment URL/id confirming the code anchors before your first commit. NEVER "n/a" — you read + confirm the main's design, you never author it (CYCLE step 2, #1061).>
+approach: <per issue, the MAIN's decided design you implemented: the `Design-by: main` comment URL/id (root cause + chosen approach + rejected alternative + Triage: + Architektúra:, authored by the main), AND your own `Anchors-confirmed:` comment URL/id confirming the code anchors before your first commit. NEVER "n/a" — you read + confirm the main's design, you never author it (CYCLE step 2, #1061).>
 review: <per issue: `/review` + `/requesting-code-review` result (0 🔴 0 🟡 0 🔵 or N findings fixed in <sha>), ALSO posted as its own `gh issue comment <N>` per CYCLE step 6 — checked by the SAME extended #214 gate.>
 achieved: <per issue, ONE Slovak line of what actually LANDED — used verbatim as the Discord card's "Dosiahnuté" (#A: …; #B: …)>
 pr: #<M> <url>  (body Closes #A #B …)
@@ -720,7 +720,7 @@ OPEN):
 issues: #<A> <title>, #<B> <title>, …
 plan: <per issue, N/N acceptance-criteria items from the issue body fulfilled — self-audit vs what the ticket asked for>
 validated: <per issue: how you proved each is still real, ALSO posted as its own `gh issue comment <N>` | "OBSOLETE — commented, left OPEN: <what>">
-approach: <per issue, the MAIN's decided design you implemented: the `Design-by: main` comment URL/id (root cause + chosen approach + rejected alternative + Triage: + Architektúra:, authored by the Fable main), AND your own `Anchors-confirmed:` comment URL/id confirming the code anchors before your first commit. NEVER "n/a" — you read + confirm the main's design, you never author it (CYCLE step 2, #1061).>
+approach: <per issue, the MAIN's decided design you implemented: the `Design-by: main` comment URL/id (root cause + chosen approach + rejected alternative + Triage: + Architektúra:, authored by the main), AND your own `Anchors-confirmed:` comment URL/id confirming the code anchors before your first commit. NEVER "n/a" — you read + confirm the main's design, you never author it (CYCLE step 2, #1061).>
 review: <per issue: local `/review` + `/requesting-code-review` result before hand-off, ALSO posted as its own `gh issue comment <N>`>
 achieved: <per issue, ONE Slovak line of what LANDED locally — verbatim into each --handoff card's Dosiahnuté>
 branch: <your fork branch name — the EXACT name, pushed after your FIRST commit (#503), never a vague "my branch">
@@ -743,7 +743,7 @@ variant exists to prevent):
 issues: #<A> <title>, #<B> <title>, …
 plan: <per issue, N/N acceptance-criteria items from the issue body fulfilled — self-audit vs what the ticket asked for>
 validated: <per issue: how you proved each is still real, ALSO posted as its own `gh issue comment <N>` | "OBSOLETE — commented, left OPEN: <what>">
-approach: <per issue, the MAIN's decided design you implemented: the `Design-by: main` comment URL/id (root cause + chosen approach + rejected alternative + Triage: + Architektúra:, authored by the Fable main), AND your own `Anchors-confirmed:` comment URL/id confirming the code anchors before your first commit. NEVER "n/a" — you read + confirm the main's design, you never author it (CYCLE step 2, #1061).>
+approach: <per issue, the MAIN's decided design you implemented: the `Design-by: main` comment URL/id (root cause + chosen approach + rejected alternative + Triage: + Architektúra:, authored by the main), AND your own `Anchors-confirmed:` comment URL/id confirming the code anchors before your first commit. NEVER "n/a" — you read + confirm the main's design, you never author it (CYCLE step 2, #1061).>
 review: <per issue: `/review` + `/requesting-code-review` result before hand-off, ALSO posted as its own `gh issue comment <N>`>
 achieved: <per issue, ONE Slovak line of what LANDED on the integration branch — verbatim into each --handoff card's Dosiahnuté>
 pr: #<M> <url>  (dev → <integration branch>, body Closes #A #B … — GitHub does NOT auto-close from this branch, see below)
@@ -767,7 +767,7 @@ those, one integration cycle at a time under the #8 integration mutex, as each b
 issues: #<A> <title>, #<B> <title>, … (one PR closes all — opened by the SUPERVISOR when your branch is integrated)
 plan: <per issue, N/N acceptance-criteria items fulfilled — your own self-audit>
 validated: <per issue: how you proved each is still real, ALSO posted as its own `gh issue comment <N>` | "OBSOLETE — closed: <what>">
-approach: <per issue, the MAIN's decided design you implemented: the `Design-by: main` comment URL/id (root cause + chosen approach + rejected alternative + Triage: + Architektúra:, authored by the Fable main), AND your own `Anchors-confirmed:` comment URL/id confirming the code anchors before your first commit. NEVER "n/a" — you read + confirm the main's design, you never author it (CYCLE step 2, #1061).>
+approach: <per issue, the MAIN's decided design you implemented: the `Design-by: main` comment URL/id (root cause + chosen approach + rejected alternative + Triage: + Architektúra:, authored by the main), AND your own `Anchors-confirmed:` comment URL/id confirming the code anchors before your first commit. NEVER "n/a" — you read + confirm the main's design, you never author it (CYCLE step 2, #1061).>
 review: <per issue: LOCAL `/review` + `/requesting-code-review` result (0 🔴 0 🟡 0 🔵 or N findings fixed in <sha>), ALSO posted as its own `gh issue comment <N>`>
 achieved: <per issue, ONE Slovak line of what LANDED on your branch — the supervisor relays this verbatim into your ticket's own run-card at its integration cycle>
 worktree: <your worktree's absolute path>

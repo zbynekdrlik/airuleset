@@ -16,7 +16,7 @@ sweep even though it now checks every recent subagent, not just the newest.
 
 Machine-channel ONLY (the #850 repo-health class): it returns journal LOG lines
 and NEVER pings the owner (this module deliberately imports no `notify` send
-path). The owner's remedy per floated session is `/model -> Fable 5.1`, or a
+path). The owner's remedy per floated session is `/model -> MANAGED_MODEL`, or a
 relaunch (which re-lands the launch pin). Read-only — never keystrokes, never
 writes (feedback_never_keystroke_human_active_pane / no_manual_pane_nudges).
 """
@@ -32,8 +32,8 @@ def _flag(read_model, path, kind, pane, cwd, out):
     # allowlisted tier (incl. sonnet/haiku) is never journaled.
     if m and airuleset.is_banned_model_for_audit(m):
         out.append("model-float %s pane=%s model=%s cwd=%s "
-                    "(BANNED model — /model -> Fable 5.1 or relaunch)"
-                    % (kind, pane, m, cwd))
+                    "(BANNED model — /model -> %s or relaunch)"
+                    % (kind, pane, m, cwd, airuleset.MANAGED_MODEL))
 
 
 def model_float_audit_job(now, state, panes, projects_dir, read_model,

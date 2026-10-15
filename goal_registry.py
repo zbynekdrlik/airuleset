@@ -226,7 +226,7 @@ _DUAL_DISPATCH = (
     "IMPLEMENTER window, NEVER an in-session Agent(autopilot-worker): "
     "ListAgents → SendMessage(to the impl session) the SAME per-ticket prompt; "
     "the wait = the implementer's return message OR a ticket poll for "
-    "LANE-RETURN (the Approach-3 fallback); everything after the return (Fable "
+    "LANE-RETURN (the Approach-3 fallback); everything after the return (main "
     "review, integrate, run-card) is UNCHANGED; no impl session → journal "
     "`dual: implementer session missing — dispatch left on the ticket` and "
     "continue other work — NEVER fall back to an in-session Opus autopilot-worker "

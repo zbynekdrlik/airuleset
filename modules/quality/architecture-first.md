@@ -3,7 +3,7 @@
 Before writing code, think about the design:
 
 - **Follow existing patterns** in the codebase. Consistency is more important than cleverness.
-- **No patchwork — area-reviewed at integration (#993).** Fix a wrong architecture; never stack workarounds on it. Every integrated change gets a main-session (Fable) review of the whole AREA it touches: verdict `OK` or `REWORK`; `REWORK` FILES an `architecture-rework` ticket — mechanical, not a question.
+- **No patchwork — area-reviewed at integration (#993).** Fix a wrong architecture; never stack workarounds on it. Every integrated change gets a main-session review of the whole AREA it touches: verdict `OK` or `REWORK`; `REWORK` FILES an `architecture-rework` ticket — mechanical, not a question.
 - **Critical self-review:** Be skeptical of your own conclusions. Before assuming something "doesn't work":
   1. Search documentation and GitHub issues for evidence
   2. Verify from multiple independent sources

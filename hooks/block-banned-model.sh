@@ -3,11 +3,10 @@ set -euo pipefail
 
 # Hook: PreToolUse (Agent + Workflow) — #991 (owner directive 2026-09-11).
 #
-# The working model chooses a subagent's model natively; airuleset bans exactly
-# ONE thing on the dispatch surface: a BANNED model. Ban-list source of truth =
-# airuleset.BANNED_MODELS: claude-opus-5 + the bare opus / opusplan alias, and
-# (#1248) every Fable id + the bare fable alias. Everything else passes. tests/test_block_banned_
-# model.py asserts every BANNED_MODELS id is named here.
+# The working model picks a subagent's model natively; airuleset bans only a
+# BANNED model (source: airuleset.BANNED_MODELS = Opus 5 + opus/opusplan, and
+# every Fable id + fable, #1248). tests/test_block_banned_model.py asserts each
+# BANNED_MODELS id is named here.
 #
 # Exit 2 = block (STDERR = reason). Stdin: the JSON payload. Fail-open on no jq.
 
@@ -26,17 +25,16 @@ if [ -n "$SCRIPT_PATH" ] && [ -r "$SCRIPT_PATH" ]; then
 $FILE_CONTENT"
 fi
 
-# _is_banned <value> — true (rc 0) iff value names a BANNED model. Normalizes:
-# lowercase, strip quotes/backticks/space, strip a trailing [Nm] tag, strip a
-# provider prefix (us/eu/apac.anthropic.) and a served -YYYYMMDD date suffix.
+# _is_banned <value>: rc 0 iff a BANNED model, after lowercasing and stripping
+# quotes/spaces, a [Nm] tag, a provider prefix and a -YYYYMMDD suffix.
 _is_banned() {
     local v core
     v=$(printf '%s' "$1" | tr 'A-Z' 'a-z')
     v="${v//[\'\"\`]/}"
     v="${v// /}"
-    v=$(printf '%s' "$v" | sed -E 's/\[[0-9]+m\]$//; s/^(us|eu|apac)?\.?anthropic\.//')
+    v=$(printf '%s' "$v" | sed -E 's/\[[0-9]+m\]$//; s/^((us|eu|apac|global)\.)?anthropic[./]//')
     core=$(printf '%s' "$v" | sed -E 's/-[0-9]{8}$//')
-    case "$v" in opus|opusplan|claude-opus-5|fable|claude-fable-5|claude-fable-5-1) return 0 ;; esac
+    case "$v" in opus|opusplan|claude-opus-5|fable|claude-fable-5|claude-fable-5-1|fable*|claude-fable*) return 0 ;; esac
     case "$core" in claude-opus-5|claude-fable|claude-fable-*) return 0 ;; esac
     return 1
 }
@@ -55,14 +53,16 @@ fi
 
 # --- Workflow surface: check each (opts.)model value ----------------------- #
 if [ -n "$SCRIPT" ]; then
+    # #1248: a real `model` key only (not `Self-review-model:` text), quoted
+    # or bare, `:` or `=`, newlines joined so a next-line value counts.
     while IFS= read -r val; do
         [ -n "$val" ] || continue
         if _is_banned "$val"; then
             _block "$val"
         fi
-    done < <(printf '%s' "$SCRIPT" \
-                | grep -oiE "model:[[:space:]]*[\"'\`]?[a-z0-9._:-]*[\"'\`]?" \
-                | sed -E "s/^model:[[:space:]]*//I")
+    done < <(printf '%s' "$SCRIPT" | tr '\n' ' ' \
+                | grep -oiE "(^|[^a-z0-9_-])[\"'\`]?model[\"'\`]?[[:space:]]*[:=][[:space:]]*[\"'\`]?[a-z0-9._:/-]*" \
+                | sed -E "s/^.*model[\"'\`]?[[:space:]]*[:=][[:space:]]*[\"'\`]?//I")
 fi
 
 exit 0

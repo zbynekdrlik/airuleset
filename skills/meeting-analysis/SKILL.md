@@ -16,7 +16,7 @@ user-invocable: true
 
 ## The hard rules (the failures this skill exists to prevent)
 
-0. **Interpretation = the MAIN session (Fable); only MECHANICS may be delegated.** A subagent may
+0. **Interpretation = the MAIN session; only MECHANICS may be delegated.** A subagent may
    do ONLY the mechanical phases 1-3 (ffmpeg extraction, the ASR API call, frame dedup). Phases 4-6
    — reading EVERY screen, correlation, synthesis, per-task supplements, the questions — run in
    main, whole, no sampling. Repeated client statements carry the HIGHEST weight. A meeting

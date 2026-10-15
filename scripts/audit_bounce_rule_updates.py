@@ -139,13 +139,14 @@ def fetch_issue_comments(repo, number, runner=None):
 
 def audit_design_by(repo, since=None, issues_runner=None, comments_runner=None):
     """List OPEN issues whose NEWEST `Design-by:` comment is NOT
-    `Design-by: main <Fable id>` (#1061). `since` (YYYY-MM-DD) restricts to
+    `Design-by: main <accepted main id>` (#1061; Opus 5.5 now, the pre-#1119
+    Fable main still accepted, #1248). `since` (YYYY-MM-DD) restricts to
     design comments created on/after that date, so pre-fix tickets never count.
     An issue with NO `Design-by:` comment (or none since `since`) is not a
     violation (no design-authorship signal). Reuses the single-source
-    gates.designdispatch regex + Fable-id match. Returns a list of dicts."""
+    gates.designdispatch regex + accepted-main-id set. Returns a list of dicts."""
     from gates import designdispatch as dd
-    fable = dd._fable_id()
+    accepted = dd._accepted_main_ids()
     violations = []
     for iss in fetch_open_issues(repo, runner=issues_runner):
         comments = fetch_issue_comments(repo, iss["number"],
@@ -162,7 +163,7 @@ def audit_design_by(repo, since=None, issues_runner=None, comments_runner=None):
         role, model, ts = newest
         if since and ts and ts < since:
             continue  # design comment predates the fix date
-        if role == "main" and dd._norm_model(model) == dd._norm_model(fable):
+        if role == "main" and dd._norm_model(model) in accepted:
             continue  # compliant
         violations.append({
             "number": iss["number"], "title": iss["title"],

@@ -12,7 +12,7 @@ For every live managed tmux pane it reads the newest-assistant `model` of the
 pane's MAIN transcript AND of every subagent transcript under it, and flags any
 that is a BANNED model. A watchdog job (machine-channel only, never an
 owner ping — the #850 repo-health class) journals violations; the owner's remedy
-per floated session is `/model → Fable 5.1` (or a relaunch, which re-lands the
+per floated session is `/model → MANAGED_MODEL` (or a relaunch, which re-lands the
 launch pin automatically).
 """
 import glob
@@ -149,6 +149,6 @@ def cmd_model_audit(args):
                 r["pane"], r["kind"], r["model"], r["cwd"],
                 "BANNED" if r["banned"] else "ok"))
         if flagged:
-            print("model-audit: %d BANNED (floated to a banned model) — owner "
-                  "remedy per session: /model -> Fable 5.1, or relaunch" % len(flagged))
+            print("model-audit: %d BANNED (floated to a banned model) — owner remedy per "
+                  "session: /model -> %s, or relaunch" % (len(flagged), airuleset.MANAGED_MODEL))
     return 1 if flagged else 0

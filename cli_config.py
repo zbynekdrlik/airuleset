@@ -384,7 +384,7 @@ def apply_managed_settings_defaults(settings: dict) -> dict:
     # CLAUDE_LAUNCH_SCRIPT_CONTENT's own comment).
     result["tui"] = airuleset.MANAGED_TUI
     # Unconditional overwrite = self-heal of any banned `model`
-    # (airuleset.is_banned_model — Opus 5, #871; Fable 5.1 unbanned by #894) back to the
+    # (airuleset.is_banned_model — Opus 5, #871; Fable, #1248) back to the
     # allowed managed default. See the docstring's `model` bullet.
     result["model"] = airuleset.MANAGED_MODEL
     result["promptSuggestionEnabled"] = False

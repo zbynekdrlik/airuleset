@@ -500,9 +500,9 @@ the `/goal` line, the loop never starts.
 
 > **DUAL dispatch CHANNEL (model-backend marker box, #1060 L3b) — read alongside the MODE gate above.** The concurrency MODE (parallel/sequential) decides HOW MANY units run at once; the dispatch CHANNEL decides HOW a unit is dispatched, and is ORTHOGONAL (miva1, the phase-1 dual box, stays `sequential` AND dual). On a box carrying the model-backend marker (`~/.claude/airuleset-model-backend.json`), the implementation runs in the persistent IMPLEMENTER window (window 1 `impl`, on the controller gateway, its per-box backend set by `model-backend set` — the MAIN is NEVER flipped, settings.json is shared) — a SEPARATE Claude Code session, not an in-session subagent — so a unit is handed off by a cross-session `SendMessage` and the ticket is the durable record. The canonical `goal_registry` clause is carried VERBATIM here (hand-maintained, NOT auto-rendered — `goal-inventory --check` CHECK-LOCKS it byte-identical via `goal_registry.skill_dual_drift`, so the body can never drift):
 >
-> DUAL dispatch (model-backend marker present) — dispatch each unit to the IMPLEMENTER window, NEVER an in-session Agent(autopilot-worker): ListAgents → SendMessage(to the impl session) the SAME per-ticket prompt; the wait = the implementer's return message OR a ticket poll for LANE-RETURN (the Approach-3 fallback); everything after the return (Fable review, integrate, run-card) is UNCHANGED; no impl session → journal `dual: implementer session missing — dispatch left on the ticket` and continue other work — NEVER fall back to an in-session Opus autopilot-worker on a dual box (that breaks the pilot's per-alias measurement).
+> DUAL dispatch (model-backend marker present) — dispatch each unit to the IMPLEMENTER window, NEVER an in-session Agent(autopilot-worker): ListAgents → SendMessage(to the impl session) the SAME per-ticket prompt; the wait = the implementer's return message OR a ticket poll for LANE-RETURN (the Approach-3 fallback); everything after the return (main review, integrate, run-card) is UNCHANGED; no impl session → journal `dual: implementer session missing — dispatch left on the ticket` and continue other work — NEVER fall back to an in-session Opus autopilot-worker on a dual box (that breaks the pilot's per-alias measurement).
 >
-> The main (Fable) still DESIGNS every ticket (Step 3.1), REVIEWS the returned diff, INTEGRATES, and fires the run-card exactly as in the non-dual flow — ONLY the dispatch + the wait change. `ListAgents` names the `impl` session; `SendMessage(to=<impl session name>, …)` carries the identical per-ticket prompt an `Agent(autopilot-worker)` dispatch would. The implementer runs the receiving-side design gate itself (`python3 -m gates.designdispatch --issue N --slug owner/repo`) before any work; see `agents/implementer.md` for the implementer-side discipline.
+> The main still DESIGNS every ticket (Step 3.1), REVIEWS the returned diff, INTEGRATES, and fires the run-card exactly as in the non-dual flow — ONLY the dispatch + the wait change. `ListAgents` names the `impl` session; `SendMessage(to=<impl session name>, …)` carries the identical per-ticket prompt an `Agent(autopilot-worker)` dispatch would. The implementer runs the receiving-side design gate itself (`python3 -m gates.designdispatch --issue N --slug owner/repo`) before any work; see `agents/implementer.md` for the implementer-side discipline.
 
 **PARALLEL mode (explicit declaration only since #1137) — the rest of Step 3 below applies only when Step 3.0 above resolved `parallel`; a `sequential` pane followed the SEQUENTIAL block and skips its refill / lane-count sentences (#1035).** Each loop turn works the backlog with **CONTINUOUS REFILL** (#848, retiring #723's batch mode): keep
 `isolation: "worktree"`-isolated `autopilot-worker` lanes live — one lane per solo ticket or
@@ -845,9 +845,9 @@ gap in either.
    own design-depth (design-heavy) criteria (architectural / cross-cutting / ambiguous-design / a prior worker
    already failed on it) PLUS the ONE framework-first trigger `architecture-first.md` names (a NEW
    service, CLI, daemon, or long-lived component) — extending that single taxonomy, never
-   inventing a second, parallel one. **YOU (the Fable MAIN) AUTHOR the design comment yourself and
+   inventing a second, parallel one. **YOU (the MAIN) AUTHOR the design comment yourself and
    post it BEFORE dispatch — for EVERY member, trivial or design-heavy (#871/#1061, owner escalation
-   2026-09-17: design + architecture are done by the Fable main, the weaker worker only implements a
+   2026-09-17: design + architecture are done by the main, the weaker worker only implements a
    decided design).** For a DESIGN-HEAVY member, do the deeper thinking first — dispatch ONE
    read-only design consult (a `general-purpose` dispatch inheriting the native subagent-model
    default; never a `model` param naming a banned model), OR hold the synthesis in the main session
@@ -857,10 +857,10 @@ gap in either.
    rejected alternative + `Triage:` + `Architektúra:` + `Shared-benefit:`) to a body file and POST
    it with **`python3 ~/devel/airuleset/airuleset.py design-record --repo <owner/name> --issue <N>
    --body-file <design.md>`** — it stamps `Design-by: main <model>` read from YOUR OWN transcript
-   (the Fable id, never a self-declared string), validates the design shape before posting, and
+   (the main's own id, never a self-declared string), validates the design shape before posting, and
    writes the local design marker the worker's commit gate needs. The dispatch precondition
    (`gates.designdispatch`) then REFUSES to dispatch a worker for any member whose newest design
-   comment is not `Design-by: main <Fable id>` — so a member without your design comment simply
+   comment is not `Design-by: main <main id>` — so a member without your design comment simply
    cannot be dispatched (bypass `airuleset:design-by-ok <reason>` in the prompt, logged). Embed a
    tight summary of the design in that member's worker dispatch prompt as grounding. The worker's
    CYCLE step 2 (`agents/autopilot-worker.md`) then READS your `Design-by: main` comment, confirms
@@ -1133,7 +1133,7 @@ gap in either.
    > branches are READY at that moment (never waiting for stragglers), and releases it; NO new lane
    > is dispatched while the batch is open (Step 3.2):
    > 1. **MAIN REVIEW GATE before integration (#991).** For each returned lane (any order), the
-   >    MAIN session (Fable) reads `git diff main...<ref>` (or `git -C <worktree-path> diff <base>`)
+   >    MAIN session reads `git diff main...<ref>` (or `git -C <worktree-path> diff <base>`)
    >    + the lane's LANE-RETURN comment and strictly judges architecture and quality — this is the
    >    review of the subagent's work, done by the reviewer that holds the whole conversation
    >    context. Check: **(a)** the diff matches the ticket's design comment (approach, root cause,
@@ -1149,7 +1149,7 @@ gap in either.
    >    concept with ONE source of truth, or layers of reactions to requests (patchwork:
    >    duplicated sources of truth, shim/compat layers, hook-on-hook, incident-driven exceptions,
    >    prose replacing a native function)? **This review IS the review of record, done by the
-   >    Fable MAIN (#871/#1061) — the worker's two adversarial reviews are only a pre-filter; record
+   >    MAIN (#871/#1061) — the worker's two adversarial reviews are only a pre-filter; record
    >    `Reviewed-by: main <model>` on the integration/merge note (same transcript-derived stamp as
    >    `Design-by:`).** **Every integration records the verdict in the report's
    >    `🏛 Architektúra: <oblasť> — OK|REWORK #N` line** (`completion-report.md`, hook-enforced). A
@@ -1232,7 +1232,7 @@ gap in either.
    > its review verdicts (clean worktree, review comment on the ticket) is NOT re-dispatched — verify
    > (status clean + comments) and merge it directly. A dead worker's in-flight review-subagent
    > outputs survive at `/tmp/claude-*/…/tasks/<agent-id>.output` — the resume worker reads
-   > `tail -c 6000` (never the whole JSONL) and POSTS the verdicts, or the 2× Fable review is lost.
+   > `tail -c 6000` (never the whole JSONL) and POSTS the verdicts, or the 2× review is lost.
    > (2) **A manual `/compact` (owner) drops the harness task handle of a `run_in_background`
    > `airuleset.py push` — but the PROCESS survives.** Do NOT launch a second push (collision):
    > `pgrep -af "airuleset.py push"`, then wait on the live PID (`while kill -0 $PID; do sleep 30;

@@ -5806,8 +5806,8 @@ def _canonical_self_review_model(value):
     """Return the CANONICAL MODEL_TIERS id for a --self-review-model value,
     or None if it is not an allowed exact model id (#991 review finding 1).
 
-    Tolerates case + the ``[Nm]`` context tag via ``_normalize_model`` (a
-    Fable main reports ``claude-fable-5-1[1m]``), then maps back to the
+    Tolerates case + the ``[Nm]`` context tag via ``_normalize_model`` (the
+    main reports ``claude-opus-5-5[1m]``), then maps back to the
     literal MODEL_TIERS constant so the emitted ``Self-review-model:`` line
     is always gate-EXACT. Banned/alias/unknown/empty -> None. Single source
     of truth: MODEL_TIERS / BANNED_MODELS via is_allowed_model/is_banned_model.
