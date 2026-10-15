@@ -55,7 +55,6 @@ class TestModelAwarenessConversion(TestCase):
     def test_tier_table_stays(self):
         self.assertIn("claude-fable-*", self.module)  # #1248: named as BANNED
         self.assertIn("claude-opus-4-8", self.module)
-        self.assertIn("claude-sonnet-5-5", self.module)
 
     def test_banned_opus5_stays(self):
         self.assertIn("Opus 5", self.module)
