@@ -172,6 +172,27 @@ class DuplicateCheck(_FakeProcCase):
         self.assertEqual(second, [])
 
 
+class StatusLine(_FakeProcCase):
+    """`airuleset.py status` names a duplicate so the owner can see it without
+    the journal (silent when <= 1 server shares the path)."""
+
+    def test_silent_for_a_single_server(self):
+        self.p.proc(100, "tmux: server")
+        self.p.listen(100, self.PATH)
+        self.assertIsNone(ts.status_line(path=self.PATH, proc_root=self.p.root))
+
+    def test_names_the_servers_and_the_claude_host(self):
+        self.two_servers(claude_under=(200,))
+        line = ts.status_line(path=self.PATH, proc_root=self.p.root)
+        self.assertIn("2 servers", line)
+        self.assertIn("100,200", line)
+        self.assertIn("claude in 200", line)
+
+    def test_cmd_status_prints_it(self):
+        import airuleset
+        self.assertIn("tmux_servers", inspect.getsource(airuleset.cmd_status))
+
+
 class PaneInventoryWiring(unittest.TestCase):
     """`_pane_inventory_raw` runs the duplicate check after a healthy query and
     re-reads the inventory when the socket moved; run_once hands it `logs`."""
