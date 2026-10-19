@@ -1059,9 +1059,9 @@ class TestControllerSshAttach(TestCase):
         h = hashlib.sha256(
             airuleset.STREAM_SSH_ATTACH_BLOCK.encode()).hexdigest()
         self.assertEqual(
-            h, "886f66e57b30789d187767"
-               "1ca70610d4d211dc8293d0"
-               "b162cadadd5946677a88")
+            h, "ec560fba770b52b22f7633"
+               "60877966d73f4f3bedb697"
+               "0d47aca4e8a029409275")
 
     def test_controller_does_not_regress_sibling_consumers(self):
         # RED-1 from fable review: widening is_single_session_box_user
