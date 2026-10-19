@@ -200,6 +200,24 @@ class AttachBodyNeverForksASecondServer(_RealTmux):
         self.assertEqual(names, ["alpha"])
 
 
+class SshAutoAttachRevivesToo(unittest.TestCase):
+    """The ssh auto-attach bashrc block also ends in `exec tmux new-session
+    -A`; it runs the SAME revive fragment before any lookup."""
+
+    def test_block_runs_the_revive_before_the_first_lookup(self):
+        import cli_bashrc_appliers as b
+        import cli_tmux_revive as rv
+        block = b.STREAM_SSH_ATTACH_BLOCK
+        self.assertIn(rv.TMUX_REVIVE_SH, block)
+        self.assertLess(block.index(rv.TMUX_REVIVE_SH),
+                        block.index("tmux has-session"))
+
+    def test_webterm_body_uses_the_same_fragment(self):
+        import cli_tmux_revive as rv
+        self.assertIs(w.TMUX_REVIVE_SH, rv.TMUX_REVIVE_SH)
+        self.assertTrue(w._ATTACH_BODY.startswith(rv.TMUX_REVIVE_SH))
+
+
 class FallbackNeverJoinsAnotherHuman(unittest.TestCase):
     """The single-session fallback (#555, for gk's unnamed `0`) must never put
     a per-human tab into ANOTHER human's session (claudy, 2026-10-19)."""

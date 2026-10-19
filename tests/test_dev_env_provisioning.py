@@ -1053,14 +1053,15 @@ class TestControllerSshAttach(TestCase):
         # here, not derived from the code under test. #1088 changed the cwd
         # chain loop to the repo-aware `.git` predicate + the loud last-resort
         # line, so the hash was deliberately recomputed (was
-        # 42fe3ea8...891755, pre-#985/#1088; #1202 (last resort $HOME): f09b01...).
+        # 42fe3ea8...891755, pre-#985/#1088; #1202 (last resort $HOME): f09b01...;
+        # #1088: fa7ff40f...068a9f0a; #1256 adds the tmux revive fragment).
         import hashlib
         h = hashlib.sha256(
             airuleset.STREAM_SSH_ATTACH_BLOCK.encode()).hexdigest()
         self.assertEqual(
-            h, "fa7ff40fe735da33cd4f70"
-               "1bcab690db19b1cf2c2171"
-               "5edfefc9ced6068a9f0a")
+            h, "886f66e57b30789d187767"
+               "1ca70610d4d211dc8293d0"
+               "b162cadadd5946677a88")
 
     def test_controller_does_not_regress_sibling_consumers(self):
         # RED-1 from fable review: widening is_single_session_box_user
