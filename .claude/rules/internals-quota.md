@@ -38,3 +38,7 @@ paths:
   - A step that acts on live processes refuses its default runner under `PYTEST_CURRENT_TEST` (the #1136 shape), so a full `cmd_install` test on dev1 never moves real sessions.
   - Verify a "protection" on the box as it IS, not as a fresh launch makes it: list every `claude` with its cgroup `memory.max`. A green fresh-launch probe said nothing about the four old sessions.
 
+- **#1256 — the #1224 tool-OOM `BASH_ENV` file recursed into a segfault under another `$HOME`.** A launcher run under another HOME (a test HOME, a sudo/su-hosted Claude) chained the inherited outer oom file as `AIRULESET_PREV_BASH_ENV`, and that file's PREV was itself, so every non-interactive bash crashed. The gate symptom: 12 `TestClaudeLauncherContinueOrNew` failures once the session ran with `BASH_ENV` set. Fix:
+  - the launcher never chains another `airuleset-tool-oom.sh`;
+  - the oom file skips that name and also keeps a `__airuleset_oom_chain` re-entrancy sentinel, which covers a symlink or a user file that sources it.
+  - Tests that run launchers inherit the ambient `BASH_ENV`, so set it explicitly in a regression test.
