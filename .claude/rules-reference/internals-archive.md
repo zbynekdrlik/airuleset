@@ -2438,3 +2438,48 @@ The #672 REWORK bullet in internals-webterm.md marks these two as the OLD design
 - **#1046 — every hook-level test runs against a HOME it OWNS; two locks keep it so.** A `subprocess.run/Popen/…` that drives `hooks/<x>.sh` (literal path OR a hook-path var) or `-m gates.<m>` reads the BOX's real `~/.claude` unless `env=` overrides HOME — `gates/questionscope` reads `tickets-status/<cwd-key>.json` (BLOCKS a fixture `#N` when U==0 fresh-cache: the 2026-09-16 controller reds), `designdispatch`/`designbypost` APPEND fixtures to real `design-by-gate.log`. Sweep: method → `env=hermetic_hook_env(self, **extra)` (#1028 seam); a MODULE-level helper (no `testcase`) → HOME to the shared `MODULE_HOOK_HOME` constant in `_hook_state_cleanup.py` (empty dir; safe ONLY because no module-level helper drives a HOME-WRITER — audited); an `env=None`-param helper → `{**(env if env is not None else os.environ), "HOME": <hermetic>}` (caller vars kept, HOME still hermetic). Static lock `test_hook_runner_env_lock_1046.py` (ast, NO allowlist) — detects direct + DEFERRED `addCleanup(subprocess.run, argv)` + bare-`from subprocess import run` + `"hooks"`-basename + TRANSITIVE hook-path vars (`NUDGE = HOOKS / "x.sh"`): each call needs `env=` AND a file-level HOME control (`hermetic_hook_env` ref OR a `"HOME"`/`HOME=` key — `dict(os.environ, HOME=tmp)` is legit; the transformer double-appends `HOME=…, HOME=…` if the regex misses `HOME=`). Dynamic lock `test_gate_adapter_cwd_1046.py` runs every `-m gates.` adapter + every `python3 -c`/`-` repo-module importer (wdrain, block-main-implementation, the stdin heredocs) from a hostile cwd (stale `gates/` + raising `cli_concurrency.py`): asserts exit∈{0,2}, no `Traceback`/`ModuleNotFoundError`/`stale` on stderr, AND no stale-import MARKER — the marker is the teeth that survive the hook's `2>/dev/null` (stderr alone misses it). A top-level `import os` added for a module `{**os.environ}` insert can orphan/dup a function-local one (F401/F811) → `ruff --fix`.
 
 - **[Moved from internals-watchdog.md at the #1223 cap, 2026-10-14]** **#1109 — a release-blocking infra hand-off gets a cap-EXEMPT `infra-priority` nudge kind + a per-episode gk role-pane stall notice.** The owner's 3 h cross-kind TOTAL nudge cap (#913/#1023) held a GATEKEEPER-ACTION (INFRA) hand-off 3 h behind ONE morning `queue-arrival` send (release 2.318, 22.9). (1) **Kind registration is THREE-set-aware** (vs #1066 bounce-verdict's two): `tmux_io.MACHINE_NUDGE_KINDS` (stageable/default-OFF, the `nudges` CLI list derives it) but NOT `RECOVERY_NUDGE_KINDS` (it IS a prompt interruption) and NOT `nudge_gate.GATED_CATEGORIES` (its 15-min floor is BELOW the 60-min `test_every_gated_kind_has_the_60min_floor` lock). (2) **A NEW `PRIORITY_CAP_EXEMPT_KINDS` set, distinct from RECOVERY:** SKIPPED in `_total_cap_block` (never blocks/consumes the cap) like recovery, but `gate_ok` KEEPS its per-kind floor (15 min via a `_category_floor` special-case) and only SKIPS the total-cap check (recovery returns True BEFORE the floor, this AFTER); `floor_hold_reason` never reports `hold:total-cap` for it. (3) **Classification** (`queue_arrival_recheck._is_priority_record`): a `kind=="comment"` STOP:/GATEKEEPER-ACTION (INFRA) record (LIVE today) OR a ticket with a `prio:*`/`release-block` `labels` member (future-proofed — airuleset.py `_watchdog_infra_queue_fetch` does NOT yet attach ticket labels, a sibling follow-up). A priority wave forces `batch_collect=None` (direct path, never the capped batch). **A GATEKEEPER-ACTION comment now logs `infra-priority nudge`; the one test that locked the old token (`test_infra_queue_arrival_1029::test_comment_arrival_nudges`) is updated — a behaviour change, not the cap-counting lock.** (4) **Hub receipt** on CONFIRMED delivery only: `_post_hub_receipts` posts one comment per NEW arrival id (deduped in `state["infra_priority_receipts"]`) via an INJECTABLE `receipt_post_fn` (None in unit tests → zero gh; the prod default `_default_hub_receipt_post(cwd)` is wired ONLY at the goal.py call sites, so rider tests delivering comment arrivals without it never shell gh). (5) **Stall notice** = leaf `watchdog/gk_stall_notice.py`, called from `goal_lane_sweep` after `_lane_stuck_owner_alert` with the cached `glance`+`captured`: a DECLARED gk role pane (`cli_concurrency.resolve_concurrency` `source=="role"` + review/infra/quality) one-glance `stuck` >= 20 min AND at the 5 h limit (`five_hour_pct>=90` OR `decide.pane_session_limited`) gets ONE owner ping per episode (NOT #546-suppressed — the owner-approved analyze-not-ping exception); `gks_ts`/`gks_alert` on the goal_lane `rec`, RESET on any exit so a re-stall re-alarms; dry_run mutates nothing. A "default-OFF kind" test must unset the conftest `AIRULESET_TEST_IGNORE_DISABLE=1`.
+
+<!-- Moved from internals-webterm.md at the #1256 51200-byte cap, 2026-10-19 -->
+### #686 webterm U-dot — a per-box AGGREGATION over tickets-status caches must FRESHNESS-filter, or a dead session's frozen U inflates it forever
+
+The #677 U-dot collector (`cli_webterm.py` `_box_u_count` local + the inline
+`_U_READER_SNIPPET` run over ssh on each remote box) summed `user_waiting` across
+EVERY `~/.claude/tickets-status/*.json` with no freshness test. A tickets-status
+cache is refreshed ONLY by the OWNER of its cwd (statusline shim on render, TTL
+120s; plus the watchdog's 60s re-warm of an ACTIVE cwd, `_watchdog_backlog_fetch`
+→ `_spawn_refresh`), so a DEAD session's cache FREEZES its `user_waiting` and the
+sum stays inflated forever (live: gk footer truthfully U 0 while `/u-status`
+summed the box's stale caches to 8 — the red dot never cleared; dev1 similarly).
+FIX = a freshness precondition (`_U_FRESH_MAX_AGE_S = 30 min = 15× the 120s TTL`)
+in BOTH readers: an entry counts only when `ts` is numeric and `now - ts <= M`.
+Lessons reusable for any future per-box aggregation over these caches:
+
+- **FRESHNESS is the right discriminator, NOT root-existence.** Real dev1 data
+  proved root-existence INSUFFICIENT: two dead-session caches (camera-box ~10.4h,
+  spinbike ~16.7h, `user_waiting=1`) had `root` EXISTING (a real repo dir, not a
+  removed worktree) — root-existence keeps them and still inflates; only freshness
+  drops a dead session in a real dir. Root-existence is ALSO redundant (a removed
+  worktree's cache is already stale) and would need the check baked into the FIXED
+  remote snippet (root-existence is only checkable on-box). Freshness alone handles
+  BOTH removed-worktree and dead-session-in-real-dir, and is the smallest fix.
+- **The remote read runs the snippet ON the box** (`_read_box_u` ssh-runs
+  `_U_READER_SNIPPET`; the collector receives only the integer), so the snippet must
+  carry the SAME freshness filter as `_box_u_count` — they are kept equal by
+  `tests/test_webterm_u_status.TestUReaderSnippet`. The max-age constant is baked
+  into the snippet string via `% _U_FRESH_MAX_AGE_S`.
+- **Window justification:** live sessions refresh within ~1–2 min (TTL 120s) +
+  watchdog 60s re-warm; every OBSERVED dead entry is ≥10h. 30 min is ~15× the TTL
+  (huge margin so a live-but-idle WAITING session — the case that legitimately has
+  U>0 — keeps its dot) yet ~20× below the smallest dead entry. Deliberately a bit
+  more generous than the sibling `_BACKLOG_STATUS_CACHE_MAX_AGE_S` (15 min, SAME
+  cache) because a false-negative here loses a navigation DOT, not just a fallback.
+- **Fail-safe direction preserved** (`_read_box_u` doctrine): a stale / undatable
+  (no-ts / non-numeric-ts) entry is DROPPED (dot lost, self-heals on next refresh),
+  never summed as a false positive; a transiently-unreachable box still returns None
+  (no dot) via the unchanged error path — the filter lives INSIDE the per-box sum.
+- **Contract-change test adaptation:** the pre-existing `TestBoxUCount` /
+  `TestUReaderSnippet` fixtures seeded caches with NO `ts` — after the fix a ts-less
+  cache is (correctly) dropped, so those fixtures were updated to seed a fresh `ts`
+  (a deliberate precondition change, not a weakening). The JS poll (`applyUStatus`,
+  ~1564) is UNCHANGED — a box aggregating to 0 yields `map[id]=0` → the existing
+  `u>0` toggle removes the dot.
