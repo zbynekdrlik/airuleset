@@ -230,7 +230,7 @@ class RepointOnRealTmux(unittest.TestCase):
     process named `claude`. The check must hand the socket back to it."""
 
     def setUp(self):
-        self.dir = tempfile.mkdtemp(prefix="dup1256-")
+        self.dir = tempfile.mkdtemp(prefix="d1256", dir="/tmp")   # socket path <= 108 bytes
         self.sock = os.path.join(self.dir, "sock")
         self.env = {k: v for k, v in os.environ.items()
                     if k not in ("TMUX", "TMUX_PANE")}

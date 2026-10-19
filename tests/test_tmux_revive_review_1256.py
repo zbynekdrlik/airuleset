@@ -39,7 +39,7 @@ class _SubdirSock(base._RealTmux):
 
     def setUp(self):
         super().setUp()
-        self.sockdir = os.path.join(self.dir, "tmux-sock")
+        self.sockdir = os.path.join(self.short, "s")   # base: short /tmp dir
         os.mkdir(self.sockdir, 0o700)
         self.sock = os.path.join(self.sockdir, "default")
         self.env["AIRULESET_TMUX_SOCK"] = self.sock

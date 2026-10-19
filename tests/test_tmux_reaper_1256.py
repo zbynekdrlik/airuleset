@@ -91,7 +91,9 @@ class ReapsARealLeakedServer(unittest.TestCase):
         self.addCleanup(shutil.rmtree, scratch, True)
         run_dir = os.path.join(scratch, "airuleset-pytest-run-finished")
         os.mkdir(run_dir)
-        sock = os.path.join(scratch, "sock")
+        short = tempfile.mkdtemp(prefix="r1256", dir="/tmp")   # socket path <= 108 bytes
+        self.addCleanup(shutil.rmtree, short, True)
+        sock = os.path.join(short, "sock")
         env = {k: v for k, v in os.environ.items() if k not in ("TMUX", "TMUX_PANE")}
         env.update(TMPDIR=run_dir, HOME=scratch)
         r = subprocess.run(["tmux", "-S", sock, "-f", "/dev/null", "new-session",

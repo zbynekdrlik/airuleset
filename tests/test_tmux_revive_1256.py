@@ -91,7 +91,10 @@ class _RealTmux(unittest.TestCase):
         self.dir = tempfile.mkdtemp(prefix="revive1256-")
         self.home = os.path.join(self.dir, "home")
         os.mkdir(self.home)
-        self.sock = os.path.join(self.dir, "sock")
+        # a unix socket path is capped at 108 bytes and the push gate nests
+        # TMPDIR deep: sockets live in a SHORT /tmp dir (removed in teardown)
+        self.short = tempfile.mkdtemp(prefix="t1256", dir="/tmp")
+        self.sock = os.path.join(self.short, "sock")
         self.sock2 = None
         self.env = {k: v for k, v in os.environ.items()
                     if k not in ("TMUX", "TMUX_PANE")}
@@ -111,6 +114,7 @@ class _RealTmux(unittest.TestCase):
             for pid in (_listening_pids(path) if path else ()):
                 _best_effort(os.kill, pid, signal.SIGTERM)
         shutil.rmtree(self.dir, ignore_errors=True)
+        shutil.rmtree(self.short, ignore_errors=True)
 
     def tmux(self, *args, sock=None):
         return subprocess.run(["tmux", "-S", sock or self.sock, *args],
@@ -149,7 +153,7 @@ class ReviveSnippetOnRealTmux(_RealTmux):
 
     def test_only_the_server_bound_to_the_seam_path_is_signalled(self):
         self.start_server("alpha")
-        self.sock2 = os.path.join(self.dir, "other")
+        self.sock2 = os.path.join(self.short, "other")
         self.start_server("beta", sock=self.sock2)
         os.unlink(self.sock)
         os.unlink(self.sock2)
