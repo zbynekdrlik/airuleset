@@ -83,6 +83,8 @@ def _per_run_tempdir(base=None):
     run_dir.mkdir(parents=True, exist_ok=True)
     import _tmux_reaper as reaper  # #1256: a daemonized test tmux outlives its run
     reaper.reap(reaper.stale_servers())
+    orig_tmux_sock = os.environ.get("AIRULESET_TMUX_SOCK")
+    os.environ["AIRULESET_TMUX_SOCK"] = str(run_dir / "tmux-none" / "default")
     exec_state_dir = run_dir / "main-exec-state"
     exec_state_dir.mkdir(parents=True, exist_ok=True)
     tempfile.tempdir = str(run_dir)
@@ -101,6 +103,10 @@ def _per_run_tempdir(base=None):
         else:
             os.environ["AIRULESET_MAIN_EXEC_STATE_DIR"] = orig_exec_state
         reaper.reap(reaper.run_servers(str(run_dir)))
+        if orig_tmux_sock is None:
+            os.environ.pop("AIRULESET_TMUX_SOCK", None)
+        else:
+            os.environ["AIRULESET_TMUX_SOCK"] = orig_tmux_sock
         shutil.rmtree(run_dir, ignore_errors=True)
 
 

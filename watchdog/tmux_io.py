@@ -783,7 +783,8 @@ def _pane_inventory_raw(run=None, logs=None, dry_run=False):
             elif pids:
                 recovered = False
                 # #1256: the server hosting a Claude first, never plain ps order.
-                for pid in tmux_servers.recovery_order(pids):
+                for pid in tmux_servers.recovery_order(
+                        pids, path=_tmux_default_socket_path()):
                     if logs is not None:
                         logs.append("tmux-socket-orphaned server-pid=%d -- "
                                     "recovering via SIGUSR1" % pid)
@@ -800,7 +801,8 @@ def _pane_inventory_raw(run=None, logs=None, dry_run=False):
         if (out or "").strip() and tmux_servers.duplicate_check(
                 run, logs=logs, dry_run=dry_run, memo_path=_dup_memo_path()) \
                 == "repointed" and not dry_run:
-            out = run(_PANE_INVENTORY_QUERY)   # #1256: the socket moved
+            again = run(_PANE_INVENTORY_QUERY)   # #1256: the socket moved
+            out = again if (again or "").strip() else out
         return out or ""
 
     return memoized(("panes_raw",), _compute)

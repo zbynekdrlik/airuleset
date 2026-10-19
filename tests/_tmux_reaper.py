@@ -9,6 +9,9 @@ dirs already removed.
 Only own-uid processes whose comm is `tmux: server` AND whose TMPDIR is a
 per-run dir are ever candidates: a real server (no such TMPDIR) is never
 touched, and a concurrent live run keeps its dir, so its servers are kept.
+A server bound to the REAL default socket, or with a client connected to its
+own socket path, is never reaped either (a stray test may have started the
+real default server, which a human then joined).
 """
 import os
 import signal
@@ -47,16 +50,66 @@ def _test_servers(proc_root="/proc"):
     return sorted(out)
 
 
-def stale_servers(proc_root="/proc", isdir=os.path.isdir):
-    """Servers whose test run is over: their per-run dir no longer exists."""
-    return [pid for pid, tmpdir in _test_servers(proc_root) if not isdir(tmpdir)]
+def real_default_socket():
+    """The account's REAL default socket (never the AIRULESET_TMUX_SOCK seam)."""
+    return os.path.join(os.environ.get("TMUX_TMPDIR") or "/tmp",
+                        "tmux-%d" % os.getuid(), "default")
 
 
-def run_servers(run_dir, proc_root="/proc"):
-    """Servers started by THIS run (TMPDIR == run_dir)."""
-    want = str(run_dir).rstrip("/")
+def _unix_table(proc_root):
+    """{inode: (state, path)} from <proc_root>/net/unix."""
+    table = {}
+    try:
+        with open(os.path.join(proc_root, "net", "unix")) as f:
+            for line in f:
+                p = line.split()
+                if len(p) >= 8:
+                    table[p[6]] = (p[5], p[7])
+    except OSError as e:
+        sys.stderr.write("tmux reaper: cannot read unix sockets: %s\n" % e)
+    return table
+
+
+def _protected(pid, proc_root, table, default_path):
+    """True when `pid` listens on the real default socket, or a client is
+    connected to its own socket path (state 03 on a path it listens on)."""
+    fd_dir = os.path.join(proc_root, str(pid), "fd")
+    entries = []
+    try:
+        for fd in os.listdir(fd_dir):
+            try:
+                link = os.readlink(os.path.join(fd_dir, fd))
+            except OSError:
+                continue
+            if link.startswith("socket:[") and link[8:-1] in table:
+                entries.append(table[link[8:-1]])
+    except FileNotFoundError:
+        return False  # the process is gone: nothing left to protect
+    except OSError:
+        return True   # cannot prove it is unattended: keep it
+    listening = {path for state, path in entries if state == "01"}
+    if default_path in listening:
+        return True
+    return any(state == "03" and path in listening for state, path in entries)
+
+
+def stale_servers(proc_root="/proc", isdir=os.path.isdir, default_path=None):
+    """Servers whose test run is over (their per-run dir no longer exists),
+    minus any on the real default socket or with a connected client."""
+    default_path = default_path or real_default_socket()
+    table = _unix_table(proc_root)
     return [pid for pid, tmpdir in _test_servers(proc_root)
-            if tmpdir.rstrip("/") == want]
+            if not isdir(tmpdir) and not _protected(pid, proc_root, table, default_path)]
+
+
+def run_servers(run_dir, proc_root="/proc", default_path=None):
+    """Servers started by THIS run (TMPDIR == run_dir), same protections."""
+    want = str(run_dir).rstrip("/")
+    default_path = default_path or real_default_socket()
+    table = _unix_table(proc_root)
+    return [pid for pid, tmpdir in _test_servers(proc_root)
+            if tmpdir.rstrip("/") == want
+            and not _protected(pid, proc_root, table, default_path)]
 
 
 def reap(pids, kill=os.kill):

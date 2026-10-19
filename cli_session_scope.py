@@ -139,11 +139,16 @@ def render_tool_oom_env():
             "# runaway tool before Claude itself. Raising is unprivileged.\n"
             "# The group keeps a refused write silent (hooks print on stderr).\n"
             "{ echo %d > /proc/self/oom_score_adj; } 2>/dev/null || :\n"
-            "# #1256: never source an oom file (itself or another HOME's): it\n"
-            "# would recurse until bash crashes.\n"
+            "# #1256: never source an oom file (itself, another HOME's, or one\n"
+            "# reached through a symlink or a user file): it would recurse until\n"
+            "# bash crashes. The name skip plus a re-entrancy sentinel.\n"
             "case \"${AIRULESET_PREV_BASH_ENV:-}\" in\n"
             "  ''|*/%s) ;;\n"
-            "  *) [ -r \"$AIRULESET_PREV_BASH_ENV\" ] && . \"$AIRULESET_PREV_BASH_ENV\" ;;\n"
+            "  *) if [ -z \"${__airuleset_oom_chain:-}\" ] && "
+            "[ -r \"$AIRULESET_PREV_BASH_ENV\" ]; then\n"
+            "       __airuleset_oom_chain=1; . \"$AIRULESET_PREV_BASH_ENV\"; "
+            "unset __airuleset_oom_chain\n"
+            "     fi ;;\n"
             "esac\n" % (TOOL_OOM_SCORE_ADJ, TOOL_OOM_ENV_NAME))
 
 

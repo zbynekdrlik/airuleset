@@ -1998,6 +1998,7 @@ def cmd_push(args):
         # `tempfile.mkdtemp`/`mkstemp` call sites are contained — point the
         # WHOLE subprocess at a per-run TMPDIR removed on context exit.
         test_env["TMPDIR"] = str(_suite_tmp)
+        test_env["AIRULESET_TMUX_SOCK"] = str(Path(_suite_tmp) / "tmux-none" / "default")  # #1256
         # #629: bracket the suite subprocess with a tracked-tree content
         # fingerprint (as tightly as possible around subprocess.run) so a
         # concurrent integration mutating the shared checkout MID-RUN is

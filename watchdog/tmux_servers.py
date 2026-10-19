@@ -19,9 +19,12 @@ LISTENING = "00010000"   # __SO_ACCEPTCON in /proc/net/unix "Flags"
 
 
 def default_socket_path(env=None):
+    """The default tmux socket path, or the `AIRULESET_TMUX_SOCK` seam (the
+    same one the shell revive reads); conftest and the push gate point it at a
+    per-run path no server binds, so a test run never acts on a real server."""
     env = os.environ if env is None else env
-    return os.path.join(env.get("TMUX_TMPDIR") or "/tmp",
-                        "tmux-%d" % os.getuid(), "default")
+    return env.get("AIRULESET_TMUX_SOCK") or os.path.join(
+        env.get("TMUX_TMPDIR") or "/tmp", "tmux-%d" % os.getuid(), "default")
 
 
 def listening_inodes(path, proc_root="/proc"):
@@ -44,11 +47,13 @@ def _pids(proc_root):
         return []
 
 
-def servers_bound_to(path, proc_root="/proc"):
+def servers_bound_to(path, proc_root="/proc", min_inodes=1):
     """Pids holding a LISTENING unix socket bound to `path` (own-uid fds only:
-    another uid's fd dir is unreadable and skipped)."""
+    another uid's fd dir is unreadable and skipped). The /proc/*/fd scan runs
+    only when at least `min_inodes` listeners exist (2 = a duplicate check:
+    a healthy box pays one /proc/net/unix read and no scan)."""
     inodes = listening_inodes(path, proc_root)
-    if not inodes:
+    if len(inodes) < max(1, min_inodes):
         return []
     out = []
     for pid in _pids(proc_root):
@@ -105,9 +110,11 @@ def claude_hosts(server_pids, proc_root="/proc"):
     return hosts
 
 
-def recovery_order(pids, proc_root="/proc"):
-    """#318 recovery candidates, the server hosting a Claude first (stable)."""
-    hosts = claude_hosts(pids, proc_root)
+def recovery_order(pids, path=None, proc_root="/proc"):
+    """#318 recovery candidates, a server BOUND TO `path` that hosts a Claude
+    first (stable). Fake test pids that no real server binds keep ps order."""
+    bound = set(servers_bound_to(path or default_socket_path(), proc_root))
+    hosts = claude_hosts([p for p in pids if p in bound], proc_root)
     return [p for p in pids if p in hosts] + [p for p in pids if p not in hosts]
 
 
@@ -123,8 +130,15 @@ def _already_logged(memo_path, signature):
         return False
 
 
-def _log_once(logs, line, signature, memo_path):
-    """Append `line` unless the same state signature was already logged."""
+def _log_once(logs, line, signature, memo_path, dry_run=False):
+    """Append `line` unless the same state signature was already logged. The
+    memo is written only on a real pass that logs (a dry run or a caller with
+    no `logs` must not use up the one journal line)."""
+    if logs is None:
+        return
+    if dry_run:
+        logs.append(line + " (dry-run)")
+        return
     if _already_logged(memo_path, signature):
         return
     if memo_path:
@@ -133,20 +147,59 @@ def _log_once(logs, line, signature, memo_path):
                 f.write(signature)
         except OSError as e:
             line += " (memo unwritable: %s)" % e
-    if logs is not None:
-        logs.append(line)
+    logs.append(line)
+
+
+def _running_under_tests():
+    return bool(os.environ.get("PYTEST_CURRENT_TEST"))
+
+
+def _signal(target, kill, proc_root, logs, head):
+    """SIGUSR1 `target` only if it is still a tmux server; never raise."""
+    def note(msg):
+        if logs is not None:
+            logs.append(head + " -- " + msg)
+        return None
+
+    try:
+        with open(os.path.join(proc_root, str(target), "comm")) as f:
+            comm = f.read().strip()
+    except OSError:
+        comm = ""
+    if comm != "tmux: server":
+        note("target %d changed (%r), not signalled" % (target, comm))
+        return "changed"
+    if kill is None:
+        if _running_under_tests():
+            note("default kill refused under tests")
+            return "refused"
+        kill = os.kill
+    try:
+        kill(target, signal.SIGUSR1)
+    except ProcessLookupError:
+        note("target %d gone before SIGUSR1" % target)
+        return "gone"
+    except OSError as e:
+        note("SIGUSR1 %d failed: %s" % (target, e))
+        return "error"
+    note("repointed to %d (SIGUSR1)" % target)
+    return "repointed"
 
 
 def duplicate_check(run, logs=None, dry_run=False, path=None, proc_root="/proc",
-                    kill=os.kill, memo_path=None):
+                    kill=None, memo_path=None):
     """None when <= 1 server is bound to the path. Otherwise one of:
     'repointed' — the socket owner hosts no Claude and exactly one other
     server does: SIGUSR1 it so new connections reach the working session;
     'ok' — the owner hosts the Claude (an idle orphan lingers, logged);
     'ambiguous' — Claudes in several servers: logged, never touched;
-    'no-claude' — no server hosts a Claude: logged, never touched."""
+    'no-claude' — no server hosts a Claude: logged, never touched;
+    'unknown' — list-sessions named no owner: logged, never touched;
+    'changed' / 'gone' / 'error' / 'refused' — the SIGUSR1 did not happen
+    (target no longer tmux, exited, kill failed, default kill under tests).
+    `kill=None` means os.kill, refused under a test run."""
     path = path or default_socket_path()
-    servers = servers_bound_to(path, proc_root)
+    servers = servers_bound_to(path, proc_root, min_inodes=2)
     if len(servers) < 2:
         return None
     hosts = claude_hosts(servers, proc_root)
@@ -155,7 +208,9 @@ def duplicate_check(run, logs=None, dry_run=False, path=None, proc_root="/proc",
     head = "tmux-duplicate-server path=%s servers=%s owner=%s claude-in=%s" % (
         path, ",".join(map(str, servers)), owner,
         ",".join(map(str, sorted(hosts))) or "none")
-    if len(hosts) >= 2:
+    if owner is None:
+        verdict = "unknown"
+    elif len(hosts) >= 2:
         verdict = "ambiguous"
     elif not hosts:
         verdict = "no-claude"
@@ -167,11 +222,8 @@ def duplicate_check(run, logs=None, dry_run=False, path=None, proc_root="/proc",
             if logs is not None:
                 logs.append(head + " -- would repoint to %d (dry-run)" % target)
             return "repointed"
-        kill(target, signal.SIGUSR1)
-        if logs is not None:
-            logs.append(head + " -- repointed to %d (SIGUSR1)" % target)
-        return "repointed"
-    _log_once(logs, head + " -- " + verdict, head + verdict, memo_path)
+        return _signal(target, kill, proc_root, logs, head)
+    _log_once(logs, head + " -- " + verdict, head + verdict, memo_path, dry_run)
     return verdict
 
 
@@ -179,7 +231,7 @@ def status_line(path=None, proc_root="/proc"):
     """One `airuleset.py status` row when >= 2 servers share the socket path;
     None otherwise (the common, healthy case prints nothing)."""
     path = path or default_socket_path()
-    servers = servers_bound_to(path, proc_root)
+    servers = servers_bound_to(path, proc_root, min_inodes=2)
     if len(servers) < 2:
         return None
     hosts = sorted(claude_hosts(servers, proc_root))
