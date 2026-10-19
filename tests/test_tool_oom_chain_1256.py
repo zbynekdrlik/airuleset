@@ -9,7 +9,6 @@ PREV is itself: every non-interactive bash recursed until it crashed
 (`Segmentation fault`), so every Bash tool call of such a session died and 12
 launcher tests failed in the push gate.
 """
-import os
 import subprocess
 import sys
 import tempfile
