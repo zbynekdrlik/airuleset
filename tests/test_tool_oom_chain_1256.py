@@ -67,5 +67,54 @@ class OomEnvNeverSourcesItself(unittest.TestCase):
             self.assertIn("ok", r.stdout)
 
 
+class ReentrancyGuard(unittest.TestCase):
+    """Review round: matching by file NAME misses a symlink to the oom file and
+    a user BASH_ENV that sources it; a re-entrancy sentinel catches both."""
+
+    def _run(self, d, prev):
+        f = Path(d, scope.TOOL_OOM_ENV_NAME)
+        f.write_text(scope.render_tool_oom_env())
+        return subprocess.run(["/bin/bash", "-c", "echo ok"], capture_output=True,
+                              text=True, timeout=30,
+                              env={"PATH": "/usr/bin:/bin", "BASH_ENV": str(f),
+                                   "AIRULESET_PREV_BASH_ENV": str(prev)})
+
+    def test_symlink_to_the_oom_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            link = Path(d, "prev-link.sh")
+            link.symlink_to(Path(d, scope.TOOL_OOM_ENV_NAME))
+            r = self._run(d, link)
+            self.assertEqual((r.returncode, r.stdout.strip()), (0, "ok"), r.stderr)
+
+    def test_user_env_that_sources_the_oom_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            user = Path(d, "user-env.sh")
+            user.write_text(". %s\n" % Path(d, scope.TOOL_OOM_ENV_NAME))
+            r = self._run(d, user)
+            self.assertEqual((r.returncode, r.stdout.strip()), (0, "ok"), r.stderr)
+
+
+class LauncherNeverChainsAnOomFile(unittest.TestCase):
+    """The launcher-side guard alone: another HOME's oom file is never
+    exported as AIRULESET_PREV_BASH_ENV."""
+
+    def test_prev_stays_unset(self):
+        with tempfile.TemporaryDirectory() as d:
+            outer = Path(d, "outer", ".claude")
+            outer.mkdir(parents=True)
+            scope.write_tool_oom_env(outer)
+            launch = _Launch(Path(d, "inner"), host="controller")
+            _exe(launch.home / ".local" / "bin" / "claude",
+                 "#!/bin/sh\necho \"PREV=${AIRULESET_PREV_BASH_ENV:-}\"\n")
+            env = {"PATH": "/usr/bin:/bin", "HOME": str(launch.home),
+                   "BASH_ENV": str(outer / scope.TOOL_OOM_ENV_NAME),
+                   "AIRULESET_MEMINFO": str(launch.home / "meminfo")}
+            r = subprocess.run(["bash", str(launch.script), "plain"], env=env,
+                               capture_output=True, text=True, timeout=30,
+                               cwd=str(launch.home))
+            self.assertIn("PREV=\n", r.stdout + "\n")
+            self.assertNotIn("outer", r.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()
