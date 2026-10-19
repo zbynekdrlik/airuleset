@@ -1849,8 +1849,10 @@ def cmd_install(args):
                 result.get("user", "?"), result["action"]))
     except Exception as e:
         print(f"  webterm-only keys error (non-fatal): {e}", file=sys.stderr)
-    # #1256: re-render every baked webterm forced command (push never re-baked).
-    __import__("cli_forced_command_reconcile").install_step(Path.home(), _current_user())
+    try:  # #1256: re-render every baked webterm forced command (push never re-baked)
+        __import__("cli_forced_command_reconcile").install_step(Path.home(), _current_user())
+    except Exception as e:
+        print(f"  webterm forced commands error (non-fatal): {e}", file=sys.stderr)
 
     # --- 3b-sexte. Render subdev accounts conf (#869): the SINGLE source for
     # block-subdev-ssh-misuse.sh + block-destructive-remote.sh — no Python

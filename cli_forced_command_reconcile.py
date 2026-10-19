@@ -87,14 +87,47 @@ def plan(ak_text, user):
     return "".join(out), changed
 
 
-def reconcile(home, user):
-    """Re-render the baked forced commands in `<home>/.ssh/authorized_keys`.
-    Returns {"action": skipped|unchanged|updated|unwritable, "changed": n,
-    "path": str, "error": str}; never raises for an I/O problem."""
-    path = os.path.join(str(home), ".ssh", "authorized_keys")
-    res = {"action": "skipped", "changed": 0, "path": path, "error": ""}
+def foreign_tmux_commands(ak_text):
+    """How many forced commands mention tmux but are NOT our attach body (a
+    hand-baked `tmux new -A -s x`): never rewritten, so install reports them."""
+    n = 0
+    for line in ak_text.splitlines():
+        parts = None if line.lstrip().startswith("#") else split_command(line)
+        if parts:
+            cmd = decode(parts[1])
+            if "tmux" in cmd and not (cmd.startswith("P=") and SIGNATURE in cmd):
+                n += 1
+    return n
+
+
+def _write_new(directory, prefix, content):
+    """A fresh 0600 file in `directory` holding `content`, fsynced; its path."""
+    import tempfile
+    fd, tmp = tempfile.mkstemp(dir=directory, prefix=prefix)
     try:
-        with open(path, encoding="utf-8") as f:
+        with os.fdopen(fd, "w", encoding="utf-8", errors="surrogateescape",
+                       newline="") as fh:
+            fh.write(content)
+            fh.flush()
+            os.fsync(fh.fileno())
+    except OSError:
+        os.unlink(tmp)
+        raise
+    return tmp
+
+
+def reconcile(home, user):
+    """Re-render the baked forced commands in `<home>/.ssh/authorized_keys`
+    (through a symlink: the managed target is updated, the link stays).
+    Returns {"action": skipped|unchanged|updated|unwritable, "changed": n,
+    "foreign": n, "path": str, "error": str}; never raises for an I/O
+    problem. Bytes and line endings outside the rewritten commands are kept
+    (surrogateescape, newline="")."""
+    path = os.path.join(str(home), ".ssh", "authorized_keys")
+    res = {"action": "skipped", "changed": 0, "foreign": 0, "path": path, "error": ""}
+    real = os.path.realpath(path)
+    try:
+        with open(real, encoding="utf-8", errors="surrogateescape", newline="") as f:
             text = f.read()
     except FileNotFoundError:
         return res
@@ -102,24 +135,23 @@ def reconcile(home, user):
         res.update(action="unwritable", error=str(e))
         return res
     new_text, changed = plan(text, user)
-    res["changed"] = changed
+    res.update(changed=changed, foreign=foreign_tmux_commands(text))
     if not changed:
         res["action"] = "unchanged"
         return res
-    ssh_dir = os.path.dirname(path)
-    stamp = time.strftime("%Y%m%dT%H%M%S")
-    backup = os.path.join(ssh_dir, "authorized_keys.airuleset-prev-" + stamp)
-    tmp = path + ".airuleset-tmp"
+    directory, name = os.path.split(real)
+    tmp = None
     try:
-        for target, content in ((backup, text), (tmp, new_text)):
-            fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-            with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                fh.write(content)
-        os.replace(tmp, path)
+        backup = _write_new(directory, name + ".airuleset-prev-%s-" %
+                            time.strftime("%Y%m%dT%H%M%S"), text)
+        tmp = _write_new(directory, "." + name + ".airuleset-new-", new_text)
+        os.replace(tmp, real)
     except OSError as e:
+        if tmp and os.path.exists(tmp):
+            os.unlink(tmp)
         res.update(action="unwritable", error=str(e))
         return res
-    res["action"] = "updated"
+    res.update(action="updated", backup=backup)
     return res
 
 
@@ -135,4 +167,8 @@ def install_step(home, user):
     if res["action"] in ("updated", "unwritable"):
         print("  webterm forced commands: %s (%d line(s)) %s"
               % (res["action"], res["changed"], res["error"]))
+    if res.get("foreign"):
+        print("  webterm forced commands: %d hand-baked tmux command(s) in %s are "
+              "not ours and were NOT re-rendered (re-bake by hand)"
+              % (res["foreign"], res["path"]))
     return res
