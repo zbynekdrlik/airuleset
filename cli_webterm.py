@@ -53,6 +53,7 @@ from pathlib import Path
 
 import cli_aliases  # #592: the shared fleet target-alias derivation (stdlib-only)
 import cli_webterm_profiles as profiles  # #612: doména -> session set + auth realm
+from cli_tmux_revive import TMUX_REVIVE_SH  # #1256: revive before create
 # #694/#1159: dashboard template + touch key bar = sibling pure-constant leaves;
 # the `@@…@@` single-pass substitution contract stays in render_dashboard_html.
 from cli_webterm_dash_template import DASHBOARD_TEMPLATE as _DASHBOARD_TEMPLATE
@@ -383,14 +384,26 @@ def webterm_inventory(profile=profiles.OWNER):
 # remote (ssh) alike. The `-A` fresh-base fallback (no existing session at
 # all) is the owner's own real, ONLY view -- unaffected by any of the above,
 # and (like before) never `-f ignore-size` (it must size its own windows).
+#
+# #1256: TMUX_REVIVE_SH (cli_tmux_revive) runs first -- a server whose socket
+# FILE was deleted is SIGUSR1-revived, so `new-session -A` below never forks a
+# SECOND server (a hidden second Claude).
+# #1256: the ONE list of PER-HUMAN session names (every other `preferred` is
+# the target account's own name, test-locked). The single-session fallback
+# below never joins one of these that is not this tab's own (claudy: the owner
+# landed in marek's session after his own ended).
+HUMAN_SESSION_NAMES = frozenset({OWNER_GROUP, profiles.MAREK_GATEWAY_USER,
+                                 profiles.CODEX_PREFERRED})
 _ATTACH_BODY = (
+    TMUX_REVIVE_SH +
     'T=""; '
     'if tmux has-session -t "=$P" 2>/dev/null; then T="$P"; else '
     'T=$(tmux list-sessions -F "#{session_group}::#{session_name}" 2>/dev/null '
     "| awk -F '::' -v g=\"$P\" '$1==g{print $2; exit}'); "
     'if [ -z "$T" ]; then '
     'N=$(tmux list-sessions -F "#{session_name}" 2>/dev/null); '
-    'if [ "$(printf %s "$N" | grep -c .)" = "1" ]; then T="$N"; fi; '
+    'if [ "$(printf %s "$N" | grep -c .)" = "1" ]; then '
+    'case " $H " in *" $N "*) ;; *) T="$N";; esac; fi; '
     'fi; fi; '
     'if [ -n "$T" ]; then '
     # #615 (SCOPED to this connection -- see the block comment above for the
@@ -448,7 +461,9 @@ def _remote_command(preferred, start_dir_chain=None, user=None):
     chain = start_dir_chain if start_dir_chain is not None else STREAM_DEV_CWD_CHAIN
     chain, fallback_rel = session_chain_for(user, chain)
     chain_shell = render_webterm_cwd_shell(chain, fallback_rel)
-    return "P=" + shlex.quote(preferred) + "; " + chain_shell + _ATTACH_BODY
+    humans = shlex.quote(" ".join(sorted(HUMAN_SESSION_NAMES)))
+    return ("P=" + shlex.quote(preferred) + "; H=" + humans + "; " + chain_shell
+            + _ATTACH_BODY)
 
 
 def _ssh_interactive_prefix(entry):

@@ -52,6 +52,8 @@ import re
 import sys
 from pathlib import Path
 
+from cli_tmux_revive import TMUX_REVIVE_SH  # #1256: revive before create
+
 # #263/#264/#563/#1088/#1202: the stream start-dir chain, its resolver and its
 # bash renderer live in cli_session_cwd (the ONE cwd source, declared window
 # first) -- re-exported here for the existing importers.
@@ -448,6 +450,9 @@ def render_ssh_attach_block(session_target, cwd_chain, fallback_rel=None):
         # (resolve_stream_cwd) -- ONE predicate.
         + render_stream_cwd_chain_shell(cwd_chain, fallback_rel=fallback_rel) +
         f'  __airuleset_me={session_target}\n'
+        # #1256: a server whose socket FILE was deleted is SIGUSR1-revived
+        # first, so the `-A` below never forks a SECOND server.
+        + '  ' + TMUX_REVIVE_SH + '\n'
         "  # #284/#593: search for a live group survivor whose NAME may differ\n"
         "  # from this exact username before the plain -A reattach. This once\n"
         "  # guarded against a tmux destroy-unattached sweep (#254) reducing a\n"

@@ -3616,7 +3616,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
     # SAME list below instead of a second `list_claude_panes` tmux call; the
     # characterization suite pins "pane loop runs before EVERY standalone job,
     # list_claude_panes never fires twice" (test_run_once_characterization.py).
-    panes = list(list_claude_panes(run, dry_run=dry_run))
+    panes = list(list_claude_panes(run, logs=logs, dry_run=dry_run))
     # #1086 — gk / gk-infra / gk-quality FIRST in the sweep (owner high-priority
     # targets) so a limit-dialog on one is dismissed before a lower-priority pane
     # even under sweep-budget pressure. Stable sort on the fleet-declared cwd

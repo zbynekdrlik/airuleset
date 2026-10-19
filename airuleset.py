@@ -2679,6 +2679,14 @@ def cmd_status(args):
     except Exception as e:
         print(f"\nwindow: error ({e})", file=sys.stderr)
 
+    try:  # #1256: two tmux servers sharing the default socket (hidden 2nd Claude)
+        from watchdog import tmux_servers as _tsrv
+        _tl = _tsrv.status_line()
+        if _tl:
+            print("\n" + _tl)
+    except Exception as e:
+        print(f"\ntmux servers: error ({e})", file=sys.stderr)
+
     # --- Checkout freshness (#1176): Job 53's per-checkout lag + reason, the
     # rows behind the footer `stale N`. Empty until the job ran on this box. ---
     try:

@@ -77,7 +77,8 @@ _airuleset_exec_claude() {
   unset AIRULESET_MEMINFO
   if [ -r "$_oom" ]; then
     if [ -n "${BASH_ENV:-}" ] && [ "$BASH_ENV" != "$_oom" ]; then
-      export AIRULESET_PREV_BASH_ENV="$BASH_ENV"
+      # never chain another account's oom file (#1256: it recursed into itself)
+      case "$BASH_ENV" in */__ENV__) ;; *) export AIRULESET_PREV_BASH_ENV="$BASH_ENV";; esac
     fi
     export BASH_ENV="$_oom"
   fi
@@ -138,10 +139,12 @@ def render_tool_oom_env():
             "# runaway tool before Claude itself. Raising is unprivileged.\n"
             "# The group keeps a refused write silent (hooks print on stderr).\n"
             "{ echo %d > /proc/self/oom_score_adj; } 2>/dev/null || :\n"
-            "if [ -n \"${AIRULESET_PREV_BASH_ENV:-}\" ] && "
-            "[ -r \"$AIRULESET_PREV_BASH_ENV\" ]; then\n"
-            "  . \"$AIRULESET_PREV_BASH_ENV\"\n"
-            "fi\n" % TOOL_OOM_SCORE_ADJ)
+            "# #1256: never source an oom file (itself or another HOME's): it\n"
+            "# would recurse until bash crashes.\n"
+            "case \"${AIRULESET_PREV_BASH_ENV:-}\" in\n"
+            "  ''|*/%s) ;;\n"
+            "  *) [ -r \"$AIRULESET_PREV_BASH_ENV\" ] && . \"$AIRULESET_PREV_BASH_ENV\" ;;\n"
+            "esac\n" % (TOOL_OOM_SCORE_ADJ, TOOL_OOM_ENV_NAME))
 
 
 def write_tool_oom_env(directory):

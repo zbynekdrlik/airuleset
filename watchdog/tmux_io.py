@@ -51,6 +51,7 @@ import watchdog
 # is watchdog.WORKING_NUDGE_TEXT (it stays resident in __init__.py). The `as`
 # alias marks it an intentional re-export so ruff does not flag F401.
 from watchdog import NUDGE_TEXT, WORKING_NUDGE_TEXT as WORKING_NUDGE_TEXT
+from watchdog import tmux_servers  # #1256: pure /proc leaf, no facade import
 
 # #490 — transcript-proof submit verification (`send_verified`, below). CC
 # writes the accepted `user` turn near-instantly, so most confirms land on the
@@ -740,6 +741,13 @@ _PANE_INVENTORY_QUERY = [
 ]
 
 
+def _dup_memo_path():
+    """#1256: where `tmux_servers.duplicate_check` remembers the last logged
+    duplicate state, next to the watchdog state file (logged once per state)."""
+    return os.path.join(os.path.dirname(str(watchdog.STATE_PATH)),
+                        "tmux-duplicates.last")
+
+
 def _pane_inventory_raw(run=None, logs=None, dry_run=False):
     """Raw `tmux list-panes -a` output (the 4-field superset format), SHARED
     across a sweep via the per-sweep memo so `list_claude_panes` and
@@ -774,7 +782,8 @@ def _pane_inventory_raw(run=None, logs=None, dry_run=False):
                                 "would recover via SIGUSR1 (dry-run)" % pids[0])
             elif pids:
                 recovered = False
-                for pid in pids:
+                # #1256: the server hosting a Claude first, never plain ps order.
+                for pid in tmux_servers.recovery_order(pids):
                     if logs is not None:
                         logs.append("tmux-socket-orphaned server-pid=%d -- "
                                     "recovering via SIGUSR1" % pid)
@@ -788,6 +797,10 @@ def _pane_inventory_raw(run=None, logs=None, dry_run=False):
                 if not recovered and logs is not None:
                     logs.append("tmux-socket-recovery-failed server-pids=%s"
                                 % ",".join(str(p) for p in pids))
+        if (out or "").strip() and tmux_servers.duplicate_check(
+                run, logs=logs, dry_run=dry_run, memo_path=_dup_memo_path()) \
+                == "repointed" and not dry_run:
+            out = run(_PANE_INVENTORY_QUERY)   # #1256: the socket moved
         return out or ""
 
     return memoized(("panes_raw",), _compute)

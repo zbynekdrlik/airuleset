@@ -81,6 +81,8 @@ def _per_run_tempdir(base=None):
     root = base if base is not None else tempfile.gettempdir()
     run_dir = Path(root) / ("airuleset-pytest-run-" + uuid.uuid4().hex)
     run_dir.mkdir(parents=True, exist_ok=True)
+    import _tmux_reaper as reaper  # #1256: a daemonized test tmux outlives its run
+    reaper.reap(reaper.stale_servers())
     exec_state_dir = run_dir / "main-exec-state"
     exec_state_dir.mkdir(parents=True, exist_ok=True)
     tempfile.tempdir = str(run_dir)
@@ -98,6 +100,7 @@ def _per_run_tempdir(base=None):
             os.environ.pop("AIRULESET_MAIN_EXEC_STATE_DIR", None)
         else:
             os.environ["AIRULESET_MAIN_EXEC_STATE_DIR"] = orig_exec_state
+        reaper.reap(reaper.run_servers(str(run_dir)))
         shutil.rmtree(run_dir, ignore_errors=True)
 
 
