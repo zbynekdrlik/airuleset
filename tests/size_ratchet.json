@@ -590,7 +590,7 @@
     "tests/test_tmux_attach_helpers_651.py": 451,
     "tests/test_tmux_reaper_1256.py": 125,
     "tests/test_tmux_revive_1256.py": 297,
-    "tests/test_tmux_revive_review_1256.py": 162,
+    "tests/test_tmux_revive_review_1256.py": 166,
     "tests/test_tmux_servers_1256.py": 285,
     "tests/test_tmux_servers_review_1256.py": 120,
     "tests/test_tmux_socket_recovery.py": 369,

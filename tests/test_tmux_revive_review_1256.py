@@ -119,8 +119,12 @@ class TestsNeverReachTheRealSocket(unittest.TestCase):
                       inspect.getsource(cli_remote))
 
     def test_the_seam_is_set_inside_this_run(self):
+        # conftest (pytest) and the push gate's Pass B (unittest discover) each
+        # point it at their own per-run tmp dir: set, not the real socket, unbound
         sock = os.environ.get("AIRULESET_TMUX_SOCK", "")
-        self.assertIn("airuleset-pytest-run-", sock)
+        self.assertTrue(sock.endswith("/tmux-none/default"), sock)
+        self.assertNotEqual(sock, "/tmp/tmux-%d/default" % os.getuid())
+        self.assertFalse(os.path.exists(sock))
 
 
 class ReaperGuards(unittest.TestCase):
