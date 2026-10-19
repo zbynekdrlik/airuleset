@@ -104,13 +104,13 @@ class ServerDiscovery(_FakeProcCase):
 
     def test_recovery_order_puts_the_claude_host_first(self):
         self.two_servers(claude_under=(200,))
-        self.assertEqual(ts.recovery_order([100, 200], proc_root=self.p.root),
-                         [200, 100])
+        self.assertEqual(ts.recovery_order([100, 200], path=self.PATH,
+                                           proc_root=self.p.root), [200, 100])
 
     def test_recovery_order_keeps_ps_order_without_a_claude(self):
         self.two_servers(claude_under=())
-        self.assertEqual(ts.recovery_order([100, 200], proc_root=self.p.root),
-                         [100, 200])
+        self.assertEqual(ts.recovery_order([100, 200], path=self.PATH,
+                                           proc_root=self.p.root), [100, 200])
 
 
 class DuplicateCheck(_FakeProcCase):
@@ -272,7 +272,7 @@ class RepointOnRealTmux(unittest.TestCase):
                                   timeout=10, env=self.env).stdout
 
         logs = []
-        res = ts.duplicate_check(run, logs=logs, path=self.sock,
+        res = ts.duplicate_check(run, logs=logs, path=self.sock, kill=os.kill,
                                  memo_path=os.path.join(self.dir, "memo"))
         self.assertEqual(res, "repointed", logs)
         deadline = time.time() + 5
