@@ -256,10 +256,13 @@ class HumanSessionRegistry(unittest.TestCase):
 
     def test_project_account_sessions_are_registered_humans(self):
         import cli_account_bootstrap as b
+        # `webterm_sessions` maps human -> {preferred, start_dir_chain}; the
+        # session name is the `preferred` value, not the human key.
         for acct, decl in b.SERVICE_ACCOUNTS.items():
-            for name in decl.get("webterm_sessions") or ():
+            for human, spec in (decl.get("webterm_sessions") or {}).items():
+                name = spec.get("preferred")
                 self.assertTrue(name == acct or name in w.HUMAN_SESSION_NAMES,
-                                "%s: session %r unregistered" % (acct, name))
+                                "%s/%s: session %r unregistered" % (acct, human, name))
 
     def test_rendered_command_carries_the_registry(self):
         cmd = w._remote_command("zbynek")
