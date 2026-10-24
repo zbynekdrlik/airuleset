@@ -290,7 +290,8 @@ class ReviewFindings(Base):
         # Review 8: mkdir+chmod followed a planted `secret-logs` symlink.
         import cli_vault_public as pub
         target = self.home / "elsewhere"
-        target.mkdir(mode=0o755)
+        target.mkdir()
+        target.chmod(0o755)  # explicit: mkdir(mode=) is masked by an ambient umask 077
         (self.home / ".claude").mkdir()
         (self.home / ".claude" / "secret-logs").symlink_to(target)
         with mock.patch.dict(os.environ, {"HOME": str(self.home)}):
