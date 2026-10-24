@@ -935,7 +935,9 @@ class TestChainWidthCap(TestCase):
                 scope_gate="cross-cutting"), home=tmp, cwd=d, gh_bin=gh_bin)
             self.assertEqual(r.returncode, 0, r.stderr)
 
-    def test_width_cap_exempt_for_user_request(self):
+    def test_width_cap_applies_to_user_request_children(self):
+        # #1259 review: a user-request naming a parent was the new split door;
+        # only an area-review verdict escapes the width cap now.
         tmp = tempfile.mkdtemp(prefix="airuleset-widthcap-test4-")
         self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
         gh_bin = _fake_gh(tmp, {
@@ -952,7 +954,8 @@ class TestChainWidthCap(TestCase):
                 "sibling 2 (#100 follow-up)",
                 "A user directive, distinct from the cross-cutting siblings.",
                 scope_gate="user-request"), home=tmp, cwd=d, gh_bin=gh_bin)
-            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual(r.returncode, 2, r.stderr)
+            self.assertIn("-> chain-width-cap", r.stderr)
 
     def test_parents_field_is_written_to_the_log(self):
         tmp = tempfile.mkdtemp(prefix="airuleset-widthcap-test5-")
@@ -1886,11 +1889,14 @@ class TestNetDrainHarness842(TestCase):
         self.assertEqual(r.returncode, 2, r.stderr)
         self.assertIn("presence", r.stderr.lower())
 
-    def test_unattended_planned_work_is_blocked(self):
-        r = run(body_cmd("plan step", "converged-plan decomposition",
-                          scope_gate="planned-work"),
+    def test_unattended_user_request_without_a_quote_is_blocked(self):
+        # #1259: planned-work is retired, so this presence check now runs on the
+        # one remaining owner-asked criterion.
+        r = run(body_cmd("plan step", "a claimed owner ask with no quote",
+                          scope_gate="user-request"),
                 gh_bin=_default_gh_stub(), session_id=self._away_sid())
         self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("presence-required", r.stderr)
 
     def test_attended_user_request_still_passes(self):
         # PRESENT (no stale marker) -> user-request is accepted, unchanged.
