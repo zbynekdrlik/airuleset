@@ -199,3 +199,38 @@ class TestFrontmatterShapes(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestReviewRound2(unittest.TestCase):
+    """The verification review: a checklist MENTION must not excuse a dropped
+    problem, and the owner's own present user-request filings must not eat an
+    away session's budget for genuine discoveries."""
+
+    def _blocked(self, text):
+        sid = "t-rf2-ndw-" + uuid.uuid4().hex[:10]
+        p = subprocess.run(["bash", str(HOOKS / "stop-check-untracked-work.sh")],
+                           input=json.dumps({"session_id": sid, "last_assistant_message": text}),
+                           capture_output=True, text=True, env=hermetic_hook_env(self))
+        return '"block"' in p.stdout
+
+    def test_a_checklist_mention_does_not_excuse_a_dismissal(self):
+        self.assertTrue(self._blocked(
+            "All items in the #42 checklist are ticked. The failing test_x is "
+            "pre-existing and unrelated to this change."))
+
+    def test_asking_to_file_the_checklist_items_still_blocks(self):
+        self.assertTrue(self._blocked(
+            "Want me to create issues for the #42 checklist items, or hold?"))
+
+    def test_present_owner_requests_do_not_cap_an_away_discovery(self):
+        home = tempfile.mkdtemp(prefix="rf2-")
+        cwd = tempfile.mkdtemp(prefix="rf2-cwd-")
+        for i in range(DAILY_CAP):
+            r = run(body_cmd("owner asked %d" % i, "Distinct topic %d %s." % (i, uuid.uuid4().hex),
+                             scope_gate="user-request"),
+                    home=home, cwd=cwd, session_id="t-rf2-present-" + uuid.uuid4().hex[:8])
+            self.assertEqual(r.returncode, 0, r.stderr)
+        r = run(body_cmd("a real discovery", "A separate defect %s." % uuid.uuid4().hex,
+                         scope_gate="cross-cutting"),
+                home=home, cwd=cwd, session_id=_away_sid(self))
+        self.assertEqual(r.returncode, 0, r.stderr)

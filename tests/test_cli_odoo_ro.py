@@ -135,14 +135,14 @@ class TestConfigContract(unittest.TestCase):
 
     def test_load_corrupt_returns_none(self):
         p = self._write("{ this is not json")
-        self.assertIsNone(ro.load_config(p))
+        self.assertIsNone(ro.load_config(p, home=os.path.dirname(p)))
 
     def test_hash_commented_template_parses(self):
         # the template is written with #-line comments and must still parse
         tmpl = ro.config_template()
         self.assertIn("#", tmpl)
         p = self._write(tmpl)
-        cfg = ro.load_config(p)
+        cfg = ro.load_config(p, home=os.path.dirname(p))
         self.assertIsNotNone(cfg)
         self.assertEqual(cfg["instance_url"], "https://erp.montalu.cloud")
         self.assertEqual(cfg["project_ids"], [1])
@@ -154,7 +154,7 @@ class TestConfigContract(unittest.TestCase):
 
     def test_template_is_valid_config(self):
         p = self._write(ro.config_template())
-        cfg = ro.load_config(p)
+        cfg = ro.load_config(p, home=os.path.dirname(p))
         ok, missing = ro.config_valid(cfg)
         self.assertTrue(ok, "template must be a valid config, missing: %r" % missing)
 
@@ -166,14 +166,14 @@ class TestConfigContract(unittest.TestCase):
 
     def test_client_confirm_days_default(self):
         p = self._write(ro.config_template())
-        cfg = ro.load_config(p)
+        cfg = ro.load_config(p, home=os.path.dirname(p))
         self.assertEqual(ro.client_confirm_days(cfg), 3)
         self.assertEqual(ro.client_confirm_days({"client_confirm_days": 5}), 5)
 
     def test_urls_with_double_slash_survive_hash_stripping(self):
         # a #-line-comment stripper must not corrupt an https:// value
         p = self._write('# comment line\n{"instance_url": "https://a.b/x"}\n')
-        cfg = ro.load_config(p)
+        cfg = ro.load_config(p, home=os.path.dirname(p))
         self.assertEqual(cfg["instance_url"], "https://a.b/x")
 
 

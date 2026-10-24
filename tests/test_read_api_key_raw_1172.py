@@ -157,7 +157,7 @@ class TestReadApiKeyRawFile(unittest.TestCase):
         cp = os.path.join(d, "odoo-task-tracking.json")
         with open(cp, "w", encoding="utf-8") as h:
             h.write(tmpl)
-        ok, missing = ro.config_valid(ro.load_config(cp))
+        ok, missing = ro.config_valid(ro.load_config(cp, home=d))
         self.assertTrue(ok, missing)
 
 

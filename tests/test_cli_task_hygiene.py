@@ -382,7 +382,7 @@ class TestCLI(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertTrue(os.path.exists(p))
         import cli_odoo_ro as ro
-        cfg = ro.load_config(p)
+        cfg = ro.load_config(p, home=home)
         ok, missing = ro.config_valid(cfg)
         self.assertTrue(ok, missing)
 
