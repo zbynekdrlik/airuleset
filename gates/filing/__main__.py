@@ -194,6 +194,11 @@ def _invalid_criterion_reason(body, body_err, crit):
         # body IS readable but carries no `Scope-gate: <criterion>` line
         # at all -- the plain missing-line case.
         reason = "no-scope-gate -- body carries no `Scope-gate: <criterion>` line"
+    elif crit.lower() == "planned-work":
+        # #1259: decomposition is no longer a reason to file -- say the right way.
+        reason = ("planned-work-retired -- one owner request = ONE ticket: add this "
+                  "step as a `- [ ]` checklist item in the parent ticket (gh issue "
+                  "edit), never a new issue")
     else:
         # crit present but not one of ALLOWED -- name the bad (attacker-
         # written) value, decoy-neutralised.
@@ -441,7 +446,7 @@ def classify_command(cmd, sid, cwd, repo_dir, log_path, unattended):
             # #842 -- UNATTENDED gates (an ATTENDED / owner-present filing keeps the
             # pre-#842 flow untouched, so these never touch the owner). presence-gate
             # (req 3): an unattended loop cannot claim the owner asked for a
-            # user-request / planned-work ticket. dismissal-word (req 4): a NEW issue
+            # user-request ticket. dismissal-word (req 4): a NEW issue
             # body dismissing a test failure (flaky / pre-existing / intermittent /
             # out-of-scope) is the same dismissal in durable form -- fix the test /
             # root cause, never file its excuse. Both BLOCK BEFORE the dedup/cap/
@@ -535,7 +540,7 @@ def classify_command(cmd, sid, cwd, repo_dir, log_path, unattended):
                         # saw. A non-exempt discovery filing is allowed ONLY while the
                         # repo is strictly draining today (created_today <
                         # closed_today); otherwise BLOCK. A gh error -> BLOCK
-                        # (fail-safe). user-request / planned-work / architecture-rework
+                        # (fail-safe). user-request / architecture-rework
                         # are exempt (user-request is presence-gated above via
                         # _has_recent_owner_quote).
                         results.append((

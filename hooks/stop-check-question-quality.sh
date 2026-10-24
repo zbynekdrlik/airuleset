@@ -696,6 +696,13 @@ fi
 # (attachments-required) read the SAME regex, never a divergent second copy
 # (#1098 Review 1).
 TASK_URL_RX='/odoo/project/[0-9]+/tasks/[0-9]+'
+# #1258: a client WITHOUT an Odoo board (slovnormal, david1-4 — owner 24.10.2026)
+# never looks up a task, so Checks 7 and 9 do not apply there. install writes the
+# marker from cli_odoo_board.NO_BOARD_USERS; any other value keeps both checks.
+CLIENT_BOARD_OFF=""
+if [ "$(head -1 "${HOME:-/nonexistent}/.claude/airuleset-client-board" 2>/dev/null | tr -d '[:space:]')" = "off" ]; then
+    CLIENT_BOARD_OFF=1
+fi
 
 # Check 7 — an Odoo-context question must carry an Odoo task URL (#907).
 # Owner directive (montalu 2026-09-06): every question about Odoo work must
@@ -705,7 +712,7 @@ TASK_URL_RX='/odoo/project/[0-9]+/tasks/[0-9]+'
 # or /odoo/action- shape. An explicit no-task statement also passes.
 # Same fail-safe as Check 6: fires only on away-user question turns past
 # Checks 1-6, narrow detection, over-block is safe (model re-adds the URL).
-if [ -z "$VIOLATION" ]; then
+if [ -z "$VIOLATION" ] && [ -z "$CLIENT_BOARD_OFF" ]; then
     # Odoo-context detector: the BRIEFING LINE names odoo-erp as the project
     # (the `**Otazka — projekt odoo-erp` shape), or the block carries an ERP
     # domain, or "odoo" adjacent to a task/module/ERP token. A bare stream
@@ -864,7 +871,7 @@ fi
 # `[*-]*` (no multibyte `•`) while this anchor uses `[*•-]*`, so a `• Prílohy:` line
 # is not matched by the Check-3 EXEMPTION regex, but it IS matched by Check 3's
 # option-bullet EXIT rule, so the net effect ("not counted toward the brief") holds.
-if [ -z "$VIOLATION" ]; then
+if [ -z "$VIOLATION" ] && [ -z "$CLIENT_BOARD_OFF" ]; then
     # Fence-stripped block — a `Prílohy:` inside a ``` fence must not count.
     BLOCK_NOFENCE=$(printf '%s\n' "$BLOCK" | awk '
         /^[[:space:]]*```/ { fence = !fence; next }

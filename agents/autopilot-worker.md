@@ -660,7 +660,7 @@ push / PR / merge / deploy, never that backup.
    can** — a small adjacent problem, a flaky test, a review finding all land HERE, never in
    a new ticket. A genuinely out-of-scope discovery goes in your evidence block's
    `followup_candidates:` line (title + which of the six criteria it clears + est. LoC) for
-   the SUPERVISOR to decide and file — **you have NO `gh issue create` authority; the
+   the SUPERVISOR to record on the current ticket (#1259) — **you have NO `gh issue create` authority; the
    scope-gate hook BLOCKS a worker's filing outright (#842)**, so never `gh issue create` and
    never put a `filed:` line in your return (a return with `filed:` is REJECTED at
    integration and the lane is sent back). Never silently drop it (`no-dropped-work.md`).

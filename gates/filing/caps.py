@@ -30,9 +30,11 @@ from gates.filing.parse import (
     TOKEN_JACCARD_THRESHOLD,
 )
 
-DAILY_CAP = 8
+# #1259 (owner 24.10.2026): 8 -> 2 non-exempt discovery filings per repo per box per day.
+DAILY_CAP = 2
 
-CHAIN_WIDTH_CAP = 2
+# #1259: 2 -> 1 -- a 2nd finding off one ticket goes ON that ticket.
+CHAIN_WIDTH_CAP = 1
 
 
 def _gh_view_text(parent, cwd, repo=None):

@@ -939,7 +939,7 @@ gap in either.
    - **Worker filing authority — NONE (#842).** A worker has NO `gh issue create` / `gh api
      …/issues` POST authority — the scope-gate hook hard-BLOCKS a subagent's filing (payload
      `agent_id`). It FIXES every discovery in-lane and returns a `followup_candidates:` line
-     (title + which of the six criteria it clears + est. LoC) for YOU to decide and file. At
+     (title + which of the six criteria it clears + est. LoC) for YOU to record as `- [ ]` items on the current ticket (a NEW issue only for a separate defect outside the request, #1259). At
      integration (Step 4) a worker return carrying a `filed:` line is REJECTED — send that lane
      back (`SendMessage` if it is alive, else re-dispatch fresh) to fix it in-lane; never accept
      a worker-filed ticket. This is the same net-drain discipline that gates YOUR OWN

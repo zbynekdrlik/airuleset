@@ -18,6 +18,7 @@ import sys       # parse_profile, cmd_validate
 import json      # load_hooks_json, cmd_validate, cmd_diff
 import shutil    # symlink_global_rules
 import difflib   # unified_diff
+import re        # frontmatter_errors
 from pathlib import Path
 
 # 1-line leaf-dup of airuleset.REPO_DIR: identical value (this leaf is a sibling
@@ -600,6 +601,31 @@ def _validate_watchdog():
     return errors
 
 
+_FRONTMATTER_RE = re.compile(r"\A---\n(.*?)\n---\n", re.S)
+
+
+def frontmatter_errors(text):
+    """#1259 (the /doctor finding): a top-level frontmatter `key: value` whose
+    PLAIN (unquoted) value contains ': ' or ends with ':' is invalid YAML
+    ("mapping values are not allowed here"), and Claude Code then drops EVERY
+    field of that file (post-deploy-verification lost `user-invocable: false`)."""
+    m = _FRONTMATTER_RE.match(text)
+    if not m:
+        return []
+    errs = []
+    for line in m.group(1).splitlines():
+        if not line or line[0] in " \t#-":
+            continue
+        key, sep, value = line.partition(":")
+        value = value.strip()
+        if not sep or not value or value[0] in "\"'|>[{&*!":
+            continue
+        if ": " in value or value.endswith(":"):
+            errs.append("frontmatter `%s`: an unquoted value containing ': ' is "
+                        "invalid YAML -- quote it" % key.strip())
+    return errs
+
+
 def cmd_validate(args):
     """Check all module/rule files exist and all @import paths resolve."""
     import airuleset
@@ -661,6 +687,13 @@ def cmd_validate(args):
         content = rule_file.read_text()
         if not content.startswith("---"):
             errors.append(f"Rule missing YAML frontmatter: {rule_file.name}")
+
+    # #1259: every skill / agent / rule frontmatter must be valid YAML
+    for md in sorted(list((REPO_DIR / "skills").glob("**/SKILL.md"))
+                     + list((REPO_DIR / "agents").glob("*.md"))
+                     + list((REPO_DIR / "rules").glob("*.md"))):
+        for err in frontmatter_errors(md.read_text(encoding="utf-8")):
+            errors.append(f"{md.relative_to(REPO_DIR)}: {err}")
 
     # Validate the File-Drop service: filedrop/*.py loads + service template ok.
     errors.extend(_validate_filedrop())

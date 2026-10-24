@@ -111,7 +111,7 @@ The intent: the user understands every question instantly, in their language, wi
 
 #### Odoo-context questions — Odoo task reference + origin + functional action URL (issue 907, owner directive montalu 2026-09-06)
 
-**When the `❓` question is about Odoo work (any Odoo stream — montalu/david/miva/simap), the question block MUST carry:**
+**When the `❓` question is about Odoo work on a client WITH a board (montalu/miva; slovnormal/david has NO board since #1258 — no task lookup, no task reference there), the question block MUST carry:**
 
 1. **Odoo project.task reference:** task name + deep URL (`https://<instancia>/odoo/project/<pid>/tasks/<tid>`) + current stage. The Odoo task is the PRIMARY client-facing tracking — "vyjadruje čo chcel zákazník". A GitHub issue (`#N`) is the developer tracking and appears only ALONGSIDE the task reference, never instead of it. If no Odoo task exists for the question, state it explicitly: "Odoo task neexistuje — ide o čisto technickú úlohu."
 2. **Origin intro:** where the task came from — which discussion, session, or Discuss thread originated it, what is being worked on and why. The owner cannot engage with a question that has no pôvod. The montalu 2026-09-06 incident: question to issue 5629 was 3x unintelligible until it got origin + functional URL.

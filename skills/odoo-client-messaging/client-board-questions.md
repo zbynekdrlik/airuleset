@@ -8,14 +8,12 @@ Topic companion of `client-board-tasks.md` (CORE). Auto-loads on a `project.task
 
 When a task needs clarification FROM the client:
 
-1. Move it to the profile's question stage (**Potrebuje ujasniť**; slovnormal
-   keeps it in **V práci**).
+1. Move it to the profile's question stage (**Potrebuje ujasniť**).
 2. Post a chatter note with the question. Mention text is derived from
    `res.partner.name` by `data-oe-id`, never a literal name typed by hand
    (`handover-compose.md` mention-anchor rule).
 3. Mention AT MOST ONE person per question — never mass-mention, never the boss
-   unless the boss IS the one who must answer. On the **slovnormal** profile the
-   addressee is always **Dávid Greňa**.
+   unless the boss IS the one who must answer.
 4. The FULL question lives in the Odoo task. A GitHub `needs-answer` ticket is a
    TRACKING MIRROR only — see rule 8.
 

@@ -59,6 +59,13 @@ BOARD_PROFILES = {
 }
 _WAIT_KEYS = ("reminder_days", "close_days", "after_reminder_days")
 
+# #1258 (owner 24.10.2026): the slovnormal client does not use Odoo projects or
+# tasks, so its streams have NO client board. install writes BOARD_MARKER = "off"
+# for these accounts; the question gate (Checks 7/9) and the task-config loader
+# read the marker, because a bash hook cannot query this table.
+NO_BOARD_USERS = frozenset({"david1", "david2", "david3", "david4"})
+BOARD_MARKER = "airuleset-client-board"
+
 # One daily cron cycle of grace before "overdue" (the mechanism is a cron; at
 # exactly 21.0 days it may simply not have run yet), and the same tolerance for
 # recognising the day-14 reminder.
@@ -77,6 +84,35 @@ MESSAGE_TYPES = ("comment", "email")
 _TICKET_RX = re.compile(r"\(GitHub\s*#(\d+)\)|GitHub ticket:\s*#(\d+)",
                         re.IGNORECASE)
 _DAY_S = 86400.0
+
+
+def board_enabled(user):
+    """False for an account whose client has no Odoo board (#1258)."""
+    return user not in NO_BOARD_USERS
+
+
+def board_off_here(home=None):
+    """True iff this account's install wrote the no-board marker (#1258)."""
+    base = home if home is not None else os.path.expanduser("~")
+    try:
+        with open(os.path.join(base, ".claude", BOARD_MARKER), encoding="utf-8") as h:
+            return h.read().strip() == "off"
+    except OSError:
+        return False
+
+
+def write_board_marker(claude_dir, user):
+    """install step (#1258): write the marker for a no-board account, remove a
+    stale one elsewhere. Returns a one-line status for the install output."""
+    path = os.path.join(str(claude_dir), BOARD_MARKER)
+    if board_enabled(user):
+        if not os.path.exists(path):
+            return "client board: on"
+        os.remove(path)
+        return "client board: on (stale marker removed)"
+    with open(path, "w", encoding="utf-8") as h:
+        h.write("off\n")
+    return "client board: off (%s)" % path
 
 
 def m2o(value):

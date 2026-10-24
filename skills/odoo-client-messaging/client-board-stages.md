@@ -2,7 +2,7 @@
 
 Topic companion of `client-board-tasks.md` (CORE): its profile table holds each board's stages.
 
-The profile's "awaiting client verification" stage is **Verifikácia** (montalu) or **Na overenie** (slovnormal) — rule 3's handover note fires on the transition INTO it. The "blocked on a client question" stage is **Potrebuje ujasniť** (montalu); slovnormal has no dedicated question stage, so a question stays in **V práci** with the chatter question of rule 4 (`client-board-questions.md`).
+The profile's "awaiting client verification" stage is **Verifikácia** (montalu) — rule 3's handover note fires on the transition INTO it. The "blocked on a client question" stage is **Potrebuje ujasniť** (montalu).md`).
 
 On the **miva** profile the stage names differ: awaiting client verification = **Čaká** (rule 3's handover note posts there), the client-question stage = **Požadujú sa zmeny** (rule 4/8 answers), **Hotové** moved by the OWNER only after client confirmation (rule 6), **Zrušené** never set by a stream.
 
@@ -41,9 +41,7 @@ On the **montalu** profile the person the handover addresses is @mentioned in
 the message AND set as the task's assignee (`user_ids`) when the rule 3 note is
 posted — the employee the note is written for (owner
 28.9.2026, #1166). On the **miva** profile a client task carries **NO assignee**
-(`user_ids` empty). On the **slovnormal** profile the assignee
-is **Dávid Greňa** — never add an assignee a profile does
-not name.
+(`user_ids` empty). Never add an assignee a profile does not name.
 
 ### 6. "Done" stage — per profile
 
@@ -51,7 +49,7 @@ A task reaches the profile's terminal stage (**Hotovo** / **Hotové**) ONLY afte
 the client confirms acceptance — a 👍 reaction, a reply, or an explicit "OK" —
 never on the stream's own judgment (except the montalu auto-close below). WHO
 moves it: the **OWNER** on miva and, after a confirmation,
-on montalu; **Dávid Greňa himself** on slovnormal. Record it on the GitHub
+on montalu. Record it on the GitHub
 issue as
 `Acceptance-cited: msg <message_id> task <task_id>` (`handover-compose.md`
 family acceptance: one confirmation closes the family).
@@ -74,7 +72,7 @@ countdown. The mechanism moves the task, never the stream by hand, and replaces
 
 👷 ACK + presun fázy = OKAMŽITÉ na každý komentár klienta; text pre klienta čaká na schválenie ownera (#606 U flow).
 
-The phase names below are the montalu vocabulary — map each to YOUR profile's stages (miva: **V riešení** / **Požadujú sa zmeny** / **Čaká**; slovnormal: **V práci** / **Na overenie**).
+The phase names below are the montalu vocabulary — map each to YOUR profile's stages (miva: **V riešení** / **Požadujú sa zmeny** / **Čaká**).
 
 | Udalosť klienta | Fáza + akcia |
 |---|---|

@@ -39,18 +39,18 @@ During a normal run a test fails, a warning appears, or something looks broken. 
 - "This is a known issue in the upstream lib, nothing we can do here." — **WRONG.** File it documenting the limitation and the upstream link.
 - "The console warning is unrelated to this PR." — **WRONG.** Unrelated to the PR ≠ unrelated to the project. File it.
 
-#### The mechanism (every fate-2 case)
+#### The mechanism (every fate-2 case) — the CURRENT ticket, never a new one (#1259)
 
 ```bash
-gh issue create --title "<concise problem statement>" \
-  --body "<what you observed (exact error/test name/warning), where it happens, why it matters, original-request context if it's a shed sub-part>"
+gh issue edit <N> --body-file <body + a new "- [ ] <step>" line>   # a step of the request
+gh issue comment <N> --body "<finding: exact error/test/warning, where, why>"
 ```
 
-Then surface it: `Filed as #N: <title>`. File BEFORE you stop — not "I'll file it later" (that's a fourth fate, and it doesn't exist). The bundling/follow-up gate (`autonomous-batch-issue-development.md`, `complete-planned-work.md`) decides whether a small cleanup lands in THIS PR instead of a new issue — but the choice is do-now-in-PR vs file-issue, NEVER drop.
+Then surface it: `Recorded on #N: <step>`. Record BEFORE you stop — not "I'll write it down later" (a fourth fate does not exist). A NEW issue (`gh issue create`, then `Filed as #N: <title>`) only when the owner asks for one, or for a separate defect outside the request that cannot be fixed in the current change; the bundling/follow-up gate (`complete-planned-work.md`) still decides do-now-in-PR first — NEVER drop.
 
 **Dedup by CODE AREA before filing** (#860, montalu3 incident): before filing a feature/gap ticket, ALSO grep the relevant codebase area (models, functions, the mechanism) for existing implementations — not only issue-title search. Ticket titles name symptoms differently; the code is the ground truth. A title-only dedup misses already-merged work under a different name.
 
-**Filing itself is now mechanically gated on naming WHY it's out of scope** (`hooks/block-ungated-issue-filing.sh`, #137 — the enforcement asymmetry this rule used to have with `complete-planned-work.md`'s Follow-up gate): the `--body` must carry a `Scope-gate: <criterion>` line (`>300-loc`/`schema-migration`/`api-break`/`security-boundary`/`cross-cutting`/`needs-user-decision`/`planned-work`/`user-request`). This does not weaken the filing mandate above — a legitimate discovery always has a truthful criterion to name in one line — it only stops the SILENT default of filing over fixing. **A reduced-authority stream filing a core/shared-infra ticket** (a foreign `stream:core` or `stream:<other>` label) must also carry `Stream-routing: <reason>` in the body AND `-l needs-gatekeeper` in the command to auto-route to the gatekeeper (#962); an unattended `user-request` filing is presence-exempt when the body quotes an owner message with `verbatim` and today's/yesterday's date.
+**Filing itself is now mechanically gated on naming WHY it's out of scope** (`hooks/block-ungated-issue-filing.sh`, #137 — the enforcement asymmetry this rule used to have with `complete-planned-work.md`'s Follow-up gate): the `--body` must carry a `Scope-gate: <criterion>` line (`>300-loc`/`schema-migration`/`api-break`/`security-boundary`/`cross-cutting`/`needs-user-decision`/`user-request`). This does not weaken the filing mandate above — a legitimate discovery always has a truthful criterion to name in one line — it only stops the SILENT default of filing over fixing. **A reduced-authority stream filing a core/shared-infra ticket** (a foreign `stream:core` or `stream:<other>` label) must also carry `Stream-routing: <reason>` in the body AND `-l needs-gatekeeper` in the command to auto-route to the gatekeeper (#962); an unattended `user-request` filing is presence-exempt when the body quotes an owner message with `verbatim` and today's/yesterday's date.
 
 #### Prepared ≠ filed — RUN `gh issue create`, never ask permission to
 
@@ -58,11 +58,11 @@ Filing a GitHub issue is **non-destructive tracking**. It changes no code, touch
 
 The failure: you decompose a request, DRAFT the issue list in chat (titles, scopes, "the 7 new issues + 4 rescopes"), and then STOP to ask permission to create them — "give the word and I'll create them", "ready to file the backlog?", "or tell me to hold". **A drafted issue that was never `gh issue create`'d is a dropped issue.** The user then has to say "yes create them", which is exactly the re-prompting this rule exists to eliminate.
 
-- When you identify a backlog at the INITIAL high-level prompt, FILE it as part of doing the work — immediately, in that same turn. Do not present a list and wait to be told.
+- When the request has several steps, write them as a `- [ ]` checklist in its ONE ticket — immediately, in that same turn (#1259: never one new issue per step). Do not present a list and wait to be told.
 - When the user points out missing issues, CREATE them — do not re-draft them and ask again.
 - If a specific issue's DESIGN is genuinely ambiguous (e.g. "reset to 0dB or last preset?"), still FILE the issue now (so it's tracked), then note the open design question ON that issue or in the same turn. Filing is never blocked on a design answer.
 
-Banned (the Stop hook blocks these): "give the word and I'll create the issues", "ready to create the backlog?", "should I file these issues or hold?", "want me to open the issues?", "once you confirm I'll file them" — any wording that asks permission to file issues instead of filing them. The only allowed message about a backlog is one where the issues are ALREADY created (`gh issue create` ran → cite `Filed as #N: <title>` for each).
+Banned (the Stop hook blocks these): "give the word and I'll create the issues", "ready to create the backlog?", "should I file these issues or hold?", "want me to open the issues?", "once you confirm I'll file them" — any wording that asks permission to file issues instead of filing them. The only allowed message about a backlog is one where its steps are ALREADY recorded (the checklist on `#N` exists → cite `Recorded on #N`), or, for a genuinely separate defect, `Filed as #N: <title>`.
 
 #### Banned phrases (intent — all rewordings and semantic equivalents apply)
 

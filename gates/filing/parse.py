@@ -25,7 +25,9 @@ CATFILE_RE = re.compile(r'^\s*cat\s*>>?\s*([^\s<>&;|]+)')
 
 ALLOWED = {
     ">300-loc", "schema-migration", "api-break", "security-boundary",
-    "cross-cutting", "needs-user-decision", "planned-work", "user-request",
+    "cross-cutting", "needs-user-decision", "user-request",
+    # #1259 (owner 24.10.2026): `planned-work` is GONE -- one owner request =
+    # one ticket; a plan step is a `- [ ]` checklist item in that ticket.
     # #993 -- a REWORK verdict from the integration-time area-review gate files
     # an architecture-rework ticket AUTONOMOUSLY (the supervisor, same turn); it
     # must be able to file even on a non-draining repo, and it requires an
@@ -41,7 +43,7 @@ ALLOWED = {
 # (durable-decisions-to-tickets.md); a discovered review-finding/cleanup
 # must not. #993 -- architecture-rework joins them: a genuine area-rework
 # verdict is a mandated autonomous action, never a discovery to be rate-limited.
-EXEMPT_FROM_CAP = {"planned-work", "user-request", "architecture-rework"}
+EXEMPT_FROM_CAP = {"user-request", "architecture-rework"}
 
 
 # #993 -- the `Area:` line every architecture-rework body must carry (the
