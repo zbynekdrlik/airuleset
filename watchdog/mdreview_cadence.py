@@ -45,7 +45,7 @@ _DEFAULT_STATE_PATH = Path.home() / ".claude" / "mdreview-cadence.json"
 
 BOOTSTRAP_TITLE = "mdreview: recurring fleet-wide audit (pinned)"
 BOOTSTRAP_BODY_LINES = [
-    "Scope-gate: planned-work",
+    "Scope-gate: user-request",
     "Dedup-checked: pinned recurring mdreview ticket — reopened, never re-filed",
     "",
     "This ticket is the PERMANENT recurring mdreview ticket — kept OPEN from now",

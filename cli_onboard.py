@@ -419,7 +419,7 @@ def _onboard_ticket_body(name):
         "chýbali; existujúce súbory sa neprepisovali.\n\n"
         "Zápis v machine-readable registry: `projects-registry.json` v repe "
         "airuleset.\n\n"
-        "Scope-gate: planned-work"
+        "Scope-gate: user-request"
     ) % name
 
 
@@ -429,7 +429,7 @@ def _foundation_ci_body(name):
         "lint + test + (podľa stacku) build/deploy job, aby každý PR prešiel "
         "bránami pred mergom. Onboarding tento ticket LEN zakladá — CI sa "
         "negeneruje automaticky.\n\n"
-        "Scope-gate: planned-work"
+        "Scope-gate: user-request"
     ) % name
 
 
@@ -438,7 +438,7 @@ def _foundation_version_body(name):
         "Web projekt **%s** by mal viditeľne zobrazovať nasadenú verziu "
         "(v<semver>, build-time injected, overené DOM read-om po deployi). "
         "Onboarding tento ticket LEN zakladá.\n\n"
-        "Scope-gate: planned-work"
+        "Scope-gate: user-request"
     ) % name
 
 

@@ -189,10 +189,9 @@ def load_config(path=None, home=None):
     """The parsed config dict, or None when absent / unreadable / not valid JSON
     (the documented fail-safe — the watchdog job renders `not configured`, never
     an error). `#`-line comments in the file are stripped before parsing."""
-    if path is None:
-        import cli_odoo_board  # #1258: a client without a board reads no tasks
-        if cli_odoo_board.board_off_here(home):
-            return None
+    import cli_odoo_board  # #1258: a client without a board reads no tasks,
+    if cli_odoo_board.board_off_here(home):  # whatever path a caller passes
+        return None
     p = path if path is not None else default_config_path(home)
     try:
         with open(p, encoding="utf-8") as h:

@@ -180,6 +180,15 @@ def strip_frontmatter(text):
     return text
 
 
+# #1258: a client WITHOUT an Odoo board (slovnormal, david1-4) never gets the
+# client-board doctrine injected -- it would only send the session into tasks.
+try:
+    with open(os.path.join(os.path.expanduser("~"), ".claude", "airuleset-client-board"),
+              encoding="utf-8") as fh:
+        board_off = fh.readline().strip() == "off"
+except OSError:
+    board_off = False
+
 chunks = []
 for line in open(conf_path, encoding="utf-8"):
     line = line.rstrip("\n")
@@ -190,6 +199,8 @@ for line in open(conf_path, encoding="utf-8"):
         continue
     topic, tool_pat, pattern, body_rel = parts[:4]
     exclude = parts[4] if len(parts) == 5 else ""
+    if board_off and topic.startswith("odoo-client-board"):
+        continue
 
     # #631 -- a RAW_BASH_MATCH_TOPICS row on a Bash surface matches (and is
     # excluded) against the un-stripped command, so a quoted/heredoc

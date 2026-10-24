@@ -1035,11 +1035,13 @@ def _write_box_class_marker():
             print(f"  Box class: {box_class} ({marker})")
         else:
             print(f"  Box class: {box_class} (unchanged)")
-        # #1258: the per-user no-board marker (slovnormal) rides the same step
-        import cli_odoo_board
-        print("  " + cli_odoo_board.write_board_marker(CLAUDE_DIR, u))
     except Exception as e:  # never let box-class provisioning crash install
         print(f"  Box class marker error (non-fatal): {e}", file=sys.stderr)
+    try:  # #1258: the per-user no-board marker (slovnormal) rides the same step
+        import cli_odoo_board
+        print("  " + cli_odoo_board.write_board_marker(CLAUDE_DIR, _current_user()))
+    except Exception as e:
+        print(f"  Client board marker error (non-fatal): {e}", file=sys.stderr)
 
 
 def _is_worktree_repo_dir(repo_dir):

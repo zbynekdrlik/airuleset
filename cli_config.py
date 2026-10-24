@@ -601,15 +601,17 @@ def _validate_watchdog():
     return errors
 
 
-_FRONTMATTER_RE = re.compile(r"\A---\n(.*?)\n---\n", re.S)
+_FRONTMATTER_RE = re.compile(r"\A\ufeff?---[ \t]*\n(.*?)\n---[ \t]*(?:\n|\Z)", re.S)
+# a PLAIN YAML scalar may not start with these (alias, tag, directive, reserved)
+_RESERVED_FIRST = ("@", "`", "%", "*", "?")
 
 
 def frontmatter_errors(text):
-    """#1259 (the /doctor finding): a top-level frontmatter `key: value` whose
-    PLAIN (unquoted) value contains ': ' or ends with ':' is invalid YAML
-    ("mapping values are not allowed here"), and Claude Code then drops EVERY
-    field of that file (post-deploy-verification lost `user-invocable: false`)."""
-    m = _FRONTMATTER_RE.match(text)
+    """#1259 (the /doctor finding): top-level frontmatter `key: value` shapes
+    that are invalid YAML, or that YAML silently cuts. Claude Code then drops
+    EVERY field of the file (post-deploy-verification lost `user-invocable:
+    false`) or keeps a truncated value (` #` starts a comment)."""
+    m = _FRONTMATTER_RE.match(text.replace("\r\n", "\n"))
     if not m:
         return []
     errs = []
@@ -617,12 +619,18 @@ def frontmatter_errors(text):
         if not line or line[0] in " \t#-":
             continue
         key, sep, value = line.partition(":")
-        value = value.strip()
-        if not sep or not value or value[0] in "\"'|>[{&*!":
+        key, value = key.strip(), value.strip()
+        if not sep or not value or value[0] in "|>[{":
             continue
-        if ": " in value or value.endswith(":"):
-            errs.append("frontmatter `%s`: an unquoted value containing ': ' is "
-                        "invalid YAML -- quote it" % key.strip())
+        if value[0] in "\"'":
+            if len(value) < 2 or value[-1] != value[0]:
+                errs.append("frontmatter `%s`: unclosed quote" % key)
+        elif value.startswith(_RESERVED_FIRST) or (value[0] == "!" and not value.startswith("!!")):
+            errs.append("frontmatter `%s`: a plain value cannot start with %r -- quote it" % (key, value[0]))
+        elif re.search(r"\s#", value):
+            errs.append("frontmatter `%s`: ' #' starts a YAML comment and cuts the value -- quote it" % key)
+        elif re.search(r":\s", value) or value.endswith(":"):
+            errs.append("frontmatter `%s`: an unquoted value containing ': ' is invalid YAML -- quote it" % key)
     return errs
 
 

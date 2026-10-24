@@ -230,7 +230,7 @@ def foundation_tray_body(name, reason):
         "`<!-- airuleset:tray=n/a <dôvod> -->` a ticket zavri ako n/a s "
         "odôvodnením. Onboarding "
         "tento ticket LEN zakladá.\n\n"
-        "Scope-gate: planned-work"
+        "Scope-gate: user-request"
     ) % (name, reason)
 
 

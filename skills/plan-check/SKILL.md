@@ -24,6 +24,7 @@ For EACH requirement from the prompt AND each step from the plan, check:
 - Was it tested? How? (unit test, E2E Playwright test, manual verification)
 - Is CI green for it?
 - Can you show evidence it works?
+- Is its `- [ ]` item on the ticket ticked (`- [x]` + evidence)? A ticket never closes with open boxes (#1259).
 
 Use this format:
 

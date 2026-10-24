@@ -2,7 +2,7 @@
 
 Topic companion of `client-board-tasks.md` (CORE): its profile table holds each board's stages.
 
-The profile's "awaiting client verification" stage is **Verifikácia** (montalu) — rule 3's handover note fires on the transition INTO it. The "blocked on a client question" stage is **Potrebuje ujasniť** (montalu).md`).
+The profile's "awaiting client verification" stage is **Verifikácia** (montalu) — rule 3's handover note fires on the transition INTO it. The "blocked on a client question" stage is **Potrebuje ujasniť** (montalu). slovnormal has NO board (#1258).
 
 On the **miva** profile the stage names differ: awaiting client verification = **Čaká** (rule 3's handover note posts there), the client-question stage = **Požadujú sa zmeny** (rule 4/8 answers), **Hotové** moved by the OWNER only after client confirmation (rule 6), **Zrušené** never set by a stream.
 

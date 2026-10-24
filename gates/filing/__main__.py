@@ -29,8 +29,8 @@ from gates.filing.parse import (
     _explicit_stream_labels, _no_field_decoy, _target_repo_for_segment,
 )
 from gates.filing.caps import (
-    CHAIN_WIDTH_CAP, DAILY_CAP, cwd_repo_of,
-    _gh_view_text, _log_pass_count, _near_duplicate, _ratchet_should_block,
+    cap_verdict, cwd_repo_of,
+    _gh_view_text, _near_duplicate, _ratchet_should_block,
     _stream_routing_block_reason, _today_str,
 )
 from gates.filing.presence import is_away, _dismissal_word, _has_recent_owner_quote
@@ -496,26 +496,11 @@ def classify_command(cmd, sid, cwd, repo_dir, log_path, unattended):
                 # when the local caps alone would already refuse most of
                 # them -- reordering costs nothing for the common case and
                 # bounds the worst case).
-                width_blocked = False
-                if crit_l not in EXEMPT_FROM_CAP and parents:
-                    for p in parents:
-                        n = (_log_pass_count(log_path, target_repo, today, parent=p)
-                             + _local_parent_count.get((target_repo, p), 0))
-                        if n >= CHAIN_WIDTH_CAP:
-                            width_blocked = True
-                            break
-                daily_blocked = False
-                if not width_blocked and crit_l not in EXEMPT_FROM_CAP:
-                    n = (_log_pass_count(log_path, target_repo, today)
-                         + _local_day_count.get(target_repo, 0))
-                    if n >= DAILY_CAP:
-                        daily_blocked = True
-
-                if width_blocked:
-                    results.append(("BLOCK", clean_title, "chain-width-cap",
-                                     parents_str, target_repo, dedup_claim))
-                elif daily_blocked:
-                    results.append(("BLOCK", clean_title, "daily-cap",
+                cap_reason, width_capped, daily_capped = cap_verdict(
+                    log_path, target_repo, today, crit_l, parents, unattended,
+                    _local_day_count, _local_parent_count)
+                if cap_reason:
+                    results.append(("BLOCK", clean_title, cap_reason,
                                      parents_str, target_repo, dedup_claim))
                 else:
                     near_dup = _near_duplicate(title, body, cwd, target_repo,
@@ -561,9 +546,10 @@ def classify_command(cmd, sid, cwd, repo_dir, log_path, unattended):
                         # NOTFILED (the whole command is refused, nothing filed), so
                         # bumping it here would be a phantom +1 (#842-review 🔵,
                         # mirroring the #329 phantom-PASS / NOTFILED discipline).
-                        if crit_l not in EXEMPT_FROM_CAP:
+                        if daily_capped:
                             _local_day_count[target_repo] = \
                                 _local_day_count.get(target_repo, 0) + 1
+                        if width_capped:
                             for p in parents:
                                 key = (target_repo, p)
                                 _local_parent_count[key] = \

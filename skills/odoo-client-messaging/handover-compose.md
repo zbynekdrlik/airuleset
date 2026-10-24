@@ -300,10 +300,10 @@ owner-approved BEFORE posting.
   never a shortcut around any of those.
 
 - **Every client Discuss report → Odoo project.task IMMEDIATELY (#924,
-  owner 7.9.).** Before reply/GitHub ticket: create the task in the client's
-  project (origin: thread + deep URL + msg id, summary, dev ref). Stages +
-  Hotovo authority per `client-board-tasks.md`; lag=violation. Discuss is NEVER
-  the source of truth; the task is.
+  7.9.; NOT slovnormal: no board, #1258).** Before reply/GitHub ticket:
+  create the task in the client's project (origin: thread + deep URL + msg id,
+  summary, dev ref). Stages/Hotovo per `client-board-tasks.md`; lag=violation.
+  Discuss is never the record; the task is.
 
 - **Štartovací Introduction v produkte — udržiavaný per-tenant návod (airuleset
   #1042/#1073, owner 18.9.2026: „návody buduj a udržiavaj").** Dodaj JEDEN

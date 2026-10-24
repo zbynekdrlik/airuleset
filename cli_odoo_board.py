@@ -96,7 +96,7 @@ def board_off_here(home=None):
     base = home if home is not None else os.path.expanduser("~")
     try:
         with open(os.path.join(base, ".claude", BOARD_MARKER), encoding="utf-8") as h:
-            return h.read().strip() == "off"
+            return h.readline().strip() == "off"  # first line, as the bash hook reads it
     except OSError:
         return False
 
@@ -112,6 +112,10 @@ def write_board_marker(claude_dir, user):
         return "client board: on (stale marker removed)"
     with open(path, "w", encoding="utf-8") as h:
         h.write("off\n")
+    # a leftover Job 49 status would keep the footer A / Stop gate live for hours
+    stale = os.path.join(str(claude_dir), "task-hygiene", "status.json")
+    if os.path.exists(stale):
+        os.remove(stale)
     return "client board: off (%s)" % path
 
 

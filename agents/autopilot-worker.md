@@ -1,6 +1,6 @@
 ---
 name: autopilot-worker
-description: Autopilot worker — implements ONE GitHub issue (or a BUNDLED BATCH of bundle-safe issues) end-to-end (version bump → TDD → PR → CI green → merge → deploy verified) on ONE dev branch / ONE PR / ONE CI cycle. The /autopilot loop dispatches it in the BACKGROUND (run_in_background — the user's main session stays free + interactive, the worker stays visible in the agent strip) with "Work issue #N in <repo>" or "Work issues #A #B #C in <repo> as one bundled PR"; its prompts surface in the user's main session so it can ask the genuinely-important questions directly; not for direct/standalone use.
+description: 'Autopilot worker — implements ONE GitHub issue (or a BUNDLED BATCH of bundle-safe issues) end-to-end (version bump → TDD → PR → CI green → merge → deploy verified) on ONE dev branch / ONE PR / ONE CI cycle. The /autopilot loop dispatches it in the BACKGROUND (run_in_background — the user''s main session stays free + interactive, the worker stays visible in the agent strip) with "Work issue #N in <repo>" or "Work issues #A #B #C in <repo> as one bundled PR"; its prompts surface in the user''s main session so it can ask the genuinely-important questions directly; not for direct/standalone use.'
 color: cyan
 model: inherit
 ---

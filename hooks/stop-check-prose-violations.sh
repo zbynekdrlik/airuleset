@@ -1868,9 +1868,9 @@ if [ "$IS_COMPLETION" = "1" ]; then
             echo "" >&2
             echo "  Without that, the deferred work is permanently lost (the ghost-deferral failure mode)." >&2
             echo "" >&2
-            echo "  Fix NOW:" >&2
-            echo "    1. gh issue create --title 'TODO: <description of deferred work>' --body '<context>'" >&2
-            echo "    2. Add a line to the completion report: 'Filed as #<returned-N>: <title>'" >&2
+            echo "  Fix NOW (#1259: one owner request = one ticket):" >&2
+            echo "    1. Record it on the CURRENT ticket (a '- [ ]' item via gh issue edit, or a comment) and cite 'Recorded on #<N>', OR" >&2
+            echo "    2. only for a separate defect outside the request: gh issue create, then 'Filed as #<returned-N>: <title>'" >&2
             echo "" >&2
             echo "  See complete-planned-work.md → 'CRITICAL — deferral phrases MUST cite the issue number'." >&2
             add_hard "Deferral phrase in completion report without explicit 'Filed as #N' / 'Tracked as #N' reference"

@@ -1,6 +1,6 @@
 ---
 name: post-deploy-verification
-description: "Three-layer post-deploy verification: liveness, version-match via DOM read, functional Playwright E2E. Load after any deploy."
+description: Three-layer post-deploy check (liveness, version-match via DOM read, functional Playwright E2E). Load after any deploy.
 user-invocable: false
 ---
 

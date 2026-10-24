@@ -1,13 +1,13 @@
-### No Dropped Work — Everything You Identify Is Either Done Now or Filed as an Issue
+### No Dropped Work — Everything You Identify Is Done Now or Recorded on Its Ticket
 
 **Context gate — related rules you MUST also apply:**
 - `complete-planned-work.md` — deferral phrases in completion reports MUST cite `#N`; this rule extends that to EVERY message, every phase
-- `completion-report.md` — 🔵 review findings inside the diff = MUST FIX; out-of-diff = file an issue
+- `completion-report.md` — 🔵 review findings inside the diff = MUST FIX; out-of-diff = record it on the current ticket
 - `autonomous-batch-issue-development.md` — bundling/follow-up gate decides same-PR vs new issue
-- `tdd-workflow.md` / `regression-test-first.md` — a discovered bug is a missing-test report; file it AND test it
+- `tdd-workflow.md` / `regression-test-first.md` — a discovered bug is a missing-test report; record it AND test it
 - `durable-decisions-to-tickets.md` — DECISIONS and FINDINGS get the same treatment as work items, and the deadline is THE MOMENT they land (compaction eats anything that lives only in the conversation)
 
-**The single rule: any piece of work you IDENTIFY but do NOT complete in this session MUST be captured as a tracked GitHub issue BEFORE you stop. Work is never silently dropped. The only three fates for an identified task are: (1) do it now, (2) `gh issue create` and cite the returned `#N`, (3) it was already a tracked issue you can point at. There is no fourth fate.**
+**The single rule (ONE owner request = ONE ticket, #1259, owner 24.10.2026): any piece of work you IDENTIFY but do NOT complete in this session MUST be captured BEFORE you stop. Work is never silently dropped. The only three fates for an identified task are: (1) do it now, (2) record it on the CURRENT ticket — a `- [ ]` checklist item in its body or a comment — and cite `#N`, (3) it was already tracked. There is no fourth fate. A NEW issue only when the owner asks for one, or for a separate defect outside the request that cannot be fixed in the current change.**
 
 **Default fate = FIX NOW; filing is the EXCEPTION, and it is RATE-GATED (#842, 2026-09-02).** The autopilot loop was filing more issues than it closed (a black hole that never drains), so the scope-gate hook now BLOCKS an unattended automation filing while the repo is not net-draining today (`created_today >= closed_today`), and a worktree WORKER cannot `gh issue create` at all — it fixes in-lane and returns `followup_candidates:` for the supervisor to decide. The "never silently drop" invariant is UNCHANGED: a finding that genuinely cannot be filed today must be FIXED today, never forgotten. Filing stays available for the owner (present) and for the legit channels; it is only the unattended discovery-filing that must yield to draining first.
 
@@ -17,17 +17,17 @@ This rule exists because the same work keeps getting lost the same three ways, f
 
 The user gives a high-level prompt. You split it into sub-parts. You implement SOME parts and silently forget the rest — they were never tracked, so they evaporate, and the user has to prompt them again.
 
-**Mandatory mechanism:** when you decompose a request, enumerate ALL sub-parts UP FRONT (TodoWrite, or an explicit numbered list). Before you stop, walk that list. EVERY sub-part you did not complete this session → `gh issue create` with the context from the original prompt, then list `Filed as #N: <title>`. Never end a turn having done part of a request with the remainder living only in your head.
+**Mandatory mechanism:** when you decompose a request, enumerate ALL sub-parts UP FRONT (TodoWrite, or an explicit numbered list). Before you stop, walk that list. EVERY sub-part you did not complete this session → a `- [ ]` item on the request's ONE ticket (never a child ticket per sub-part), then say `Recorded on #N: <sub-part>`. Never end a turn having done part of a request with the remainder living only in your head.
 
-- "I focused on the auth piece; the rate-limiting and the audit-log parts can come later." — **WRONG** unless each later part has a filed `#N`.
-- "Implemented 2 of the 4 things you asked for." — **WRONG** unless the other 2 are filed `#N`.
+- "I focused on the auth piece; the rate-limiting and the audit-log parts can come later." — **WRONG** unless each later part is a `- [ ]` item on the ticket.
+- "Implemented 2 of the 4 things you asked for." — **WRONG** unless the other 2 are `- [ ]` items on the ticket.
 - Quietly shipping a subset and not mentioning the dropped parts at all — **WRONG.** That's the silent loss the user is most angry about.
 
-#### Failure mode 2 — Review findings acknowledged but neither fixed nor filed
+#### Failure mode 2 — Review findings acknowledged but neither fixed nor recorded
 
-A review (`/review`, `/requesting-code-review`, or any ad-hoc inspection) surfaces a problem. You note it, decide not to fix it right now, and move on without filing it. It's gone.
+A review (`/review`, `/requesting-code-review`, or any ad-hoc inspection) surfaces a problem. You note it, decide not to fix it right now, and move on without recording it. It's gone.
 
-**Rule:** every review finding is fixed in this PR (preferred — see `completion-report.md`'s 🔵 = MUST FIX) OR filed as a `#N` issue with a title. A finding you "decided to leave" with no `#N` is a dropped finding. This applies to findings you surface yourself mid-work, not just to formal review-skill output.
+**Rule:** every review finding is fixed in this PR (preferred — see `completion-report.md`'s 🔵 = MUST FIX) OR recorded on the current ticket (a `- [ ]` item or comment on `#N`). A finding you "decided to leave" with no `#N` is a dropped finding. This applies to findings you surface yourself mid-work, not just to formal review-skill output.
 
 #### Failure mode 3 — "Pre-existing / known / unrelated" dismissal during testing
 
@@ -46,7 +46,7 @@ gh issue edit <N> --body-file <body + a new "- [ ] <step>" line>   # a step of t
 gh issue comment <N> --body "<finding: exact error/test/warning, where, why>"
 ```
 
-Then surface it: `Recorded on #N: <step>`. Record BEFORE you stop — not "I'll write it down later" (a fourth fate does not exist). A NEW issue (`gh issue create`, then `Filed as #N: <title>`) only when the owner asks for one, or for a separate defect outside the request that cannot be fixed in the current change; the bundling/follow-up gate (`complete-planned-work.md`) still decides do-now-in-PR first — NEVER drop.
+Then surface it: `Recorded on #N: <step>`. Record BEFORE you stop — not "I'll write it down later" (a fourth fate does not exist). A NEW issue (`gh issue create`, then `Filed as #N: <title>`) only when the owner asks for one, or for a separate defect outside the request that cannot be fixed in the current change; the bundling/follow-up gate (`complete-planned-work.md`) still decides do-now-in-PR first — NEVER drop. **Before the ticket closes, every `- [ ]` is `- [x]` with its evidence, or moved to a separate defect ticket — closing a ticket with open boxes drops them.**
 
 **Dedup by CODE AREA before filing** (#860, montalu3 incident): before filing a feature/gap ticket, ALSO grep the relevant codebase area (models, functions, the mechanism) for existing implementations — not only issue-title search. Ticket titles name symptoms differently; the code is the ground truth. A title-only dedup misses already-merged work under a different name.
 
@@ -74,11 +74,11 @@ Any of these, when NOT accompanied by a filed `#N` (or an in-session fix), is a 
 - "out of scope" / "outside the scope" (used to avoid acting, with nothing filed)
 - "the remaining parts / the rest / the other items can wait / will follow / later"
 - "handled only part of" / "did some of what you asked"
-- "I'll file it later" / "should be tracked" / "worth an issue someday" (intent without the actual `gh issue create`)
+- "I'll file it later" / "should be tracked" / "worth an issue someday" (intent without actually recording it on `#N`)
 - "separate issue" / "different problem" said as a reason to skip, with no `#N`
 
 The intent is banned: surfacing work and then letting it evaporate. The Stop hook (`stop-check-untracked-work.sh`) blocks these phrases when no `#N` / `gh issue create` / in-session fix is present, on EVERY message — not just completion reports.
 
 #### The principle
 
-The user runs long autonomous sessions and cannot babysit what you silently drop. A dropped sub-part, a dropped review finding, and a dropped "pre-existing" failure are the same bug: identified work with no tracking. Track everything you touch. Filing an issue costs 10 seconds; re-explaining a lost request costs the user a whole session. When in doubt, file the issue.
+The user runs long autonomous sessions and cannot babysit what you silently drop. A dropped sub-part, a dropped review finding, and a dropped "pre-existing" failure are the same bug: identified work with no tracking. Track everything you touch. Recording it on the ticket costs 10 seconds; re-explaining a lost request costs the user a whole session. When in doubt, record it on the ticket — never a new issue per item (#1259).
