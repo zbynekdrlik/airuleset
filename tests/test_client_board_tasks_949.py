@@ -65,18 +65,13 @@ class TestClientBoardTasksDoctrine949(TestCase):
                       "Verifikácia", "Hotovo"):
             self.assertIn(stage, self.body)
 
-    def test_slovnormal_profile_stages(self):
-        self.assertIn("slovnormal", self.body)
-        for stage in ("Nové", "V práci", "Na overenie", "Hotové"):
-            self.assertIn(stage, self.body)
-
-    def test_slovnormal_assignee_david_grena(self):
-        self.assertIn("Dávid Greňa", self.body)
-
-    def test_slovnormal_david_moves_to_done_himself(self):
-        # slovnormal's terminal-stage mover is Dávid himself, not the owner
-        self.assertIn("moves it to", self.normed)
-        self.assertIn("himself", self.normed)
+    def test_slovnormal_profile_has_no_board(self):
+        # #1258 (owner 24.10.2026) reverses #1018: the slovnormal client does not
+        # use Odoo projects or tasks, so its row says NO board, not a stage list.
+        row = next(ln for ln in self.body.splitlines() if ln.startswith("| **slovnormal**"))
+        self.assertIn("NO board", row)
+        self.assertIn("project.task", row)
+        self.assertNotIn("Dávid Greňa", row)
 
     # Rule 5: no assignee on miva (montalu assigns the addressee, owner 28.9.2026, #1166)
     def test_miva_no_assignee(self):

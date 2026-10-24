@@ -51,6 +51,10 @@ class TestDailyCap(unittest.TestCase):
     def test_daily_cap_is_two(self):
         self.assertEqual(caps.DAILY_CAP, 2)
 
+    def test_chain_width_cap_is_one(self):
+        # a 2nd finding off one ticket goes ON that ticket
+        self.assertEqual(caps.CHAIN_WIDTH_CAP, 1)
+
     def test_block_message_names_the_new_cap_and_no_planned_work(self):
         from gates.filing import render
         # the criterion token, not the `complete-planned-work.md` file name

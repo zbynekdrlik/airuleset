@@ -49,6 +49,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 sys.path.insert(0, str(REPO_ROOT))
 import airuleset  # noqa: E402
+from gates.filing.caps import CHAIN_WIDTH_CAP, DAILY_CAP  # noqa: E402  (#1259: 2/day, 1/parent)
 
 
 _DEFAULT_EMPTY_GH_DIR = None
@@ -394,7 +395,7 @@ class TestBasicBehavior(TestCase):
         home = tempfile.mkdtemp(prefix="airuleset-scopegate-log-")
         self.addCleanup(shutil.rmtree, home, ignore_errors=True)
         run(body_cmd("logged-block", "no criterion here"), home=home)
-        run(body_cmd("logged-pass", "ok", scope_gate="planned-work"), home=home)
+        run(body_cmd("logged-pass", "ok", scope_gate="user-request"), home=home)
         log = Path(home) / ".claude" / "scope-gate.log"
         self.assertTrue(log.exists())
         text = log.read_text()
@@ -402,7 +403,7 @@ class TestBasicBehavior(TestCase):
         self.assertIn("verdict=PASS", text)
         self.assertIn("logged-block", text)
         self.assertIn("logged-pass", text)
-        self.assertIn("criterion=planned-work", text)
+        self.assertIn("criterion=user-request", text)
 
 
 class TestCdPrefixRelativeBodyPath(TestCase):
@@ -783,41 +784,41 @@ class TestDedupGate(TestCase):
 
 class TestDailyCap(TestCase):
     """#329 -- soft per-day, per-repo cap on agent-authored filings
-    (8/day/repo). Real SEQUENTIAL filings into a shared HOME (never a
+    (#1259: DAILY_CAP/day/repo, now 2). Real SEQUENTIAL filings into a shared HOME (never a
     hand-seeded log line), so the test exercises the hook's OWN log
     format end-to-end instead of a fixture's own assumption about it."""
 
-    def test_ninth_non_exempt_filing_in_one_day_blocks(self):
+    def test_filing_past_the_daily_cap_blocks(self):
         home = tempfile.mkdtemp(prefix="airuleset-dailycap-test-")
         self.addCleanup(shutil.rmtree, home, ignore_errors=True)
         with tempfile.TemporaryDirectory() as d:
-            for i in range(8):
+            for i in range(DAILY_CAP):
                 r = run(body_cmd(
                     "finding %d" % i,
                     "A genuinely distinct topic %d: %s." % (i, os.urandom(4).hex()),
                     scope_gate="cross-cutting"), home=home, cwd=d)
                 self.assertEqual(r.returncode, 0, "seed %d: %s" % (i, r.stderr))
             r = run(body_cmd(
-                "finding 9",
+                "finding past the cap",
                 "One more genuinely distinct topic: %s." % os.urandom(4).hex(),
                 scope_gate="cross-cutting"), home=home, cwd=d)
             self.assertEqual(r.returncode, 2, r.stderr)
             # #329 adversarial review: assert the exact classified reason.
-            self.assertIn('"finding 9" -> daily-cap', r.stderr)
+            self.assertIn('"finding past the cap" -> daily-cap', r.stderr)
 
-    def test_eighth_filing_in_one_day_still_passes(self):
+    def test_last_filing_under_the_daily_cap_still_passes(self):
         home = tempfile.mkdtemp(prefix="airuleset-dailycap-test2-")
         self.addCleanup(shutil.rmtree, home, ignore_errors=True)
         with tempfile.TemporaryDirectory() as d:
-            for i in range(7):
+            for i in range(DAILY_CAP - 1):
                 r = run(body_cmd(
                     "finding %d" % i,
                     "A genuinely distinct topic %d: %s." % (i, os.urandom(4).hex()),
                     scope_gate="cross-cutting"), home=home, cwd=d)
                 self.assertEqual(r.returncode, 0, "seed %d: %s" % (i, r.stderr))
             r = run(body_cmd(
-                "finding 8",
-                "The 8th genuinely distinct topic: %s." % os.urandom(4).hex(),
+                "finding at the cap",
+                "The last genuinely distinct topic: %s." % os.urandom(4).hex(),
                 scope_gate="cross-cutting"), home=home, cwd=d)
             self.assertEqual(r.returncode, 0, r.stderr)
 
@@ -825,7 +826,7 @@ class TestDailyCap(TestCase):
         home = tempfile.mkdtemp(prefix="airuleset-dailycap-test3-")
         self.addCleanup(shutil.rmtree, home, ignore_errors=True)
         with tempfile.TemporaryDirectory() as d:
-            for i in range(8):
+            for i in range(DAILY_CAP):
                 r = run(body_cmd(
                     "finding %d" % i,
                     "A genuinely distinct topic %d: %s." % (i, os.urandom(4).hex()),
@@ -841,7 +842,7 @@ class TestDailyCap(TestCase):
         home = tempfile.mkdtemp(prefix="airuleset-dailycap-test4-")
         self.addCleanup(shutil.rmtree, home, ignore_errors=True)
         with tempfile.TemporaryDirectory() as d1:
-            for i in range(8):
+            for i in range(DAILY_CAP):
                 r = run(body_cmd(
                     "finding %d" % i,
                     "A genuinely distinct topic %d: %s." % (i, os.urandom(4).hex()),
@@ -862,7 +863,7 @@ class TestDailyCap(TestCase):
                 ("finding %d" % i,
                  "A genuinely distinct topic %d: %s." % (i, os.urandom(4).hex()),
                  "cross-cutting")
-                for i in range(9)
+                for i in range(DAILY_CAP + 1)
             ]
             r = run(_multi_body_cmd(items), home=home, cwd=d)
             self.assertEqual(r.returncode, 2, r.stderr)
@@ -870,51 +871,47 @@ class TestDailyCap(TestCase):
 
 class TestChainWidthCap(TestCase):
     """#329 -- chain-WIDTH cap: siblings off ONE parent, same day, same
-    repo (cap=2, the 3rd blocks). Extends #311's chain-DEPTH cap with the
+    repo (#1259: CHAIN_WIDTH_CAP, now 1 -- the 2nd blocks). Extends #311's chain-DEPTH cap with the
     WIDTH half of the same measured failure (odoo-erp's real
     #3250/#3251/#3252/#3258 -- four siblings off one parent, each
     individually depth-1). Reuses the SAME "(#N follow-up)" wording the
     depth cap already detects."""
 
-    def test_third_sibling_off_one_parent_same_day_blocks(self):
+    def test_sibling_past_the_width_cap_blocks(self):
         tmp = tempfile.mkdtemp(prefix="airuleset-widthcap-test-")
         self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
         gh_bin = _fake_gh(tmp, {
             "100": {"title": "original bug", "body": "Just a normal ticket."},
         })
         with tempfile.TemporaryDirectory() as d:
-            for i in range(2):
+            for i in range(CHAIN_WIDTH_CAP):
                 r = run(body_cmd(
                     "sibling %d (#100 follow-up)" % i,
                     "Found while fixing #100 (#100 follow-up).",
                     scope_gate="cross-cutting"), home=tmp, cwd=d, gh_bin=gh_bin)
                 self.assertEqual(r.returncode, 0, "sibling %d: %s" % (i, r.stderr))
             r = run(body_cmd(
-                "sibling 2 (#100 follow-up)",
+                "sibling past (#100 follow-up)",
                 "Found while fixing #100 (#100 follow-up).",
                 scope_gate="cross-cutting"), home=tmp, cwd=d, gh_bin=gh_bin)
             self.assertEqual(r.returncode, 2, r.stderr)
             # #329 adversarial review: assert the exact classified reason.
             self.assertIn(
-                '"sibling 2 (#100 follow-up)" -> chain-width-cap', r.stderr)
+                '"sibling past (#100 follow-up)" -> chain-width-cap', r.stderr)
 
-    def test_second_sibling_off_one_parent_still_passes(self):
+    def test_siblings_up_to_the_width_cap_pass(self):
         tmp = tempfile.mkdtemp(prefix="airuleset-widthcap-test2-")
         self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
         gh_bin = _fake_gh(tmp, {
             "100": {"title": "original bug", "body": "Just a normal ticket."},
         })
         with tempfile.TemporaryDirectory() as d:
-            r = run(body_cmd(
-                "sibling 0 (#100 follow-up)",
-                "Found while fixing #100 (#100 follow-up).",
-                scope_gate="cross-cutting"), home=tmp, cwd=d, gh_bin=gh_bin)
-            self.assertEqual(r.returncode, 0, r.stderr)
-            r = run(body_cmd(
-                "sibling 1 (#100 follow-up)",
-                "Found while fixing #100 (#100 follow-up).",
-                scope_gate="cross-cutting"), home=tmp, cwd=d, gh_bin=gh_bin)
-            self.assertEqual(r.returncode, 0, r.stderr)
+            for i in range(CHAIN_WIDTH_CAP):
+                r = run(body_cmd(
+                    "sibling %d (#100 follow-up)" % i,
+                    "Found while fixing #100 (#100 follow-up).",
+                    scope_gate="cross-cutting"), home=tmp, cwd=d, gh_bin=gh_bin)
+                self.assertEqual(r.returncode, 0, r.stderr)
 
     def test_width_cap_scoped_per_parent(self):
         tmp = tempfile.mkdtemp(prefix="airuleset-widthcap-test3-")
@@ -923,8 +920,10 @@ class TestChainWidthCap(TestCase):
             "100": {"title": "original bug A", "body": "Just a normal ticket."},
             "200": {"title": "original bug B", "body": "Just a normal ticket."},
         })
+        # the per-parent scope is observable only while one more filing fits the day
+        self.assertLess(CHAIN_WIDTH_CAP, DAILY_CAP)
         with tempfile.TemporaryDirectory() as d:
-            for i in range(2):
+            for i in range(CHAIN_WIDTH_CAP):
                 r = run(body_cmd(
                     "sibling-A %d (#100 follow-up)" % i,
                     "Found while fixing #100 (#100 follow-up).",
@@ -943,7 +942,7 @@ class TestChainWidthCap(TestCase):
             "100": {"title": "original bug", "body": "Just a normal ticket."},
         })
         with tempfile.TemporaryDirectory() as d:
-            for i in range(2):
+            for i in range(CHAIN_WIDTH_CAP):
                 r = run(body_cmd(
                     "sibling %d (#100 follow-up)" % i,
                     "Found while fixing #100 (#100 follow-up).",
@@ -986,7 +985,7 @@ class TestChainWidthCap(TestCase):
             "100": {"title": "original bug", "body": "Just a normal ticket."},
         })
         with tempfile.TemporaryDirectory() as d:
-            for i in range(2):
+            for i in range(CHAIN_WIDTH_CAP):
                 r = run(body_cmd(
                     "sibling %d (#100 follow-up)" % i,
                     "Found while fixing #100 (#100 follow-up).",
@@ -1035,9 +1034,9 @@ class TestScopeGate329ReviewFixes(TestCase):
             self.assertIn("verdict=NOTFILED", text)
             self.assertNotIn("verdict=PASS", text)
 
-            # If the phantom entry had wrongly counted, only 7 of these 8
-            # genuinely distinct real filings would pass.
-            for i in range(8):
+            # If the phantom entry had wrongly counted, only DAILY_CAP - 1 of these
+            # DAILY_CAP genuinely distinct real filings would pass.
+            for i in range(DAILY_CAP):
                 r = run(body_cmd(
                     "real finding %d" % i,
                     "A genuinely distinct real topic %d: %s." %
@@ -1079,7 +1078,7 @@ class TestScopeGate329ReviewFixes(TestCase):
         home = tempfile.mkdtemp(prefix="airuleset-targetrepo-api-")
         self.addCleanup(shutil.rmtree, home, ignore_errors=True)
         with tempfile.TemporaryDirectory() as d:
-            for i in range(8):
+            for i in range(DAILY_CAP):
                 r = run(body_cmd(
                     "finding %d" % i,
                     "A genuinely distinct topic %d: %s." %
@@ -1987,10 +1986,10 @@ class TestNetDrainHarness842(TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
 
     def test_attended_exempt_still_passes_on_a_non_draining_repo(self):
-        # #1070 item 7: the exemptions are UNCHANGED -- planned-work never meets
-        # the ratchet, even attended on a non-draining repo.
-        r = run(body_cmd("plan step attended", "converged-plan decomposition",
-                          scope_gate="planned-work"),
+        # #1070 item 7: the exemption never meets the ratchet, even attended on a
+        # non-draining repo (#1259: planned-work is retired; user-request remains).
+        r = run(body_cmd("owner asked attended", "the owner asked for this",
+                          scope_gate="user-request"),
                 gh_bin=_fake_gh_netdrain(self.tmp, created=99, closed=0),
                 session_id="t-nd-present-" + uuid.uuid4().hex[:6], home=self.home)
         self.assertEqual(r.returncode, 0, r.stderr)
