@@ -381,7 +381,7 @@ def cmd_task_hygiene(args):
               % path)
         return 0
 
-    cfg = ro.load_config(path)
+    cfg = ro.load_config(path, home=getattr(args, "home", None))  # #1258: off on a no-board account
     if cfg is None:
         print("task-hygiene: not configured on this box")
         return 0

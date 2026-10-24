@@ -1858,9 +1858,9 @@ if [ "$IS_COMPLETION" = "1" ]; then
         # A tracking reference EXONERATES the deferral, so ask whether it is
         # MISSING — an unanswerable check must not grant that exemption.
         if msg_missing "$MSG" -qiE "\b(filed|tracked|tracking|tracker|opened|created|logged|recorded)\b[^.]{0,60}#[0-9]+|issue\s+#[0-9]+\b|todo[: ]+#[0-9]+|see\s+#[0-9]+|follow.?up\s+(in|at|as)\s+#[0-9]+|deferred[^.]{0,60}#[0-9]+|root.?cause[^.]{0,60}#[0-9]+|address(ed)?\s+(in|by|via)\s+#[0-9]+"; then
-            echo "VIOLATION: Completion report contains a deferral phrase ('deferred', 'root-cause fix later', 'will be addressed in follow-up', 'remains outstanding', 'workaround for now', 'patched around', 'this PR doesn't fix...', 'punted to...') but NO EXPLICIT tracking-issue reference. The current PR's own #N in the title does NOT count — the user needs proof the DEFERRED work was filed as its own tracked issue." >&2
+            echo "VIOLATION: Completion report contains a deferral phrase ('deferred', 'root-cause fix later', 'will be addressed in follow-up', 'remains outstanding', 'workaround for now', 'patched around', 'this PR doesn't fix...', 'punted to...') but NO EXPLICIT tracking-issue reference. The current PR's own #N in the title does NOT count — the user needs proof the DEFERRED work was recorded (a '- [ ]' item / comment on the current ticket, or a separate defect ticket)." >&2
             echo "" >&2
-            echo "  Per complete-planned-work.md, any deferred work MUST be filed as a tracked GitHub issue BEFORE sending the completion report, and the report MUST cite it explicitly:" >&2
+            echo "  Per complete-planned-work.md, any deferred work MUST be recorded on a ticket BEFORE sending the completion report, and the report MUST cite it explicitly:" >&2
             echo "    • 'Filed as #<N>: <title>'" >&2
             echo "    • 'Tracked as #<N>'" >&2
             echo "    • 'Root-cause fix tracked in #<N>'" >&2

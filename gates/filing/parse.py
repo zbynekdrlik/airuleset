@@ -36,13 +36,12 @@ ALLOWED = {
 }
 
 
-# #329 -- these criteria are exempt from the NEW soft caps below (daily filing
-# cap, chain-width cap) AND (#842) the net-drain ratchet -- they never COUNT
-# toward either cap and never GET capped/ratchet-blocked. A user directive or a
-# converged-plan decomposition must always be able to file
-# (durable-decisions-to-tickets.md); a discovered review-finding/cleanup
-# must not. #993 -- architecture-rework joins them: a genuine area-rework
-# verdict is a mandated autonomous action, never a discovery to be rate-limited.
+# #329 -- these criteria skip the daily filing cap AND (#842) the net-drain
+# ratchet: an owner directive must always be able to file; a discovered
+# review-finding/cleanup must not. #993 -- architecture-rework joins them (a
+# mandated area-review verdict). #1259 -- user-request is still width-capped when
+# it names a parent and daily-capped when unattended (caps.cap_verdict); only
+# architecture-rework escapes every cap.
 EXEMPT_FROM_CAP = {"user-request", "architecture-rework"}
 
 

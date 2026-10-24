@@ -128,8 +128,8 @@ them, never drop silently.
 2. Create the milestone:
    `gh api repos/{owner}/{repo}/milestones -f title='arch-review: <model> <date>' 2>/dev/null || true`
    (resolve owner/repo via `gh repo view --json owner,name`).
-3. `gh issue create` one issue per dimension (body line `Scope-gate: user-request` —
-   the owner invoked this review). Labels: `architecture-review` + `dimension:<d>` +
+3. `gh issue create` one issue per dimension (body lines `Scope-gate: user-request` —
+   the owner invoked this review — and `Dedup-checked: <what you searched>`). Labels: `architecture-review` + `dimension:<d>` +
    the highest `severity:<s>` of its fixes. Assign all to the milestone.
 
 Do NOT ask for confirmation before creating — auto-create is the chosen behavior.

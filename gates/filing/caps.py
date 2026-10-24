@@ -216,8 +216,10 @@ def cap_verdict(log_path, repo, today, crit_l, parents, unattended,
             if n >= CHAIN_WIDTH_CAP:
                 return "chain-width-cap", width_capped, daily_capped
     if daily_capped:
+        # only an away user-request counts the day's user-request filings too
+        away_ask = unattended and crit_l == "user-request"
         n = (_log_pass_count(log_path, repo, today,
-                             exempt=UNCAPPED_ALWAYS if unattended else None)
+                             exempt=UNCAPPED_ALWAYS if away_ask else None)
              + local_day.get(repo, 0))
         if n >= DAILY_CAP:
             return "daily-cap", width_capped, daily_capped

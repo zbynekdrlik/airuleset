@@ -603,7 +603,13 @@ def _validate_watchdog():
 
 _FRONTMATTER_RE = re.compile(r"\A\ufeff?---[ \t]*\n(.*?)\n---[ \t]*(?:\n|\Z)", re.S)
 # a PLAIN YAML scalar may not start with these (alias, tag, directive, reserved)
-_RESERVED_FIRST = ("@", "`", "%", "*", "?")
+_RESERVED_FIRST = ("@", "`", "%", "*")
+_CLOSED_RE = {
+    "'": re.compile(r"\A'(?:[^']|'')*'\s*(?:#.*)?\Z"),
+    '"': re.compile(r'\A"(?:[^"\\]|\\.)*"\s*(?:#.*)?\Z'),
+    "[": re.compile(r"\A\[.*\]\s*(?:#.*)?\Z"),
+    "{": re.compile(r"\A\{.*\}\s*(?:#.*)?\Z"),
+}
 
 
 def frontmatter_errors(text):
@@ -620,12 +626,12 @@ def frontmatter_errors(text):
             continue
         key, sep, value = line.partition(":")
         key, value = key.strip(), value.strip()
-        if not sep or not value or value[0] in "|>[{":
+        if not sep or not value or value[0] in "|>":
             continue
-        if value[0] in "\"'":
-            if len(value) < 2 or value[-1] != value[0]:
-                errs.append("frontmatter `%s`: unclosed quote" % key)
-        elif value.startswith(_RESERVED_FIRST) or (value[0] == "!" and not value.startswith("!!")):
+        if value[0] in "\"'[{":
+            if not _CLOSED_RE[value[0]].match(value):  # a trailing comment may follow
+                errs.append("frontmatter `%s`: unclosed %s" % (key, value[0]))
+        elif value.startswith(_RESERVED_FIRST) or (value[0] == "!" and not value.startswith(("!!", "! "))):
             errs.append("frontmatter `%s`: a plain value cannot start with %r -- quote it" % (key, value[0]))
         elif re.search(r"\s#", value):
             errs.append("frontmatter `%s`: ' #' starts a YAML comment and cuts the value -- quote it" % key)

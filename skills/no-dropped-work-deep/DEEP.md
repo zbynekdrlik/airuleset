@@ -52,15 +52,15 @@ Then surface it: `Recorded on #N: <step>`. Record BEFORE you stop — not "I'll 
 
 **Filing itself is now mechanically gated on naming WHY it's out of scope** (`hooks/block-ungated-issue-filing.sh`, #137 — the enforcement asymmetry this rule used to have with `complete-planned-work.md`'s Follow-up gate): the `--body` must carry a `Scope-gate: <criterion>` line (`>300-loc`/`schema-migration`/`api-break`/`security-boundary`/`cross-cutting`/`needs-user-decision`/`user-request`). This does not weaken the filing mandate above — a legitimate discovery always has a truthful criterion to name in one line — it only stops the SILENT default of filing over fixing. **A reduced-authority stream filing a core/shared-infra ticket** (a foreign `stream:core` or `stream:<other>` label) must also carry `Stream-routing: <reason>` in the body AND `-l needs-gatekeeper` in the command to auto-route to the gatekeeper (#962); an unattended `user-request` filing is presence-exempt when the body quotes an owner message with `verbatim` and today's/yesterday's date.
 
-#### Prepared ≠ filed — RUN `gh issue create`, never ask permission to
+#### Prepared ≠ recorded — record it on the ticket, never ask permission to
 
-Filing a GitHub issue is **non-destructive tracking**. It changes no code, touches no production, costs nothing, and is trivially editable or closeable afterward. Therefore it **NEVER requires the user's approval** — and "should I create the issues?" is a pre-answered YES (see `ask-before-assuming.md`).
+Recording on the ticket (or filing a separate defect) is **non-destructive tracking**. It changes no code, touches no production, costs nothing, and is trivially editable or closeable afterward. Therefore it **NEVER requires the user's approval** — and "should I create the issues?" is a pre-answered YES (see `ask-before-assuming.md`).
 
 The failure: you decompose a request, DRAFT the issue list in chat (titles, scopes, "the 7 new issues + 4 rescopes"), and then STOP to ask permission to create them — "give the word and I'll create them", "ready to file the backlog?", "or tell me to hold". **A drafted issue that was never `gh issue create`'d is a dropped issue.** The user then has to say "yes create them", which is exactly the re-prompting this rule exists to eliminate.
 
 - When the request has several steps, write them as a `- [ ]` checklist in its ONE ticket — immediately, in that same turn (#1259: never one new issue per step). Do not present a list and wait to be told.
-- When the user points out missing issues, CREATE them — do not re-draft them and ask again.
-- If a specific issue's DESIGN is genuinely ambiguous (e.g. "reset to 0dB or last preset?"), still FILE the issue now (so it's tracked), then note the open design question ON that issue or in the same turn. Filing is never blocked on a design answer.
+- When the user points out missing items, RECORD them on the ticket — do not re-draft them and ask again.
+- If a specific issue's DESIGN is genuinely ambiguous (e.g. "reset to 0dB or last preset?"), still RECORD it now (so it's tracked), then note the open design question ON that ticket or in the same turn. Recording is never blocked on a design answer.
 
 Banned (the Stop hook blocks these): "give the word and I'll create the issues", "ready to create the backlog?", "should I file these issues or hold?", "want me to open the issues?", "once you confirm I'll file them" — any wording that asks permission to file issues instead of filing them. The only allowed message about a backlog is one where its steps are ALREADY recorded (the checklist on `#N` exists → cite `Recorded on #N`), or, for a genuinely separate defect, `Filed as #N: <title>`.
 
