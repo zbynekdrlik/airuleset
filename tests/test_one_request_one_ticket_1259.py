@@ -53,7 +53,8 @@ class TestDailyCap(unittest.TestCase):
 
     def test_block_message_names_the_new_cap_and_no_planned_work(self):
         from gates.filing import render
-        self.assertNotIn("planned-work", render.BLOCK_MSG)
+        # the criterion token, not the `complete-planned-work.md` file name
+        self.assertNotRegex(render.BLOCK_MSG, r"(?<!complete-)planned-work")
         self.assertIn("soft filing cap of 2", render.BLOCK_MSG)
 
 
