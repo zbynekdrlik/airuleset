@@ -203,10 +203,25 @@ class TestJob1NewWording(unittest.TestCase):
         now = 1_800_000_000.0
         with unittest.mock.patch("watchdog.goal._recovery_recent_human", return_value=False), \
                 unittest.mock.patch("watchdog.resurrect.pane_is_bare_idle", return_value=False):
-            self._run(now, cred_mtime=now - 300, age_s=600,
-                      entries=[_err(NEW_BANNER, now - 600)],
+            self._run(now, cred_mtime=now - 560, age_s=400,
+                      entries=[_err(NEW_BANNER, now - 600),
+                               {"type": "user", "message": {"role": "user",
+                                                            "content": "oauth-resume: x"}},
+                               _err(NEW_BANNER, now - 400)],
                       preseed=self._continued(now - 600))
         self.assertTrue(self.badge.exists())
+
+
+    def test_no_new_401_since_the_continue_waits_for_the_badge(self):
+        # the transcript still ends in the pre-continue 401: nothing proves the
+        # continue failed yet, so no immediate auth!
+        now = 1_800_000_000.0
+        with unittest.mock.patch("watchdog.goal._recovery_recent_human", return_value=False), \
+                unittest.mock.patch("watchdog.resurrect.pane_is_bare_idle", return_value=False):
+            self._run(now, cred_mtime=now - 500, age_s=600,
+                      entries=[_err(NEW_BANNER, now - 600)],
+                      preseed=self._continued(now - 600))
+        self.assertFalse(self.badge.exists())
 
 
 if __name__ == "__main__":
