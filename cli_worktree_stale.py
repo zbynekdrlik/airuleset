@@ -51,7 +51,7 @@ from cli_worktree_orphans import (
 # (`skills/autopilot/SKILL.md` ROUND INTEGRATION step 5) only ever cleans
 # branches it actually merged -- never a sibling round's dead leftovers.
 # Dead workers therefore leak one worktree + one branch each, unboundedly,
-# fleet-wide. This reuses #315's own `purge_stale_tier0_targets` shape
+# fleet-wide. This reuses #315's (retired, #1137) target-purge shape
 # EXACTLY: a plain, cadence-gated function (its own state file, never the
 # 60s watchdog timer -- the FREEZE forbids a new job, and rate-limiting a
 # plain function call needs none) wired as a non-fatal step inside
@@ -471,7 +471,7 @@ def sweep_stale_worktrees(home=None, dry_run: bool = False, now=None, log_path=N
     can add a new commit to the branch in between.
 
     Cadence-gated via its own state file (`STALE_WORKTREE_STATE_PATH`)
-    mirroring #315's `purge_stale_tier0_targets` exactly -- never leans
+    mirroring #315's retired target purge exactly -- never leans
     on the 60s watchdog timer (FREEZE: no new job). `force=True` (the
     CLI's own manual invocation) or `dry_run=True` always bypasses it.
 

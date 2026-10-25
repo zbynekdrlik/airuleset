@@ -20,7 +20,6 @@ Two keys `cli_config.apply_managed_settings_defaults` delegates here:
   session thrashed all night; a persisted per-model `xhigh` silently overrides
   the managed `high` (#751).
 """
-import os
 
 LENS_EXCLUDE = "**/.claude/rules/gk-review-lenses*.md"
 LENS_SUFFIX = "/.claude/rules/gk-review-lenses*.md"
@@ -37,16 +36,35 @@ def _managed(entry):
     return entry == LENS_EXCLUDE or (entry.startswith("/") and entry.endswith(LENS_SUFFIX))
 
 
+def _account_home():
+    import airuleset
+    import pwd
+    return pwd.getpwnam(airuleset._current_user()).pw_dir
+
+
 def _window_entries():
-    """Absolute lens excludes for this box's declared non-review windows."""
+    """Absolute lens excludes for this box's declared non-review windows (and
+    their worktree lanes). Fail-safe: any error yields none, never an aborted
+    install; a cwd a review window also uses is never excluded."""
     import airuleset
     import cli_fleet
+    try:
+        home = _account_home()
+        dirs = {}
+        for w in cli_fleet.box_windows(airuleset._current_user()) or []:
+            cwd = w.get("cwd") if isinstance(w, dict) else None
+            if not isinstance(cwd, str) or not cwd.strip():
+                continue
+            cwd = cwd.strip().rstrip("/")
+            cwd = home + cwd[1:] if cwd.startswith("~") else cwd
+            cwd = cwd if cwd.startswith("/") else home + "/" + cwd
+            dirs.setdefault(cwd, set()).add(w.get("role"))
+    except Exception:  # noqa: BLE001 -- a bad declaration never aborts install
+        return []
     out = []
-    for w in cli_fleet.box_windows(airuleset._current_user()):
-        cwd = os.path.expanduser(w.get("cwd") or "").rstrip("/")
-        entry = cwd + LENS_SUFFIX
-        if w.get("role") != "review" and cwd.startswith("/") and entry not in out:
-            out.append(entry)
+    for cwd, roles in dirs.items():
+        if "review" not in roles:
+            out += [cwd + LENS_SUFFIX, cwd + "/.claude/worktrees/**" + LENS_SUFFIX]
     return out
 
 

@@ -3236,7 +3236,7 @@ SEVERE_TICKET_STATE_NAME = "severe-ticket-state.json"
 # under the guard's own state dir (derived from `home`, never `~/.claude`
 # resolved directly -- #861) recording the last-filed timestamp, PLUS an
 # IN-MEMORY within-run guard that survives even when THAT write itself fails
-# (the #545 `_record_tier0_bypass` "disk write can fail" lesson, reused here).
+# (the retired #545 bypass recorder's "disk write can fail" lesson, reused here).
 SEVERE_TICKET_REFILE_S = 24 * 3600     # re-file only after this cooldown
 
 _SEVERE_TICKET_FILED_THIS_PROCESS = {}     # {state_path_str: last_filed_ts}
@@ -3251,8 +3251,8 @@ def _severe_ticket_recently_filed(state_path, now, refile_s=None):
     checked BOTH via the in-memory within-run guard (set the instant a filing
     succeeds, so it holds even when the durable write below fails) and the
     durable per-box state file (across-run / across-process). A future-dated
-    stamp never wedges the gate open forever (mirrors the sibling #545
-    `_record_tier0_bypass` dedup shape)."""
+    stamp never wedges the gate open forever (mirrors the retired #545
+    bypass recorder's dedup shape)."""
     refile_s = SEVERE_TICKET_REFILE_S if refile_s is None else refile_s
     key = str(state_path)
     mem_ts = _SEVERE_TICKET_FILED_THIS_PROCESS.get(key)
