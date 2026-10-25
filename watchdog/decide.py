@@ -216,7 +216,7 @@ def is_account_dispatch_block(text):
 #   "Please run /login · API Error: 401 OAuth access token has been revoked."
 # and a terminally-killed background Agent surfaces the SAME
 #   "Agent … failed: … API Error: 401 OAuth access token has been revoked"
-# WITHOUT the /login prefix. #1261: Claude Code 2.1.306 writes both as
+# WITHOUT the /login prefix. #1261: Claude Code 2.1.30x writes both as
 #   "OAuth token revoked · Please run /login" (error type authentication_failed).
 # Only these revoke phrasings match -- DELIBERATELY NOT a bare "Please run
 # /login". A corpus scan (#602 adversarial review) of 270 real
@@ -240,7 +240,7 @@ _OAUTH_REVOKED_RX = re.compile(
 
 def is_oauth_revoked(text):
     """True for the OAuth-rotation 401 REVOKED class (#602) -- "access token has
-    been revoked", or "OAuth token revoked" since CC 2.1.306 (#1261), in the
+    been revoked", or "OAuth token revoked" since CC 2.1.30x (#1261), in the
     /login banner AND the agent-death variant. A bare "Please run /login"
     (login-expired / not-logged-in, the 71% non-rotation majority in the
     corpus) is DELIBERATELY excluded. Time-INdependent (unlike is_usage_cap):

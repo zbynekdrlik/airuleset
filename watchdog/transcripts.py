@@ -482,8 +482,8 @@ def transcript_last_error_ts(path):
     a genuinely dead new process would be skipped forever (no badge, no ping),
     reintroducing the #1075 silent-death class. The EPISODE seed stays
     `transcript_first_error_ts` (the rotation time, for the "since HH:MM" surface
-    and the AUTH_STALE_OWNER_S timer, #1075 review A#3) — this helper is used ONLY
-    for the historical predicate, never for the seed."""
+    and the AUTH_STALE_OWNER_S timer, #1075 review A#3) — this helper feeds the
+    historical predicate and (#1261) the freshness check, never the seed."""
     for entry in reversed(_iter_jsonl_tail(path, max_lines=200)):
         if not isinstance(entry, dict):
             continue

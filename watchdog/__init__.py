@@ -196,13 +196,12 @@ NUDGE_TEXT = "continue"
 # `oauth-resume:` prefix registered in `_MACHINE_PROMPT_PREFIXES` below, so the
 # submitted `user` turn is never misread as a human answer (`_last_human_prompt_ts`
 # / `_is_genuine_human_prompt`) -- the same guarantee bare `continue` gets from
-# `_MACHINE_PROMPT_EXACT`. Delivered through job 1's normal generic-nudge path
-# (`send_verified` / `deliver_with_stash`), not a new mechanism.
+# `_MACHINE_PROMPT_EXACT`. Typed by the #1075 handler (`_handle_authdead_episode`).
 OAUTH_REVOKED_NUDGE_TEXT = (
     "oauth-resume: práve prebehla rotácia OAuth tokenu — starý access token bol "
     "revoknutý a session dostala 401 (Please run /login). Čerstvý token je už na "
     "disku, takže pokračuj v rozrobenej práci. DÔLEŽITÉ: tá istá rotácia mohla "
-    "TERMINÁLNE zabiť tvojich background agentov (Agent … failed: … 401 OAuth "
+    "TERMINÁLNE zabiť tvojich background agentov (Agent … OAuth token revoked / "
     "access token has been revoked) a watchdog ich NEVIE oživiť. Ak ti nejaký "
     "padol, nečakaj naň ako na „waiting for background agents“ — re-dispatchni "
     "každú padnutú prácu z durable state (subagent-continuation.md): otvorený "
@@ -423,8 +422,8 @@ def _write_auth_badge_cache(state_path, first_401_ts, now):
     """Write the `auth!` footer badge cache (#1075) — the statusline's
     `auth_segment` reads it. Written on every credential-dead sweep that has
     SURFACED (a STALE credential, or a FRESH credential whose 401 PERSISTED
-    through the one continue — never a self-healing FRESH transient that resumed
-    on the continue). The cache self-expires AUTH_BADGE_TTL_S (3 h) after the last
+    through the one continue), and only once the episode is AUTH_STALE_OWNER_S
+    old (#1261: a routine rotation heals within minutes). The cache self-expires AUTH_BADGE_TTL_S (3 h) after the last
     write, so a resolved episode / restarted session / dead watchdog stops
     painting `auth!` on its own (a longer window than the 600 s disk badge — see
     `statusbar.auth_segment` for why). Written next to the watchdog state
@@ -466,25 +465,22 @@ def _authdead_action_enabled():
 def _handle_authdead_episode(state, key, cred_mtime_fn, now, idle, project, pid,
                              cwd, tpath, captured, draft_pending, run, send_fn,
                              owner, sleep_fn, dry_run, logs, state_path,
-                             first_401_seed):
+                             first_401_seed, last_401_ts=None):
     """#1075 CREDENTIAL-DEAD handler for job 1's oauth-revoked class (extracted
     from run_once to keep it under the function-line budget). The caller has
     already confirmed `is_oauth_revoked(err_text)` and `continue`s unconditionally
     after this returns — this OWNS the episode (own `apierr-authdead:<key>`
     state), so it is never nudged by the generic chain.
 
-    A REVOKED OAuth token is dead IN the running process — a `continue` can never
-    re-read a rotated token (the miva1 30h outage). `first_401_seed` is the
-    episode's ROTATION time (the earliest 401 entry's own timestamp — NOT the
-    transcript mtime, which drifts forward with CC's retries). Read the
-    credentials-file mtime (mtime ONLY, injectable) vs that first-401 time:
-      STALE (file older/equal) → NEVER nudge; journal, `auth!` badge, ONE owner
-        ping after AUTH_STALE_OWNER_S.
+    A REVOKED OAuth token is dead IN the running process (the miva1 30h outage).
+    `first_401_seed` (the earliest 401's own timestamp) dates the episode for the
+    surface and the AUTH_STALE_OWNER_S timer; freshness compares the credentials-
+    file mtime (mtime ONLY, injectable) with the NEWEST 401 (`last_401_ts`, #1261):
+      STALE (file older/equal) → NEVER nudge; journal; past AUTH_STALE_OWNER_S the
+        `auth!` badge + ONE owner ping.
       FRESH (file newer) → exactly ONE enriched continue; on a PERSISTING 401,
-        SURFACE it (badge + the SAME owner ping — the owner must learn of a dead
-        session even when the destructive relaunch stays gated OFF) AND, opt-in
-        behind AIRULESET_AUTHDEAD_ACTION, a VERIFIED RELAUNCH (recent-human +
-        bare-shell gated, once per episode).
+        SURFACE it (same badge + ping) AND, opt-in behind AIRULESET_AUTHDEAD_ACTION,
+        a VERIFIED RELAUNCH (recent-human + bare-shell gated, once per episode).
 
     dry-run contract (#1075 review A#2): a `--dry-run` sweep persists NOTHING and
     writes no badge — every mutation lands on a COPY that is stored back into
@@ -497,7 +493,8 @@ def _handle_authdead_episode(state, key, cred_mtime_fn, now, idle, project, pid,
         "continued": False, "relaunched": False}
     ad["last_seen"] = int(now)
     first_401 = ad["first_401_ts"]
-    cstate = credential_state(first_401, cred_mtime_fn(), now)
+    cstate = credential_state(first_401 if last_401_ts is None else last_401_ts,
+                              cred_mtime_fn(), now)
     _hhmm = time.strftime("%H:%M", time.localtime(first_401))
 
     def _persist():
@@ -509,9 +506,11 @@ def _handle_authdead_episode(state, key, cred_mtime_fn, now, idle, project, pid,
         # case and the FRESH-persistent case (#1075 review A#1/B#1): the `auth!`
         # footer badge + ONE owner ping past AUTH_STALE_OWNER_S. The ping is
         # `credential-dead:` (un-suppressed) and latched once per episode.
+        if (now - first_401) < AUTH_STALE_OWNER_S:
+            return              # #1261: a routine rotation heals in minutes, no auth!
         if not dry_run:
             _write_auth_badge_cache(state_path, first_401, now)
-        if not ad.get("pinged") and (now - first_401) >= AUTH_STALE_OWNER_S:
+        if not ad.get("pinged"):
             send_fn(msg, owner=owner,
                     dedup_key="credential-dead:%s:%s" % (key, int(first_401)),
                     dry_run=dry_run)
@@ -1884,8 +1883,8 @@ def _apierr_escalation_ping(send_fn, project, pid, run, key, err_hash, fs,
     (2) #662 -- but an error that needs an INTERACTIVE `/login`
     (`_needs_interactive_login`: the genuine `access token has been revoked` OR
     the bare "Please run /login" login-expired/not-logged-in family) and that
-    survived every one of the `max_nudges` `continue`s is NOT self-healing (the
-    #602 rotation resumes on nudge #1); it is a PERSISTENT non-self-healing AUTH
+    survived every one of the `max_nudges` `continue`s is NOT self-healing (a
+    rotation revoke never gets here: the #1075 handler owns it); a PERSISTENT AUTH
     block, exactly the acctblock class. So for that class ONLY, ALSO fire ONE
     `oauthblock:` alert naming the session (`loc`). #676 (owner ruling
     2026-08-24) then owner-suppressed `oauthblock:` (a 401 revoke is normal
@@ -4152,9 +4151,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
                     # it), so the earliest-401 anchor would mask the genuinely
                     # dead new process forever (#1075 fix-forward review A#-c). The
                     # EPISODE seed stays `first_401_seed` (the rotation time).
-                    last_401 = transcript_last_error_ts(tpath)
-                    if last_401 is None:
-                        last_401 = first_401_seed
+                    last_401_ts = transcript_last_error_ts(tpath)
+                    last_401 = first_401_seed if last_401_ts is None else last_401_ts
                     proc_start = proc_start_fn(pid, run)
                     if authdead_is_historical(last_401, proc_start):
                         logs.append(
@@ -4169,7 +4167,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
                     _handle_authdead_episode(
                         state, key, cred_mtime_fn, now, idle, project, pid, cwd,
                         tpath, captured, draft_pending, run, send_fn, owner,
-                        sleep_fn, dry_run, logs, state_path, first_401_seed)
+                        sleep_fn, dry_run, logs, state_path, first_401_seed,
+                        last_401_ts)
                     continue
                 if action == "nudge" and _thrash_stop(err_text, tpath):   # #1260: never `continue`
                     _thrash_hold(state, key, entry, project, logs, send_fn, owner, "thrash:%s:%s:%s" % (key, err_hash, fs), dry_run)
