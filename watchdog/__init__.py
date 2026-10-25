@@ -478,8 +478,8 @@ def _handle_authdead_episode(state, key, cred_mtime_fn, now, idle, project, pid,
     file mtime (mtime ONLY, injectable) with the NEWEST 401 (`last_401_ts`, #1261):
       STALE (file older/equal) → NEVER nudge; journal; past AUTH_STALE_OWNER_S the
         `auth!` badge + ONE owner ping.
-      FRESH (file newer) → exactly ONE enriched continue; on a PERSISTING 401,
-        SURFACE it (same badge + ping) AND, opt-in behind AIRULESET_AUTHDEAD_ACTION,
+      FRESH (file newer) → exactly ONE enriched continue; on a PERSISTING 401
+        (judged vs the first 401 again) the badge at once + the ping AND, opt-in behind AIRULESET_AUTHDEAD_ACTION,
         a VERIFIED RELAUNCH (recent-human + bare-shell gated, once per episode).
 
     dry-run contract (#1075 review A#2): a `--dry-run` sweep persists NOTHING and
@@ -493,24 +493,24 @@ def _handle_authdead_episode(state, key, cred_mtime_fn, now, idle, project, pid,
         "continued": False, "relaunched": False}
     ad["last_seen"] = int(now)
     first_401 = ad["first_401_ts"]
-    cstate = credential_state(first_401 if last_401_ts is None else last_401_ts,
-                              cred_mtime_fn(), now)
+    once = last_401_ts is None or ad.get("continued")   # after the continue: #1075 anchor
+    cstate = credential_state(first_401 if once else last_401_ts, cred_mtime_fn(), now)
     _hhmm = time.strftime("%H:%M", time.localtime(first_401))
 
     def _persist():
         if not dry_run:
             state[ad_key] = ad
 
-    def _surface(msg):
+    def _surface(msg, wait=True):
         # The owner-facing surface for a dead-on-401 session, SHARED by the STALE
         # case and the FRESH-persistent case (#1075 review A#1/B#1): the `auth!`
         # footer badge + ONE owner ping past AUTH_STALE_OWNER_S. The ping is
         # `credential-dead:` (un-suppressed) and latched once per episode.
-        if (now - first_401) < AUTH_STALE_OWNER_S:
+        if wait and (now - first_401) < AUTH_STALE_OWNER_S:
             return              # #1261: a routine rotation heals in minutes, no auth!
         if not dry_run:
             _write_auth_badge_cache(state_path, first_401, now)
-        if not ad.get("pinged"):
+        if not ad.get("pinged") and (now - first_401) >= AUTH_STALE_OWNER_S:
             send_fn(msg, owner=owner,
                     dedup_key="credential-dead:%s:%s" % (key, int(first_401)),
                     dry_run=dry_run)
@@ -573,7 +573,7 @@ def _handle_authdead_episode(state, key, cred_mtime_fn, now, idle, project, pid,
     _surface("🔴 **%s** — OAuth session je mŕtva na 401: token bol odvolaný od %s "
              "(~%dh), ~/.claude/.credentials.json je už čerstvý, ale `continue` to "
              "nevylieči (proces drží starý token) — treba reštart session na boxe."
-             % (project or key, _hhmm, _hrs))
+             % (project or key, _hhmm, _hrs), wait=False)
     if not ad.get("relaunched"):
         from watchdog import goal as _goal_mod
         from watchdog import resurrect as _resurrect
@@ -4127,7 +4127,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
                     # mtime `now - idle` (which drifts forward with CC's retries and
                     # would misclassify a fresh rotation STALE — #1075 review A#3);
                     # fall back to `now - idle` when no 401 carries a timestamp.
-                    first_401_seed = transcript_first_error_ts(tpath)
+                    first_401_seed = transcript_first_error_ts(tpath, match=is_oauth_revoked)
                     if first_401_seed is None:
                         first_401_seed = int(now - idle)
                     # #1075 fix-forward: a HISTORICAL 401 — one produced by a

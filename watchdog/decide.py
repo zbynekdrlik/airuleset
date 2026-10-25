@@ -259,7 +259,7 @@ AUTH_STALE_OWNER_S = 30 * 60
 
 def credential_state(first_401_ts, cred_mtime, now):
     """PURE (#1075): is `~/.claude/.credentials.json` FRESH (refreshed AFTER the
-    session's first 401) or STALE (still the revoked token the running process
+    given 401 — job 1 passes the newest one, #1261) or STALE (still the revoked token the running process
     already holds)? Returns "fresh" | "stale".
 
     A revoked OAuth token is dead IN the running Claude Code process — a
