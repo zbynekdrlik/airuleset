@@ -425,15 +425,15 @@ def transcript_last_error(path):
     return ""
 
 
-def transcript_first_error_ts(path):
-    """#1075 — epoch of the FIRST `isApiErrorMessage` in the transcript's CURRENT
-    trailing stall run (the true "first 401" time), or None. Scans back from the
-    newest entry mirroring `transcript_last_error`'s walk: collect every
-    contiguous api-error timestamp, STOP at the first genuine-progress entry (a
-    `tool_result` user turn, a real `tool_use`, or a real non-error assistant
-    reply), and return the EARLIEST 401 epoch in that trailing run (`None` when
-    the last real entry is not an api-error, or no 401 carries a parseable
-    `timestamp`).
+def transcript_first_error_ts(path, match=None):
+    """#1075 — epoch of the FIRST `isApiErrorMessage` whose text passes `match`
+    (#1261: the 401, not an earlier 529; None = any) in the transcript's CURRENT
+    trailing stall run, or None. Scans back from the newest entry mirroring
+    `transcript_last_error`'s walk: collect every contiguous api-error timestamp,
+    STOP at the first genuine-progress entry (a `tool_result` user turn, a real
+    `tool_use`, or a real non-error assistant reply), and return the EARLIEST
+    match (`None` when the last real entry is not an api-error, or no match
+    carries a parseable `timestamp`).
 
     This anchors `decide.credential_state` on the ROTATION time, not on the
     transcript's last-write mtime (`now - idle`): CC's own 401 retries keep
@@ -454,7 +454,7 @@ def transcript_first_error_ts(path):
             continue             # system / bookkeeping → skip
         if entry.get("isApiErrorMessage") is True:
             ep = _jsonl_entry_epoch(json.dumps(entry))
-            if ep is not None:
+            if ep is not None and (match is None or match(_entry_text(entry) or "")):
                 first = ep       # reversed = newest→oldest, so the LAST set wins = earliest
             continue
         if _entry_has_tool_use(entry):
@@ -482,8 +482,8 @@ def transcript_last_error_ts(path):
     a genuinely dead new process would be skipped forever (no badge, no ping),
     reintroducing the #1075 silent-death class. The EPISODE seed stays
     `transcript_first_error_ts` (the rotation time, for the "since HH:MM" surface
-    and the AUTH_STALE_OWNER_S timer, #1075 review A#3) — this helper is used ONLY
-    for the historical predicate, never for the seed."""
+    and the AUTH_STALE_OWNER_S timer, #1075 review A#3) — this helper feeds the
+    historical predicate and (#1261) the freshness check, never the seed."""
     for entry in reversed(_iter_jsonl_tail(path, max_lines=200)):
         if not isinstance(entry, dict):
             continue

@@ -656,9 +656,9 @@ def auth_segment(home=None, now=None):
     """#1075: the `auth!` footer badge (RED) — this box has a Claude session dead
     on a REVOKED OAuth token (STALE credential, or a FRESH credential the running
     process still can't re-read). Shown while the watchdog's credential-dead cache
-    is younger than AUTH_BADGE_TTL_S, HIDDEN otherwise. Job 1 writes the cache on
-    every credential-dead sweep (stale OR fresh-persistent) and refreshes it each
-    sweep while the session stays dead, so the badge holds through a multi-hour
+    is younger than AUTH_BADGE_TTL_S, HIDDEN otherwise. Job 1 writes it once a stale
+    episode is 30 min old, or at once when fresh-persistent (#1261), and refreshes it
+    each sweep while the session stays dead, so the badge holds through a multi-hour
     outage (the miva1 30 h case) and SELF-EXPIRES once the watchdog stops
     refreshing (a resolved episode, a restarted session, or a dead watchdog).
 
