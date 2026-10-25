@@ -178,7 +178,7 @@ class TestWorktreeStopPointAndSkillPointAtTheWaitDoctrine(unittest.TestCase):
 
     def test_skill_worktree_fleet_note_points_at_738(self):
         text = SKILL_MD.read_text(encoding="utf-8")
-        marker = "Worktree/fleet mode"
+        marker = "Worktree mode — the worker's cycle"
         self.assertIn(marker, text)
         idx = text.index(marker)
         window = _norm(text[idx:idx + 1100])

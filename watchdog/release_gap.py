@@ -7,10 +7,9 @@ the release train (develop -> staging -> main + deploy + verify), so merged work
 sits UNRELEASED for days ("práca zmergovaná, ale nikdy nevydaná"). Root cause is
 structural, traced in `watchdog/__init__.py` run_once():
 
-  * Job 20 (`goal.goal_lane_sweep` + its riders `goal_lane_occupancy_nudge`,
-    `ops_wait_recheck.goal_ops_wait_recheck`) is the ONLY family that keystrokes
-    into an armed `/goal` pane — but its signals are lane occupancy (fill worker
-    lanes) and the W/I partition audit, NEITHER of which reads develop-vs-main.
+  * Job 20 (`goal.goal_lane_sweep` + its riders) is the ONLY family that
+    keystrokes into an armed `/goal` pane — but none of its other signals reads
+    develop-vs-main.
   * Jobs 24/28 (`delivery_stall_watch` / `stuck_main_sweep`) DO measure "fresh
     work over a frozen base", but structurally cannot serve this: they are
     DETECTION-ONLY (a deduped Discord ping, never a keystroke — "what to do about

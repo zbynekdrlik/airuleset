@@ -222,7 +222,7 @@ same file, zero new hooks.
 
 If the supervisor dispatched you with `isolation: "worktree"` (its own choice, #1137), you run in an
 **isolated git worktree** — a separate checkout of the repo, sharing only `.git` with the main tree
-and any sibling worktrees. You can tell from your own `cwd` (something like
+and any other worktrees. You can tell from your own `cwd` (something like
 `<repo>/.claude/worktrees/agent-<id>`, distinct from the repo's main checkout path) and from the
 dispatch prompt naming it explicitly. This changes what "done" looks like for you:
 
@@ -245,8 +245,8 @@ dispatch prompt naming it explicitly. This changes what "done" looks like for yo
   THIS self-check IN that directory (after the `cd`, Bash cwd persists) — the toplevel then
   correctly resolves under `.claude/worktrees/` with the dead lane's branch, so your momentary
   main-checkout STARTING cwd is NOT an isolation failure and you do NOT return `ISOLATION FAILED`
-  for it. Every OTHER dispatch (the default `isolation: "worktree"`) still aborts on a main
-  checkout exactly as above.
+  for it. Every OTHER dispatch (an `isolation: "worktree"` one) still aborts on a main checkout
+  exactly as above.
 - **NEVER touch the shared main tree.** Work entirely inside your OWN worktree path — always your
   own `cwd` (`<repo>/.claude/worktrees/agent-<id>`), NEVER the bare main checkout path even if the
   dispatch prompt happens to name it as context. If any tool call refuses with "this command
@@ -280,35 +280,24 @@ dispatch prompt naming it explicitly. This changes what "done" looks like for yo
   salvage-commit them itself, then dispatch a shape-1 worker).
 - **Your scratchpad directory is SHARED with every sibling worker the same supervisor
   dispatches — it is NOT private to you (#432).** It is keyed off the SUPERVISOR's own top-level
-  conversation id, so every worker the supervisor dispatches inherits the identical
-  path verbatim, even though each of you runs in its own isolated git worktree. A conventionally
-  named scratch file (`gh-cli-recipes.md` itself recommends generic names like `body.md` /
-  `red-commit-msg.txt`) is a live collision hazard: two siblings writing-then-consuming the same
-  filename can silently clobber each other (real incident, presenter #683: one worker's commit
-  shipped under a sibling's unrelated message text). **Check your dispatch prompt FIRST (#435):
-  if it already states your scratchpad subdirectory for this dispatch (the supervisor now
-  computes AND CREATES a per-batch, issue-number-namespaced one before dispatching you — never
-  private, but collision-free by construction across this round's siblings), use THAT path
-  verbatim — do not compute your own.** Otherwise (an older dispatch, or the documented serial
-  fallback with no `isolation:`), before writing ANY temp/body/commit-message file, create your
-  OWN uniquely-namespaced subdirectory first — e.g. `mkdir -p
-  <scratchpad>/agent-<your-worktree-id>` (skip the extra `agent-` prefix if your worktree's own
-  directory name already starts with it) — and put every transient file for this dispatch under
-  it, never at the scratchpad's top level. This is the SAME-ROUND SIBLING half of a wider hazard
-  `.claude/rules/airuleset-internals.md` already documents from #325 (the scratchpad is ALSO
-  shared across DIFFERENT rounds and days, not just siblings in this one) — that rule's own
-  remedy (scope every filename with the issue number, and verify a scratch file's content
-  immediately before feeding it to `git commit -F`/`gh issue comment -F`) still applies fully
-  inside your own per-worker subdirectory, and is not replaced by having one.
+  conversation id, so every worker it dispatches inherits the identical path verbatim. A
+  conventionally named scratch file (`body.md`, `red-commit-msg.txt`) is a live collision hazard:
+  two siblings writing-then-consuming the same filename can silently clobber each other (presenter
+  #683: one worker's commit shipped under a sibling's message text). **Check your dispatch prompt
+  FIRST (#435): if it states your scratchpad subdirectory (the supervisor creates a per-batch,
+  issue-number-namespaced one before dispatching you), use THAT path verbatim.** Otherwise, before
+  writing ANY temp/body/commit-message file, create your OWN uniquely-namespaced subdirectory —
+  e.g. `mkdir -p <scratchpad>/agent-<your-worktree-id>` — and put every transient file under it.
+  The #325 remedy (scope every filename with the issue number, verify a scratch file's content
+  right before `git commit -F`/`gh issue comment -F`) still applies inside it.
 - **NEVER push to the INTEGRATION flow (`dev`/`main`, or opening/merging a PR), NEVER run
   `airuleset.py push`/`install`, NEVER fire your own run-card, NEVER open or merge the PR
   yourself.** All of that is INTEGRATION, and integration is the
   SUPERVISOR's job, done CONTINUOUSLY under the #8 integration mutex — each returned branch is
   integrated in its own merge→gates→push cycle, one integration cycle at a time, as it becomes
-  ready, never held for the whole round to finish (`skills/autopilot/SKILL.md` Step 4). Doing any
-  of it yourself from inside a worktree would race or duplicate whatever the other workers in the
-  same round are doing. (The ONE push you DO make is the durability BACKUP below — it integrates
-  nothing and triggers no CI.) **NEVER export `AIRULESET_INSTALL_FROM_WORKTREE=1` in your lane
+  ready (`skills/autopilot/SKILL.md` Step 4). Doing any of it yourself from inside a worktree would
+  race the supervisor's integration. (The ONE push you DO make is the durability BACKUP below — it
+  integrates nothing and triggers no CI.) **NEVER export `AIRULESET_INSTALL_FROM_WORKTREE=1` in your lane
   shell, and run any push-shape / install-touching test ONLY under an isolated `HOME=$(mktemp -d)`
   — a worktree install into the login user's REAL home dangles the managed `~/.claude` symlinks
   after worktree cleanup and Claude Code loses agent types (#972).**
@@ -345,8 +334,7 @@ dispatch prompt naming it explicitly. This changes what "done" looks like for yo
   version bump → per-issue TDD (RED→GREEN, each member its own `Closes #<n>` commit) → local
   `/review` + `/requesting-code-review` clean (via CYCLE step 6's dispatch shape below — never the
   built-in review/code-review Skill, #363) → the local test suite green. Do NOT wait for CI —
-  there is no CI to wait for yet; the supervisor's ONE integration wave triggers it after merging
-  every worker's branch.
+  there is no CI to wait for yet; the supervisor's integration of your branch triggers it.
 - **Return your branch name AND worktree path in your evidence block**, not a PR link or merge
   SHA — the supervisor merges directly from your branch REF (a worktree's branch is a normal git
   ref, visible and mergeable from the main checkout via the shared `.git` even without your
@@ -385,11 +373,10 @@ dispatch prompt naming it explicitly. This changes what "done" looks like for yo
   `box-queue refresh`. If `take` keeps refusing because the box is `dirty:*` (a refresh is owed)
   for ~20 min, return with `blocked: box (refresh owed)` — the supervisor refreshes and resumes you
   from your branch.
-- **The serial-fallback (single-worker, no `isolation:`) shape is UNCHANGED** — if your dispatch
-  prompt does not mention a worktree/isolation and your `cwd` is the repo's ordinary main
-  checkout, you are running the old fully self-contained cycle: push, open, merge, deploy, and
-  fire your own run-card yourself, exactly as documented in the rest of this file (CYCLE, below).
-  When in doubt about which mode you're in, check your `cwd` first — it is unambiguous.
+- **Without `isolation:`** (your `cwd` is the repo's ordinary main checkout) you run the fully
+  self-contained cycle: push, open, merge, deploy, and fire your own run-card yourself (CYCLE,
+  below). Two non-isolated workers in one shared checkout collide, so without isolation there is
+  one writer at a time. When in doubt about which mode you're in, check your `cwd` first.
 
 ## READ FIRST (durable context — never skip)
 
@@ -444,8 +431,8 @@ block's `obsolete_handed_off:` line, and let the maintainer close it.
 **The supervisor holds the cross-session integration mutex, not you.** The supervisor acquires the
 repo's #8 lock via `airuleset.py autopilot-lock acquire --repo <path>` ONLY around each
 merge→gates→push INTEGRATION cycle — it serializes INTEGRATION across SEPARATE `/autopilot` sessions
-on the same repo (one integration at a time per repo), never dispatch (#456 narrowed it from the old
-round-scope dispatch lock) — and releases it the moment that cycle's push has landed. You never call
+on the same repo (one integration at a time per repo), never dispatch — and releases it the moment
+that cycle's push has landed. You never call
 `autopilot-lock` yourself — just do your work; the lock is the supervisor's concern.
 
 1. `git fetch origin`; confirm you are on `dev` with a clean tree (worktree mode: your worktree's
@@ -503,17 +490,17 @@ round-scope dispatch lock) — and releases it the moment that cycle's push has 
    up the batch. A dropped member simply gets no merge card (you only card members whose PR merges).
 4. **Search the codebase before assuming anything is missing** — never re-implement what
    already exists. NO placeholder or stub implementations.
-**Worktree-mode STOP POINT: steps 5–10 below describe the SERIAL-FALLBACK flow (push, PR, merge,
-deploy, your own run-card).** In `isolation: "worktree"` mode (the default — see WORKTREE
-AWARENESS above), you STOP after step 4 once every member is committed on your OWN worktree
+**Worktree-mode STOP POINT: steps 5–10 below describe the no-isolation flow (push, PR, merge,
+deploy, your own run-card).** In `isolation: "worktree"` mode (WORKTREE AWARENESS above), you
+STOP after step 4 once every member is committed on your OWN worktree
 branch and local `/review` + `/requesting-code-review` + the local test suite are clean — via ONE
 self-contained fresh-context `general-purpose` review dispatch — dispatched FOREGROUND, never with
 `run_in_background: true`, per CYCLE step 6's wait doctrine (#738) — NEVER the built-in review/
 code-review Skill (#363, CYCLE step 6 below) — do NOT push, open a PR, merge, wait for CI, deploy,
 or fire a run-card yourself. Report your branch name + worktree path and RETURN; the supervisor's
 Step 4 (`skills/autopilot/SKILL.md`) does steps 5–10 below for your branch as it returns — one
-integration cycle at a time under the #8 integration mutex, never held for the whole round to
-finish. Continue with steps 5–10 yourself ONLY in the documented serial fallback (no `isolation:`).
+integration cycle at a time under the #8 integration mutex. Continue with steps 5–10 yourself
+ONLY without `isolation:`.
 The ONE push you DO make in worktree mode is the durability BACKUP to `refs/autopilot-wip/<branch>`
 after each commit (WORKTREE AWARENESS above — #503); the "do NOT push" here bans the INTEGRATION
 push / PR / merge / deploy, never that backup.
@@ -553,7 +540,7 @@ push / PR / merge / deploy, never that backup.
    is the shape that has reliably worked (#353, #354, #358, #359, #361, #362); the built-in review
    skill has not.**
    **WAIT ON THE REVIEW DISPATCH SAFELY — dispatch it FOREGROUND (#738/#569).** You are yourself a
-   SUBAGENT (worktree isolation is the default), so if you dispatch the review async and END YOUR TURN
+   SUBAGENT, so if you dispatch the review async and END YOUR TURN
    while it is still outstanding you TERMINATE — the completion notification then fires to your PARENT,
    not to you (the SAME bg-CI-poll termination class already warned at CYCLE step 5's CI wait). So
    dispatch the review FOREGROUND: do NOT pass `run_in_background: true` — a foreground `Agent`

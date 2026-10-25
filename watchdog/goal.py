@@ -181,6 +181,7 @@ imports `watchdog.goal`, `watchdog/__init__.py` has already finished
 executing top to bottom.
 """
 
+import copy
 import hashlib
 import json
 import os
@@ -4549,9 +4550,8 @@ def _account_limit_notify_owner(send_fn, pid, run, sid, cwd, dry_run,
     decision log line for the caller to journal."""
     from notify import stream_redirect
     send_fn("⛔ **%s** — účet je zablokovaný (mesačný spend limit alebo vypnutý "
-            "prístup k predplatnému) — dispatch nových workerov je pozastavený a "
-            "toto NEMÁ automatický reset, treba tvoj zásah. Skontroluj prosím účet."
-            % watchdog.project_label(cwd),
+            "prístup k predplatnému), session nemôže pracovať, kým sa blok nezruší. "
+            "Nemá automatický reset, treba tvoj zásah." % watchdog.project_label(cwd),
             owner=stream_redirect(watchdog.pane_owner(pid, run)) or None,
             dedup_key="acctblock:%s:%d" % (sid, int(first_seen)),
             dry_run=dry_run)
@@ -4561,16 +4561,15 @@ def _account_limit_notify_owner(send_fn, pid, run, sid, cwd, dry_run,
 
 def goal_account_limit_check(now, run, rec, sid, cwd, pid, tpath, loc,
                              send_fn, dry_run, captured=""):
-    """#502 -- the account-block OWNER PING for one armed pane, run by
-    `goal_lane_sweep` for every armed candidate. Moved out intact (#1137) from
-    the removed lane-occupancy branch, where it rode the refill decision:
-    `_account_limit_decision` reads the supervisor's own transcript error, keeps
-    the bounded episode in `rec['alim']` (persisted by the caller), and on the
-    FIRST detection of a no-reset block (monthly spend / org disable, the shapes
-    job 6 does not ping) `_account_limit_notify_owner` pings the owner once per
-    episode. Returns decision log lines; never types into the pane."""
+    """#502 -- the account-block OWNER PING for one armed pane (run by
+    `goal_lane_sweep`): `_account_limit_decision` reads the supervisor's own
+    transcript error and keeps the bounded episode in `rec['alim']`; the FIRST
+    detection of a no-reset block (monthly spend / org disable, which job 6 does
+    not ping) pings the owner once per episode. Never types into the pane. A dry
+    run decides on a copy (run_once saves state on a dry run too)."""
     _back_off, alim_log, alim_notify = _account_limit_decision(
-        rec, now, watchdog.transcript_last_error(tpath), loc,
+        copy.deepcopy(rec) if dry_run else rec, now,
+        watchdog.transcript_last_error(tpath), loc,
         watchdog._pane_live_task_count(captured or ""))
     logs = [alim_log] if alim_log else []
     if alim_notify and send_fn is not None and not dry_run:

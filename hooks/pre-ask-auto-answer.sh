@@ -21,7 +21,7 @@ fi
 # Catches: "subagent or sequential", "Subagent-Driven ... Inline Execution",
 # "which execution approach", "Two execution options", "Which approach?"
 if echo "$TOOL_INPUT" | grep -qiE "subagent.?driven|subagent.*(or|vs).*(sequential|inline)|agent.?driven.*(or|vs)|which.*execution.*approach|two.*execution.*option|execution.*option.*subagent|inline.*execution.*subagent|subagent.*inline.*execution"; then
-    echo "BLOCKED: Always use subagent-driven execution. Do not ask. See ask-before-assuming.md pre-answered questions table." >&2
+    echo "BLOCKED: Inline vs subagent execution is a technical choice: decide it yourself and proceed. Do not ask. See ask-before-assuming.md pre-answered questions table." >&2
     exit 2
 fi
 

@@ -16,9 +16,9 @@ user-invocable: false
   member, batched or not; bundling small issues never licenses skipping structure on a member that
   is actually production-classified
 
-**The user runs agentic development. Most GitHub issues are small, well-scoped, and solvable without user input. Bundle them. Iterate. Push once. ONE PR per batch — not one PR per issue.**
+**The user runs agentic development. Most GitHub issues are small, well-scoped, and solvable without user input. Related ones go together on one branch, one PR and one CI cycle when their focus allows — fewer CI cycles, no prompts between them.**
 
-#### The model — batch by default
+#### The model — bundle related issues
 
 When `/issue-planner` runs:
 
@@ -111,7 +111,7 @@ After all selected issues are committed locally:
 - Selecting one issue → finishing → pushing → opening PR → telling user "ready for next issue?" — **WRONG.** Multi-select up front, batch them.
 - Pushing after each issue's commit — **WRONG.** Each push burns a CI cycle; bundle commits, push once.
 - Asking "should I bundle?" — **WRONG.** The gate decides. Apply it silently.
-- Splitting a 3-issue batch across 3 PRs because "review is easier" — **WRONG** unless one issue fails the bundling gate. Trivial parallel issues = one PR.
+- Splitting trivial related issues across PRs only because "review is easier" — needless CI cycles; keep them together when their focus allows.
 - Pausing between bundled issues to "let the user verify the first one" — **WRONG.** That's three CI cycles + three review rounds for work that fits in one.
 - Stopping the batch when CI fails on issue #2's commit — **WRONG.** Investigate, fix, continue. CI failure inside a batch is the same as CI failure at the end — debug the root cause and keep going.
 
@@ -164,6 +164,6 @@ The intent is banned: turning one feature into a queue of PRs that block on user
 
 #### The principle
 
-The user picked agentic development to AVOID being interrupted for trivial process gates. They explicitly want fewer PRs, fewer review cycles, fewer "ready to proceed?" pings. **One feature = one PR. Many small issues = one bundled PR. Splitting is the exception, never the default.** When in doubt, combine and proceed.
+The user picked agentic development to AVOID being interrupted for trivial process gates. They explicitly want fewer PRs, fewer review cycles, fewer "ready to proceed?" pings. **One feature = one PR. Related small issues share one bundled PR when their focus allows.** Never stop to ask.
 
 Applies to all rewordings and semantic equivalents of the patterns above.

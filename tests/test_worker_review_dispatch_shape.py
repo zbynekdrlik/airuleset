@@ -173,7 +173,7 @@ class TestAutopilotSkillDoesNotImplyLiteralSkillReruns(unittest.TestCase):
         self.text = SKILL_MD.read_text(encoding="utf-8")
 
     def test_worktree_fleet_mode_note_points_at_363(self):
-        marker = "Worktree/fleet mode"
+        marker = "Worktree mode — the worker's cycle"
         self.assertIn(marker, self.text)
         idx = self.text.index(marker)
         window = _norm(self.text[idx:idx + 900])

@@ -317,11 +317,11 @@ def _wedged_machine_nudge(state, pid, head_txt, txt, now):
         return None
     kind = rec.get("kind")
     # #1022 review-2 MINOR-3: re-validate the recorded kind is a GATED machine
-    # nudge on the READ side too (defense-in-depth). The write gate is the sole
-    # producer, but a corrupt/legacy state entry — or a future writer — must
-    # never let the wedge CLEAR a RECOVERY draft (resume/compact); those are
-    # always-on revivals the wedge must leave alone. Self-enforcing invariant.
-    if kind not in watchdog.MACHINE_NUDGE_KINDS:
+    # nudge on the READ side too (defense-in-depth): a corrupt/legacy entry must
+    # never let the wedge CLEAR a RECOVERY draft (resume/compact). #1137: the
+    # two lane kinds retired since still read as ours, so a draft stranded at
+    # upgrade is cleared, never taken for the owner's.
+    if kind not in watchdog.MACHINE_NUDGE_KINDS | {"lane-reconcile", "lane-occupancy"}:
         return None
     return kind
 

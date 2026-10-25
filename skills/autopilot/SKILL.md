@@ -679,16 +679,14 @@ merge→gates→push at a time per repo across all sessions).
    `subagent_type: autopilot-worker`, **`run_in_background: true`**, and `isolation: "worktree"`
    when you want it in its own checkout — this keeps your main session FREE + thin while the worker
    runs, it stays VISIBLE in the agent strip, and (per CC's 2026-W26 change) its prompts still reach
-   you. prompt = `Work issues #A #B #C in
-   <repo> as ONE bundled PR (Closes all). You are running in an isolated git worktree — see
-   agents/autopilot-worker.md's worktree-awareness section: never touch the shared tree, never
-   push/install, never fire your own run-card — return your branch name + worktree path instead.`
-   (or `Work issue #<N> in <repo>; isolated worktree — work ONLY in your worktree dir, never the
-   shared main checkout.` for a solo batch) plus any repo-specific note. **LEAD with the worktree,
-   never a bare `Repo <main path>`** — a dispatch prompt that names the main checkout path as
-   "context" is exactly what made a worktree worker `cd` into it and edit the shared tree (#496,
-   worker #433 step 12); `block-foreign-airuleset-write.sh` rule B now hard-blocks that write, but
-   the prompt must not invite it in the first place. ONE PR per
+   you. prompt = `Work issues #A #B #C in <repo> as ONE bundled PR (Closes all).` (or `Work issue
+   #<N> in <repo>.`) plus any repo-specific note; when you chose isolation, add `You are running in
+   an isolated git worktree — see agents/autopilot-worker.md's worktree-awareness section: never
+   touch the shared tree, never push/install, never fire your own run-card — return your branch
+   name + worktree path instead.` and **LEAD with the worktree, never a bare `Repo <main path>`**
+   (naming the main checkout as "context" made a worktree worker edit the shared tree, #496;
+   `block-foreign-airuleset-write.sh` rule B now hard-blocks that write). Two non-isolated workers
+   in one shared checkout collide, so without isolation there is one writer at a time. ONE PR per
    INTEGRATION CYCLE (not per worker), ONE CI cycle per integration — see the repo-flow policy
    above for exactly which branch each worker's worktree branch integrates into.
    - **Compute AND CREATE this batch's own scratch subdirectory BEFORE dispatching, then STATE it
@@ -699,11 +697,7 @@ merge→gates→push at a time per repo across all sessions).
      since no two live batches share an issue), then append `Your scratchpad
      subdirectory for this dispatch (already created): <that path> — use it for every
      temp/body/commit-message file; never the scratchpad's top level.` to the prompt text
-     verbatim. This reduces the sibling-collision hazard from N independent prose-followers (every
-     worker computing its own path) down to ONE (the supervisor, once per dispatch, with a safe
-     worker-side fallback below) — it is still a prose-followed step, not a mechanically
-     enforced one (no hook exists here, per the repo's FREEZE on new hooks/watchdog jobs) —
-     `agents/autopilot-worker.md`'s WORKTREE AWARENESS section still carries the worker-side
+     verbatim. `agents/autopilot-worker.md`'s WORKTREE AWARENESS section carries the worker-side
      fallback (compute its own `agent-<worktree-id>` path) for a dispatch that doesn't state one.
    - **Include the Step 1b validator verdict in the dispatch prompt when you ran it** (`Validator:
      STILL_VALID — <one-line note>` per member) — it saves the worker re-deriving what you already
@@ -781,7 +775,7 @@ merge→gates→push at a time per repo across all sessions).
    from this PR (leaves its issue open) and finishes the rest — the loop re-dispatches the dropped one
    solo later.
 
-   > **Worktree/fleet mode — the worker's cycle stops at its OWN branch; the supervisor's Step 4
+   > **Worktree mode — the worker's cycle stops at its OWN branch; the supervisor's Step 4
    > integrates.** In `isolation: "worktree"` mode a worker does version bump → per-issue TDD
    > (RED→GREEN, each member committed with its own `Closes #<n>`) → local `/review` +
    > `/requesting-code-review` + the local test suite, ALL on its OWN worktree branch — via ONE
@@ -795,11 +789,9 @@ merge→gates→push at a time per repo across all sessions).
    > after the supervisor integrates the worker's branch under the integration mutex (Step 4 below
    > does the merge → gates → push → deploy for each returned branch). (The worker DOES make ONE
    > push: a durability BACKUP of its branch to `refs/autopilot-wip/<branch>` after each commit,
-   > #503 — CI-neutral, integrates nothing, deleted by Step 4 after the branch merges.) In the
-   > documented serial
-   > fallback (no `isolation:`), the
-   > worker's full self-contained cycle above — push → PR → merge → deploy → its own run-card —
-   > is UNCHANGED, exactly as it always was.
+   > #503 — CI-neutral, integrates nothing, deleted by Step 4 after the branch merges.) Without
+   > `isolation:` the worker runs its full self-contained cycle above — push → PR → merge →
+   > deploy → its own run-card.
 
    > **Prefer durable-state resumption over `SendMessage` for a worker that has already ended.**
    > `SendMessage` (the subagent-continuation tool, loadable via `ToolSearch` on current builds, no
@@ -816,15 +808,15 @@ merge→gates→push at a time per repo across all sessions).
    > double-post its card. A worker ending mid-issue (turn boundary, error, your answer to its
    > question) is recovered by ONE fresh dispatch with the resume context in the prompt — silently,
    > never by narrating the tooling, never by restarting from scratch. This includes a worker
-   > KILLED by a server-side rate limit mid-round (#332) — no different from any other API-error
+   > KILLED by a server-side rate limit mid-flight (#332) — no different from any other API-error
    > death: the same "presumed dead, dispatch fresh, resume from durable state" rule applies.
 
-   > **Worktree/fleet mode: a dead worker's branch is NOT self-discovering — name it explicitly
+   > **Worktree mode: a dead worker's branch is NOT self-discovering — name it explicitly
    > (#332).** A fresh replacement worker gets its OWN new `isolation: "worktree"` checkout and has
    > no way to know a previous attempt ever existed unless you tell it — the resume text above
    > ("the existing `dev` branch") only describes the serial/shared-tree case. Before re-dispatching,
    > find the SPECIFIC dead worker's branch — `git branch --list 'worktree-agent-*'` alone is NOT
-   > enough: a live repo routinely carries dozens of stray branches from past rounds with no issue
+   > enough: a live repo routinely carries dozens of stray branches from past lanes with no issue
    > number in the name, so do not guess from that bare list alone — naming the WRONG branch
    > re-dispatches on top of a different, possibly still-live worker's work. Two reliable ways to
    > find the RIGHT one: (1) when no custom worktree `name` was passed, the branch is
@@ -848,7 +840,7 @@ merge→gates→push at a time per repo across all sessions).
    > have left nothing to recover. If no commits exist yet (the worker died before
    > its first commit — the common shape for a rate-limit kill during Step 0/1b, before any code
    > was written), there is nothing to resume: dispatch fresh in a NEW worktree exactly as
-   > documented above, no special handling needed. Either way the round is NOT blocked waiting on
+   > documented above, no special handling needed. Either way integration is NOT blocked waiting on
    > the dead worker indefinitely — once its death is confirmed (a fatal-API-error task
    > notification, or a bounded liveness check per `verify-launched-work-liveness.md` rather than
    > an unbounded silent wait), re-dispatch that ONE issue's fresh worker and let the
@@ -910,8 +902,8 @@ merge→gates→push at a time per repo across all sessions).
    is the union across the workers integrated in it (a worker still running is integrated in a
    LATER cycle — never held for the others).
 
-   > **Serial fallback (no `isolation:`): unchanged, per-batch, exactly as before.** The worker
-   > already pushed, opened, and merged its OWN PR — verify it directly:
+   > **No isolation:** the worker already pushed, opened, and merged its OWN PR — verify it
+   > directly:
    > - `gh pr view <PR> --json state,mergedAt,mergeCommit,closingIssuesReferences` — confirm EVERY
    >   surviving member is in `closingIssuesReferences`
    > - `gh run list -b main -L 1 --json conclusion`
@@ -923,9 +915,8 @@ merge→gates→push at a time per repo across all sessions).
    > itself in this mode, directly at merge (`notify --run-card`), NOT by the supervisor; just
    > confirm the worker carded each merged member.
 
-   > **Fleet/worktree mode: INTEGRATION — serial, supervisor-owned, one merge→test→push CYCLE at a
-   > time under the #8 integration mutex, repeated as this batch's branches return (never held for
-   > the others).** This is what replaces the worker's own push→PR→merge→deploy for each returned
+   > **Worktree mode: INTEGRATION — supervisor-owned, one merge→test→push CYCLE at a time under
+   > the #8 integration mutex, repeated as branches return (never held for the others).** This is what replaces the worker's own push→PR→merge→deploy for each returned
    > member. Each integration cycle acquires the mutex, integrates whatever branches are READY at
    > that moment (never waiting for stragglers), and releases it (Step 3.2):
    > 1. **MAIN REVIEW GATE before integration (#991).** For each returned lane (any order), the
@@ -980,31 +971,31 @@ merge→gates→push at a time per repo across all sessions).
    >    local-merge repo → one `push` after this cycle's merges + the one green suite; `dev`→`main`
    >    PR repo → open (or update) ONE PR whose body lists `Closes #<n>` for every member merged in
    >    this cycle, then `pr-merge-policy.md`'s normal gate→merge→deploy flow. A later cycle
-   >    integrates the branches that have since returned, the same way — never held for the fleet.
+   >    integrates the branches that have since returned, the same way.
    > 5. `git worktree remove` each worker's worktree once its branch is safely merged (or leave it
    >    for salvage per `salvage-before-discarding-work.md` if anything looked wrong — never delete
    >    a worktree whose branch you have not yet confirmed merged). Then delete that worker's origin
    >    durability backup ref (#503): `git push origin --delete refs/autopilot-wip/<branch>`
-   >    (best-effort — a missing ref is a harmless no-op; a serial-fallback worker made none). The
+   >    (best-effort — a missing ref is a harmless no-op; a non-isolated worker made none). The
    >    worker pushed this CI-neutral backup after each commit so its finished work survived a lost
    >    worktree; once the branch is merged the backup is redundant remote litter, so remove it in
    >    the SAME integration cycle that merged the branch.
-   > A worker KILLED mid-round (API error / session limit) leaves a worktree + branch this step
+   > A worker KILLED mid-flight (API error / session limit) leaves a worktree + branch this step
    > never reaches at all (its branch was never merged) — that leak is now cleaned SYSTEMICALLY,
    > not by you: `sweep_stale_worktrees()` (#345) runs fleet-wide, non-fatal, on every
    > `install`/`push` (cadence-gated, at most every few hours), reclaiming only a worktree that is
    > unlocked, has ZERO commits ahead of the repo's own base, and whose tree `git worktree remove`
    > itself confirms is clean — never `--force`, never `main`/`dev`. You do not need to hunt for
-   > these by hand; if you want one run immediately (e.g. to reclaim disk before dispatching a big
-   > round), `airuleset.py sweep-worktrees [--dry-run]` bypasses the cadence gate on demand.
-   > Then run the SAME per-member verification bullets as the serial-fallback box above, against
+   > these by hand; if you want one run immediately (e.g. to reclaim disk before dispatching),
+   > `airuleset.py sweep-worktrees [--dry-run]` bypasses the cadence gate on demand.
+   > Then run the SAME per-member verification bullets as the no-isolation box above, against
    > this integration cycle's PR/push instead of a per-worker one, before writing `docs/autopilot-log.md`.
    > **Read back each surviving member's OUTPUT artifact BEFORE firing its card (#450).** When
    > the ticket produced or changed a user-facing output (email content from the DB, a rendered
    > document, live UI values), open the ACTUAL artifact and record CONCRETE observed values —
    > price, currency, order number, heading — never send/delivery/liveness alone (the montalu3
    > 0 € email class: emails "verified" delivered while every price rendered 0 €). This is the
-   > worktree-fleet sibling of CYCLE step 8's own read-back: on the DEFAULT dispatch YOU (the
+   > worktree-mode sibling of CYCLE step 8's own read-back: on an isolated dispatch YOU (the
    > supervisor) compose the cards, not the worker, so the observed values must exist HERE. They
    > feed the integration cycle report's mandatory `✅ Výstup:` line (`completion-report.md` — an explicit
    > `n/a — <prečo>` when a member truly has no user-facing output), and each card fires only
@@ -1036,7 +1027,7 @@ merge→gates→push at a time per repo across all sessions).
    > `pgrep -af "airuleset.py push"`, then wait on the live PID (`while kill -0 $PID; do sleep 30;
    > done`) + the durable read (`origin/main` sha, log tail). A double notification is harmless; a
    > blind second push is not. (3) **Batch cleanup includes `refs/autopilot-wip/*` AND stray
-   > `worktree-agent-*`/`lane-*` branches on origin from prior rounds** (two-branch policy = only
+   > `worktree-agent-*`/`lane-*` branches on origin from earlier lanes** (two-branch policy = only
    > `dev`+`main`): ALWAYS `git merge-base --is-ancestor origin/<b> main` BEFORE any delete — never
    > delete an unmerged branch (`salvage-before-discarding-work.md`). After a FAILED dead-lane
    > resume attempt (#836 shapes), the fresh `isolation: "worktree"` worker's OWN stray worktree +

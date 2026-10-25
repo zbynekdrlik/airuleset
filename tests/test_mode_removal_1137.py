@@ -31,6 +31,7 @@ import goal_registry  # noqa: E402
 import watchdog as wd  # noqa: E402
 from watchdog import goal, stash  # noqa: E402
 
+from _hook_state_cleanup import hermetic_hook_env  # noqa: E402
 from _goal_arm_helpers import (  # noqa: E402
     GOAL_ARMED_CAP,
     DeliverGoalFakeTmux,
@@ -139,7 +140,8 @@ class TestRemovedFiles(unittest.TestCase):
         stub = REPO / "hooks" / "stop-check-lane-fill.sh"
         self.assertTrue(stub.exists())
         r = subprocess.run(["bash", str(stub)], input='{"stop_hook_active": false}',
-                           capture_output=True, text=True, timeout=10)
+                           capture_output=True, text=True, timeout=10,
+                           env=hermetic_hook_env(self))
         self.assertEqual((r.returncode, r.stdout, r.stderr), (0, "", ""))
         self.assertIn("delete in 0.1.557", stub.read_text())
 
@@ -255,7 +257,8 @@ class TestNoForcedDelegation(unittest.TestCase):
         payload = {"tool_name": "AskUserQuestion",
                    "tool_input": {"questions": [{"question": q}]}}
         r = subprocess.run(["bash", str(self.HOOK)], input=json.dumps(payload),
-                           capture_output=True, text=True, timeout=10)
+                           capture_output=True, text=True, timeout=10,
+                           env=hermetic_hook_env(self))
         self.assertEqual(r.returncode, 2, r.stderr)
         self.assertNotRegex(r.stderr, r"(?i)always use subagent")
         self.assertIn("yourself", r.stderr)
@@ -282,9 +285,12 @@ class TestLiveDocsNameNoRemovedGates(unittest.TestCase):
                 (".claude/rules/internals-cli.md", "stay valid"),
                 ("gates/ticketrefs.py", "lane-overlap"),
                 ("gates/ticketrefs.py", "block-dispatch-over-wdrain"),
-                ("cli_lane_liveness.py", "lane-overlap"),
                 ("watchdog/release_gap.py", "goal_lane_occupancy_nudge")):
             self.assertNotIn(gone, _read(rel), (rel, gone))
+        # the docstring only: the moved functions' log prefixes stay
+        # byte-identical (the #1107 verbatim-move lock).
+        import cli_lane_liveness
+        self.assertNotIn("lane-overlap", cli_lane_liveness.__doc__)
 
 
 class TestAccountBlockPingKept(unittest.TestCase):

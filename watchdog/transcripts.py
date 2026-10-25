@@ -1139,7 +1139,7 @@ WorkerLane = namedtuple("WorkerLane", ["agent_id", "state", "age_s",
 # state ∈ {"live", "stale", "wedged", "unreadable", "finished"};
 # count == #(state=="live"). `finished` (#587) is a FRESH lane whose worker has
 # produced its final reply and returned — excluded from `count` AND from
-# `lane_has_live_evidence` (a free lane), like `stale`.
+# `live_lane_labels` (a free lane), like `stale`.
 
 
 def _warn_stderr(msg):
@@ -1328,11 +1328,9 @@ def count_live_workers(projects_dir, cwd, session_id, now, freshness_s,
             continue
         if finished:
             # a `finished` lane is FRESH (its mtime is inside the window) but not
-            # live — excluded from the count AND (via `lane_has_live_evidence`)
-            # from the evidence-based live predicate, so the compact / lane-fill /
-            # one-glance consumers all read it as a FREE lane immediately (#587),
-            # instead of a 15-min mtime ghost. Still full evidence (agent_type
-            # enriched) so the decision journal can name it.
+            # live — excluded from the count, so consumers read it as a FREE lane
+            # immediately (#587), instead of a 15-min mtime ghost. Still full
+            # evidence (agent_type enriched) so the decision journal can name it.
             evidence.append(WorkerLane(agent_id, "finished", age, atype, ""))
             continue
         count += 1
@@ -1343,44 +1341,10 @@ def count_live_workers(projects_dir, cwd, session_id, now, freshness_s,
 _LANE_NOT_LIVE_STATES = frozenset(("stale", "finished"))
 
 
-def lane_has_live_evidence(evidence):
-    """#571 — the #565 EVIDENCE-based liveness predicate as a SHARED helper:
-    True iff ANY lane in a ``count_live_workers`` evidence list is a genuinely
-    live lane (``live`` / ``wedged`` / ``unreadable`` — NOT ``stale`` and NOT
-    ``finished``), the direction a consumer whose DANGEROUS bias is UNDER-
-    counting live lanes must read — never the wedged-EXCLUDING headline
-    ``count``.
-
-    Two consumers have that inverted danger and BOTH read this SINGLE predicate
-    (`internals-watchdog.md`, #565 shared-primitive bias — no inline copy to
-    drift): compact's ``_session_has_live_bg_tasks`` (a live/wedged lane must
-    veto a compact that would orphan it) and the lane-occupancy
-    ``working-no-tasks`` defer (#571) — UNDER-counting a live lane there
-    suppresses the recovery/fill nudge (the gk 16-issues / 2-lanes regression),
-    so a fresh WEDGED lane (recoverable work the supervisor still owns) reads as
-    "there IS a live lane".
-
-    #587: a ``finished`` lane (a worker that produced its final reply and
-    returned) is DEAD for BOTH consumers — a FREE lane compact may compact past
-    and the fill gate may fill — so it is excluded here exactly like ``stale``.
-    Finish-detection is conservative (only a clear text-ending final turn), so a
-    genuinely running/wedged lane is never misread as finished; the danger
-    direction (under-counting a RUNNING lane) is the SAME for both consumers and
-    is not made worse by this exclusion.
-
-    Fail-safe: an empty / falsy evidence list (or ``None``) → False (no live
-    lane); a malformed item with no ``state`` is treated as non-live. Never
-    raises."""
-    return any(getattr(lane, "state", "stale") not in _LANE_NOT_LIVE_STATES
-               for lane in (evidence or []))
-
-
 def live_lane_labels(evidence):
     """The compact ``agent_id(state[/agent_type])`` labels of every LIVE lane in a
-    ``count_live_workers`` evidence list — the SAME live/not-live partition
-    ``lane_has_live_evidence`` uses (``_LANE_NOT_LIVE_STATES`` exclusion, #565/#587
-    single source of truth), so the compact decision-log detail can never disagree
-    with the veto that produced it. For the ``SKIP live-tasks`` decision log
+    ``count_live_workers`` evidence list (``_LANE_NOT_LIVE_STATES`` exclusion,
+    #565/#587). For the ``SKIP live-tasks`` decision log
     (#605): when condition (b) vetoes, NAME the exact lane(s) so it is never
     blind-diagnosed again (the #605 incident was diagnosed twice from a bare
     ``SKIP live-tasks sid=... cwd=...``). Never raises; a malformed lane is
@@ -1654,10 +1618,8 @@ def transcript_worker_finished(path):
 # structured `toolUseResult` dict, never an echo-spoofable content string (a
 # command that merely PRINTS "Command running in background with ID: X" would
 # false-register otherwise — seen in the corpus). Consumed ONLY by compact's
-# veto (`_session_has_live_bg_tasks`), never folded into `count_live_workers`/
-# `lane_has_live_evidence` — a bg-bash job is NOT a worker lane, so the lane-
-# occupancy (#571) / gk-fill consumers whose danger is UNDER-counting a live
-# lane must not see it (they'd suppress their fill nudge).
+# veto (`_session_has_live_bg_tasks`), never folded into `count_live_workers`
+# — a bg-bash job is NOT a worker lane.
 # DELIBERATELY NO time-based staleness fallback (#604 evaluate-and-decline): a
 # launched job that vanishes with NEITHER a completion NOR a kill is ~0 in the
 # corpus (1/1459 — a one-shot whose START scrolled out long before session end),

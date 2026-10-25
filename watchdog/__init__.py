@@ -643,7 +643,6 @@ from watchdog.transcripts import (  # noqa: E402
     transcript_last_error_ts as transcript_last_error_ts,        # #1075 fix-forward
     _submit_confirmed as _submit_confirmed,
     count_live_workers as count_live_workers,   # #486 G2 -> consumed by G3
-    lane_has_live_evidence as lane_has_live_evidence,   # #571 -> lane working-no-tasks
     live_lane_labels as live_lane_labels,               # #605 -> compact SKIP live-tasks log detail
     transcript_current_context as transcript_current_context,
     transcript_last_marker as transcript_last_marker,

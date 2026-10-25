@@ -4,18 +4,16 @@ Split out of gates/designdispatch.py (#1165) so the prompt-parsing concern has
 its own module; `gates.designdispatch.issue_numbers` re-exports it unchanged.
 STDLIB ONLY.
 
-The fleet's real prompts on this controller write the ticket WITHOUT `#`
-("Work airuleset issue 1061 …") because the lane-overlap dispatch hook refuses
-`#N` mentions outside its receipt, so a `#N`-only extractor was VACUOUS — every
-real dispatch parsed to [] and the gate fail-opened (the #1028
+The fleet's real prompts often write the ticket WITHOUT `#` ("Work airuleset
+issue 1061 …"), so a `#N`-only extractor was VACUOUS — every real dispatch
+parsed to [] and the gate fail-opened (the #1028
 vacuous-classifier class; #1061 supervisor review-3). So parse `#N` AND bare
 `issue N` / `issues N, M` / `issue #N` / `issue-N` / `issue: N` /
 `issues #A #B`. Require the `issue`/`#` PREFIX so a version string (0.1.326),
 a date (2026-09-17), a commit hash, or an "items 1, 2, 3" run is NEVER
-mistaken for a ticket. Scoped to ONE lead line (below), mirroring the sibling
-block-dispatch-over-wdrain gate, so a folded / related "issue N" on a LATER
-body line ("5b. folded from issue 1046") never triggers a false precondition
-check on a ticket the worker is not working.
+mistaken for a ticket. Scoped to ONE lead line (below), so a folded / related
+"issue N" on a LATER body line ("5b. folded from issue 1046") never triggers a
+false precondition check on a ticket the worker is not working.
 
 #1165: the number is 1-6 digits (it was 2-6, so a young repo's `issue 4` /
 `#4` parsed to NO ticket and a correct dispatch was refused "names no
@@ -34,12 +32,10 @@ only when no line carries a stronger one, so no 1-digit `#N` moves the lead.
 `PRs #A, #B` / `pull #N` / `pull request #N` reference is NEVER a ticket: it is
 dropped before the lead line is chosen, so a PR line can neither take the lead
 away from the real `issue N` line (the design gate skipped the PR and never
-design-checked the ticket -- fail-open) nor demand a lane-overlap receipt for
-a PR (false block). The `Work issue N` template line is the lead ahead of an
+design-checked the ticket -- fail-open). The `Work issue N` template line is the lead ahead of an
 earlier context line (`follow-up of #1100`), and a path (`/issues-41-43`) is
-never an issue run. Consumers: gates/designdispatch.py and
-hooks/block-dispatch-over-wdrain.sh (`issue_numbers`, the lead line) and
-cli_lane_liveness.py (`branch_ticket_number` for a lane branch name,
+never an issue run. Consumers: gates/designdispatch.py (`issue_numbers`, the
+lead line) and cli_lane_liveness.py (`branch_ticket_number` for a lane branch name,
 `text_ticket_numbers` for its commit subjects).
 """
 import re

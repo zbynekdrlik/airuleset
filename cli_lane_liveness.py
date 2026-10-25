@@ -4,9 +4,7 @@
 idle-unmerged`` from evidence (worker transcript / process cwd / hand-off state /
 merged-into-target); ``gather_live_lanes`` is the live subset. Consumed by the
 watchdog finished-worktree prune rung (``watchdog/lane_reconcile``) and the
-#1193 live-lane gate every worktree reclaimer asks. (#1137 removed its other
-consumers: the ``lane-overlap`` receipt and the sequential dispatch gate.)
-Pure, dependency-injected (a ``run`` callable for git), stdlib-only apart from
+#1193 live-lane gate every worktree reclaimer asks. Pure, dependency-injected (a ``run`` callable for git), stdlib-only apart from
 the stdlib leaf gates.ticketrefs.
 """
 import json

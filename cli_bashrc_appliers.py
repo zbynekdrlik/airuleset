@@ -73,12 +73,12 @@ from cli_claude_scripts import (
     render_claude_history_script,
     render_claude_history_popup_script,
 )
-# #649: the #613-r2 prefix+w window-menu helper is REMOVED (prefix+w now binds
-# to the native `choose-tree -ZwG`, cli_tmux_provisioning). This constant names
-# the previously-deployed file the cleanup below removes; the cluster test
-# independently hard-codes the same literal filename (a cross-check that fails if
-# the cleanup ever targets a different name than the one that was deployed).
-_LEGACY_WINDOW_MENU_SCRIPT_NAME = "airuleset-tmux-window-menu.sh"
+# Retired files an older install put in ~/.claude, removed below: the #649
+# window-menu helper (prefix+w binds native `choose-tree -ZwG`) and the #1137
+# scope's BASH_ENV tool-OOM file + log (bash ignores a missing BASH_ENV file).
+# The tests hard-code the same literal names (a cross-check).
+_RETIRED_CLAUDE_FILES = ("airuleset-tmux-window-menu.sh", "airuleset-tool-oom.sh",
+                         "airuleset-session-scope.log")
 
 # Canonical dup of the two ultracode marker sentinels -- byte-identical to
 # airuleset.ULTRACODE_MARK_* (which stay resident for tests). Needed at
@@ -196,10 +196,9 @@ def apply_ultracode_launcher(bashrc_path: Path = None, script_path: Path = None,
     if not ppath.exists():
         raise RuntimeError(f"claude-history popup script missing right after write: {ppath}")
 
-    # #649: the #613-r2 prefix+w window-menu helper is REMOVED (prefix+w now
-    # binds to the native `choose-tree -ZwG`). CLEAN UP a previously-deployed
-    # helper co-located with the popup script (in production `~/.claude`), so an
-    # upgraded box does not keep the dead file. `missing_ok=True` makes this a
+    # CLEAN UP the retired files (`_RETIRED_CLAUDE_FILES`: the #649 window-menu
+    # helper, the #1137 scope files) co-located with the popup script (in
+    # production `~/.claude`), so an upgraded box does not keep dead files. `missing_ok=True` makes this a
     # true no-op on a fresh box or a repeated push; unlink is best-effort (a
     # stray permission error must never break the launcher install). Unlike the
     # #613-r2 helper (whose deploy had to precede the `w` bind, since that bind
@@ -207,12 +206,13 @@ def apply_ultracode_launcher(bashrc_path: Path = None, script_path: Path = None,
     # script -- so this cleanup is ordering-independent (a running box keeps its
     # existing `w` binding until apply_tmux_history_limit's live-apply rebinds it
     # to choose-tree, and the conf file is rewritten regardless).
-    legacy_menu = ppath.parent / _LEGACY_WINDOW_MENU_SCRIPT_NAME
-    try:
-        legacy_menu.unlink(missing_ok=True)
-    except OSError as e:
-        print(f"  #649 cleanup: could not remove dead window-menu helper "
-              f"{legacy_menu}: {e}", file=sys.stderr)
+    for name in _RETIRED_CLAUDE_FILES:
+        retired = ppath.parent / name
+        try:
+            retired.unlink(missing_ok=True)
+        except OSError as e:
+            print(f"  cleanup: could not remove retired {retired}: {e}",
+                  file=sys.stderr)
 
     existing = bpath.read_text() if bpath.exists() else ""
     if ULTRACODE_MARK_START in existing and ULTRACODE_MARK_END in existing:

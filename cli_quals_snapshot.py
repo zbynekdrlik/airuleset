@@ -3,10 +3,10 @@
 #1067 slice 1d: ONE JSON object carrying every quals fact the watchdog reads,
 from the caller's ONE `_partition_workable` pass, so the detached refresher
 (`watchdog/ops_wait_refresh.py`) runs ONE derivation instead of separate
-`--count` / `--count-dispatchable` / `--ops-wait` runs. Split out of
-`cli_quals_cmd.py` (at its size ratchet) as a TRUE leaf: `cli_quals_cmd`
-imports it lazily from its `--snapshot-json` branch and PASSES IN its two
-shared emitters, so nothing here imports back from the CLI module.
+`--count` / `--ops-wait` runs. Split out of `cli_quals_cmd.py` (at its size
+ratchet) as a TRUE leaf: `cli_quals_cmd` imports it lazily from its
+`--snapshot-json` branch and PASSES IN its shared ops-wait emitter, so nothing
+here imports back from the CLI module.
 Stdlib-only at import time, so the watchdog's `parse_members` delegator stays
 cheap.
 """
@@ -77,24 +77,20 @@ def _bounce_numbers(rows):
 
 
 def emit_snapshot_json(rows, ops_wait, root, quals, own_stream, emit_ops_wait,
-                       dispatchable_fields, owed=()):
+                       owed=()):
     """`--snapshot-json` (#1067 slice 1d): ONE JSON object carrying every quals
     fact the watchdog reads, all from the caller's ONE `_partition_workable`
     pass (#367): `open_count` (the `--count` number: I plus the owed C rows
     `owed`, #1141 ruling 2; `i_members` the I numbers and `i_titles` their
-    titles — the #1178 queue-arrival rider's own workable set),
-    `dispatchable_count`/`dispatchable_reason` (the caller's
-    `dispatchable_fields`, the SAME derivation `--count-dispatchable` prints)
-    and `ops_wait_members` (the caller's `emit_ops_wait` listing — the SAME
+    titles — the #1178 queue-arrival rider's own workable set) and
+    `ops_wait_members` (the caller's `emit_ops_wait` listing — the SAME
     `--ops-wait` text — captured and parsed, so the two cannot drift).
 
-    The two emitters are PASSED IN by `cli_quals_cmd`, so this module imports
-    nothing back from it (a true leaf). Each part degrades on its OWN (review
-    F3/F4): an ops-wait part that raises or does not parse emits
-    `ops_wait_members: null`, a dispatchable part that raises emits
-    `dispatchable_count: null` + a reason, and `open_count` still lands — a
-    tagger bug never costs the backlog count. Each degradation is one stderr
-    line (the refresher unit's journal)."""
+    The emitter is PASSED IN by `cli_quals_cmd`, so this module imports
+    nothing back from it (a true leaf). An ops-wait part that raises or does
+    not parse emits `ops_wait_members: null` and `open_count` still lands — a
+    tagger bug never costs the backlog count (review F3/F4); the degradation
+    is one stderr line (the refresher unit's journal)."""
     import contextlib
     import io
     buf = io.StringIO()
@@ -109,16 +105,8 @@ def emit_snapshot_json(rows, ops_wait, root, quals, own_stream, emit_ops_wait,
     except Exception as e:  # noqa: BLE001 — isolate the part, never the count
         print("quals --snapshot-json: the ops-wait part failed (%s) — "
               "ops_wait_members null" % type(e).__name__, file=sys.stderr)
-    try:
-        count, reason = dispatchable_fields(rows, root)
-    except Exception as e:  # noqa: BLE001 — isolate the part, never the count
-        print("quals --snapshot-json: the dispatchable part failed (%s)"
-              % type(e).__name__, file=sys.stderr)
-        count, reason = None, "snapshot part failed"
     print(json.dumps({"open_count": len(rows) + len(owed or ()),
                       "i_members": sorted(int(n) for n in rows),
                       "i_titles": _titles(rows),   # #1178 the arrival nudge names them
                       "i_bounce": _bounce_numbers(rows),   # #1178 F3
-                      "dispatchable_count": count,
-                      "dispatchable_reason": reason,
                       "ops_wait_members": members}))

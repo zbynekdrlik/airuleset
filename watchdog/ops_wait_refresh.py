@@ -15,8 +15,8 @@ refresher child when the snapshot is stale AND no child is alive. The spawn
 is single-flight through the pidfile, the transient unit name and an
 in-process guard across the readers of one sweep. The child runs
 `airuleset.py <cmd> --snapshot-json` (its own `CHILD_TIMEOUT_S` timeout) and
-gets `{open_count, i_members, dispatchable_count, dispatchable_reason,
-ops_wait_members}` from ONE `_partition_workable` pass (#367). It then
+gets `{open_count, i_members, i_titles, i_bounce, ops_wait_members}` from ONE
+`_partition_workable` pass (#367). It then
 atomically writes ONE versioned snapshot (tmp + `os.replace`).
 
 The child is launched as a transient `systemd-run --user` unit so it runs in its
@@ -78,12 +78,11 @@ CHILD_TIMEOUT_S = 180
 # own CHILD_TIMEOUT_S so a wedged/reused pid can never block refresh forever.
 CHILD_MAX_AGE_S = CHILD_TIMEOUT_S + 120
 # the snapshot schema. A success entry without it (a slice-1c members-only
-# cache) is due at once so the backlog/dispatchable readers are not starved.
+# cache) is due at once so the backlog readers are not starved.
 SNAPSHOT_VERSION = 2
 # every field a success writes and a failure carries forward (never partially)
 _SNAPSHOT_FIELDS = ("v", "members", "members_ts", "open_count", "i_members",
-                    "i_titles", "i_bounce", "dispatchable_count",
-                    "dispatchable_reason")
+                    "i_titles", "i_bounce")
 # in-process single-flight across the readers of ONE sweep: {cache path: ts}.
 # A just-launched child has not written its pidfile yet, so without this the
 # 2nd and 3rd reader of the same sweep would each spawn again.
@@ -151,8 +150,8 @@ def parse_snapshot(stdout):
     the prior good snapshot). The other parts degrade PER FIELD so a failure in
     one never costs the backlog count (#1067 1d review F3/F4):
     `ops_wait_members` may be null (that part failed → the ops-wait reader reads
-    undetermined), `dispatchable_count` may be None only WITH a reason (#1021),
-    and a malformed `i_members` / `i_titles` (#1178) is dropped to None."""
+    undetermined), and a malformed `i_members` / `i_titles` (#1178) is dropped
+    to None."""
     try:
         snap = json.loads(stdout or "")
     except ValueError:
@@ -160,13 +159,10 @@ def parse_snapshot(stdout):
     if not isinstance(snap, dict):
         return None
     members = snap.get("ops_wait_members")
-    dc, dr = snap.get("dispatchable_count"), snap.get("dispatchable_reason")
     if not (_is_int(snap.get("open_count")) and snap["open_count"] >= 0
             and (members is None or (isinstance(members, list) and all(
                 isinstance(m, dict) and _is_int(m.get("number"))
-                for m in members)))
-            and (dr is None or isinstance(dr, str))
-            and (_is_int(dc) or (dc is None and dr))):
+                for m in members)))):
         return None
     i_members = snap.get("i_members")
     if not (isinstance(i_members, list) and all(map(_is_int, i_members))):
@@ -219,7 +215,7 @@ def _fail_ttl(entry):
     """The re-spawn window after a failed attempt, GEOMETRIC in the consecutive
     failure count (`fail_streak`): 60 s, 120 s, 240 s … capped at
     FAIL_BACKOFF_CAP_S. The slice-1 backoff lived only in the ops-wait outer
-    cache; since 1d the backlog/dispatchable readers (60 s outer fail-TTLs) also
+    cache; since 1d the backlog readers (60 s outer fail-TTLs) also
     reach `read_snapshot`, so the backoff must live HERE or a derivation that
     keeps timing out re-runs every minute (#1067 1d review F1/F2)."""
     streak = entry.get("fail_streak")
@@ -267,7 +263,7 @@ def _serve(entry, timeout_sentinel, now):
 
 def _good_snapshot(entry, now):
     """The entry when it is a v2 snapshot whose last SUCCESSFUL derivation is
-    within MAX_SERVE_AGE_S, else None — the backlog/dispatchable readers serve
+    within MAX_SERVE_AGE_S, else None — the backlog readers serve
     nothing from a legacy, never-succeeded or too-stale entry."""
     if not isinstance(entry, dict) or entry.get("v") != SNAPSHOT_VERSION:
         return None
@@ -548,9 +544,7 @@ def run_refresh_child(target, cmd_name, cache, pid_file, argv0, run_fn=None,
                 "open_count": snap["open_count"],
                 "i_members": snap["i_members"],
                 "i_titles": snap.get("i_titles"),
-                "i_bounce": snap.get("i_bounce"),
-                "dispatchable_count": snap["dispatchable_count"],
-                "dispatchable_reason": snap["dispatchable_reason"]})
+                "i_bounce": snap.get("i_bounce")})
         else:                              # "timeout" | "error" | "rate_hold"
             entry[result["kind"]] = True
             if result.get("detail"):   # #1178: why it failed, for `problem()`

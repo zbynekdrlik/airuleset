@@ -965,7 +965,7 @@ def cmd_slice_quals(args):
         # #1067 slice 1d: ALL watchdog quals facts from THIS one partition.
         import cli_quals_snapshot
         cli_quals_snapshot.emit_snapshot_json(
-            unhandled, ops_wait, root, quals, user, _emit_ops_wait, _dispatchable_fields,
+            unhandled, ops_wait, root, quals, user, _emit_ops_wait,
             owed=_b["C"])
         return
     if want_ops_wait:
@@ -1548,7 +1548,7 @@ def cmd_core_quals(args):
         # (own_stream=None: a full-authority box owns no stream).
         import cli_quals_snapshot
         cli_quals_snapshot.emit_snapshot_json(
-            workable, ops_wait, root, quals, None, _emit_ops_wait, _dispatchable_fields,
+            workable, ops_wait, root, quals, None, _emit_ops_wait,
             owed=_b["C"])
         return
     if want_ops_wait:
