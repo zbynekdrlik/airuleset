@@ -116,8 +116,8 @@ def session_chain_for(user, default_chain):
 # + the checkout). #563's chain accepted the first EXISTING dir with NO git
 # check, so on montalu1 (no odoo-erp subdir) it picked the non-repo parent
 # ~/devel/odoo -- a claude launched there wrote under the wrong project key (no
-# history/memory), the footer rendered nothing, and lane-fill saw no dispatchable
-# tickets (the owner's complaint, #1088).
+# history/memory) and the footer rendered nothing (the owner's complaint,
+# #1088).
 #
 # #1088: the chain is now REPO-AWARE -- a candidate is accepted ONLY if it is a
 # git WORK TREE (`<dir>/.git` present, work tree or gitfile). The checkout names

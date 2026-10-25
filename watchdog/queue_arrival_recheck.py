@@ -19,10 +19,10 @@ arrival-triggered, in-session wake on a new gk hand-off.
     (24h/3d/7d for materially-unchanged state) — never a fast arrival trigger.
   * Job 11's stale-handoff alarm fires only after 6h+ untouched, and is a
     Discord ping, never an in-session keystroke.
-  * Job 20's three riders (`goal_lane_occupancy_nudge` lane occupancy,
-    `ops_wait_recheck` ~daily partition audit, `release_gap` ~1h release train)
-    are the ONLY family that keystrokes into an armed `/goal` pane, but NONE
-    reads the gk queue union for an arrival delta.
+  * Job 20's riders (`ops_wait_recheck` ~daily partition audit,
+    `release_gap` ~1h release train) are the ONLY family that keystrokes into
+    an armed `/goal` pane, but NONE reads the gk queue union for an arrival
+    delta.
   * The "arm a standing queue-watcher when you arm a waiter" doctrine is
     prose-only (root cause 3) — nothing mechanical enforces it.
 
@@ -49,6 +49,11 @@ persistent-unprocessed-queue case stays covered by jobs 8/11.
 AUTHORITY (#1178): no gate — every box watches its OWN set (`core-quals` on a
 full box, which already unions every gk hand-off; `slice-quals` on a stream).
 The #733 full-only gate existed because the gk union was a gk-only concern.
+
+#1137 (owner 25.10.2026): an ARMED review pane gets NO arrival nudge any more
+(it was a refill push, silent everywhere since the sequential default). What
+delivers: the INFRA role's arrival path (#1029/#1109) and the ENDED supervisor
+pane (#1178, `deliver_hold` set) — both AWARENESS wakes, never a refill.
 
 DESIGN (#486 reuse, ZERO new delivery/fetch/keystroke primitives): reuses
 `watchdog.send_verified` (transcript-proof submit, with the #594
@@ -401,31 +406,26 @@ def _nudge_text(arrivals, cur_count, titles=None):
 
 # --- ROLE-AWARE (#1029) ----------------------------------------------------
 # The gk box declares THREE windows (cli_fleet, #998/#1074): gk (role=review,
-# parallel, ~/devel/odoo/odoo-erp), gk-infra (role=infra, sequential,
-# ~/devel/odoo/odoo-erp-infra) and gk-quality (role=quality, sequential,
-# ~/devel/odoo/odoo-erp-quality). This infra-arrival rider is gated on
-# role=="infra" (via watchdog/goal.py) — a quality/review window never reaches
-# it. The FLOW review session routes infra-caused
-# STOP:/GATEKEEPER-ACTION (INFRA) as comments on odoo-erp #6883 + infra tickets,
-# but nothing woke the INFRA session — the rider was blind to it (the #998
-# sequential skip + hardcoded review union). This rider is now ROLE-AWARE: the
-# review path is byte-identical; the infra path fetches the INFRA queue, uses an
-# infra nudge text, and bypasses the sequential skip (an arrival nudge is
-# AWARENESS, not a refill — the exact thing the owner-present infra session was
-# blind to). ONE keystroke primitive, ONE floor, ZERO new job/kind.
+# ~/devel/odoo/odoo-erp), gk-infra (role=infra, ~/devel/odoo/odoo-erp-infra)
+# and gk-quality (role=quality, ~/devel/odoo/odoo-erp-quality). The infra
+# arrival path is gated on role=="infra" (via watchdog/goal.py) — a
+# quality/review window never reaches it. The FLOW review session routes
+# infra-caused STOP:/GATEKEEPER-ACTION (INFRA) as comments on odoo-erp #6883 +
+# infra tickets; the infra path fetches the INFRA queue and uses an infra
+# nudge text (an arrival nudge is AWARENESS — the exact thing the owner-present
+# infra session was blind to). ONE keystroke primitive, ONE floor.
 
 def _role_queue_config(role, queue_fetch, infra_queue_fetch, classify_builder):
-    """Role-dependent `(fetch, cache_key, skip_sequential, classify_builder)`
-    for the rider. review = the box's own workable set (#1178: queue_fetch,
+    """Role-dependent `(fetch, cache_key, classify_builder)` for the rider.
+    review = the box's own workable set (#1178: queue_fetch,
     `queue_arrival_own_cache` — a NEW namespace so a pre-#1178 cached gk-union
-    list is never diffed against the own set — sequential-skip ON, the #993
-    dep classify); infra =
-    the INFRA queue (infra_queue_fetch, `queue_arrival_infra_cache`,
-    sequential-skip OFF — awareness not refill, and NO dep-wait classify). The
-    infra-unwired short-circuit stays in the caller (it must `return`)."""
+    list is never diffed against the own set — and the #993 dep classify);
+    infra = the INFRA queue (infra_queue_fetch, `queue_arrival_infra_cache`,
+    NO dep-wait classify). The infra-unwired short-circuit stays in the caller
+    (it must `return`)."""
     if role == "infra":
-        return infra_queue_fetch, "queue_arrival_infra_cache", False, None
-    return queue_fetch, "queue_arrival_own_cache", True, classify_builder
+        return infra_queue_fetch, "queue_arrival_infra_cache", None
+    return queue_fetch, "queue_arrival_own_cache", classify_builder
 
 
 def _resolve_role(cwd, resolve_role_fn):
@@ -724,13 +724,12 @@ def goal_queue_arrival_recheck(now, run, qrecs, sid, cwd, pid, tpath, loc,
     so a pane those already typed is deferred to next sweep, and a nudge WE send
     claims the sid)."""
     logs = []
-    # #1029 — resolve the pane ROLE. review (default / unwired) = today's union,
-    # byte-identical; infra = the INFRA queue (open infra tickets ∪ tagged
-    # STOP:/GATEKEEPER-ACTION (INFRA) comments), an infra nudge text, the #998
-    # sequential skip BYPASSED, and no dep-wait classify (an arrival nudge is
-    # AWARENESS, not a refill/dispatch).
+    # #1029 — resolve the pane ROLE. review (default / unwired) = the box's own
+    # workable set; infra = the INFRA queue (open infra tickets ∪ tagged
+    # STOP:/GATEKEEPER-ACTION (INFRA) comments), an infra nudge text and no
+    # dep-wait classify (an arrival nudge is AWARENESS, not a refill/dispatch).
     role = _resolve_role(cwd, resolve_role_fn)
-    _fetch, _cache_key, _skip_sequential, _classify_builder = _role_queue_config(
+    _fetch, _cache_key, _classify_builder = _role_queue_config(
         role, queue_fetch, infra_queue_fetch, classify_builder)
     if role == "infra" and _fetch is None:
         logs.append("queue-arrival %s -> skip:infra-unwired (role=infra but "
@@ -741,26 +740,14 @@ def goal_queue_arrival_recheck(now, run, qrecs, sid, cwd, pid, tpath, loc,
         logs.append("queue-arrival %s -> skip:%s" % (loc, _why))
         return logs
 
-    # #998 — a SEQUENTIAL-mode REVIEW pane never gets a refill/queue-arrival
-    # nudge: ONE unit at a time, no refill (subagents/consults are NOT gated).
-    # The INFRA role is EXEMPT (#1029): the gk-infra window is ALWAYS sequential
-    # and its arrival nudge is an AWARENESS wake, not a refill. Cheap, before any
-    # fetch. Fail-safe: a resolver error is treated as SEQUENTIAL (#1137: the
-    # default of every box; parallel needs an explicit declaration an erroring
-    # resolver cannot prove), and LOGGED (never a silent swallow). An ENDED
-    # supervisor pane (#1178, `deliver_hold` set: proven-empty backlog, idle, no
-    # lane) is EXEMPT too — its nudge is awareness ("next"), never a refill.
-    if _skip_sequential and deliver_hold is None:
-        try:
-            import cli_concurrency
-            _seq_mode = cli_concurrency.resolve_mode(cwd)
-        except Exception as e:  # noqa: BLE001
-            _seq_mode = "sequential"
-            logs.append("queue-arrival %s -> concurrency-resolve-error (%r) — "
-                        "treating as sequential (the #1137 default)" % (loc, e))
-        if _seq_mode == "sequential":
-            logs.append("queue-arrival %s -> skip:sequential-mode" % loc)
-            return logs
+    # #1137 — an ARMED review pane never gets an arrival nudge (that was a
+    # refill push; Claude Code decides its own dispatch). Only the INFRA role
+    # (#1029) and an ENDED supervisor pane (#1178, `deliver_hold` set:
+    # proven-empty backlog, idle, no lane) get one — both AWARENESS wakes.
+    # Cheap, before any fetch.
+    if role != "infra" and deliver_hold is None:
+        logs.append("queue-arrival %s -> skip:armed-review (no refill nudge)" % loc)
+        return logs
     # #1023 timeout-race — SWEEP-RELATIVE fetch budget: a cache-miss fetch (esp.
     # the #1029 infra fetch, up to _INFRA_COMMENT_BUDGET_S=60s of gh calls) that
     # STARTS with too little sweep budget left runs the sweep into the unit's

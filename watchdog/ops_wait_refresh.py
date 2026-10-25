@@ -9,8 +9,8 @@ TTL-cached derivation sat on the SYNCHRONOUS sweep path at all.
 
 This leaf moves the derivation OFF the sweep path, and slice 1d makes it ONE
 derivation. The sweep READS a per-repo atomic snapshot file through the
-non-blocking readers `backlog_count` / `dispatchable` / `fetch_or_refresh`
-(ops-wait members). All three go through `read_snapshot`, which spawns ONE
+non-blocking readers `backlog_count` / `fetch_or_refresh` (ops-wait members)
+/ `workable_records`. They go through `read_snapshot`, which spawns ONE
 refresher child when the snapshot is stale AND no child is alive. The spawn
 is single-flight through the pidfile, the transient unit name and an
 in-process guard across the readers of one sweep. The child runs
@@ -320,23 +320,6 @@ def backlog_count(cwd, cmd_name, argv0=None, now=None, spawn_fn=None,
         read_snapshot(cwd, cmd_name, argv0, now, spawn_fn, alive_fn), now)
     count = good.get("open_count") if good else None
     return count if _is_int(count) else None
-
-
-def dispatchable(cwd, cmd_name, argv0=None, now=None, spawn_fn=None,
-                 alive_fn=None):
-    """NON-BLOCKING dispatchable reader, in the lane nudge's fetch shape:
-    `[{"count": N, "reason": r}]`; `[{"count": None, "reason": r}]` for an
-    unmeasurable count WITH a reason (#1021); None when there is no good
-    snapshot or an unmeasurable count carries no reason."""
-    now = time.time() if now is None else now
-    good = _good_snapshot(
-        read_snapshot(cwd, cmd_name, argv0, now, spawn_fn, alive_fn), now)
-    if not good:
-        return None
-    count, reason = good.get("dispatchable_count"), good.get("dispatchable_reason")
-    if not _is_int(count):
-        return [{"count": None, "reason": reason}] if reason else None
-    return [{"count": count, "reason": reason}]
 
 
 # #1178 — why the LAST `workable_records` read for a cwd came back None, kept

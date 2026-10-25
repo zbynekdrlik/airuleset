@@ -1,27 +1,22 @@
 """cli_work_class — the ONE home for autopilot orchestration classification (#993).
 
-Owner directives 2026-09-12 (#992/#993): autopilot acceleration must respect that
-NOT everything is safe to run in parallel. Round 2b (owner directive 4 + MAIN
-REVIEW kolo 2) SIMPLIFIED this to TWO orthogonal concerns:
+Owner directives 2026-09-12 (#992/#993), simplified in round 2b (owner directive
+4 + MAIN REVIEW kolo 2) to TWO orthogonal concerns:
 
   1. DEPENDENCY — a unit that must follow the EVALUATION of a previous one
      (`Depends-on: #N`) is not dispatchable until that predecessor is CLOSED
-     (closing with evidence IS the evaluation in this harness). This is the
-     mechanism that bounds parallelism.
+     (closing with evidence IS the evaluation in this harness).
   2. WORK CLASS (`work_class`) — used ONLY to ROUTE a ticket to a role slice
-     (`core-quals`/`slice-quals --role review|infra`). Infra serialisation is
-     achieved by ROUTING the `infra` label into the infra role/target (which
-     runs in the round-3 sequential mode), NEVER by class-gating a live infra
-     lane inside a parallel target — that class-based mechanism was removed in
-     round 2b (it was a second, redundant path for the same goal).
+     (`core-quals`/`slice-quals --role review|infra`): the `infra` label is
+     ROUTED into the infra role window, never class-gated as a live lane (that
+     mechanism was removed in round 2b).
 
 This module is PURE + stdlib-only + dependency-injected for IO (a `state_fn` for
 gh issue state; the callers own the gh/git calls). It is the single source of
 truth for `work_class`, `Depends-on:` parsing/resolution, the dep-wait predicate,
-and the dispatchable predicate — reused by the picker (`cli_quals_cmd`), both
-watchdog nudges (`watchdog/goal.py`, `watchdog/queue_arrival_recheck.py`), and
-the lane-overlap receipt (`cli_lane_overlap.py`). No shim, no duplicate
-derivation (the #367 one-derivation invariant).
+and the dispatchable predicate — reused by the picker (`cli_quals_cmd`) and the
+queue-arrival nudge (`watchdog/queue_arrival_recheck.py`). No shim, no
+duplicate derivation (the #367 one-derivation invariant).
 """
 import json
 import re

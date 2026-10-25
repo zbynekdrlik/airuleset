@@ -60,10 +60,9 @@ _log = logging.getLogger(__name__)
 # #1084 L2 KEEP: the live-worker freshness window (15 min). Its former compact
 # consumers (`_live_bg_tasks_detail` / `_session_has_live_bg_tasks`, the #848
 # live-tasks delivery veto) were deleted with the machinery, but a DIFFERENT live
-# subsystem imports it as its single source: `gates/lanefill.py` (the lane-fill
-# Stop gate, #1078/#1089) reads it for `watchdog.count_live_workers(...)`. Kept
-# here so that gate keeps working — deleting it silently fails-open that gate
-# fleet-wide (the #1084-L2-review BLOCKER this restores).
+# subsystem imports it as its single source: `cli_lane_live_gate` (the #1193
+# live-lane gate every worktree reclaimer asks) reads it for
+# `watchdog.count_live_workers(...)`. Deleting it would break that gate.
 COMPACT_LIVE_WORKER_FRESHNESS_S = 15 * 60
 
 

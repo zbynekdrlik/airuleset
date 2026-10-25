@@ -548,12 +548,11 @@ def persisted_goal_mark(sid, state_path=None):
     what `_parse_goal_marker`/`_newest_marker` produce
     (`{"state": "set"|"cleared", ...}` or None).
 
-    THE SINGLE SOURCE both the dark-watch WRITER and a reader consume (#486): the
-    lane-fill Stop gate (`gates.lanefill._goal_armed`) reads THIS instead of
-    re-scanning a 650-730 MB transcript on every Stop -- the #1078 fail-open where
-    the arm marker had scrolled past the 32 MB seed cap (`unknown-past-cap`). The
-    watchdog's own consumer of the same record is `one_glance.resolve_goal_armed`;
-    both key on `mark.state`, so a helper here keeps the two from drifting.
+    THE SINGLE SOURCE the dark-watch WRITER persists and readers consume (#486)
+    instead of re-scanning a 650-730 MB transcript (the #1078 fail-open where the
+    arm marker had scrolled past the 32 MB seed cap). The watchdog's own consumer
+    of the same record is `one_glance.resolve_goal_armed`; both key on
+    `mark.state`.
 
     `state_path` defaults to `watchdog.STATE_PATH`; a test passes a fixture path.
     Fail-safe: an empty `sid`, a missing/corrupt state file, an absent `goal_mark`

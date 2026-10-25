@@ -91,21 +91,17 @@ REMOTE_HOSTS = [
         "repo_path": "~/devel/airuleset",
         "identity": "~/.secrets/gatekeeper_access_ed25519",
         # #998 — DECLARED managed tmux windows (owner directive 2026-09-12).
-        # ONE declaration drives everything: role+mode resolution
-        # (cli_concurrency.resolve_concurrency), idempotent reboot-safe window
+        # ONE declaration drives everything: role resolution
+        # (cli_concurrency.resolve_role), idempotent reboot-safe window
         # creation (cli_tmux_provisioning._managed_windows_create_body, wired
         # into the session-created hook + provisioning-time live-apply, #998
         # item 1(a)), resurrect relaunch (watchdog/resurrect), the infra clone
-        # as a managed checkout
-        # (session-start-fetch.sh). The infra window runs SEQUENTIAL (one unit
-        # at a time — a sensitive box-maintenance / architecture-rework lane);
-        # the review window ALSO runs SEQUENTIAL since #1137 (owner
-        # ROZHODNUTÉ 2026-09-30: the sequential/natural mode is the default of
-        # EVERY target; no window declares parallel). Every OTHER target
-        # declares NO windows and resolves the default (sequential).
+        # as a managed checkout (session-start-fetch.sh). #1137 (owner
+        # 25.10.2026) removed the window `mode`: Claude Code decides its own
+        # dispatch, the windows keep their names and roles.
         "windows": [
             {"name": "gk", "cwd": "~/devel/odoo/odoo-erp",
-             "role": "review", "mode": "sequential"},
+             "role": "review"},
             # #1108: gk-infra/gk-quality declare their managed checkout so the
             # install PROVISIONS it (clone when absent — `ensure_declared_
             # checkouts`), never touching an existing tree. The FLOW primary
@@ -113,10 +109,9 @@ REMOTE_HOSTS = [
             # checkout, left as-is.
             {"name": "gk-infra", "cwd": "~/devel/odoo/odoo-erp-infra",
              "repo": "zbynekdrlik/odoo-erp", "branch": "develop",
-             "role": "infra", "mode": "sequential"},
+             "role": "infra"},
             # #1074 — the THIRD gk window `gk-quality` (owner directive 18.9.,
-            # escalated 21.9.): its own managed odoo-erp checkout, SEQUENTIAL
-            # like gk-infra (one sensitive quality unit at a time). Owns subdev
+            # escalated 21.9.): its own managed odoo-erp checkout. Owns subdev
             # delivery QUALITY end-to-end (review lenses + hand-off gate
             # promotions, root-causing every bounce/release-break into a
             # mechanical guard, fresh-prod-copy + E2E evidence at hand-off, a
@@ -128,7 +123,7 @@ REMOTE_HOSTS = [
             # never a /goal: scheduled work, owner cadence 25.9. (odoo-erp 7924).
             {"name": "gk-quality", "cwd": "~/devel/odoo/odoo-erp-quality",
              "repo": "zbynekdrlik/odoo-erp", "branch": "develop",
-             "role": "quality", "mode": "sequential",
+             "role": "quality",
              "steer": "watch", "tz": "Europe/Bratislava", "triggers": [
                  {"name": "watch", "cron": "17 7,19 * * *",
                   "prompt": "Spusti gk-quality watch: prejdi nové bounce, "
@@ -185,13 +180,11 @@ REMOTE_HOSTS = [
         "host": "100.118.174.27",
         "user": "montalu4",
         "repo_path": "~/devel/airuleset",
-        # owner 2026-09-28 („prepni montalu4 do sekvencneho modu", issue 1169): the
-        # SAME #998/#1031 declared-window mechanism as d1-d4/miva — ONE
-        # autopilot-worker lane at a time, no refill. (Since #1137 every
-        # undeclared box resolves sequential by default too.)
+        # The declared window names the box's tmux window (issue 1169 added it
+        # for the since-removed sequential mode, #1137).
         "windows": [
             {"name": "m4", "cwd": "~/devel/odoo/odoo-erp",
-             "role": None, "mode": "sequential"},
+             "role": None},
         ],
     },
     {
@@ -239,12 +232,11 @@ REMOTE_HOSTS = [
         "user": "miva1",
         "repo_path": "~/devel/airuleset",
         "identity": "~/.secrets/gatekeeper_access_ed25519",
-        # owner 2026-09-21 („prepni david1 až david4 aby nemali multi subagent mod ale
-        # aby išli sekvenčne … to isté aj miva1"): the SAME #998/#1031 declared-window
-        # mechanism as gk-infra/d3 — ONE autopilot-worker lane at a time, no refill.
+        # The declared window names the box's tmux window (added 2026-09-21 for
+        # the since-removed sequential mode, #1137).
         "windows": [
             {"name": "miva", "cwd": "~/devel/odoo/odoo-erp",
-             "role": None, "mode": "sequential"},
+             "role": None},
         ],
     },
     {
@@ -265,12 +257,11 @@ REMOTE_HOSTS = [
         "user": "david2",
         "repo_path": "~/devel/airuleset",
         "identity": "~/.secrets/gatekeeper_access_ed25519",
-        # owner 2026-09-21 („prepni david1 až david4 aby nemali multi subagent mod ale
-        # aby išli sekvenčne … to isté aj miva1"): the SAME #998/#1031 declared-window
-        # mechanism as gk-infra/d3 — ONE autopilot-worker lane at a time, no refill.
+        # The declared window names the box's tmux window (added 2026-09-21 for
+        # the since-removed sequential mode, #1137).
         "windows": [
             {"name": "d2", "cwd": "~/devel/odoo/odoo-erp",
-             "role": None, "mode": "sequential"},
+             "role": None},
         ],
     },
     {
@@ -279,30 +270,11 @@ REMOTE_HOSTS = [
         "user": "david3",
         "repo_path": "~/devel/airuleset",
         "identity": "~/.secrets/gatekeeper_access_ed25519",
-        # #1031 (owner todo 2026-09-14: "prepnut d3 aby nepracoval multi agent
-        # paralelelne ale sequencne") — the d3 window runs SEQUENTIAL (one
-        # autopilot-worker at a time), the SAME #998 declared-window mechanism
-        # as gk-infra. `role` is None: a stream window is neither the gk
-        # `review` nor `infra` kind (validate_windows accepts None). ONE
-        # declaration flips every consumer through the cwd-first resolver
-        # (cli_concurrency.resolve_concurrency): lane cap 1
-        # (watchdog/lane_resources), block-dispatch-over-wdrain.sh's sequential
-        # gate (dispatch_gate_line), the refill/queue nudge skips
-        # (skip:sequential-mode), the status `concurrency:` row, and the
-        # `/autopilot` fork-no-merge × sequential /goal variant
-        # (goal_registry.render_goal_line). Every OTHER box is byte-identical.
-        # A single declared window keeps tmux provisioning byte-identical too
-        # (_managed_windows_create_body returns "" for < 2 windows → bare
-        # `rename-window d3`). NOT a project .claude/lane-resources.json in
-        # odoo-erp: a declared window is SOURCE 1 in the resolver and beats the
-        # project file (source 2), so gk's OWN declared review window keeps its
-        # own mode — the committed odoo-erp file would instead wrongly flip
-        # every OTHER non-declared stream sharing that checkout (montalu*,
-        # david1/2/4, miva*, simap*) to sequential. The per-box fleet
-        # declaration scopes the change to the david3 account only.
+        # The declared window names the box's tmux window (added 2026-09-21 for
+        # the since-removed sequential mode, #1137).
         "windows": [
             {"name": "d3", "cwd": "~/devel/odoo/odoo-erp",
-             "role": None, "mode": "sequential"},
+             "role": None},
         ],
     },
     {
@@ -311,12 +283,11 @@ REMOTE_HOSTS = [
         "user": "david4",
         "repo_path": "~/devel/airuleset",
         "identity": "~/.secrets/gatekeeper_access_ed25519",
-        # owner 2026-09-21 („prepni david1 až david4 aby nemali multi subagent mod ale
-        # aby išli sekvenčne … to isté aj miva1"): the SAME #998/#1031 declared-window
-        # mechanism as gk-infra/d3 — ONE autopilot-worker lane at a time, no refill.
+        # The declared window names the box's tmux window (added 2026-09-21 for
+        # the since-removed sequential mode, #1137).
         "windows": [
             {"name": "d4", "cwd": "~/devel/odoo/odoo-erp",
-             "role": None, "mode": "sequential"},
+             "role": None},
         ],
     },
     {
@@ -498,12 +469,11 @@ REMOTE_HOSTS = [
         "user": "david1",
         "repo_path": "~/devel/airuleset",
         "identity": "~/.secrets/gatekeeper_access_ed25519",
-        # owner 2026-09-21 („prepni david1 až david4 aby nemali multi subagent mod ale
-        # aby išli sekvenčne … to isté aj miva1"): the SAME #998/#1031 declared-window
-        # mechanism as gk-infra/d3 — ONE autopilot-worker lane at a time, no refill.
+        # The declared window names the box's tmux window (added 2026-09-21 for
+        # the since-removed sequential mode, #1137).
         "windows": [
             {"name": "d1", "cwd": "~/devel/odoo/odoo-erp",
-             "role": None, "mode": "sequential"},
+             "role": None},
         ],
     },
     {
@@ -521,11 +491,11 @@ REMOTE_HOSTS = [
         "host": "100.118.174.27",
         "user": "montalu1",
         "repo_path": "~/devel/airuleset",
-        # owner 2026-09-30 („Prepni m1 do seqvencneho modu"): the SAME #998/#1031
-        # declared-window shape as m4 — ONE autopilot-worker lane at a time.
+        # The declared window names the box's tmux window (added 2026-09-30 for
+        # the since-removed sequential mode, #1137).
         "windows": [
             {"name": "m1", "cwd": "~/devel/odoo/odoo-slovnormal",
-             "role": None, "mode": "sequential"},
+             "role": None},
         ],
     },
     {
@@ -705,8 +675,8 @@ def box_paused_reason(user, hostname=None):
 # #1174 — DECLARED machine-nudge PROFILES per box type (owner 28.9.2026). The
 # baseline = each type's LIVE set read on 28.9 (the rollout changes nothing).
 # cli_nudge_profiles resolves a box's profile (an entry's `nudge_profile` wins).
-_NUDGE_CORE = ("goal-guard", "lane-occupancy", "lane-reconcile", "partition-audit",
-               "queue-arrival", "release-gap", "task-hygiene", "u-freshness")
+_NUDGE_CORE = ("goal-guard", "partition-audit", "queue-arrival", "release-gap",
+               "task-hygiene", "u-freshness")
 NUDGE_PROFILES = {
     "gk": frozenset(_NUDGE_CORE + ("infra-priority", "watch-trigger")),
     "stream": frozenset(_NUDGE_CORE + ("bounce", "checkout-lag")),   # + #1176 census
@@ -719,11 +689,10 @@ NUDGE_PROFILES = {
 # #998 — DECLARED managed windows (owner directive 2026-09-12)
 # ---------------------------------------------------------------------------
 
-#: The valid values for a declared window's ``role`` / ``mode`` (``None`` =
-#: unset, resolved to the default). ``resolve_concurrency`` (cli_concurrency)
-#: is the single consumer; kept here next to the data it validates.
+#: The valid values for a declared window's ``role`` (``None`` = no role).
+#: ``resolve_role`` (cli_concurrency) is the single consumer; kept here next to
+#: the data it validates.
 WINDOW_ROLES = ("review", "infra", "quality")  # #1074 — the gk-quality window
-WINDOW_MODES = ("parallel", "sequential")
 
 
 def _window_name_ok(name):
@@ -778,8 +747,8 @@ def managed_windows(remote):
     """The DECLARED managed tmux windows for a REMOTE_HOSTS entry (#998), or
     ``[]`` when the entry declares none — an empty list means "one default
     window, today's behaviour, byte-identical", the state of every target but
-    gk. Each window is ``{"name", "cwd", "role", "mode"}``; ``role``/``mode``
-    may be ``None`` (unset → default). Pure accessor, no logic, kept next to
+    gk. Each window is ``{"name", "cwd", "role"}``; ``role`` may be ``None``
+    (no role). Pure accessor, no logic, kept next to
     the table it reads (the ``is_paused``/``paused_reason`` shape)."""
     return list(remote.get("windows") or [])
 
@@ -788,8 +757,7 @@ def validate_windows(windows):
     """Return a list of human-readable error strings for a ``windows``
     declaration (``[]`` == valid). A shape check only — name/cwd must be
     present + token-safe (the tmux argv-injection guard the #656 owner-VPS
-    block already applies), ``role`` ∈ WINDOW_ROLES or None, ``mode`` ∈
-    WINDOW_MODES or None. Used by the fleet-symmetry test + any provisioning
+    block already applies), ``role`` ∈ WINDOW_ROLES or None. Used by the fleet-symmetry test + any provisioning
     that bakes a window name/cwd into a tmux command."""
     errs = []
     if not isinstance(windows, list):
@@ -812,9 +780,6 @@ def validate_windows(windows):
         role = w.get("role")
         if role is not None and role not in WINDOW_ROLES:
             errs.append("window[%d] role %r not in %s" % (i, role, WINDOW_ROLES))
-        mode = w.get("mode")
-        if mode is not None and mode not in WINDOW_MODES:
-            errs.append("window[%d] mode %r not in %s" % (i, mode, WINDOW_MODES))
         # #1108: OPTIONAL repo/branch — a declared window's managed checkout the
         # install clones when absent (`ensure_declared_checkouts`). Absent ==
         # today (a window with no clone step, byte-identical). When present they
@@ -839,7 +804,7 @@ def box_windows(user):
     """The declared managed windows for the box whose unix account is
     ``user`` (#998) — the FIRST REMOTE_HOSTS entry with ``user == <user>``
     that declares ``windows``, else ``[]``. This is how a box finds its OWN
-    window declaration (role/mode resolution scopes to the box's own entry, so
+    window declaration (role resolution scopes to the box's own entry, so
     a montalu box at ``~/devel/odoo/odoo-erp`` is never mis-classified as the
     gk review window). Pure lookup over the facade table."""
     if not user:

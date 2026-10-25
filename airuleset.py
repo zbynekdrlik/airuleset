@@ -1801,18 +1801,12 @@ def cmd_install(args):
         print(f"  model-gateway install error (non-fatal): {e}", file=sys.stderr)
 
     # --- 3b-quinque-quater. Managed swap (#992/#993): a swapless box gets a /swapfile
-    # (RAM, [2,8] GB; sudo -n, non-fatal). Then #1245: an uncapped claude gets a scope. ---
+    # (RAM, [2,8] GB; sudo -n, non-fatal). ---
     try:
         from cli_disk_guard_root import provision_swap
         print(f"  {provision_swap()}")
     except Exception as e:
         print(f"  swap provisioning error (non-fatal): {e}", file=sys.stderr)
-    try:
-        import cli_session_scope
-        for line in cli_session_scope.adopt_unscoped_sessions():
-            print(f"  {line}")
-    except Exception as e:
-        print(f"  session-scope adoption error (non-fatal): {e}", file=sys.stderr)
 
     # --- 3b-quinque-ter. Managed DNS records (#983): controller-only,
     # idempotent upsert of the proxied CNAME for claudy.newlevel.media and
@@ -2629,12 +2623,14 @@ def cmd_status(args):
     except Exception as e:
         print(f"lane liveness: error ({e})", file=sys.stderr)
 
-    # --- Concurrency mode/role (#998) ---
+    # --- Declared window role (#998; #1137 removed the concurrency mode) ---
     try:
         import cli_concurrency
-        print("\n" + cli_concurrency.concurrency_status_row(os.getcwd()))
+        _role_row = cli_concurrency.role_status_row(os.getcwd())
+        if _role_row:
+            print("\n" + _role_row)
     except Exception as e:
-        print(f"\nconcurrency: error ({e})", file=sys.stderr)
+        print(f"\nrole: error ({e})", file=sys.stderr)
 
     # --- Declared managed windows (#1108) — each declared window's checkout as
     # present/MISSING, so a missing role-window cwd is visible WITHOUT ssh (the
@@ -4239,7 +4235,6 @@ def cmd_tickets_status(args):
                 entry["user_waiting"] = None
                 entry["user_waiting_numbers"] = None   # #1025
                 entry["ops_wait"] = None
-                entry["dispatchable"] = None           # #1078 (gate falls back)
             else:
                 # #1141 slice 3: ONE route (`cli_ticket_route.footer`, the SAME
                 # `bucketize` slice-quals counts with): role pre-filter (#998),
@@ -4323,14 +4318,6 @@ def cmd_tickets_status(args):
                 except Exception as _e:
                     sys.stderr.write("tickets-status: stale W count "
                                      "skipped (%s)\n" % _e)
-                # #1078: persist the DISPATCHABLE set (workable ∧ deps-satisfied)
-                # so the lane-fill Stop gate reads it cheaply (no per-turn quals
-                # subprocess). Fail-safe (None on any dep-read failure → the gate
-                # falls back to a bounded live call). #1078 review F1: feed the
-                # UNHANDLED subset (I) — `slice-quals --list-dispatchable` computes
-                # over I, so passing `workable_rows` (+gk +P) would OVERCOUNT (a
-                # false block naming handed-off tickets on a slice box).
-                entry["dispatchable"] = _dispatchable_for_cache(_b["I"], root)
             # Skipped bucket (2026-07-16): same slice quals, POSITIVE label
             # filter — how many of MY tickets are excluded from autopilot runs.
             # `quals` empty ⟺ SliceUnresolved above (it is otherwise always 1
@@ -4386,7 +4373,6 @@ def cmd_tickets_status(args):
                 entry["user_waiting"] = None
                 entry["user_waiting_numbers"] = None   # #1025
                 entry["ops_wait"] = None
-                entry["dispatchable"] = None           # #1078 (gate falls back)
             else:
                 # #510/#468: ops-wait and user-waiting leave `I N` (`W N`/`U N`),
                 # ONE partition of the SAME fetch `core-quals --count` uses (#367).
@@ -4423,9 +4409,6 @@ def cmd_tickets_status(args):
                 except Exception as _e:
                     sys.stderr.write("tickets-status: stale W count "
                                      "skipped (%s)\n" % _e)
-                # #1078: persist the DISPATCHABLE set for the lane-fill Stop gate
-                # (same as the slice path above; fail-safe None on dep failure).
-                entry["dispatchable"] = _dispatchable_for_cache(workable, root)
             # Skipped bucket (2026-07-16): the POSITIVE label query over the
             # CORE partition — how many tickets are excluded from autopilot.
             # #367 left this scoped to the core partition (unchanged) rather
@@ -7165,72 +7148,6 @@ def _watchdog_backlog_fetch(cwd):
     return _owref.backlog_count(cwd, cmd_name, argv0=os.path.abspath(__file__))
 
 
-def _dispatchable_for_cache(workable, root):
-    """#1078 — the DISPATCHABLE set (workable ∧ deps-satisfied) as
-    `[{"number", "title"}]`, OLDEST first — the SAME set `--list-dispatchable`
-    returns — persisted in the tickets-status cache so the lane-fill Stop gate
-    reads it cheaply (no per-turn subprocess / gh; the #1078 integration-review
-    fix moves the dep-resolution cost to this ≤120s refresh). Reuses the identical
-    `_dep_wait_map_for` + `dispatchable_numbers` machinery `--list-dispatchable`
-    uses. Returns None on any failure / unmeasurable dep read (the gate then does
-    its bounded live fallback). Fail-safe: NEVER raises, so a dep-read failure can
-    never break the footer refresh. `workable` is the `_partition_workable` rows
-    dict `{number: {"title","createdAt",…}}`.
-
-    #1078 review F3: the dep-resolution below (`_dep_wait_map_for` → per-row
-    `Depends-on:` reads) is the expensive part of the quals class, and the
-    lane-fill gate reads `dispatchable` ONLY on `parallel` panes (sequential
-    panes — the default of every box since #1137 — are EXEMPT and never consult
-    it). Skip it on a sequential pane; a mode-resolve failure still computes (a
-    read, never a push) so a declared-parallel pane that CAN consult it is never
-    starved."""
-    try:
-        import cli_concurrency
-        _mode = cli_concurrency.resolve_mode(root)
-    except Exception:  # noqa: BLE001
-        _mode = None  # unknown → compute (a read; never starve a parallel pane)
-    if _mode == "sequential":
-        return None
-    try:
-        import cli_quals_cmd
-        dep_map, slug2, ok = cli_quals_cmd._dep_wait_map_for(workable, root)
-        if not ok:
-            return None
-        disp_set, _reason = dispatchable_numbers(workable, slug2, dep_map)
-
-        def _key(n):
-            row = workable.get(n) or {}
-            return (row.get("createdAt") or "", n)
-
-        return [{"number": int(n),
-                 "title": (workable.get(n) or {}).get("title", "")}
-                for n in sorted(disp_set, key=_key)]
-    except Exception:  # noqa: BLE001 — never break the footer refresh
-        return None
-
-
-def _watchdog_dispatchable_fetch(cwd):
-    """#993 item 3 — the DISPATCHABLE-candidate signal (`workable ∧ deps
-    satisfied`) for the repo at `cwd`, as a ONE-element list
-    `[{"count": N, "reason": r}]` (never `[]`), or None when unmeasurable.
-    `count` None + a reason (`meta read failed`, #1021) flows the reason into
-    the journal (`skip:dispatchable-unknown (<reason>)`) — still fail-safe,
-    never a nudge. The lane nudge reads it through `goal._cached_dispatchable`.
-
-    #1067 slice 1d: a NON-BLOCKING reader of the per-repo quals snapshot
-    (`watchdog.ops_wait_refresh.dispatchable`), which the detached
-    `--snapshot-json` refresher writes from the SAME derivation as
-    `--count-dispatchable` (`cli_quals_cmd._dispatchable_fields`). It is no
-    longer a blocking 19.7 s `--count-dispatchable` subprocess on the sweep
-    path. Same authority-aware command choice as the backlog reader."""
-    import watchdog.ops_wait_refresh as _owref
-    try:
-        cmd_name = _watchdog_quals_cmd(cwd)
-    except Exception:
-        return None
-    return _owref.dispatchable(cwd, cmd_name, argv0=os.path.abspath(__file__))
-
-
 def _watchdog_ops_wait_fetch(cwd):
     """#547/#1067 — the parked W (`ops-wait`) members for THIS box's slice of
     the repo at `cwd`, or None on any failure/refusal. Same authority-aware
@@ -7647,116 +7564,6 @@ def _watchdog_u_fetch(cwd):
     except Exception:
         return None, None
     return user_waiting, ts
-
-
-def _watchdog_reconcile_fetch(cwd):
-    """#844 — the RETURNED worktree lanes for the repo at `cwd`: a list of
-    `(branch, issue_num, title)` for `worktree-agent-*` branches that are (a)
-    ahead of the integration branch AND (b) carry a `LANE-RETURN:` comment on
-    their ticket, or None on ANY error/refusal (the #844 rider fails safe to NO
-    nudge; the doctrine `git worktree list` net covers a crashed lane with no
-    comment). FULL-authority ONLY — only a gk/full box integrates worktree lanes.
-    Wired HERE (like every other network seam) so run_once's unit tests stay
-    network-free (`reconcile_fetch` None disables the rider there)."""
-    import subprocess
-    import time as _time
-    # Bounds (review): NEVER an 800s serial blob inside the 60s sweep. Cap the
-    # branch count AND enforce a total wall-clock budget; a branch not reached is
-    # simply left for the NEXT observed compaction (the rider is a backstop).
-    MAX_BRANCHES = 6
-    BUDGET_S = 40
-    started = _time.monotonic()
-
-    def _git(root, *args, timeout=8):
-        return subprocess.run(["git", "-C", root] + list(args),
-                              capture_output=True, text=True, timeout=timeout)
-    try:
-        root = _repo_root(cwd=cwd) or cwd
-        if resolve_authority(cwd=root) != "full":
-            return None
-        r = _git(root, "remote", "get-url", "origin")
-        slug = _parse_origin_slug(r.stdout.strip()) if r.returncode == 0 else None
-        if not slug:
-            return None
-        # Integration candidates: a returned worktree branch is INTEGRATED once it
-        # is contained in ANY integration branch, NOT just the GitHub default. This
-        # fleet's lanes merge into "develop unless the project CLAUDE.md names
-        # another", and "merged to the integration branch but not yet in
-        # origin/main" is a DOCUMENTED normal state — so comparing against a single
-        # `origin/HEAD` (which may be main) would count every unreleased develop-
-        # merged lane as "ahead" forever. Gather every LOCAL + origin candidate
-        # among {origin/HEAD target, main, develop} that exists; a branch contained
-        # in ANY of them is integrated -> skipped.
-        cands = []
-        r = _git(root, "symbolic-ref", "--short", "refs/remotes/origin/HEAD")
-        if r.returncode == 0 and r.stdout.strip().startswith("origin/"):
-            cands.append(r.stdout.strip())
-        for c in ("main", "develop", "origin/main", "origin/develop"):
-            rc = _git(root, "rev-parse", "--verify", "--quiet", c)
-            if rc.returncode == 0 and c not in cands:
-                cands.append(c)
-        if not cands:
-            return None
-        r = _git(root, "for-each-ref", "--format=%(refname:short)",
-                 "refs/heads/worktree-agent-*", "refs/heads/worktree-issue-*")
-        if r.returncode != 0:
-            return None
-        branches = [b for b in r.stdout.splitlines() if b.strip()][:MAX_BRANCHES]
-        out = []
-        for br in branches:
-            if _time.monotonic() - started > BUDGET_S:
-                break   # budget spent — remaining branches wait for the next compaction
-            # INTEGRATED = an ancestor of ANY integration candidate.
-            integrated = False
-            ahead_of = None
-            for c in cands:
-                anc = _git(root, "merge-base", "--is-ancestor", br, c)
-                if anc.returncode == 0:
-                    integrated = True
-                    break
-                if anc.returncode == 1 and ahead_of is None:
-                    ahead_of = c   # a real "not contained" answer (not a git error)
-            if integrated or ahead_of is None:
-                continue
-            # Issue number: prefer the newest commit SUBJECT's `[#N]`/`#N` tag
-            # (the worker's own tag), fall back to the body — a body citing another
-            # ticket ("mirrors #616") must not mis-attribute.
-            rl = _git(root, "log", "%s..%s" % (ahead_of, br),
-                      "--format=%s", "-n", "1")
-            num = None
-            if rl.returncode == 0:
-                ms = re.search(r"#(\d+)", rl.stdout or "")
-                if ms:
-                    num = int(ms.group(1))
-            if num is None:
-                rb = _git(root, "log", "%s..%s" % (ahead_of, br),
-                          "--format=%s%n%b", "-n", "50")
-                if rb.returncode != 0:
-                    continue
-                mm = re.search(r"#(\d+)", rb.stdout or "")
-                if not mm:
-                    continue
-                num = int(mm.group(1))
-            # A LANE-RETURN comment on the ticket qualifies it.
-            rc2 = subprocess.run(
-                ["gh", "issue", "view", str(num), "-R", slug,
-                 "--json", "title,comments"],
-                capture_output=True, text=True, timeout=15)
-            if rc2.returncode != 0:
-                continue   # transient gh error on ONE ticket: skip it, keep the rest
-            try:
-                data = json.loads(rc2.stdout or "{}")
-            except (ValueError, TypeError):
-                continue
-            title = (data.get("title") or "")[:80]
-            bodies = " ".join(
-                (c.get("body") or "") for c in (data.get("comments") or [])
-                if isinstance(c, dict))
-            if "LANE-RETURN:" in bodies:
-                out.append((br, num, title))
-        return out
-    except Exception:
-        return None
 
 
 def _parse_origin_slug(url):
@@ -8410,11 +8217,6 @@ def cmd_watchdog(args):
                     # dispatch-class factory (Depends-on), so a dep-wait
                     # arrival is HELD, not nudged. FULL-authority only, lazy.
                     queue_classify=_watchdog_queue_classify,
-                    # #993 item 3 — job 20's lane-occupancy nudge reads the
-                    # DISPATCHABLE-candidate count (Depends-on) so a free slot
-                    # with no dispatchable unit (dep-wait) is journaled skip,
-                    # not nudged. Cached per-cwd; full-authority resolves core-quals.
-                    dispatchable_fetch=_watchdog_dispatchable_fetch,
                     # #797 — job 20's U-freshness reconcile rider reads the
                     # footer `user_waiting` count from the SAME machine-local
                     # tickets-status cache the footer renders (a LOCAL file read,
@@ -8423,13 +8225,6 @@ def cmd_watchdog(args):
                     # rider self-heals a stale cache and is per-session floored at
                     # 1x/hour by the shared nudge_gate.
                     u_fetch=_watchdog_u_fetch,
-                    # #844 — job 20's post-compact lane reconcile rider reads the
-                    # returned worktree lanes (branches ahead of integration with
-                    # a LANE-RETURN comment) per repo, but ONLY when a compaction
-                    # is actually OBSERVED in the transcript, so the git/gh work
-                    # fires at most once per observed compaction, never every
-                    # sweep. FULL-authority only; the rider self-gates authority.
-                    reconcile_fetch=_watchdog_reconcile_fetch,
                     # Job 34 (#535) — per-box conformance check runs on EVERY
                     # managed box: config/repo drift is a per-box failure, and
                     # each box holds the airuleset checkout it can measure.
@@ -8597,10 +8392,9 @@ def cmd_goal_arm(args):
               "recorded", file=sys.stderr)
         sys.exit(1)
     authority = (getattr(args, "template", "") or "").strip() or resolve_authority(cwd)
-    # #998 — resolve the pane's (mode, role) from cwd so a sequential window
-    # (gk-infra) / a sequential project (airuleset) arms the SEQUENTIAL variant,
-    # via the SAME renderer the SKILL.md lines are generated from. A
-    # parallel/no-role pane is byte-identical to the prior SKILL.md read.
+    # #998 — resolve the pane's role from cwd so a role window (gk-infra) arms
+    # its role variant, via the SAME renderer the SKILL.md lines are generated
+    # from. A no-role pane reads the SKILL.md line.
     text = _goal_mod.goal_template_for(authority, cwd)
     if not text:
         print("goal-arm --self: could not resolve a /goal template for "
@@ -9601,9 +9395,6 @@ from cli_onboard import (  # noqa: E402
     cmd_onboard_project as cmd_onboard_project,
 )
 
-# --- #993: lane-overlap independence-check CLI leaf ---
-from cli_lane_overlap import cmd_lane_overlap as cmd_lane_overlap  # noqa: E402, F401
-
 # --- #1053: gk state-machine label-ensure CLI leaf ---
 from cli_labels import cmd_labels as cmd_labels  # noqa: E402, F401
 
@@ -9721,8 +9512,7 @@ def _add_dispatch_flags(parser):
         "--list-dispatchable", action="store_true",
         help="Print the dispatchable members as `number<TAB>title` lines, OLDEST "
              "first (the SAME dispatchable_numbers set --count-dispatchable "
-             "counts). The lane-fill Stop gate shells this so ONE quals call "
-             "yields both the count and the ticket names (#1078 item 1)")
+             "counts, #1078 item 1)")
     parser.add_argument(
         "--snapshot-json", action="store_true",
         help="Print ONE JSON object: open_count, i_members, dispatchable_count/"
@@ -9733,8 +9523,7 @@ def _add_dispatch_flags(parser):
         help="Slice the rows by work class (#993 r2b): 'review' = rows whose "
              "class is NOT infra; 'infra' = rows whose class IS infra; omitted "
              "= no filter. This is how the `infra` label ROUTES a ticket into "
-             "the infra role/target (the per-role sequential mode is PENDING "
-             "round 3, #993 — today this is the routing slice only).")
+             "the infra role/target.")
     parser.add_argument("--explain", action="store_true", help=_EXPLAIN_HELP)
     parser.add_argument(
         "--post-release", type=int, nargs="?", const=30, default=None,
@@ -10646,18 +10435,6 @@ def main():
         "--limit", type=int, default=15,
         help="With --top: how many burners to print (default 15)")
 
-    # --- #993: lane-overlap independence check ---
-    p_lo = sub.add_parser(
-        "lane-overlap",
-        help="Independence check: candidate unit's paths/topics vs live lanes "
-             "+ open PRs; writes the dispatch-gate receipt (#992/#993)")
-    p_lo.add_argument("--paths", default=None,
-                      help="Comma-separated touched paths of the candidate unit")
-    p_lo.add_argument("--topics", default=None,
-                      help="Comma-separated topic keywords of the candidate unit")
-    p_lo.add_argument("--issue", action="append", default=None,
-                      help="Issue number(s) the check covers (repeatable)")
-
     # --- #857: context-baseline + skill-usage ---
     p_cb = sub.add_parser(
         "context-baseline",
@@ -11044,18 +10821,14 @@ def cmd_goal_inventory(args):
             print("goal-inventory: SKILL.md not found at %s" % path)
             sys.exit(1)
         d = gr.drift(skill_text)
-        # #998 — lock every (authority, role, mode) variant too, not just the
-        # 3 shipped default lines: renders, under budget, NO turn cap, required
-        # clauses present, sequential/infra clauses correct.
+        # #998 — lock every (authority, role) variant too, not just the 3
+        # shipped no-role lines: renders, under budget, NO turn cap, required
+        # clauses present, bundle + role clauses correct.
         variant_errs = gr.variant_check()
-        # #1035 — lock that the SKILL BODY's Step 3.0 SEQUENTIAL dispatch block
-        # carries the byte-identical registry clause, so an UNARMED session's
-        # body can never disagree with the armed sequential /goal line.
-        seq_errs = gr.skill_sequential_drift(skill_text)
         # #1060 L3b — lock the SKILL BODY's DUAL dispatch clause (SendMessage to
         # the implementer window; ticket-poll fallback), same discipline.
         dual_errs = gr.skill_dual_drift(skill_text)
-        if d or variant_errs or seq_errs or dual_errs:
+        if d or variant_errs or dual_errs:
             if d:
                 print("goal-inventory: DRIFT — SKILL.md /goal lines differ from "
                       "the registry (run: airuleset.py goal-inventory --write):")
@@ -11065,17 +10838,13 @@ def cmd_goal_inventory(args):
                 print("goal-inventory: VARIANT check failed (#998):")
                 for e in variant_errs:
                     print("  %s" % e)
-            if seq_errs:
-                print("goal-inventory: SEQUENTIAL skill-body check failed (#1035):")
-                for e in seq_errs:
-                    print("  %s" % e)
             if dual_errs:
                 print("goal-inventory: DUAL skill-body check failed (#1060 L3b):")
                 for e in dual_errs:
                     print("  %s" % e)
             sys.exit(1)
         print("goal-inventory: SKILL.md matches the registry (%d profiles) + "
-              "%d (authority,mode,role) variants locked"
+              "%d (authority,role) variants locked"
               % (len(gr.PROFILES), len(gr.variant_specs())))
         return
 
@@ -11247,11 +11016,10 @@ def _remove_legacy_nudges_off_marker(home=None):
 
 
 # #1104-review F4 -- MACHINE_NUDGE_KINDS members whose DELIVERY never types into a
-# pane: `card` is a Discord report card (a notification), and `lane-occupancy`'s
-# keystroke delivery was RETIRED (#1089, the lane-fill Stop gate refills instead).
+# pane: `card` is a Discord report card (a notification).
 # Enabling one of these must NOT print a busy-pane "first delivery will wait"
 # warning -- it is misleading (nothing ever types).
-_NON_KEYSTROKE_NUDGE_KINDS = frozenset({"card", "lane-occupancy"})
+_NON_KEYSTROKE_NUDGE_KINDS = frozenset({"card"})
 
 
 def _nudges_keystroke_pane_warnings(run=None):
@@ -11354,7 +11122,7 @@ def cmd_nudges(args, run=None):
         # delivery will wait for a true idle tick rather than typing into a
         # swallowing pane (the montalu1 incident: goal-sweep enabled while the
         # session waited on background agents). Skip the warning entirely for a
-        # pure non-keystroke enable (card / retired lane-occupancy, #1104-review
+        # pure non-keystroke enable (card, #1104-review
         # F4 -- those never type). Best-effort: no pane read must fail the enable.
         if set(kinds) - _NON_KEYSTROKE_NUDGE_KINDS:
             for _w in _nudges_keystroke_pane_warnings(run):
@@ -11494,7 +11262,6 @@ SUBCOMMANDS = {
     "gh-rate": cmd_gh_rate,
     "model-audit": cmd_model_audit,
     "model-tiers": cmd_model_tiers,
-    "lane-overlap": cmd_lane_overlap,
     "context-baseline": cmd_context_baseline,
     "skill-usage": cmd_skill_usage,
     "wdrain-pass": cmd_wdrain_pass,

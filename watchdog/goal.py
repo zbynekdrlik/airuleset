@@ -85,8 +85,7 @@ through a callback in the /autopilot command." Concretely:
              the first 30 minutes of every single invocation -- a
              structurally-always-refuses bug, not a safety net. That
              transcript gate stays exactly where it already earns its keep:
-             the watchdog-INITIATED re-arm origins + the lane-occupancy
-             nudge below. #731 added a pre-keystroke defer -- an ATTACHED
+             the watchdog-INITIATED re-arm origins. #731 added a pre-keystroke defer -- an ATTACHED
              tmux client's OWN input within a SEPARATE 5-min window (not
              the 30-min transcript one), the montalu4 blind spot -- but
              #752 SCOPED it to the SAME watchdog-INITIATED re-arm origins
@@ -198,7 +197,6 @@ from watchdog import queue_arrival_recheck as _queue_arrival  # #733 (gk arrival
 from watchdog import queue_arrival_own as _queue_own  # #1178 (ended supervisor pane)
 from watchdog import bounce_verdict_recheck as _bounce_verdict  # #1066 (bounce)
 from watchdog import u_freshness as _u_freshness             # #797 (U reconcile)
-from watchdog import lane_reconcile as _lane_reconcile       # #844 (post-compact lane reconcile)
 from watchdog import nudge_gate as _nudge_gate               # #797 (cadence gate)
 from watchdog import roster as _roster                       # #804 (armed roster)
 from watchdog import resurrect as _resurrect                 # #804 (mode-5 relaunch)
@@ -618,16 +616,14 @@ def goal_template_for_authority(authority, path=None, logs=None):
     return None
 
 
-def goal_template_for(authority, cwd, role=None, mode=None, path=None,
-                      logs=None):
-    """#998 — the `/goal` line for `authority` in the pane's resolved
-    (mode, role). When `mode`/`role` are None they are resolved from `cwd`
-    via `cli_concurrency.resolve_concurrency` (the SINGLE resolver every
-    consumer reads). The DEFAULT (sequential since #1137, no role) delegates
-    to `goal_template_for_authority` (fresh SKILL.md read, drift-locked ==
-    the renderer's default); a VARIANT (an explicit parallel declaration or a
-    role) is composed via the SAME `goal_registry.render_goal_line` the SKILL.md
-    lines are generated from. None on any failure OR over the cap (never a
+def goal_template_for(authority, cwd, role=None, path=None, logs=None):
+    """#998 — the `/goal` line for `authority` in the pane's resolved role.
+    When `role` is None it is resolved from `cwd` via
+    `cli_concurrency.resolve_role` (the SINGLE resolver every consumer reads).
+    No role delegates to `goal_template_for_authority` (fresh SKILL.md read,
+    drift-locked == the renderer's no-role line); a ROLE variant is composed
+    via the SAME `goal_registry.render_goal_line` the SKILL.md lines are
+    generated from. None on any failure OR over the cap (never a
     wrong-authority / oversize arm), logged LOUD like the sibling."""
     authority = str(authority or "").strip()
     if not authority:
@@ -637,32 +633,30 @@ def goal_template_for(authority, cwd, role=None, mode=None, path=None,
             logs.append("goal-template none: %s is a watch-steered window (#1163)"
                         % cwd)
         return None
-    if mode is None or role is None:
+    if role is None:
         try:
             import cli_concurrency
-            r_mode, r_role, _src = cli_concurrency.resolve_concurrency(cwd)
+            role = cli_concurrency.resolve_role(cwd)
         except Exception as e:  # noqa: BLE001
             if isinstance(logs, list):
-                logs.append("goal-template concurrency-resolve-error (%r) — "
-                            "falling back to default (sequential)" % e)
-            r_mode, r_role = "sequential", None
-        mode = r_mode if mode is None else mode
-        role = r_role if role is None else role
-    if mode == "sequential" and not role:
+                logs.append("goal-template role-resolve-error (%r) — falling "
+                            "back to the no-role line" % e)
+            role = None
+    if not role:
         return goal_template_for_authority(authority, path=path, logs=logs)
     try:
         import goal_registry
-        line = goal_registry.render_goal_line(authority, mode, role)
+        line = goal_registry.render_goal_line(authority, role)
     except Exception as e:  # noqa: BLE001
         if isinstance(logs, list):
-            logs.append("goal-template render_goal_line(%s,%s,%s) failed: %r"
-                        % (authority, mode, role, e))
+            logs.append("goal-template render_goal_line(%s,%s) failed: %r"
+                        % (authority, role, e))
         return None
     if len(line) > GOAL_ARM_CHAR_CAP:
         if isinstance(logs, list):
-            logs.append("goal-template REFUSED oversize authority=%s mode=%s "
-                        "role=%s len=%d cap=%d (never typed)"
-                        % (authority, mode, role, len(line), GOAL_ARM_CHAR_CAP))
+            logs.append("goal-template REFUSED oversize authority=%s role=%s "
+                        "len=%d cap=%d (never typed)"
+                        % (authority, role, len(line), GOAL_ARM_CHAR_CAP))
         return None
     return line
 
@@ -2221,9 +2215,8 @@ def goal_sweep(now, run=None, dry_run=False, projects_dir=None,
     (undeterminable / busy / recent-human / client-active / ...) never counts.
 
     `handled` (optional, a `set()`): the SAME per-sweep set job 14/20's
-    lane-occupancy nudge populate -- a sid already sent a keystroke burst
-    THIS sweep (by /compact or the lane nudge) is skipped, never double-
-    typed into."""
+    riders populate -- a sid already sent a keystroke burst THIS sweep is
+    skipped, never double-typed into."""
     logs = []
     # #1260 -- a RETIRED-origin request leaves the store first, before the owner
     # kill-switch and the #731 cap: never typed, never pinged, never a phantom
@@ -3111,9 +3104,8 @@ def _default_rearm_fn(cwd):
         # `_log_goal_sync` collapses identical repeats, so a persistently
         # over-cap template logs one line, not a per-sweep flood.
         _logs = []
-        # #998 — resolve the pane's (mode, role) from cwd via the SAME renderer
-        # (goal_template_for delegates to the default SKILL.md read for a
-        # parallel/no-role pane, byte-identical to before).
+        # #998 — resolve the pane's role from cwd via the SAME renderer
+        # (goal_template_for delegates to the SKILL.md read for a no-role pane).
         text = goal_template_for(authority, cwd, logs=_logs)
         for _ln in _logs:
             _log_goal_sync(_ln)
@@ -4371,55 +4363,18 @@ def goal_question_repoke_watch(now, run=None, state=None, send_fn=None,
 
 
 # --------------------------------------------------------------------------- #
-# LANE-OCCUPANCY NUDGE (#365, owner directive 2026-08-11) -- the ONE
-# watchdog-INITIATED action the owner explicitly named as surviving this
-# collapse. Migrated here from job 20's old `_goal_lane_occupancy_nudge`;
-# #442 then un-suppressed it in place: the recent-human-activity gate keeps
-# firing (this one is a real watchdog-initiated action, unlike arm delivery
-# above) but through the lane path's OWN short live-conversation window
-# below, and an at-rest draft is DELIVERED via `deliver_with_stash` instead
-# of being a "skip draft" dead end.
+# JOB 20 PER-PANE STATE (#365 lane sweep). #1137 (owner 25.10.2026) removed
+# the lane-occupancy refill branch; the sweep keeps the one-glance verdict,
+# the roster census, the stuck alert and the account-block owner ping.
 # --------------------------------------------------------------------------- #
 
 GOAL_LANE_IDLE_S = 15 * 60
-# #530 -- 1h reference window. Originally the empty-lane nudge's HARD HOURLY CAP;
-# #1089 retired the lane-occupancy keystroke DELIVERY and #1096 deleted the whole
-# delivery-cadence gate (`_lane_cooldown_decision`/`skip:hourly-cap`/`llast`), so
-# this constant now serves ONLY as the idle threshold in
-# `_lane_effective_min_backlog` (a loop idle > 1h over 1-2 workable tickets drops
-# its min-backlog floor to 1). Refill-nudge cadence is bounded by the shared
-# per-kind `_nudge_gate.gate_ok` gate now, not by this cap.
-GOAL_LANE_INTERVAL_S = 60 * 60
-# #937-review C1 -- agent_type values that represent IMPLEMENTATION workers
-# whose finished state means "ticket in integration" (coverage). Non-worker
-# subagents (validator/Explore/an ad-hoc review consult) review/validate, not
-# implement. (#991: the pinned tier-agent types are gone — the lane worker is
-# the single autopilot-worker type; the working model chooses its model.)
-_LANE_WORKER_AGENT_TYPES = frozenset({"autopilot-worker"})
-
-
-def _lane_effective_min_backlog(idle):
-    """#804 mode-4 -- the empty-lane min-backlog floor, idle-aware. `GOAL_LANE_
-    MIN_BACKLOG` (3) is the #530 anti-storm floor for a FRESHLY-idle box; a loop
-    that has STOOD idle > GOAL_LANE_INTERVAL_S (1h) over just 1-2 workable tickets
-    is a stuck loop, not fresh churn (#791 "stojí navždy by design"), so the floor
-    drops to 1. Used in BOTH the empty-lane gate AND the #611 working-no-tasks
-    escalation clamp (a shared derivation so the two can never drift). `idle=None`
-    (a legacy caller / a test) keeps the static floor -- byte-identical pre-#804."""
-    return 1 if (isinstance(idle, (int, float)) and idle > GOAL_LANE_INTERVAL_S) \
-        else GOAL_LANE_MIN_BACKLOG
-# #530 -- EMPTY-LANE MIN-BACKLOG floor: a fully-stalled box (0 dispatched
-# workers) is nudged only with at least this many genuinely-workable open
-# tickets. A lone open umbrella epic / 1-2 held-or-foreign items reads as
-# "workable" for core-quals but is not dispatchable, and nudging it produced the
-# reported gk storm (nudge -> "nič workable" -> nudge ...). #726: this is now the
-# ONLY backlog floor -- the under-saturated surplus floor was retired with the
-# fill nudge (a running batch is never refilled under batch mode). #804 mode-4:
-# this is the FRESHLY-idle floor only -- once a box has stood idle > 1h the floor
-# drops to 1 (`_lane_effective_min_backlog`), so a long-stuck loop over 1-2
-# workable tickets is poked instead of parked forever.
-GOAL_LANE_MIN_BACKLOG = 3
 GOAL_LANE_LIVE_WINDOW_S = 15 * 60
+# #442 -- the goal-guard rider's OWN "live conversation" window: a prompt
+# SUBMITTED within the last ~3 min (the presence marker is stamped only on
+# UserPromptSubmit) = a genuinely live exchange, never interrupted. The shared
+# check's 30-min default is calibrated for the virgin-arm decision.
+GOAL_LANE_LIVE_CONVO_S = 3 * 60
 
 # #804 -- how often the DEAD-SESSION roster census re-surfaces a persistently-
 # dead expected-armed stream: at most ONE verdict line per dead cwd per this
@@ -4494,27 +4449,6 @@ def _resurrect_dead_entry(dcwd, dentry, dloc, now, run, projects_dir, dry_run):
     return logs, True
 
 
-# #442 -- the lane-fill path's OWN "live conversation" definition. The
-# shared check's default window (`GOAL_AUTOARM_RECENT_HUMAN_S`, 30 min) is
-# calibrated for the VIRGIN-ARM decision -- irreversibly arming a whole
-# loop into a possibly-live conversation -- and blanket-applying it here
-# made the nudge structurally self-suppressing on any box the owner merely
-# GLANCES at every ~20-30 min (gk journal: "SKIP-TRANSIENT ... presence
-# marker 1331-1628s old" on every single attempt). The lane nudge is a
-# rate-limited reminder into an ALREADY-armed session, so a much shorter
-# window suffices -- with its meaning stated honestly (#442-review F1):
-# the presence marker is stamped ONLY on UserPromptSubmit
-# (`clear-question-dedup.sh`), i.e. a prompt SUBMIT, never composition
-# keystrokes -- so this window means "a prompt was SUBMITTED within the
-# last ~3 min = a genuinely live exchange" (and it comfortably covers the
-# mid-sweep race where a submit lands after the sweep's own `now` was
-# captured, via the shared check's symmetric clamp). Un-submitted
-# COMPOSITION stamps neither signal and is caught separately, by the
-# two-capture draft-diff check at the send point below. Worst-case
-# annoyance stays bounded by the shared per-kind cadence gate (and #1089 retired
-# the lane-occupancy keystroke DELIVERY entirely — only the decision line remains).
-GOAL_LANE_LIVE_CONVO_S = 3 * 60
-
 # #531 -- orphan-reap TTL for state["goal_lane"] per-sid records. Same 24h
 # magnitude as GOAL_MARK_ORPHAN_TTL_S, deliberately well above the 1h nudge
 # interval, so a live armed pane -- whose rec is re-stamped (`lts`) on every ~60s
@@ -4524,7 +4458,7 @@ GOAL_LANE_ORPHAN_TTL_S = 24 * 3600
 
 
 # #502 -- account-limit back-off HARD cap. When the supervisor's transcript shows a
-# recent account-level dispatch block (`is_account_dispatch_block`), the lane nudge
+# recent account-level dispatch block (`is_account_dispatch_block`), the episode
 # backs off until the parsed reset time -- but ALWAYS at most this long from
 # `first_seen`, so a mis-parsed far-future reset OR a no-reset cap (a monthly-spend
 # / org-disable that only human action clears) can never silence the guard beyond
@@ -4540,7 +4474,7 @@ def _account_limit_release_at(first_seen, resets_at):
     """Wall-clock instant the #502 account-limit back-off releases: the parsed
     reset time when it is known AND in the future, else `first_seen`+MAX; ALWAYS
     capped at `first_seen`+`ACCOUNT_LIMIT_BACKOFF_MAX_S` so a far-future or missing
-    reset can never silence the lane nudge for longer than one bounded window."""
+    reset can never silence the guard for longer than one bounded window."""
     cap = first_seen + ACCOUNT_LIMIT_BACKOFF_MAX_S
     if resets_at and resets_at > first_seen:
         return min(resets_at, cap)
@@ -4548,7 +4482,7 @@ def _account_limit_release_at(first_seen, resets_at):
 
 
 def _account_limit_decision(rec, now, err, loc, waiters):
-    """#502 -- the lane nudge's account-limit back-off decision from the
+    """#502 -- the account-limit back-off decision from the
     supervisor's CURRENT transcript error text `err`. Mutates `rec['alim']` (the
     caller persists `rec`); returns `(back_off, logline, notify)`:
 
@@ -4594,14 +4528,14 @@ def _account_limit_decision(rec, now, err, loc, waiters):
     if now < release:
         ra = alim.get("resets_at")
         when = watchdog._human_clock(ra, now=now) if ra else "neznámy reset"
-        return True, ("lane-occupancy %s waiters=%d -> skip:account-limit "
+        return True, ("account-limit %s waiters=%d -> skip:account-limit "
                       "(dispatch by teraz zomrel na strope účtu; back-off do %s, "
                       "zostáva %ds)" % (loc, waiters, when, int(release - now))), notify
     # Window elapsed -> re-probe ONCE and re-arm for the next window. (A re-arm is
     # never a new episode, so it never re-notifies.)
     alim["first_seen"] = now
     alim["resets_at"] = watchdog.parse_reset_epoch_from_error_text(err, now)
-    return False, ("lane-occupancy %s -> account-limit back-off elapsed, "
+    return False, ("account-limit %s -> back-off elapsed, "
                    "re-probing once (re-armed)" % loc), notify
 
 
@@ -4621,46 +4555,31 @@ def _account_limit_notify_owner(send_fn, pid, run, sid, cwd, dry_run,
             owner=stream_redirect(watchdog.pane_owner(pid, run)) or None,
             dedup_key="acctblock:%s:%d" % (sid, int(first_seen)),
             dry_run=dry_run)
-    return ("lane-occupancy %s -> account-block owner PINGED "
+    return ("account-limit %s -> account-block owner PINGED "
             "(no-reset cap, job-6-unhandled)" % loc)
 
 
-# #970 -- resource-aware lane cap.  Implementation extracted to
-# watchdog/lane_resources.py (fable-review LOW finding #3: split instead of
-# raising the ratchet).  Re-import here for backward compat.
-from watchdog.lane_resources import (  # noqa: E402,F401
-    _LANE_RESOURCE_FILE,  # noqa: F401 -- backward compat re-export
-    _LANE_NEEDS_FILE,  # noqa: F401 -- backward compat re-export
-    GOAL_LANE_SATURATION_WORKERS,
-    lane_resource_cap,  # noqa: F401 -- backward compat re-export
-    lane_resource_caps,
-)
+def goal_account_limit_check(now, run, rec, sid, cwd, pid, tpath, loc,
+                             send_fn, dry_run, captured=""):
+    """#502 -- the account-block OWNER PING for one armed pane, run by
+    `goal_lane_sweep` for every armed candidate. Moved out intact (#1137) from
+    the removed lane-occupancy branch, where it rode the refill decision:
+    `_account_limit_decision` reads the supervisor's own transcript error, keeps
+    the bounded episode in `rec['alim']` (persisted by the caller), and on the
+    FIRST detection of a no-reset block (monthly spend / org disable, the shapes
+    job 6 does not ping) `_account_limit_notify_owner` pings the owner once per
+    episode. Returns decision log lines; never types into the pane."""
+    _back_off, alim_log, alim_notify = _account_limit_decision(
+        rec, now, watchdog.transcript_last_error(tpath), loc,
+        watchdog._pane_live_task_count(captured or ""))
+    logs = [alim_log] if alim_log else []
+    if alim_notify and send_fn is not None and not dry_run:
+        logs.append(_account_limit_notify_owner(
+            send_fn, pid, run, sid, cwd, dry_run,
+            rec.get("alim", {}).get("first_seen", now), loc))
+    return logs
 
-# #442/#481/#848 -- the lane ceiling (up to 5 parallel lanes).  The constant
-# GOAL_LANE_SATURATION_WORKERS is now defined in watchdog/lane_resources.py
-# and imported above.  The saturation boundary is
-# `floor = min(effective_cap, backlog)` in goal_lane_occupancy_nudge —
-# `live_workers >= floor` logs "saturated" and SKIPS; below it, refill
-# continuously.  #970: per-resource caps extend the flat cap.
 
-# #729 -- the whole low-mem OOM subsystem (GOAL_LANE_MIN_MEM_AVAIL_MB +
-# GOAL_LANE_LOWMEM_SURFACE_STREAK + _mem_available_mb + _lane_min_mem_avail_mb +
-# _lane_lowmem_skip + _lane_lowmem_reset + one_glance.lane_low_mem_surface_
-# decision) gated the #726-RETIRED under-saturated fill nudge and was kept DORMANT
-# by #726 pending one design question: should the empty-lane "start a NEW batch"
-# nudge gate on memory headroom? #729 ROZHODNUTÉ: NO. The empty-lane nudge stays
-# memory-EXEMPT (a fully stalled 0-worker box has no worker RAM pressure to
-# protect against and MUST always be nudged), and memory back-off WITHIN a batch
-# is already delegated to the supervisor (the nudge text: "back off len na REÁLNY
-# resource signál -- ... memory pressure boxu ..."). So the subsystem is DELETED,
-# not re-wired -- net-LOC down (#486), zero change to the nudge's runtime behavior.
-
-# #571 -- max CONSECUTIVE working-no-tasks defers (a ⏳ marker with 0 render task
-# badges AND 0 structured live lanes) before the branch STOPS deferring and
-# proceeds to the gated empty-lane nudge path. Bounds the pre-#571 unbounded
-# identical skip loop (the #566 livelock class) without nudging a genuinely-idle
-# ⏳ box before a few sweeps confirm it. Each sweep is ~60-70s, so 3 ~= 3-4 min.
-GOAL_LANE_WNT_MAX_DEFERS = 3
 # #662 -- consecutive one-glance `stuck` sweeps (armed /goal + 0 workers +
 # backlog + idle over GOAL_LANE_IDLE_S) before the ONE per-episode alert record
 # fires (deduped once per episode). #688: that record is now MACHINE-CHANNEL
@@ -4690,438 +4609,6 @@ def _stuck_alert_streak():
     except (TypeError, ValueError):
         v = GOAL_LANE_STUCK_ALERT_STREAK
     return v if v >= 1 else GOAL_LANE_STUCK_ALERT_STREAK
-
-
-def _lane_boundary_ok(cap):
-    """#509 -- extracted from the nested `_boundary_ok` (keeps
-    `goal_lane_occupancy_nudge` under its size cap). Returns (ok, kind, draft): is
-    `cap` a deliverable input boundary this sweep? An AT-REST draft is deliverable
-    (`deliver_with_stash` parks it -- single slot, auto-restores once the delivered
-    turn completes), so it stopped being a reason to skip; at-rest-ness for a draft
-    is the draft-admitting free-prompt shape (`bare_only=False`), the same
-    precondition deliver_with_stash re-verifies internally before its first
-    keystroke. A bare box must be settled at an idle prompt."""
-    kind, draft = watchdog._classify_boundary(cap)
-    if kind != "input":
-        return False, kind, draft
-    if draft:
-        return watchdog._has_free_prompt(cap, bare_only=False), kind, draft
-    return watchdog.pane_at_idle_prompt(cap), kind, draft
-
-
-def _lane_skip(logs, loc, reason):
-    """#475: append a lane-occupancy DECISION line for a previously-silent
-    early-return path, mirroring the existing `lane-occupancy <pane> ... ->
-    <decision>` format so every sweep journals WHY no nudge fired (the #442c
-    every-sweep logging contract). The early skips below run before
-    `live_workers`/`backlog_n` are counted, so they name the gate, not counts."""
-    logs.append("lane-occupancy %s -> %s" % (loc, reason))
-
-
-def _lane_wnt_gate(rec, marker, waiters, projects_dir, cwd, sid, now,
-                   backlog_fetch, state, loc, dry_run, idle=None):
-    """#571 -- the STRUCTURED live-lane gate + working-no-tasks decision,
-    extracted so the capped ``goal_lane_occupancy_nudge`` does not grow (the
-    #509/#530/#511 "never grow the capped function, extract the new branch"
-    mechanic).
-
-    Resolves the live-lane count + evidence and the backlog ONCE (both RETURNED
-    for the saturation gate to REUSE -- one ``count_live_workers`` pass per
-    sweep), then runs the working-no-tasks decision on the #565 EVIDENCE
-    predicate (``lane_has_live_evidence`` -- any non-stale lane), NEVER the
-    flapping render ``waiters`` badge. Persists the defer streak in
-    ``rec['wntd']`` (rides in the existing goal_lane rec, so the #531 orphan
-    reaper already covers it -- no new state namespace) -- but ONLY on a REAL
-    sweep; ``dry_run`` mutates NO persisted state (#516). Returns
-    ``(defer, log, live_workers, backlog_n, finished_workers, ev)``.
-    #937: ``finished_workers`` counts ``state=="finished"`` lanes (recently completed,
-    in integration). #619: the #611 ``escalated`` flag
-    is retired -- the 15-min idle floor it bypassed is gone, so the escalate
-    branch simply stops deferring (``defer=False``) and the flow reaches the
-    nudge like any other empty-lane sweep."""
-    live_workers, ev = watchdog.count_live_workers(
-        projects_dir, cwd, sid, now, GOAL_LANE_LIVE_WINDOW_S)
-    backlog_n = watchdog._cached_backlog_count(cwd, backlog_fetch, state, now)
-    wnt = _one_glance.lane_working_no_tasks_decision(
-        marker=marker, render_waiters=waiters,
-        structured_live=watchdog.lane_has_live_evidence(ev),
-        backlog=(backlog_n if isinstance(backlog_n, int) and backlog_n >= _lane_effective_min_backlog(idle) else 0),  # #611: sub-FLOOR never escalates (would only skip:min-backlog); #804 mode-4: floor is idle-aware so a >1h-idle box with 1-2 tickets IS reachable
-        defer_streak=rec.get("wntd", 0), max_defers=GOAL_LANE_WNT_MAX_DEFERS)
-    if not dry_run:
-        rec["wntd"] = wnt.streak
-    log = None
-    if wnt.log:
-        log = ("lane-occupancy %s waiters=%d workers=%d -> %s"
-               % (loc, waiters, live_workers, wnt.log))
-    # #937 -- count recently-finished IMPLEMENTATION workers (in integration)
-    # from evidence. Non-worker subagents (ticket-validator, Explore, an ad-hoc
-    # review consult) are excluded — they review/validate, not implement
-    # tickets, so their presence is not coverage (#937-review C1).
-    finished_workers = sum(1 for w in ev if w.state == "finished"
-                          and w.agent_type in _LANE_WORKER_AGENT_TYPES)
-    return wnt.defer, log, live_workers, backlog_n, finished_workers, ev
-
-
-# #729 -- _lane_lowmem_reset + _lane_lowmem_skip (the low-mem CAPACITY-CAPPED
-# surface episode + the OOM skip:low-mem handler) are DELETED with the rest of the
-# memory OOM subsystem: they were reachable only from the #726-retired
-# under-saturated fill nudge, and the empty-lane batch-start nudge stays
-# memory-EXEMPT (see the GOAL_LANE_SATURATION_WORKERS block above). A pre-#729 rec
-# carrying stale `lms`/`lmsurf` keys is harmless (never read; they ride inertly
-# until the session's rec is eventually orphan-reaped, #531).
-
-
-def _cached_dispatchable(cwd, dispatchable_fetch, state, now):
-    """#993 item 3 — the per-cwd TTL cache over the dispatchable-candidate fetch.
-    `dispatchable_fetch(cwd)` returns a ONE-element list `[{"count": N, "reason":
-    r}]` (never `[]`) or None; cached via the SAME generic `_cached_member_fetch`
-    the backlog/ops-wait/queue caches use. Returns the inner dict, or None
-    (unmeasurable)."""
-    # #993 review 2 set a 5-min TTL for BOTH outcomes because a failed read used
-    # to re-run the O(deps) `--count-dispatchable` subprocess. #1067 slice 1d made
-    # the fetch a read of the detached quals snapshot (its OWN 5-min TTL + failure
-    # backoff throttle the derivation), so this memo is 1 min either way: a cold
-    # snapshot is picked up next minute, and staleness never stacks to 10 min.
-    lst = _ops_wait_recheck._cached_member_fetch(
-        cwd, dispatchable_fetch, state, now, "dispatchable_cache",
-        ttl=60, fail_ttl=60)
-    if isinstance(lst, list) and lst and isinstance(lst[0], dict):
-        return lst[0]
-    return None
-
-
-def _lane_dispatchable_decision(dispatchable_fetch, cwd, state, now, loc,
-                                live_workers, waiters, backlog_n):
-    """#993 item 3 — `(skip, logline, candidate_n)`. `dispatchable_fetch` None
-    (unwired / legacy tests) → `(False, None, None)`: NO gating, the nudge fires
-    as before. A wired fetch returns the dispatchable-candidate count + reason:
-    count 0 → `skip:dep-wait` (deps hold everything back — the class-based
-    infra-serial reason was removed in round 2b), NO keystroke; an UNMEASURABLE
-    count (fetch None / malformed) → `skip:dispatchable-unknown` (safe: never
-    push dispatch we cannot justify); count > 0 → `(False, None, count)` and the
-    caller names `candidate_n` in the nudge text.
-
-    #1067 slice 1d REMOVED the #1041 sweep-budget guard (`hold:budget`) that
-    stood here: it existed only because a cache-miss fetch ran the blocking
-    `--count-dispatchable` subprocess (up to 90 s) into the unit's 120 s kill.
-    The fetch is now a read of the detached quals snapshot; its worst sweep-side
-    cost is the ≤10 s systemd-run client call on a spawn, well inside budget."""
-    if dispatchable_fetch is None:
-        return False, None, None
-    res = _cached_dispatchable(cwd, dispatchable_fetch, state, now)
-    count = res.get("count") if isinstance(res, dict) else None
-    if not isinstance(count, int) or isinstance(count, bool):
-        # #1021: when the fetch carries a REASON (a failed dependency-meta read
-        # → `meta read failed`), journal it so an inert nudge says WHY, not only
-        # `unmeasurable`; a reasonless None (unwired/malformed) keeps the legacy
-        # phrasing. Either way it is fail-safe — never a nudge we cannot justify.
-        reason = res.get("reason") if isinstance(res, dict) else None
-        detail = reason if reason else "candidate count unmeasurable"
-        return True, ("lane-occupancy %s workers=%d waiters=%d backlog=%d -> "
-                      "skip:dispatchable-unknown (%s)"
-                      % (loc, live_workers, waiters, backlog_n, detail)), None
-    if count <= 0:
-        reason = res.get("reason") if isinstance(res, dict) else None
-        # #993 review 12: only label the KNOWN reason; a missing reason (a rare
-        # cache-disagreement) is `skip:no-candidate`, never mis-attributed.
-        if reason == "dep-wait":
-            word = "skip:dep-wait"
-        else:
-            word = "skip:no-candidate"
-        return True, ("lane-occupancy %s workers=%d waiters=%d backlog=%d -> "
-                      "%s (free slot but NO dispatchable candidate; %s)"
-                      % (loc, live_workers, waiters, backlog_n, word,
-                         reason or "reason-unknown")), 0
-    return False, None, count
-
-
-def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
-                              tmtime, loc, send_fn, dry_run, handled,
-                              projects_dir, backlog_fetch=None, state=None,
-                              sleep_fn=None, batch_collect=None,
-                              dispatchable_fetch=None):
-    """The lane-occupancy branch (#365). Mutates `rec` (the caller
-    persists it); returns `(logs, owns)` -- `owns` is the explicit
-    ownership signal set from the moment `live_workers`/`backlog_n` are
-    both known and neither escape fires, on EVERY return path from there
-    on, so a caller never has to re-derive it from log text (#365-review
-    M2)."""
-    sleep_fn = sleep_fn or time.sleep
-    logs = []
-    if backlog_fetch is None or state is None:
-        # #475 deliberately silent: a wiring/injection guard -- both are always
-        # passed by the driver in production; unwired means a test or a degraded
-        # call, never a real lane decision worth journalling.
-        return logs, False
-    try:
-        import airuleset
-        authority = airuleset.resolve_authority(cwd)
-    except Exception:
-        authority = None
-    if authority is None:
-        # #618 deliberately silent: an UNRESOLVABLE authority (resolve_authority
-        # raised) is a degraded/unknown box, not a lane decision. A RESOLVED
-        # reduced-authority stream (branch-merge/fork-no-merge) DOES fleet parallel
-        # worktree lanes under /autopilot (SKILL fleet default), so it gets the
-        # nudge like full authority (was `!= "full"`, a stale full-only assumption).
-        return logs, False
-    # #998 -- a SEQUENTIAL-mode pane is ONE unit at a time, NO refill: the
-    # lane-occupancy refill nudge NEVER fires for it (subagents/consults are
-    # NOT gated -- only the refill push). Resolved by the single resolver; a
-    # resolver error is treated as SEQUENTIAL (#1137: the default of every box,
-    # parallel only by an explicit declaration an erroring resolver cannot
-    # prove), logged (never a silent swallow). Placed after the authority gate,
-    # before any count/keystroke work.
-    try:
-        import cli_concurrency
-        _seq_mode = cli_concurrency.resolve_mode(cwd)
-    except Exception as e:  # noqa: BLE001
-        _seq_mode = "sequential"
-        _lane_skip(logs, loc, "concurrency-resolve-error (%r) -- treating as "
-                              "sequential (the #1137 default)" % e)
-    if _seq_mode == "sequential":
-        _lane_skip(logs, loc, "skip:sequential-mode (one unit at a time, no "
-                              "refill -- the sequential target caps lanes at 1)")
-        return logs, False
-    idle = now - (tmtime or now)
-    # #442 THIRD GAP / #619 -- the old top-of-function idle gate returned HERE
-    # with EMPTY logs whenever the transcript was fresh -- which a BUSY
-    # under-saturated session ALWAYS is (turns spinning -> mtime fresh) -- so it
-    # never reached the fill-the-cap decision and journalled nothing (gk 2
-    # workers, I 32, guard silent 20+ min). #619 removed the empty-lane idle
-    # floor ENTIRELY (it was structurally self-suppressing on a busy-solo box);
-    # `idle` below is now logging-only. #1089 retired the keystroke DELIVERY and
-    # #1096 deleted the give-up/cooldown/abort-backoff cadence gates, so the nudge
-    # only journals its decision line now — the surviving cadence bound is the
-    # shared per-kind `_nudge_gate.gate_ok` gate below.
-    marker = watchdog.transcript_last_marker(tpath)
-    if marker == "❓":
-        _lane_skip(logs, loc, "skip:awaiting-user (❓ marker -- session blocked "
-                              "on a question, never nudge)")
-        return logs, False
-    # #442 re-fix 2 (REOPEN č.2) / #848: worker PRESENCE is a COUNT decision made
-    # below (`live_workers`), so it can distinguish a SATURATED box (>= floor
-    # lanes -> skip) from one with ROOM (< floor lanes -> refill nudge). The old
-    # early-skip on
-    # `_pane_has_bg_agent(captured)` made that impossible: with ANY visible worker
-    # in the agent strip it returned True and skipped the entire path BEFORE
-    # `live_workers` was even counted, so the count widening alone would never fire
-    # on a live box (the exact reopen-2 root cause -- 2 visible workers -> strip
-    # shows `◯ ...` rows -> skip here, never reaching the count check). It is folded
-    # into the count via `_count_live_subagents` + a pane-strip corroboration floor
-    # below. `pane_waiting_on_user` STAYS -- it is a genuine delivery-safety gate (a
-    # blocking dialog occupies the input area, so there is no free prompt to deliver
-    # into); worker presence is not. The `_boundary_ok` idle-prompt gate below still
-    # refuses to type into a non-idle pane (so a mid-dispatch spinning pane is
-    # skipped there), and the shared per-kind cadence gate bounds re-nudging, so
-    # folding worker presence into the count is safe even without the (removed,
-    # #619) idle floor.
-    if watchdog.pane_waiting_on_user(captured):
-        _lane_skip(logs, loc, "skip:blocking-dialog (a dialog/prompt occupies "
-                              "the input area -- no free prompt to deliver into)")
-        return logs, False
-    if watchdog._pane_compacting(captured):
-        _lane_skip(logs, loc, "skip:compacting (pane is mid-/compact, transient)")
-        return logs, False
-    if _compact.pending_compact_hold(sid, now):   # #848 bounded #741 latch
-        _lane_skip(logs, loc, "hold:compact-pending (pending /compact -- hold "
-                              "the refill nudge until it delivers, bounded #848)")
-        return logs, False
-    if handled is not None and sid in handled:
-        _lane_skip(logs, loc, "skip:already-handled (another sweep job already "
-                              "delivered to this session this cycle)")
-        return logs, False
-    waiters = watchdog._pane_live_task_count(captured)
-    _wnt_defer, _wnt_log, live_workers, backlog_n, finished_workers, _wnt_ev = _lane_wnt_gate(
-        rec, marker, waiters, projects_dir, cwd, sid, now, backlog_fetch, state,
-        loc, dry_run, idle=idle)   # #571 -- structured live-lane gate; counts
-    #   reused below. #804 mode-4: idle threaded so the #611 escalation clamp uses
-    #   the SAME idle-aware floor as the empty-lane gate (a >1h-idle box with 1-2
-    #   tickets is reachable through BOTH, never blocked at working-no-tasks).
-    if _wnt_log:
-        logs.append(_wnt_log)
-    if _wnt_defer:
-        return logs, False
-    # #502 -- ACCOUNT-LIMIT BACK-OFF (extracted helper, keeps this function small).
-    # When the supervisor's OWN transcript shows a recent account-level dispatch
-    # block, dispatching a fresh worker is a certain loss (it dies on the SAME cap
-    # at Step 0). `_account_limit_decision` reads the signal FRESH from the
-    # transcript, mutates rec['alim'] (persisted by the caller), and returns a
-    # bounded skip / re-probe / clear decision -- see its docstring.
-    back_off, alim_log, alim_notify = _account_limit_decision(
-        rec, now, watchdog.transcript_last_error(tpath), loc, waiters)
-    if alim_log:
-        logs.append(alim_log)
-    if alim_notify and send_fn is not None and not dry_run:
-        logs.append(_account_limit_notify_owner(
-            send_fn, pid, run, sid, cwd, dry_run,
-            rec.get("alim", {}).get("first_seen", now), loc))
-    if back_off:
-        return logs, False
-
-    ok, kind, draft = _lane_boundary_ok(captured)
-    if not ok:
-        if kind != "input" or draft:
-            logs.append("skip %s (lane-occupancy) %s"
-                        % (draft and "draft" or kind, loc))
-        else:
-            # #475: the ONE previously-silent boundary sub-case -- an input box,
-            # empty (no draft), but not settled at an idle prompt this sweep
-            # (busy/unsettled). Every OTHER not-ok shape (busy/no-input-line, or
-            # a non-at-rest draft) already logs above; this one returned empty.
-            _lane_skip(logs, loc, "skip:not-idle-prompt (input box present, no "
-                                  "draft, but not settled at an idle prompt "
-                                  "this sweep)")
-        return logs, False
-    # #518 -- the gating worker count is the STRUCTURED G2 `count_live_workers`
-    # (transcripts.py), replacing the render-dependent `_count_live_subagents`
-    # primary count + its `_pane_has_bg_agent(captured)` render floor. G2 EXCLUDES
-    # both silent-death modes (api-error + text-toolcall-stall), so a box whose
-    # "workers" are all dead reads 0 and fires the empty-lane recovery nudge --
-    # the render floor's stale-strip over-count used to SUPPRESS exactly that
-    # (#486-G2 dangerous direction). #1096: live_workers now feeds only the
-    # saturation floor + #937 coverage (the #509/#670 cadence consumers are gone).
-    # #571 -- live_workers/backlog_n resolved ABOVE (reused, one pass per sweep).
-    if not isinstance(backlog_n, int) or backlog_n <= 0:
-        logs.append("lane-occupancy %s workers=%d waiters=%d backlog=%r -> "
-                    "no measurable open backlog, skip"
-                    % (loc, live_workers, waiters, backlog_n))
-        return logs, False
-    # #848 CONTINUOUS REFILL: ROOM to refill when live_workers < floor.
-    # floor = min(effective_cap, backlog); backlog >= 1 (guard above).
-    # #970 fix-forward: per-resource caps (lane_resource_caps).
-    caps, cap_reason = lane_resource_caps(cwd)
-    effective_cap = caps["total"]
-    if cap_reason:
-        logs.append("lane-resources %s INVALID %s -> default %d"
-                    % (loc, cap_reason, effective_cap))
-    # #1089: the per-resource USAGE read (count_resource_usage) fed only the
-    # retired nudge TEXT; the saturation FLOOR below uses effective_cap directly.
-    floor = min(effective_cap, backlog_n)
-    if live_workers >= floor:
-        logs.append("lane-occupancy %s workers=%d waiters=%d backlog=%d "
-                    "effective_cap=%d -> saturated (>= %d lanes), skip"
-                    % (loc, live_workers, waiters, backlog_n,
-                       effective_cap, floor))
-        return logs, False
-    # #937 OCCUPANCY HONESTY: live workers alone don't cover all tickets, but
-    # live + recently-finished (in integration) workers do — no room to dispatch.
-    if finished_workers > 0 and live_workers + finished_workers >= backlog_n:
-        logs.append("lane-occupancy %s workers=%d finished=%d backlog=%d -> "
-                    "skip:covered (live+integration covers all workable)"
-                    % (loc, live_workers, finished_workers, backlog_n))
-        return logs, False
-    # #993 item 3: a free slot with NO dispatchable candidate (dep-wait) is the
-    # DAMAGE (#992) — skip, never nudge (helper extracted to keep this capped
-    # function small; unwired → no gating; candidate_n names the count in the
-    # text when it fires).
-    disp_skip, disp_log, candidate_n = _lane_dispatchable_decision(
-        dispatchable_fetch, cwd, state, now, loc, live_workers, waiters, backlog_n)
-    if disp_log:
-        logs.append(disp_log)
-    if disp_skip:
-        return logs, True
-    # #848 CONTINUOUS REFILL (retiring #726/#723 batch mode): any
-    # live_workers < min(5, backlog) means there is ROOM to refill, so the nudge
-    # fires for BOTH an empty box (live_workers==0) AND a partially-full box
-    # (0 < live_workers < floor) — refill a returned lane's slot up to 5. The old
-    # `skip:batch-running` (NO refill while a batch runs) branch is REMOVED; the
-    # 0<lw<floor case now falls through to the same nudge path. (The #530
-    # min-backlog floor below + the shared per-kind `_nudge_gate.gate_ok` gate
-    # bound the refill-nudge cadence; the #670 dedup / hourly / #929 starved caps
-    # were deleted with the delivery-cadence machinery, #1096.)
-    # #530 refill floor: a lone/tiny backlog is not worth a fresh lane for a
-    # FRESHLY-idle box (the anti-storm gate against nudge->"nič workable"->nudge).
-    # #804 mode-4: but a loop that has STOOD idle > 1h over just 1-2 workable
-    # tickets is NOT freshly-idle churn -- it is a stuck loop the batch-worthiness
-    # gate was parking FOREVER (#530's "1-2 held/foreign items read as workable"),
-    # in direct conflict with 24/7 (#791: "loop with 1-2 workable tickets stojí
-    # navždy by design"). Drop the floor to 1 once idle > GOAL_LANE_INTERVAL_S, so
-    # such a box is poked; the shared per-kind cadence gate (below) bounds how
-    # often the DECISION line re-journals (the keystroke DELIVERY is retired, #1089).
-    min_backlog = _lane_effective_min_backlog(idle)
-    if backlog_n < min_backlog:
-        _lane_skip(logs, loc, "skip:min-backlog (backlog=%d < %d)"
-                   % (backlog_n, min_backlog))
-        return logs, False
-    # #619 -- the empty-lane fill nudge is NO LONGER gated on the 15-min idle
-    # floor. A continuously serially-working under-saturated session writes a
-    # turn every few min, so `idle` almost never reached 15m and the nudge was
-    # structurally unreachable (114x skip:idle/9h, 0 fill nudge on montalu1; the
-    # #611 escalated-bypass was dead because the marker flaps ⏳<->non-⏳ and the
-    # 3-consecutive-sweep streak never accumulated). #1096: the give-up / cooldown
-    # / abort-backoff DELIVERY-cadence gates that used to sit here are DELETED --
-    # they only governed WHEN to re-DELIVER a keystroke, and #1089 retired the
-    # keystroke delivery entirely (the gates/lanefill.py Stop gate is the refill
-    # lever now). What remains is the DECISION line below + the shared per-kind
-    # cadence gate; keystroke safety is moot because no keystroke is typed.
-    # #442: the SAME shared check deliver_goal's recent-human gate uses, through
-    # the lane path's OWN short window (never the 30-min default -- see
-    # GOAL_LANE_LIVE_CONVO_S above). The `window_s` seam already exists on
-    # the shared function, so job 9's own default-window semantics stay
-    # byte-identical and arm delivery stays exempt entirely.
-    recent, reason = watchdog._goal_autoarm_recent_human_activity(
-        sid, tpath, now, window_s=GOAL_LANE_LIVE_CONVO_S, pane_target=pid, run=run)
-    if recent:
-        logs.append("SKIP-TRANSIENT (lane-occupancy) %s -> %s -- recent "
-                    "human activity, never overwrite a live conversation"
-                    % (loc, reason))
-        return logs, True
-    # #1089 F-4 -- DELIVERY RETIRED. The lane-fill Stop gate (gates/lanefill.py)
-    # is the refill lever now: it BLOCKS the turn end on an under-filled parallel
-    # box WITHOUT typing into the pane, so this nudge no longer delivers a
-    # keystroke. It typed 0x in 24h on gk (starved by the #1023 3h cross-kind
-    # cap) -- pure journal noise and no refill. The DECISION line stays
-    # (observability: the SAME workers/backlog facts the owner reads), but every
-    # keystroke-delivery primitive (send_verified / deliver_with_stash /
-    # submit_own_draft_verified / _try_stash_nudge) AND the batch-collect
-    # contribution are removed -- the AST lock test_lanefill_enforce_1089
-    # .test_kind_never_calls_a_delivery_primitive enforces it. #1089 F-4: emit it
-    # HERE, ABOVE the now-vestigial keystroke cadence gate, so the retirement
-    # decision is CONSISTENTLY logged (it was previously reachable only when the
-    # gate OPENED -- cadence-gated -- inconsistent with the Stop-gate
-    # decisions.log being the authoritative per-Stop observability). The cadence
-    # gate below still runs (its hold:floor/hold:total-cap lines are the #1023
-    # dead-machinery F-1 follow-up, deferred). Recorded on #1023 as the
-    # kinds-rollout decision for lane-occupancy.
-    logs.append("lane-occupancy %s workers=%d waiters=%d backlog=%d -> "
-                "would-refill; DELIVERY RETIRED (#1089 -- Stop gate enforces)"
-                % (loc, live_workers, waiters, backlog_n))
-    # #797/#1023 SHARED CADENCE GATE: `gate_ok` DEFERS this lane nudge (no
-    # keystroke, no `_lane_record_nudge`/park/streak change) when the per-pane-
-    # per-KIND floor holds (a recent lane-occupancy) OR the #1023 cross-kind TOTAL
-    # cap holds (a DIFFERENT priority kind — u-freshness/partition-audit/release-
-    # gap/queue-arrival — within NUDGE_TOTAL_GAP_S), killing the burst. Journal
-    # token (`hold:floor`/`hold:total-cap`) via `floor_hold_reason`; the `dry_run`
-    # READY below never sends, so the gate sits before it.
-    # #923 BATCH MODE: gate_ok is handled once by the caller.
-    if batch_collect is None:
-        if not watchdog.nudges_enabled("lane-occupancy"):   # #1023 per-kind switch
-            logs.append("lane-occupancy %s -> skip:kind-off (lane-occupancy)" % loc)
-            return logs, True
-        # #1023 (2nd-review 🔴): idle-pane only — a busy "Waiting for N background
-        # agents" pane defers (`_lane_boundary_ok` returns (True,'input','') for it,
-        # so without this the submit is swallowed into the running turn and the
-        # /goal parks orphaned, deliver_goal:1702). Mirrors every sibling rider
-        # (queue_arrival). The batch path is already covered by `_b_busy` in
-        # goal_lane_sweep. Deferred WITHOUT a keystroke; retries the next idle tick.
-        if _ops_wait_recheck._pane_busy_waiting(captured):
-            logs.append("lane-occupancy %s -> hold:busy (waiting on background "
-                        "agents — deferred to next idle tick)" % loc)
-            return logs, True
-        if not _nudge_gate.gate_ok(state, sid, "lane-occupancy", now):
-            logs.append("lane-occupancy %s -> %s; retry next sweep"
-                        % (loc, _nudge_gate.floor_hold_reason(
-                            state, sid, "lane-occupancy", now)))
-            return logs, True
-    if dry_run:
-        logs.append("READY (lane-occupancy) %s workers=%d waiters=%d "
-                    "backlog=%d idle=%dm" % (loc, live_workers, waiters,
-                                             backlog_n, idle // 60))
-        return logs, True
-    # DELIVERY RETIRED — the observability line is emitted above (before the
-    # cadence gate, #1089 F-4); nothing is typed here.
-    return logs, True
 
 
 def _prune_goal_lane_orphans(recs, visited_sids, now,
@@ -5166,9 +4653,8 @@ def _lane_stuck_owner_alert(now, run, rec, glance, sid, cwd, pid, loc,
                             send_fn, dry_run):
     """#662 -- route a PERSISTENT structural one-glance `stuck` verdict to a
     real OWNER ALERT (never another pane keystroke). SILENCE B of the montalu6
-    9,5h outage: the lane-occupancy nudge above no longer types a keystroke
-    (delivery retired, #1089) — the lane-fill Stop gate is the refill lever — so
-    when the pane stays `stuck` across
+    9,5h outage: no lane nudge types a keystroke (the lane-occupancy branch is
+    gone, #1137), so when the pane stays `stuck` across
     `_stuck_alert_streak()` sweeps the session has NOT revived (a dead /
     login-dialog-covered session a `continue` cannot bring back). Records ONE
     per-episode signal (dedup_key `stuckalert:`), reusing the ALREADY-cached
@@ -5332,14 +4818,14 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
                     send_fn=None, sleep_fn=None, time_fn=None,
                     sweep_deadline=None, ops_wait_fetch=None,
                     release_state_fetch=None, queue_fetch=None,
-                    queue_classify=None, dispatchable_fetch=None,
-                    u_fetch=None, reconcile_fetch=None,
+                    queue_classify=None, u_fetch=None,
                     deploy_state_fetch=None, infra_queue_fetch=None,
                     resolve_role_fn=None, persist=None,
                     bounce_unhandled_fetch=None):
-    """The lane-occupancy driver -- the second half of job 20's new body.
-    For every candidate pane whose goal is genuinely ARMED right now, runs
-    `goal_lane_occupancy_nudge`. Owns its own small per-sid state namespace
+    """The armed-pane driver -- the second half of job 20's body. For every
+    candidate pane whose goal is genuinely ARMED right now it runs the
+    account-block check (`goal_account_limit_check`), the stuck alert and the
+    per-pane riders. Owns its own small per-sid state namespace
     (`state['goal_lane']`), distinct from the deleted `goal_rearm`'s giant
     `rec` dict.
 
@@ -5390,10 +4876,6 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
     # `bounce_unhandled_fetch` seam being wired.
     brecs = (state.setdefault("bounce_verdict", {})
              if bounce_unhandled_fetch is not None else {})
-    # #844 -- post-compact lane reconcile: keyed on the transcript's observed
-    # compaction (ZERO gh unless a compaction is actually observed), gated only on
-    # its `reconcile_fetch` seam being wired (default the git/gh reader in run_once).
-    lrecs = state.setdefault("lane_reconcile", {}) if reconcile_fetch is not None else {}
     # #486 G6 -- dark_watch's tail-proof `state["goal_mark"]` marker (populated
     # BEFORE this job in the same run_once, sharing `state`) is the authoritative
     # structured armed signal. Read-only here: dark_watch owns its lifecycle.
@@ -5430,7 +4912,7 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
         tinfo = watchdog.find_active_transcript(projects_dir, cwd)
         if not tinfo:
             continue
-        tpath, tmtime = tinfo
+        tpath, _tmtime = tinfo
         sid = tpath.stem
         visited_sids.add(sid)   # #531 -- live this sweep -> never orphan-reaped
         captured = run(["tmux", "capture-pane", "-p", "-t", pid]) or ""
@@ -5562,19 +5044,12 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
                 _nb = state.get("nudge_batch", {}).get(sid, [])
                 _batch_collect = [entry for entry in _nb
                                   if entry[0] in _eligible] if _nb else []
-        llogs, _owns = goal_lane_occupancy_nudge(
-            now, run, rec, sid, cwd, pid, captured, tpath, tmtime, loc,
-            send_fn, dry_run, handled, projects_dir,
-            backlog_fetch=backlog_fetch, state=state, sleep_fn=sleep_fn,
-            dispatchable_fetch=dispatchable_fetch,   # #993 item 3
-            batch_collect=(_batch_collect if _batch_collect is not None
-                           and "lane-occupancy" in _eligible else None))
+        # #502 -- the account-block owner ping (a Discord send, never a
+        # keystroke); its bounded episode rides `rec['alim']`.
+        logs += goal_account_limit_check(now, run, rec, sid, cwd, pid, tpath,
+                                         loc, send_fn, dry_run, captured=captured)
         rec["lts"] = now   # #531 -- write-time age anchor for the orphan reaper
         recs[sid] = rec
-        logs += llogs
-        if handled is not None and any(ln.startswith("lane-occupancy nudge")
-                                       for ln in llogs):
-            handled.add(sid)
         # #662 -- route a PERSISTENT structural `stuck` verdict to an owner
         # ALERT (SILENCE B of the montalu6 9,5h outage), using the ALREADY-cached
         # `glance` (no fetch). A Discord SEND not a keystroke, so it never
@@ -5633,14 +5108,6 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
                 captured=captured,
                 batch_collect=(_batch_collect if _batch_collect is not None
                                and "u-freshness" in _eligible else None))
-        # #844 -- post-compact lane reconcile for this armed pane.
-        if reconcile_fetch is not None:
-            logs += _lane_reconcile.goal_lane_reconcile_recheck(
-                now, run, lrecs, sid, cwd, pid, tpath, loc, dry_run, handled,
-                reconcile_fetch=reconcile_fetch, state=state, sleep_fn=sleep_fn,
-                captured=captured, budget_left_fn=_budget_left_fn,   # #1041
-                batch_collect=(_batch_collect if _batch_collect is not None
-                               and "lane-reconcile" in _eligible else None))
         # #923 BATCH DELIVERY: compose + deliver all collected texts as ONE prompt.
         if _batch_collect and not dry_run:
             _deliver_batch(_batch_collect, pid, sid, loc, tpath, run, state, now,
@@ -5719,7 +5186,5 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
             _bounce_verdict._prune_bounce_verdict_orphans(brecs, visited_sids, now)  # #1066
         if u_fetch is not None:
             _u_freshness._prune_u_freshness_orphans(urecs, visited_sids, now)  # #797
-        if reconcile_fetch is not None:
-            _lane_reconcile._prune_lane_reconcile_orphans(lrecs, visited_sids, now)  # #844
         _nudge_gate.prune(state, visited_sids, now)   # #797 shared cadence gate
     return logs

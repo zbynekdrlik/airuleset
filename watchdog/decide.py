@@ -186,8 +186,8 @@ def is_account_dispatch_block(text):
     weekly / usage / quota / reset caps) PLUS a MONTHLY-SPEND limit and an ORG
     subscription-access disable. A transient server throttle (checked first, via
     `is_usage_cap`'s own `_TRANSIENT_RX`) is NEVER one of these — a retry CAN clear
-    it, so it must not back off the lane nudge. This is the lane-back-off
-    classifier (`goal.goal_lane_occupancy_nudge`), deliberately BROADER than
+    it, so it must not open an account-block episode. This is the account-block
+    classifier (`goal.goal_account_limit_check`), deliberately BROADER than
     `is_usage_cap` (job 6's reset-clock driver) and independent of it.
 
     SESSION-guidance reconcile (#520): the SAME two classes get DIFFERENT

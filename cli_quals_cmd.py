@@ -1005,8 +1005,7 @@ def cmd_slice_quals(args):
         _emit_count_dispatchable(unhandled, root)
         return
     if want_list_dispatchable:
-        # #1078 item 1: the dispatchable members as `number<TAB>title` lines
-        # (the lane-fill Stop gate's ONE quals call — count + names, no skew).
+        # #1078 item 1: the dispatchable members as `number<TAB>title` lines.
         _emit_list_dispatchable(unhandled, root)
         return
     if want_dep_wait:
@@ -1068,8 +1067,7 @@ def _apply_role_filter(rows, root, role, slug=None):
     `rows` unchanged (today's behaviour). This is the ROUTING that
     replaces the removed class-based live-infra-lane gate: the `infra` label (and
     the whole airuleset repo, and `architecture-rework`) sends a ticket into the
-    infra role/target (the per-role sequential mode is PENDING round 3, #993 —
-    today this is the routing slice only).
+    infra role/target.
 
     `slug` (#998): a PRE-RESOLVED `owner/repo` — pass it to reuse ONE
     `_repo_slug` (a network `gh repo view`) across several calls on the same
@@ -1313,12 +1311,10 @@ def _emit_ops_wait(ops_wait, root, quals, own_stream):
 def _emit_list_dispatchable(rows, root):
     """`--list-dispatchable` (#1078 item 1): one `number<TAB>title` line per
     DISPATCHABLE member (workable ∧ ¬dep-wait — the SAME `dispatchable_numbers`
-    set `--count-dispatchable` counts), OLDEST first. The lane-fill Stop gate
-    (`gates.lanefill`) shells THIS so ONE quals call yields both the count (the
-    line count, consistent with `--count-dispatchable` by construction) AND the
-    ticket names for its block message — no count/name skew. UNMEASURABLE dep
-    read → `unmeasurable:meta read failed` (the SAME fail-safe head as
-    `--count-dispatchable`, so the shell fails toward not-enforcing)."""
+    set `--count-dispatchable` counts), OLDEST first: the line count agrees with
+    `--count-dispatchable` by construction. UNMEASURABLE dep read →
+    `unmeasurable:meta read failed` (the SAME fail-safe head as
+    `--count-dispatchable`)."""
     import airuleset
     dep_map, slug, ok = _dep_wait_map_for(rows, root)
     if not ok:
@@ -1585,8 +1581,7 @@ def cmd_core_quals(args):
         _emit_count_dispatchable(workable, root)
         return
     if want_list_dispatchable:
-        # #1078 item 1: dispatchable members as `number<TAB>title` (the lane-fill
-        # Stop gate's ONE quals call — count + names, no skew).
+        # #1078 item 1: dispatchable members as `number<TAB>title`.
         _emit_list_dispatchable(workable, root)
         return
     if want_dep_wait:

@@ -1348,7 +1348,7 @@ def ensure_declared_checkouts(windows, home=None, run=None):
 
 def declared_window_status_lines(windows, home=None):
     """#1108 item 4: one `airuleset.py status` line per DECLARED managed window
-    — `window <name>: cwd <path> (present|MISSING) role=<role> mode=<mode>` — so
+    — `window <name>: cwd <path> (present|MISSING) role=<role>` — so
     a missing role-window checkout is visible without ssh. `home` (default the
     running user's) resolves the declared `~/...`/relative cwd for the
     present/MISSING probe; `<path>` is shown as the DECLARED cwd (readable, and
@@ -1364,9 +1364,8 @@ def declared_window_status_lines(windows, home=None):
         present = ("present" if os.path.isdir(_declared_window_target(cwd, home))
                    else "MISSING")
         role = w.get("role") or "-"
-        mode = w.get("mode") or "-"
-        lines.append("window %s: cwd %s (%s) role=%s mode=%s"
-                     % (name, cwd, present, role, mode))
+        lines.append("window %s: cwd %s (%s) role=%s"
+                     % (name, cwd, present, role))
     return lines
 
 

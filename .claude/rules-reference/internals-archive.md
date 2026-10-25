@@ -2483,3 +2483,69 @@ Lessons reusable for any future per-box aggregation over these caches:
   (a deliberate precondition change, not a weakening). The JS poll (`applyUStatus`,
   ~1564) is UNCHANGED — a box aggregating to 0 yields `map[id]=0` → the existing
   `u>0` toggle removes the dot.
+
+### Moved from internals-gates.md at the #1137 mode / session-scope removal (2026-10-25)
+
+- **#1137 — flipping the ONE concurrency resolver's default (`cli_concurrency.DEFAULT_MODE`
+  parallel→sequential) re-routes EVERY consumer at once: lane caps (sequential = total 1), the
+  #998 dispatch gate (2nd `autopilot-worker` refused), the refill + queue-arrival nudge skips,
+  the lane-fill Stop gate (`gates/lanefill.py` exempts non-parallel), `_dispatchable_for_cache`,
+  and the `/goal` renderer (SKILL.md's shipped lines ARE `render()` = the default variant, so
+  `goal-inventory --write` regenerates them and `goal_template_for` must route the NEW default
+  to SKILL.md and the old one to the renderer).** Three things the design list missed, found by
+  running the WHOLE suite, not the symbol-grep subset: (1) a skip written for "no refill" also
+  silenced an AWARENESS nudge (#1178 ended-supervisor queue-arrival) on every box — audit each
+  consumer's PURPOSE, not just its mode check; the fix exempts the `deliver_hold` path like the
+  infra role. (2) resolver-ERROR fallbacks hard-coded the old default ("treating as
+  non-sequential") — flip every error branch to the new default too. (3) 15 test files drive the
+  parallel machinery on a FAKE cwd (`/home/newlevel/devel/x`, no project file possible) and
+  silently depended on the default; pin them with ONE shared one-line class decorator
+  (`tests/_parallel_mode_pin.PARALLEL_PIN` = `patch.object(cli_concurrency, "DEFAULT_MODE",
+  "parallel")`, effective because consumers import `cli_concurrency` lazily and read the global
+  at call time) instead of per-class `setUp` blocks — a decorator costs 1 line per class, which
+  keeps the size-ratchet raises small. Put brand-new locks in a NEW test file (default 1000-line
+  ceiling) rather than growing capped files. Also: the airuleset checkout's own
+  `.claude/lane-resources.json` is resolver SOURCE 2 and overrides the default for the controller.
+  Rewording a canonical `/goal` clause (`_SEQUENTIAL_SATURATION`) moves THREE hash/byte locks —
+  `test_goal_variants_998._GOLDEN`, `test_stream_no_done_state_1128.FULL_GOLDEN` and the vs-`main`
+  compare in `test_bounce_goal_rider_1066` — grep them BEFORE the RED commit, or the GREEN commit
+  lands red.
+- **#1229 — the sequential gate counts ANY worktree lane (`isolation: "worktree"`, any `subagent_type`), and a lane-count gate needs three things beyond the count.** presenter@dev2 opened three `general-purpose` worktree lanes in a sequential pane because `hooks/block-dispatch-over-wdrain.sh` exited for every type but `autopilot-worker`. The verdict now comes from `cli_dispatch_gate.dispatch_gate_report` (a leaf; `cli_concurrency` sits at its ratchet ceiling). Three review rounds, each 🔴 reproduced live: (1) **same-message race** — lanes dispatched in one message run their PreToolUse hooks before any worktree exists; an allowed dispatch takes a per-repo `.claim` slot (mtime checked and written under `flock`, clock read AFTER the lock, 20 s TTL) in the hook's EXIT trap, so a dispatch another gate in the same hook refuses never holds it. A "check then mkdir/rmdir" slot was won twice in 2/300 races. (2) **evidence order** — only a live worker TRANSCRIPT beats the merged check (a commit-less lane sits on its fork point); a process cwd never does (leaked pytest tmux servers sat in two merged controller lanes and would have wedged every dispatch). (3) **integration base** — a 2-branch repo integrates on `dev`, so a lane merged into the most advanced `dev` ref is merged (`_dev_integration_ref`), but the BASE stays develop-else-default: the controller's own repo carries a stale `origin/dev`. Classify from the MAIN worktree (subdir/lane cwds), and own-worktree exclusion keys on `CLAUDE_PROJECT_DIR`, never the shell cwd (a `cd` into a worker's lane hid it). Changing `classify_lanes`/`_resolve_base_branch` releases their #1107 verbatim pins in a test commit first.
+
+### Moved from internals-skills-modules.md at the #1137 mode / session-scope removal (2026-10-25)
+
+- **#723/#724 — reverzia fleet doktríny na batch (autopilot→batch #723, autopilot-master AJ→batch #724): shared `TestContinuousRefillMandate`/`TestNoContinuousReversion` lock číta OBA (`SKILL`+`SKILL_MASTER`), po #724 OBA asserti batch, NIKDY nemaž; „batch"(lane-set) vs „batch"(bundled-unit) rename = cross-cutting follow-up (#311), nie in-diff.
+- **#970 (2026-09-09) — per-resource lane cap via `watchdog/lane_resources.py` (extracted from goal.py).** `.claude/lane-resources.json` `{"max_lanes": 5, "resources": {"box": 1}}` declares per-resource concurrency caps; `lane_resource_caps(cwd)` returns `{"total": N, "box": M}`; `count_resource_usage(cwd, ev)` reads `.lane-needs` markers from live worktrees; `_lane_nudge_text()` prints "box 1/1 occupied . box-free 2/4 free"; `GOAL_LANE_NUDGE_TEXT` dead duplicate unified into `GOAL_LANE_NUDGE_TEXT_FN`. SKILL.md Step 3.2 documents the `.lane-needs` dispatch marker and `blocked: box` return contract. Backward compat: absent `resources` = flat cap; absent file = flat 5. **Reusable gotcha (Y-2 fable review): a marker file at a worktree's ROOT dirties the tree and blocks disk-guard reclamation** — write dispatcher markers into the worktree's PRIVATE gitdir (`$(git -C "$WT" rev-parse --git-dir)/lane-needs` = `<main>/.git/worktrees/agent-<id>/lane-needs`) — invisible to `git status`, dies with the worktree, no `.gitignore` needed. Phrase-locked tests: `"up to 5"` and `"Continuous refill"` are locked in `test_fleet_concurrency_doctrine` and `test_batch_orchestration` — keep those phrases.
+
+### Moved from internals-hooks.md at the #1137 mode / session-scope removal (2026-10-25)
+
+- **#1078 — the lane-fill Stop gate (`gates/lanefill.py` + `hooks/stop-check-lane-fill.sh`, registered in `settings/hooks.json` Stop) is FAIL-OPEN (any unreadable seam → stderr journal `lane-fill: unreadable (<why>) — not enforced` + allow; adds PRESSURE, never guards a write). FOUR gotchas a Stop gate on this data hit: (1) goal-armed MUST use `watchdog.goal_scan.seed_goal_marker` (backward scan to 32MB), NOT `scan_goal_markers(off=None)` (last-4MB tail only) — a long session whose `/goal` marker scrolled back reads as not-armed and the gate defeats itself on exactly the sessions it targets; `unknown-past-cap`→`_Unreadable`→journal+allow. (2) DISPATCHABLE is CACHE-FIRST from the per-cwd tickets-status cache (`_dispatchable_for_cache` persists `dispatchable:[{number,title}]`, ≤120s footer refresh) — NEVER a live `--list-dispatchable` subprocess per turn (14 boxes × ~15-25s + shared-app-token gh burst = the #1051 class); stale/missing→ONE 8s fallback→timeout fail-open. (3) mode via `cli_concurrency.resolve_mode` (sequential EXEMPT), cap via `watchdog.lane_resources.lane_resource_caps`, live via `watchdog.count_live_workers` (disk-only → a just-dispatched lane whose transcript hasn't landed under-counts → the block names `Lane-fill:` as the escape). (4) the `--list-dispatchable` flag hit the #1036 Mock-truthy trap — read it `getattr(args,'list_dispatchable',False) is True`.**
+
+### Moved from internals-quota.md at the #1137 mode / session-scope removal (2026-10-25)
+
+- **Per-SESSION memory scope on workstations (#1224, `cli_session_scope`).** Both launchers exec claude through `systemd-run --user --scope` on the `SCOPE_HOSTS`. Five facts, each measured live on dev1:
+  - **`OOMPolicy=continue` is mandatory.** The default `stop` ends the WHOLE scope, claude included, when the kernel memcg OOM kills one tool. A throwaway 300 MB scope showed `Terminated`; with `continue` the tool got rc -9 and the parent lived.
+  - **The probe must carry the same `-p` set as the exec.** A refused property after a green bare probe would kill the pane.
+  - **Every tool must be the OOM victim first.** `BASH_ENV` is exported and each non-interactive `/bin/bash -c "source <snapshot>…"` (how Claude Code runs a Bash tool) raises its own `oom_score_adj` to 800. An unprivileged process may lower the value only down to `oom_score_adj_min` (0), so claude cannot shield itself; raising the tools is the lever.
+    - Group the write as `{ echo 800 > /proc/self/oom_score_adj; } 2>/dev/null`: a redirect error is printed BEFORE a trailing `2>/dev/null` applies, and every hook would carry it.
+    - The real claude is a native ELF on every account (checked dev1/dev2), so it never sources `BASH_ENV`. A bash-script `claude` shim would.
+  - **`--scope` keeps the pid but RESOLVES argv[0]** (`/home/<u>/.local/bin/claude …`). A cmdline matcher needs `(^|/)claude`; `comm` and `pane_current_command` stay `claude`.
+  - **Under `set -euo pipefail`, `_kb=$(awk …)` on a missing file aborts the launch.** Every fail-open read needs `|| _kb=""`.
+  - Everything a session starts, `setsid nohup` jobs included, shares its cap.
+- **A launch-time cap never reaches a session that is already running (#1245, dev1's 5th freeze, 14.10.).** #1224 closed with "each session gets its scope at its next launch", so four sessions from 6-11.10. ran uncapped and one 5.6 GB tool froze the box. Install now ADOPTS them: `StartTransientUnit` with `PIDs` over the user bus (`busctl --user call … 'ssa(sv)a(sa(sv))'`), the call `systemd-run --scope` makes. Measured on dev1 (systemd 255):
+  - The user manager can move a process out of a logind `session-N.scope`. But the new scope lives under `user@<uid>.service`, so without linger it dies with the user manager after the last login: move a logind-scope pid only when `/var/lib/systemd/linger/<user>` exists.
+  - cgroup v2 moves no charges, so nothing is OOM-killed at the move. Pages touched again are charged to the scope later, so skip a claude already past half of MemoryHigh.
+  - One vanished pid fails the whole call (`Failed to set unit properties: No such process`). Leave descendants under 2 s old behind (a hook, the statusline) and retry with a fresh scan.
+  - `AttachProcessesToUnit` is NOT the per-pid fallback: it refuses `Process migration not available on non-delegated units`.
+  - Walk the tree, not the pid order, for a nested `claude`: pids recycle, so a child can have a lower pid than its parent.
+  - A step that acts on live processes refuses its default runner under `PYTEST_CURRENT_TEST` (the #1136 shape), so a full `cmd_install` test on dev1 never moves real sessions.
+  - Verify a "protection" on the box as it IS, not as a fresh launch makes it: list every `claude` with its cgroup `memory.max`. A green fresh-launch probe said nothing about the four old sessions.
+- **#1256 — the #1224 tool-OOM `BASH_ENV` file recursed into a segfault under another `$HOME`.** A launcher run under another HOME (a test HOME, a sudo/su-hosted Claude) chained the inherited outer oom file as `AIRULESET_PREV_BASH_ENV`, and that file's PREV was itself, so every non-interactive bash crashed. The gate symptom: 12 `TestClaudeLauncherContinueOrNew` failures once the session ran with `BASH_ENV` set. Fix:
+  - the launcher never chains another `airuleset-tool-oom.sh`;
+  - the oom file skips that name and also keeps a `__airuleset_oom_chain` re-entrancy sentinel, which covers a symlink or a user file that sources it.
+  - Tests that run launchers inherit the ambient `BASH_ENV`, so set it explicitly in a regression test.
+
+### Moved from internals-cli.md at the #1137 mode / session-scope removal (2026-10-25)
+
+- **#993/#992 — `lane-overlap` CLI leaf + managed `swap` install step + picker order.** New `cli_lane_overlap.py` (compute_overlap: candidate paths+topics vs live worktree lanes + open PR file lists; write_receipt to `~/.claude/lane-overlap/<cwd-key>.json` — the dispatch gate's receipt), wired as `airuleset.py lane-overlap`. `cli_disk_guard_root.py` gains render_swap_setup_script / swap_size_gb (clamp [2,8]G) / provision_swap (present-swap no-op, sudo -n gate + clear skip line, non-fatal) / swap_status — wired into cmd_install + a `swap:` cmd_status row (the #992 controller-OOM fix as provisioning, not a manual intervention). `cli_quals_cmd.py` `_row_sort_key`/`_row_label_rank` sort `architecture-rework` first then oldest-createdAt. Ratchet: hand-raise ceilings for deliberate growth, re-`--check` after EVERY edit (#532). **#1088: do NOT `--update` to register a new file — it REWRITES the WHOLE ratchet (registers every untracked file/fn fleet-wide = scope creep); a new file <1000 lines / fn <300 needs NO entry (FILE/FUNC_DEFAULT_CEILING), so hand-raise ONLY the grown ceilings.** A shared render CONSTANT may have >2 readers — #1088's `STREAM_DEV_CWD_CHAIN` feeds `render_ssh_attach_block` (bash), `_stream_session_cwd` (Python) AND `cli_webterm._remote_command` (#961, shares the constant not the predicate); grep every reader before changing it.
+- **#1107 -- extracting a leaf that KEEPS a shared seam in the parent = BOTTOM-placed cross-imports on BOTH sides (mutual cli<->cli cycle-break).** Leaf `classify_lanes` calls `_lane_files`/`_run_default` (kept in `cli_lane_overlap`) by BARE name; overlap re-exports the leaf's 4 public names. A TOP-level mutual import deadlocks either order -- put BOTH `from ... import` at MODULE BOTTOM (after every def); lock with a two-order fresh-`subprocess` import test. Verbatim proof (#482): PIN the pre-move SHA (`merge-base HEAD main` drifts post-merge) for the `git show`-vs-`inspect.getsource(fn).splitlines()` reconstruction assert.

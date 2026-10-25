@@ -3,7 +3,6 @@ paths:
   - "gates/**"
   - "cli_concurrency.py"
   - "goal_registry.py"
-  - "cli_dispatch_gate.py"
   - "cli_lane_liveness.py"
 ---
 
@@ -268,31 +267,7 @@ until the ratchet cap, then the oldest move to `.claude/rules-reference/internal
   silently dropped. (3) watchdog state that gates a gh WRITE is written through into `state` as it
   changes, and the write first searches for its own episode id: a killed sweep must not file twice.
 
-- **#1137 — flipping the ONE concurrency resolver's default (`cli_concurrency.DEFAULT_MODE`
-  parallel→sequential) re-routes EVERY consumer at once: lane caps (sequential = total 1), the
-  #998 dispatch gate (2nd `autopilot-worker` refused), the refill + queue-arrival nudge skips,
-  the lane-fill Stop gate (`gates/lanefill.py` exempts non-parallel), `_dispatchable_for_cache`,
-  and the `/goal` renderer (SKILL.md's shipped lines ARE `render()` = the default variant, so
-  `goal-inventory --write` regenerates them and `goal_template_for` must route the NEW default
-  to SKILL.md and the old one to the renderer).** Three things the design list missed, found by
-  running the WHOLE suite, not the symbol-grep subset: (1) a skip written for "no refill" also
-  silenced an AWARENESS nudge (#1178 ended-supervisor queue-arrival) on every box — audit each
-  consumer's PURPOSE, not just its mode check; the fix exempts the `deliver_hold` path like the
-  infra role. (2) resolver-ERROR fallbacks hard-coded the old default ("treating as
-  non-sequential") — flip every error branch to the new default too. (3) 15 test files drive the
-  parallel machinery on a FAKE cwd (`/home/newlevel/devel/x`, no project file possible) and
-  silently depended on the default; pin them with ONE shared one-line class decorator
-  (`tests/_parallel_mode_pin.PARALLEL_PIN` = `patch.object(cli_concurrency, "DEFAULT_MODE",
-  "parallel")`, effective because consumers import `cli_concurrency` lazily and read the global
-  at call time) instead of per-class `setUp` blocks — a decorator costs 1 line per class, which
-  keeps the size-ratchet raises small. Put brand-new locks in a NEW test file (default 1000-line
-  ceiling) rather than growing capped files. Also: the airuleset checkout's own
-  `.claude/lane-resources.json` is resolver SOURCE 2 and overrides the default for the controller.
-  Rewording a canonical `/goal` clause (`_SEQUENTIAL_SATURATION`) moves THREE hash/byte locks —
-  `test_goal_variants_998._GOLDEN`, `test_stream_no_done_state_1128.FULL_GOLDEN` and the vs-`main`
-  compare in `test_bounce_goal_rider_1066` — grep them BEFORE the RED commit, or the GREEN commit
-  lands red.
+- **[Moved to `.claude/rules-reference/internals-archive.md` at the #1137 mode / session-scope removal, 2026-10-25 — grep "#1137 — flipping the ONE concurrency resolver's default" there]** the machinery it describes is removed.
 - **#1203 subagent slice — a subagent's OWN transcript is `<session>/subagents/agent-<agent_id>.jsonl` and every entry in it is `isSidechain: true`.** A main-session reader that skips sidechain entries therefore sees nothing there; `model_fallback.tail_state(..., sidechain=True)` reads them. The hook payload's `agent_id` is the bare hash (the worktree pin name). Validate it as 1-64 alphanumerics before building a path, and prefer `agent_transcript_path` when the payload carries it. A subagent blocks only on a PROVEN fallback (a marker in force): per-dispatch models legitimately differ from the managed one. The controller had 12 real fallen-back subagent transcripts (25.9.). A character-class literal like `"abc…XYZ0123456789"` trips `block-sensitive-staging.sh` as a 32+ char blob, so build it from `string.ascii_letters + string.digits`. If a blocked `git add` already staged the literal, `git restore --staged` it first, because the hook re-scans the index on every staging command.
-- **#1229 — the sequential gate counts ANY worktree lane (`isolation: "worktree"`, any `subagent_type`), and a lane-count gate needs three things beyond the count.** presenter@dev2 opened three `general-purpose` worktree lanes in a sequential pane because `hooks/block-dispatch-over-wdrain.sh` exited for every type but `autopilot-worker`. The verdict now comes from `cli_dispatch_gate.dispatch_gate_report` (a leaf; `cli_concurrency` sits at its ratchet ceiling). Three review rounds, each 🔴 reproduced live: (1) **same-message race** — lanes dispatched in one message run their PreToolUse hooks before any worktree exists; an allowed dispatch takes a per-repo `.claim` slot (mtime checked and written under `flock`, clock read AFTER the lock, 20 s TTL) in the hook's EXIT trap, so a dispatch another gate in the same hook refuses never holds it. A "check then mkdir/rmdir" slot was won twice in 2/300 races. (2) **evidence order** — only a live worker TRANSCRIPT beats the merged check (a commit-less lane sits on its fork point); a process cwd never does (leaked pytest tmux servers sat in two merged controller lanes and would have wedged every dispatch). (3) **integration base** — a 2-branch repo integrates on `dev`, so a lane merged into the most advanced `dev` ref is merged (`_dev_integration_ref`), but the BASE stays develop-else-default: the controller's own repo carries a stale `origin/dev`. Classify from the MAIN worktree (subdir/lane cwds), and own-worktree exclusion keys on `CLAUDE_PROJECT_DIR`, never the shell cwd (a `cd` into a worker's lane hid it). Changing `classify_lanes`/`_resolve_base_branch` releases their #1107 verbatim pins in a test commit first.
-
+- **[Moved to `.claude/rules-reference/internals-archive.md` at the #1137 mode / session-scope removal, 2026-10-25 — grep "#1229 — the sequential gate counts ANY worktree lane" there]** the machinery it describes is removed.
 - **#1258/#1259 (owner 24.10.2026) — an exempt filing reason is a decomposition door, and a per-account doctrine exception for a bash hook rides an install-written marker.** (1) `planned-work` was exempt from every cap, so one owner task became a pile of child tickets (david3: 8 of 12 PASS filings in 30 days; odoo-erp 348 issues in 30 days). It is retired: `ALLOWED` drops it, and its block reason (`planned-work-retired`) names the right action (a `- [ ]` checklist item in the parent). A retired criterion keeps a SPECIFIC reason; never let it fall into the generic `invalid-scope-gate`. Closing one exempt door opens the next: both reviews showed `user-request` became the split door (same owner quote on every child), so a child naming a parent is width-capped whatever its criterion and an unattended `user-request` is daily-capped (`_log_pass_count(exempt=UNCAPPED_ALWAYS)`); only `architecture-rework` escapes. Retiring a doctrine also means sweeping every hook MESSAGE and deep companion that still orders it (`stop-check-untracked-work.sh` blocked "the rest stays in the #N checklist"). (2) Cap tests derive from `DAILY_CAP`/`CHAIN_WIDTH_CAP`, never hard-coded 8/9 or 2/3. Keep `CHAIN_WIDTH_CAP < DAILY_CAP`: at 2 = 2 the width cap can never fire and the per-parent scope is untestable, which is why width went to 1. (3) The presence quote (`_has_recent_owner_quote`) parses only `D.M.YYYY`; an ISO `2026-10-24` heading next to `verbatim` is still `presence-required`. (4) A client without an Odoo board (slovnormal, david1-4) is a per-user fact (`cli_odoo_board.NO_BOARD_USERS`). `_write_box_class_marker` writes `~/.claude/airuleset-client-board` = `off` (and removes a stale one), the question gate's Checks 7/9 read it, `cli_odoo_ro.load_config()` returns None on it whatever path a caller passes, and `inject-situational-rule.sh` skips every `odoo-client-board*` row, so the board doctrine never reaches that session. Never detect the tenant from question prose.

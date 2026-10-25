@@ -260,84 +260,14 @@ def evaluate(now, sid, cwd, projects_dir, state, backlog_fetch, goal_mark_entry,
     return g, g.line
 
 
-# --- #571: the lane-occupancy working-no-tasks + low-mem-surface deciders ------
-#
-# Both are PURE (facts in / verdict out), so the capped orchestrator
-# `goal.goal_lane_occupancy_nudge` consumes them through thin module-level
-# helpers and never grows, and every branch is mutation-lockable in isolation.
-
-LaneWorkingNoTasks = namedtuple("LaneWorkingNoTasks", "defer streak log")
-
-
-def lane_working_no_tasks_decision(*, marker, render_waiters, structured_live,
-                                   backlog, defer_streak, max_defers):
-    """#571 — the lane-occupancy ``working-no-tasks`` branch decider.
-
-    The branch fires only on a ``⏳`` marker with 0 RENDER task badges
-    (``render_waiters <= 0``). Pre-#571 it then DEFERRED unconditionally, reading
-    the FLAPPING render badge as truth — so a worker mid-long-tool-call (whose
-    strip badge is render-invisible but whose subagent transcript is disk-live)
-    read as "0 live tasks" and SUPPRESSED the fill nudge (the gk 16-issues /
-    2-lanes regression). ``structured_live`` is the STRUCTURED read
-    (``transcripts.lane_has_live_evidence`` over ``count_live_workers`` evidence —
-    any non-stale lane, the #565 evidence predicate, NEVER the wedged-excluding
-    count).
-
-    Verdict (`LaneWorkingNoTasks(defer, streak, log)`):
-
-      * NOT applicable (``marker != "⏳"`` or ``render_waiters > 0``): the branch
-        does not fire → ``defer=False``, streak RESET (0), ``log=None`` (silent —
-        the saturation logic below logs its own decision).
-      * ``structured_live`` True: lanes ARE live (render-invisible) → NOT a
-        working-no-tasks state → PROCEED (``defer=False``), streak RESET,
-        ``log=None`` (the fill/saturation logic logs).
-      * ``structured_live`` False (genuinely 0 non-stale lanes): a ``⏳`` claiming
-        work with nothing running → BOUNDED defer. ``defer=True`` while
-        ``streak < max_defers`` OR ``backlog <= 0`` (nothing to nudge for). At
-        ``streak >= max_defers`` WITH ``backlog > 0`` → stop deferring
-        (``defer=False``) so the pane reaches the empty-lane nudge path (whose
-        shared per-kind cadence gate bounds its journal cadence; #1089 retired the
-        keystroke DELIVERY itself) — never an
-        unbounded identical skip loop (the #566 livelock class). Both defer and
-        the stop-deferring case journal a greppable ``log``.
-
-    ``streak`` is the caller's NEW persisted defer streak. (#619: the #611
-    ``escalated`` field is retired -- the 15-min idle floor it bypassed is gone,
-    so the stop-deferring case simply reaches the nudge like any ``defer=False``.)
-    """
-    if marker != "⏳" or render_waiters > 0:
-        return LaneWorkingNoTasks(False, 0, None)  # branch does not fire
-    if structured_live:
-        return LaneWorkingNoTasks(False, 0, None)  # lanes live -> proceed
-    streak = defer_streak + 1
-    if backlog > 0 and streak >= max_defers:
-        return LaneWorkingNoTasks(
-            False, streak,
-            "working-no-tasks ESCALATE (%d defers, backlog>0, 0 structured live "
-            "lanes -- proceeding to the gated nudge path)" % streak)
-    return LaneWorkingNoTasks(
-        True, streak,
-        "skip:working-no-tasks (⏳ marker, 0 structured live lanes, defer %d/%d)"
-        % (streak, max_defers))
-
-
-# #729 -- LaneLowMemSurface + lane_low_mem_surface_decision (the persistent-
-# low-mem CAPACITY-CEILING surface decider) are DELETED with the rest of the
-# memory OOM subsystem in watchdog/goal.py: they were consumed ONLY by the
-# #726-retired under-saturated fill nudge's `_lane_lowmem_skip`, and the
-# empty-lane batch-start nudge stays memory-EXEMPT (#729 decision -- see the
-# GOAL_LANE_SATURATION_WORKERS comment block in goal.py).
-
-
 # --- #662: the persistent-STUCK -> owner-ALERT decider -------------------------
 #
 # SILENCE B of the montalu6 9,5h outage: one_glance's `stuck` verdict (the ONLY
 # actionable one) was consumed solely by a journal line + the lane KEYSTROKE
 # nudge -- which cannot revive a dead / login-dialog-covered session. Nothing
 # routed a PERSISTENT structural stuck to an OWNER alert. This PURE decider
-# (facts in / verdict out, mutation-lockable in isolation like its two siblings
-# above) is the wire: the thin orchestrator `goal._lane_stuck_owner_alert`
-# consumes it and records ONE `stuckalert:` signal per episode. #688 (owner
+# (facts in / verdict out, mutation-lockable in isolation) is the wire: the
+# thin orchestrator `goal._lane_stuck_owner_alert` consumes it and records ONE `stuckalert:` signal per episode. #688 (owner
 # ruling 2026-08-25) then added `stuckalert:` to SUPPRESSED_ALERT_PREFIXES —
 # the structural `stuck` verdict is a heuristic that fires on many
 # non-human-needed states, so the send() drops the Discord PING and keeps only

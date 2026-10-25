@@ -163,8 +163,6 @@ def apply_ultracode_launcher(bashrc_path: Path = None, script_path: Path = None,
     os.chmod(str(spath), 0o755)
     if not spath.exists():
         raise RuntimeError(f"claude launcher script missing right after write: {spath}")
-    import cli_session_scope
-    cli_session_scope.write_tool_oom_env(spath.parent)   # #1224: the BASH_ENV file
 
     # #1060 L3a: the claude-impl launcher — written UNCONDITIONALLY on every box
     # (same self-heal discipline as the main launcher). It is inert off a

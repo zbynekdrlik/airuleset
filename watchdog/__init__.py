@@ -1516,7 +1516,7 @@ from watchdog.goal_scan import (  # noqa: E402
     _newest_marker as _newest_marker,
     scan_goal_markers as scan_goal_markers,
     seed_goal_marker as seed_goal_marker,
-    persisted_goal_mark as persisted_goal_mark,   # #1089 -- lane-fill gate reader
+    persisted_goal_mark as persisted_goal_mark,   # #1089
     pane_goal_armed as pane_goal_armed,
     _tmux_client_recent_input as _tmux_client_recent_input,
     GOAL_MARK_TAIL_BYTES as GOAL_MARK_TAIL_BYTES,
@@ -2593,10 +2593,9 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
              conformance_is_target=None, conformance_hb_enabled=False,
              gkorphan_fetch=None, gkorphan_handoff_fetch=None,
              release_state_fetch=None, queue_fetch=None, queue_classify=None,
-             dispatchable_fetch=None,
              reaper_ps_fetch=None, reaper_kill_fn=None,
              resource_guard_gk_request=None,
-             u_fetch=None, reconcile_fetch=None, disk_guard_enabled=False,
+             u_fetch=None, disk_guard_enabled=False,
              nice_check_enabled=False,
              mdreview_cadence_enabled=False,
              priority_policy_enabled=False,
@@ -2853,8 +2852,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
           old re-arm delivery-discipline machinery is needed any more — a false
           ping just costs the user one glance and a cheap re-run.
           `goal.goal_lane_sweep` is where the remaining watchdog-INITIATED
-          keystrokes originate (its RIDERS deliver; the #365/#351 lane-occupancy
-          nudge DELIVERY is retired, #1089/#1096) and needs `compact_handled_this_sweep`
+          keystrokes originate (its RIDERS deliver; #1137 removed the #365
+          lane-occupancy branch) and needs `compact_handled_this_sweep`
           for the same coordination reason job 9 above does. It also carries
           the per-armed-pane RIDERS (ZERO extra pane walk, same `handled`
           coordination, NOT separately numbered): the W/I partition-audit
@@ -2885,22 +2884,14 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
           label + question-map entry that is no longer a live owner question
           (so the footer `U`, the owner's ONLY question surface since #795,
           stays truthful) — NEVER an owner ping, and hard-floored at 1×/hour
-          per session by the shared cadence gate. And, when `reconcile_fetch` is
-          wired, the #844 POST-COMPACT LANE RECONCILE rider
-          (`lane_reconcile.goal_lane_reconcile_recheck`) — keyed on the
-          transcript's OBSERVED compaction (newest `isCompactSummary` epoch, ZERO
-          gh unless a compaction is observed), FULL-authority only, it keystrokes
-          the armed session to integrate returned worktree lanes from durable
-          state (the branch + its LANE-RETURN comment) after the #844 forced
-          compact may have lost a lane-completion notification — NEVER an owner
-          ping, deduped one attempt per observed compaction. And, when
+          per session by the shared cadence gate. And, when
           `deploy_state_fetch` is wired, the #944 DEPLOY-STATE WATCH
           (feeds `ops_wait_recheck._deploy_watch_classify`) — for a
           deploy-target W member whose PROD version is behind main,
           classifies into DEPLOY-WINDOW (open window) or DEPLOY-MISS
           (missed window), per-instance and per-version deduped. All
-          seven riders (lane / ops-wait / release-gap / queue-arrival /
-          u-freshness / lane-reconcile / deploy-state) now consult that
+          riders (ops-wait / release-gap / queue-arrival / u-freshness /
+          deploy-state) now consult that
           SHARED `nudge_gate` (`state["nudge_cadence"]`, #797): a per-category
           floor (only u-freshness's 1×/hour strop is non-zero) plus a
           cross-category family-spacing floor that DEFERS a second category's
@@ -5180,8 +5171,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
     #     BSpace, gated on a clean boundary + fail-closed recent-human + a
     #     byte-exact-prefix content proof + a bounded give-up).
     #   * `goal_lane_sweep` is where the OTHER watchdog-INITIATED keystrokes
-    #     originate (its RIDERS deliver; the #365/#351 lane-occupancy nudge
-    #     DELIVERY is retired, #1089/#1096) and needs `compact_handled_this_sweep`
+    #     originate (its RIDERS deliver) and needs `compact_handled_this_sweep`
     #     for the identical reason job 9 above does.
     def _job_goal_dark_watch():
         from watchdog import goal as _goal_mod
@@ -5225,9 +5215,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
             release_state_fetch=release_state_fetch,     # #616
             queue_fetch=queue_fetch,                     # #733
             queue_classify=queue_classify,               # #993 item 4
-            dispatchable_fetch=dispatchable_fetch,       # #993 item 3
             u_fetch=u_fetch,                             # #797
-            reconcile_fetch=reconcile_fetch,             # #844
             deploy_state_fetch=deploy_state_fetch,       # #944
             infra_queue_fetch=infra_queue_fetch,         # #1029 role-aware
             resolve_role_fn=resolve_role_fn,             # #1029 role-aware

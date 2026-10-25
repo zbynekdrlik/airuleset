@@ -33,11 +33,17 @@ PROFILES = ("full", "branch-merge", "fork-no-merge")
 # drift-locked in tests/test_goal_registry.py so they can never diverge.
 GOAL_ARM_CHAR_CAP = 4000
 
+# #1137 (owner 25.10.2026) — the ONE remaining dispatch sentence: an
+# encouragement to bundle related tickets (it replaced the sequential /
+# continuous-refill mode clauses; Claude Code decides the rest itself).
+_BUNDLE = ("related tickets: work them together in one branch, one PR and one "
+           "CI cycle when their focus allows;")
+
 
 class Clause:
     """One named piece of a `/goal` condition. `text` is a str when every
     profile that carries the clause renders it identically (ONE definition —
-    e.g. `saturation-core`), or a {profile: str} dict when the profiles
+    e.g. `bundle`), or a {profile: str} dict when the profiles
     genuinely differ (e.g. `proof`, whose commands/tokens differ)."""
 
     __slots__ = ("id", "profiles", "text")
@@ -55,22 +61,6 @@ class Clause:
         return self.text if isinstance(self.text, str) else self.text[profile]
 
 
-# The reconciliation the owner asked to be VISIBLE in the registry, not buried
-# in prose (#848, 2026-09-02): `saturation-core` keeps parallel worktree lanes
-# live and refills a returned slot ONLY with a DISPATCHABLE unit (dependencies
-# closed, #993 r2b — the class-based infra-serial half was removed: infra
-# serialisation is ROUTING via --role, not a live-lane gate; the count is sized
-# to box+backlog, #991); `saturation-delivery` integrates each returned branch
-# SERIALLY under the mutex as it returns; `compact-boundary` now just ENDS every
-# integration cycle with the `## ✅ Work Complete` report — machine compacts are
-# REMOVED (#1084, owner ROZHODNUTÉ 2026-09-19), so there is NO compact command
-# and NO compact HOLD; Claude Code's native threshold autocompact is the only
-# compaction left. So dispatch is continuous-refill, integration is serial, and
-# nothing types `/compact`. Tests assert the compact-boundary clause carries no
-# compact-request instruction and no HOLD.
-SATURATION_RECONCILES_COMPACT = ("saturation-core", "saturation-delivery",
-                                 "compact-boundary")
-
 # Clause KINDS a profile MUST carry (a missing one is a red coverage test — the
 # mechanical guard that prevents another silently-absent clause like the
 # saturation directive was for months, #621). `REQUIRED_CLAUSES` is the shared
@@ -81,8 +71,8 @@ SATURATION_RECONCILES_COMPACT = ("saturation-core", "saturation-delivery",
 REQUIRED_CLAUSES = (
     "header", "stop-a", "stop-a-livelane", "stop-b-header", "obligation", "proof",
     "how-to-tell", "done-never", "cannot-tell", "produce-proof",
-    "irreversible", "work-intro", "saturation-core", "saturation-delivery",
-    "ask", "night", "bounce", "verify-sources", "compact-boundary",
+    "irreversible", "work-intro", "bundle", "ask", "night", "bounce",
+    "verify-sources", "compact-boundary",
 )
 # #1128 (owner ruling 2026-09-23): a sub-dev STREAM loop has NO backlog-empty
 # done-state — gk/U/W work keeps returning, so any countable (B) eventually holds
@@ -152,13 +142,9 @@ CLAUSES = [
         "branch-merge": "While NEITHER holds, work the assigned backlog —",
         "fork-no-merge": "While NEITHER holds, work the assigned backlog —",
     }),
-    Clause("saturation-core", PROFILES,
-        "CONTINUOUS REFILL, never one ticket per turn: keep `isolation:worktree` autopilot-worker lanes live — refill ONLY with a DISPATCHABLE unit (dependencies closed);"),
-    Clause("saturation-delivery", PROFILES, {
-        "full": "integrate returned branches SERIALLY under the integration mutex as they return;",
-        "branch-merge": "merge returned branches into the integration branch SERIALLY under the mutex as they return;",
-        "fork-no-merge": "hand off returned fork branches SERIALLY as they return;",
-    }),
+    # #1137 (owner 25.10.2026): Claude Code decides dispatch itself; the ONE
+    # remaining encouragement is to bundle related tickets.
+    Clause("bundle", PROFILES, _BUNDLE),
     Clause("prod-gate", ("full",),
         "Never gate, classify, skip, or warn based on prod-usage / events / off-air / hardware — I alone guard whether prod is live."),
     Clause("ask", PROFILES, {
@@ -171,9 +157,9 @@ CLAUSES = [
     Clause("night", PROFILES,
         "No night/day difference (#791): work the backlog and ask questions 24/7 — no night-hour cutoff, no time-of-day deferral."),
     Clause("bounce", PROFILES, {
-        "full": "Bounce lane: open tickets labeled prio:bounce jump the queue — the next FREE lane takes them oldest-first (never preempting a running lane); a named nudge gets a one-line ACK + prio:bounce label, taken next turn, never worked inline.",
-        "branch-merge": "Bounce lane: my prio:bounce tickets fill each FREE lane oldest-first (never preempting a running one); a named nudge gets a one-line ACK + label next turn, never inline.",
-        "fork-no-merge": "Bounce lane: my prio:bounce tickets fill each FREE lane oldest-first (never preempting a running one); a named nudge gets a one-line ACK + label (best-effort), taken next turn, never worked inline.",
+        "full": "Bounce lane: open tickets labeled prio:bounce jump the queue, oldest-first (never preempting running work); a named nudge gets a one-line ACK + prio:bounce label, taken next turn, never worked inline.",
+        "branch-merge": "Bounce lane: my prio:bounce tickets go first, oldest-first (never preempting running work); a named nudge gets a one-line ACK + label next turn, never inline.",
+        "fork-no-merge": "Bounce lane: my prio:bounce tickets go first, oldest-first (never preempting running work); a named nudge gets a one-line ACK + label (best-effort), taken next turn, never worked inline.",
     }),
     Clause("verify-sources", PROFILES, {
         "full": "Count a ticket done ONLY after verifying from primary sources — `gh pr view` (merged, closingIssuesReferences), `gh run list` (main green), `gh issue view` (closed), the deployed version on the live target — never the worker's claim alone; verify the LAST ticket as strictly as the first.",
@@ -189,38 +175,23 @@ CLAUSES = [
 
 
 # --------------------------------------------------------------------------- #
-# #998 — per (authority, role, mode) rendering. The DEFAULT is SEQUENTIAL with
-# no role (#1137, owner ROZHODNUTÉ 2026-09-30: the sequential/natural mode is the
-# default of every target) — `render(profile)` delegates to it; a SEQUENTIAL mode
-# SUBSTITUTES the refill clause (`saturation-core`) with a one-unit-at-a-time
-# clause (the PARALLEL variant keeps `saturation-core` and is rendered ONLY for
-# an explicit `mode: parallel` declaration), and an `infra` ROLE APPENDS an infra-scope clause after the delivery
-# clause. NO variant ever carries a turn cap ("stop after N turns" is banned in
-# operational goals, owner directive 2026-09-12, #993 comment) — the renderer
-# never inserts one, and `no_turn_cap_ok` locks it.
+# #998 — per (authority, role) rendering. #1137 (owner 25.10.2026) removed the
+# parallel/sequential MODE axis: Claude Code decides subagents, worktrees and
+# ticket order itself, so no variant carries a lane/refill/one-unit clause. An
+# `infra` ROLE APPENDS an infra-scope clause after the bundle clause; `review`
+# and `quality` REPLACE the generic (B) block. NO variant ever carries a turn
+# cap (owner directive 2026-09-12, #993) — `no_turn_cap_ok` locks it.
 # --------------------------------------------------------------------------- #
 
-MODES = ("parallel", "sequential")
-DEFAULT_MODE = "sequential"  # #1137 — mirrors cli_concurrency.DEFAULT_MODE
 ROLES = (None, "review", "infra", "quality")  # #1074 — the gk-quality window
 
-# The sequential clause that REPLACES `saturation-core` (the refill clause).
-# #1137 review: the main may implement the unit itself — no forced worker per
-# unit ("subagents where they naturally help", owner ROZHODNUTÉ 2026-09-30).
-_SEQUENTIAL_SATURATION = (
-    "SEQUENTIAL — ONE unit at a time, one theme with focus: implement it "
-    "yourself or with one worker → main review → integrate → verify → next; "
-    "no refill;")
-
-# #1060 L3b — the DUAL dispatch-CHANNEL clause. This is ORTHOGONAL to the
-# parallel/sequential MODE: it swaps HOW a unit is dispatched (a cross-session
-# SendMessage to the persistent implementer window, not an in-session
-# autopilot-worker Agent), not the loop's stop conditions or refill discipline —
-# so the armed `/goal` line is UNCHANGED and `drift()` stays green. Selected by
-# the model-backend marker (`~/.claude/airuleset-model-backend.json`). The SKILL
-# body carries this string VERBATIM (`skill_dual_drift` check-locks it, exactly
-# as `skill_sequential_drift` locks the sequential clause), so an unarmed session
-# reading only the body can never diverge from this canonical dispatch contract.
+# #1060 L3b — the DUAL dispatch-CHANNEL clause: it swaps HOW a unit is
+# dispatched (a cross-session SendMessage to the persistent implementer window,
+# not an in-session autopilot-worker Agent), not the loop's stop conditions — so
+# the armed `/goal` line is UNCHANGED and `drift()` stays green. Selected by the
+# model-backend marker (`~/.claude/airuleset-model-backend.json`). The SKILL
+# body carries this string VERBATIM (`skill_dual_drift` check-locks it), so an
+# unarmed session reading only the body never diverges from this contract.
 _DUAL_DISPATCH = (
     "DUAL dispatch (model-backend marker present) — dispatch each unit to the "
     "IMPLEMENTER window, NEVER an in-session Agent(autopilot-worker): "
@@ -232,7 +203,7 @@ _DUAL_DISPATCH = (
     "continue other work — NEVER fall back to an in-session Opus autopilot-worker "
     "on a dual box (that breaks the pilot's per-alias measurement).")
 
-# The infra-role clause, APPENDED after `saturation-delivery` when role==infra.
+# The infra-role clause, APPENDED after the `bundle` clause when role==infra.
 _INFRA_ROLE = (
     "INFRA ROLE — only tickets labelled `infra`; no stream hand-offs / release "
     "ops / PROD data; never touch the review window's checkout; coordinate with "
@@ -264,17 +235,10 @@ _REVIEW_B_BLOCK = ("stop-a-livelane", "stop-b-header", "obligation", "proof",
 # NO turn cap ("stop po"/"stop after" never appear — `no_turn_cap_ok` / the
 # #1000 tests lock it). Inserted at the `stop-b-header` position by
 # render_goal_line when role=="review".
-# Review clause (d) is the ONE lane-saturation sentence in the review block; the
-# SEQUENTIAL review variant (the gk review window's mode since #1137) swaps it
-# for a one-unit form so the rendered line never says both "ONE unit at a time"
-# and "fill lanes whenever workable".
-_REVIEW_D_PARALLEL = (
-    "(d) lanes plním DISPATCHOVATEĽNÝMI jednotkami vždy keď existuje workable "
-    "(review / fix-forward / resync / PROD akcia) — čakanie na CI nikdy nedrží "
-    "slot; ")
-_REVIEW_D_SEQUENTIAL = (
-    "(d) jedna DISPATCHOVATEĽNÁ jednotka naraz (review / fix-forward / resync / "
-    "PROD akcia), sloty nikdy nenasycujem — čakanie na CI nikdy nedrží slot; ")
+# Review clause (d): CI waits never stall the window (#1137 removed its lane
+# saturation wording; the letters stay stable for the docs that cite them).
+_REVIEW_D = ("(d) čakanie na CI nikdy neblokuje ďalšiu prácu (review / "
+             "fix-forward / resync / PROD akcia); ")
 
 _REVIEW_ROLE = (
     "(B) BACKLOG EMPTY — gk REVIEW okno, PROVEN IN THIS TURN, NEVER CLAIMED: "
@@ -291,7 +255,7 @@ _REVIEW_ROLE = (
     "(c) každý hand-off (ready-for-review / needs-gatekeeper / prio:bounce / "
     "GATEKEEPER-ACTION; stream:montalu prvé) dostane gk verdikt alebo akčný "
     "komentár do 1 h; "
-    + _REVIEW_D_PARALLEL +
+    + _REVIEW_D +
     "(e) každá akceptovaná vetva má merged PR do develop; červený/DIRTY gk PR "
     "dostane fix lane v tom istom cykle; "
     "(f) release train nikdy nestojí (develop pred main ≥ 2 h a nič in-flight → "
@@ -299,7 +263,7 @@ _REVIEW_ROLE = (
     "odoo-erp#6883); "
     "(g) za cyklus vypíš `python3 ~/devel/airuleset/airuleset.py core-quals "
     "--role review --count`, počet otvorených stream PR bez skorého review ≤ 1 "
-    "h, lanes N/cap, stav release (cut PR, shadow, main PR, posledné deploy runy "
+    "h, stav release (cut PR, shadow, main PR, posledné deploy runy "
     "s DB verziou, montalu/slovnormal/miva vs main).")
 
 # The gk-QUALITY-ROLE block (#1074, owner directive 18.9., escalated 21.9. — a
@@ -307,7 +271,7 @@ _REVIEW_ROLE = (
 # review block it REPLACES the generic (B) proof + obligation block (clause (h)
 # below is the gk-quality window's own (B) done condition) — the SAME mechanism,
 # a different charter — so it fits under the 4000 arm cap; every OTHER clause
-# stays byte-identical. gk-full-only + SEQUENTIAL (one quality unit at a time).
+# stays byte-identical. gk-full-only.
 # Carries NO turn cap. Inserted at the `stop-b-header` position by
 # render_goal_line when role=="quality".
 _QUALITY_ROLE = (
@@ -341,23 +305,18 @@ _QUALITY_ROLE = (
 _TURN_CAP_RE = _re.compile(r"stop\s+after\s+(?:\d+|N)\s+turns?", _re.IGNORECASE)
 
 
-def render_goal_line(authority, mode=DEFAULT_MODE, role=None):
-    """The exact `/goal ...` line for `(authority, mode, role)` (#998).
+def render_goal_line(authority, role=None):
+    """The exact `/goal ...` line for `(authority, role)` (#998).
 
-    `mode=DEFAULT_MODE` (sequential since #1137), `role=None` reproduces
-    `render(authority)` byte-for-byte (the SKILL.md drift lock).
-    `mode="sequential"` substitutes the refill clause (and, for the review
-    role, the review block's lane-fill clause (d)); `mode="parallel"` keeps
-    them — rendered only for an explicit `mode: parallel` declaration; `role="infra"` appends the infra-scope clause;
-    `role="review"` REPLACES the generic (B) proof + obligation block with the
-    gk review window's own (B) done condition + operating clauses (a)-(g)
-    (#1000); `role="quality"` REPLACES the same block with the gk-quality
-    window's (B) done condition + the subdev-quality charter (a)-(f) (#1074).
-    Never inserts a turn cap."""
+    `role=None` reproduces `render(authority)` byte-for-byte (the SKILL.md drift
+    lock); `role="infra"` appends the infra-scope clause; `role="review"`
+    REPLACES the generic (B) proof + obligation block with the gk review
+    window's own (B) done condition + operating clauses (a)-(g) (#1000);
+    `role="quality"` REPLACES the same block with the gk-quality window's (B)
+    done condition + the subdev-quality charter (a)-(f) (#1074). Never inserts a
+    turn cap."""
     if authority not in PROFILES:
         raise ValueError("unknown authority: %r" % (authority,))
-    if mode not in MODES:
-        raise ValueError("unknown mode: %r" % (mode,))
     if role not in ROLES:
         raise ValueError("unknown role: %r" % (role,))
     if role in ("review", "quality") and authority != "full":
@@ -378,112 +337,151 @@ def render_goal_line(authority, mode=DEFAULT_MODE, role=None):
             # position and drop the rest of the generic block (#1000 / #1074 —
             # SAME (B)-substitution mechanism, a different charter).
             if c.id == "stop-b-header":
-                if role == "quality":
-                    parts.append(_QUALITY_ROLE)
-                elif mode == "sequential":
-                    parts.append(_REVIEW_ROLE.replace(
-                        _REVIEW_D_PARALLEL, _REVIEW_D_SEQUENTIAL, 1))
-                else:
-                    parts.append(_REVIEW_ROLE)
+                parts.append(_QUALITY_ROLE if role == "quality" else _REVIEW_ROLE)
             continue
         text = c.text_for(authority)
-        if mode == "sequential" and c.id == "saturation-core":
-            text = _SEQUENTIAL_SATURATION
         if role == "infra" and authority == "full" and c.id == "proof":
             # #1066 lane B item 2 (finding a) — the gk-infra window (full
-            # authority, sequential) must prove its OWN slice, not the WHOLE gk
-            # obligation set it can neither action nor drive to 0. Role-scope its
-            # ONE quals proof command (`core-quals --count` ->
-            # `core-quals --role infra --count`, exactly what `airuleset.py
-            # status` already resolves for that pane, #1065/#1074). FULL-ONLY
-            # (documented in the #1066 Anchors-confirmed comment): applying it to
-            # the lock-only reduced+infra defensive variants would STACK on
-            # item 1's bounce clause and breach the design's explicit >=20
-            # arm-cap headroom invariant; no reduced-authority infra window
-            # exists, so scoping to full is behaviourally identical in
-            # production. Non-infra variants are byte-identical (drift/snapshot
-            # locks stay green); `_INFRA_ROLE` append below is unchanged.
+            # authority) must prove its OWN slice, not the WHOLE gk obligation
+            # set it can neither action nor drive to 0. Role-scope its ONE quals
+            # proof command (`core-quals --count` -> `core-quals --role infra
+            # --count`, exactly what `airuleset.py status` already resolves for
+            # that pane, #1065/#1074). FULL-ONLY: no reduced-authority infra
+            # window exists, and the reduced+infra variants keep their arm-cap
+            # headroom. Non-infra variants are byte-identical.
             text = text.replace("-quals --count", "-quals --role infra --count")
         parts.append(text)
-        if role == "infra" and c.id == "saturation-delivery":
+        if role == "infra" and c.id == "bundle":
             parts.append(_INFRA_ROLE)
     return "/goal " + " ".join(parts)
 
 
 def render(profile):
-    """The exact `/goal ...` line for `profile` — the DEFAULT (sequential since
-    #1137, no role) variant. Kept as the SKILL.md-drift-lock anchor; delegates
-    to `render_goal_line` so the two can never diverge."""
-    return render_goal_line(profile, DEFAULT_MODE, None)
-
-
-# The gk-full-only review variants (#1000), both modes: the gk review window is
-# declared SEQUENTIAL (#1137); the PARALLEL one stays renderable for an explicit
-# declaration and for recognising a stranded pre-#1137 arm.
-_REVIEW_SPECS = [("full", "sequential", "review"), ("full", "parallel", "review")]
+    """The exact `/goal ...` line for `profile` — the no-role variant. Kept as
+    the SKILL.md-drift-lock anchor; delegates to `render_goal_line` so the two
+    can never diverge."""
+    return render_goal_line(profile, None)
 
 
 def variant_specs():
-    """Every (authority, mode, role) variant `goal-inventory --check` locks: all
-    authority × mode with no role, PLUS the infra-role variant per authority
-    (the gk-infra window is inherently sequential-infra), PLUS the gk-full-only
-    sequential QUALITY variant (#1074 — the 10th locked variant; the gk-quality
-    window is inherently sequential-quality). Enumerated so a new clause that
+    """Every (authority, role) variant `goal-inventory --check` locks: each
+    authority with no role and with the infra role, PLUS the gk-full-only
+    review (#1000) and quality (#1074) variants. Enumerated so a new clause that
     breaks any variant (over budget, a stray turn cap, a dropped required
     clause) is caught mechanically."""
     specs = []
     for a in PROFILES:
-        for m in MODES:
-            specs.append((a, m, None))
-        specs.append((a, "sequential", "infra"))
-    specs.append(("full", "sequential", "quality"))  # #1074 — gk-full-only
+        specs.append((a, None))
+        specs.append((a, "infra"))
+    specs.append(("full", "review"))   # #1000 — gk-full-only
+    specs.append(("full", "quality"))  # #1074 — gk-full-only
     return specs
+
+
+# #1137 transition: the pre-removal sequential/parallel clause texts, kept ONLY
+# so the stash janitor still recognises a stranded old `/goal` in a box (never
+# rendered for arming). `legacy_goal_line_variants` rebuilds every old variant by
+# swapping these back into the current render; the 12 old variants are locked by
+# sha256 prefix (tests/fixtures/pre_1137_mode_goals.json). Delete after the
+# transition, together with that fixture.
+_LEGACY_SATURATION = (
+    "CONTINUOUS REFILL, never one ticket per turn: keep `isolation:worktree` "
+    "autopilot-worker lanes live — refill ONLY with a DISPATCHABLE unit "
+    "(dependencies closed);",
+    "SEQUENTIAL — ONE unit at a time, one theme with focus: implement it yourself "
+    "or with one worker → main review → integrate → verify → next; no refill;")
+_LEGACY_DELIVERY = {
+    "full": "integrate returned branches SERIALLY under the integration mutex as "
+            "they return;",
+    "branch-merge": "merge returned branches into the integration branch SERIALLY "
+                    "under the mutex as they return;",
+    "fork-no-merge": "hand off returned fork branches SERIALLY as they return;",
+}
+_LEGACY_BOUNCE = (
+    ("jump the queue, oldest-first (never preempting running work)",
+     "jump the queue — the next FREE lane takes them oldest-first (never "
+     "preempting a running lane)"),
+    ("tickets go first, oldest-first (never preempting running work)",
+     "tickets fill each FREE lane oldest-first (never preempting a running one)"),
+)
+_LEGACY_REVIEW = (
+    (("h, stav release", "h, lanes N/cap, stav release"),
+     (_REVIEW_D, "(d) lanes plním DISPATCHOVATEĽNÝMI jednotkami vždy keď existuje "
+                 "workable (review / fix-forward / resync / PROD akcia) — čakanie "
+                 "na CI nikdy nedrží slot; ")),
+    (("h, stav release", "h, lanes N/cap, stav release"),
+     (_REVIEW_D, "(d) jedna DISPATCHOVATEĽNÁ jednotka naraz (review / fix-forward "
+                 "/ resync / PROD akcia), sloty nikdy nenasycujem — čakanie na CI "
+                 "nikdy nedrží slot; ")),
+)
+
+
+def legacy_goal_line_variants():
+    """The pre-#1137 sequential + parallel `/goal` lines (recognition only)."""
+    out = []
+    for authority, role in variant_specs():
+        line = render_goal_line(authority, role)
+        for i, sat in enumerate(_LEGACY_SATURATION):
+            old = line.replace(_BUNDLE, sat + " " + _LEGACY_DELIVERY[authority], 1)
+            for new, legacy in _LEGACY_BOUNCE:
+                old = old.replace(new, legacy, 1)
+            if role == "review":
+                for new, legacy in _LEGACY_REVIEW[i]:
+                    old = old.replace(new, legacy, 1)
+            out.append(old)
+    return out
 
 
 def all_goal_line_variants():
     """#1113 recurrence — every rendered `/goal ...` line the janitor may find
-    stranded in a box: every (authority, mode, role) variant `variant_specs()`
-    locks, PLUS the gk-full-only `review` variant in BOTH modes (the default
-    sequential one armed since #1137, and the parallel one a box armed before
-    it may still carry). Deduped, order-stable.
+    stranded in a box: every (authority, role) variant `variant_specs()` locks,
+    PLUS the pre-#1137 mode variants (`legacy_goal_line_variants`). Deduped,
+    order-stable.
 
     The janitor matches a stranded box against these (verbatim template text is
     un-forgeable by a human draft) so it recognises + clears its OWN leftover
     even when the request payload it was handed is a DIFFERENT variant than the
     one actually in the box — the exact 22.9/23.9 david1-3 regression, where a
     fork-no-merge tail matched no clean substring of the current rearm payload.
-    Pure string renders; a render that raises (a nonsensical combination) is
-    skipped, so the caller always gets the valid variants."""
+    Pure string renders; a render that raises is skipped, so the caller always
+    gets the valid variants."""
     seen, out = set(), []
-    for authority, mode, role in list(variant_specs()) + _REVIEW_SPECS:
+    lines = []
+    for authority, role in variant_specs():
         try:
-            line = render_goal_line(authority, mode, role)
+            lines.append(render_goal_line(authority, role))
         except Exception:  # noqa: BLE001 — a nonsensical combo is simply skipped
             continue
+    try:
+        lines += legacy_goal_line_variants()
+    except Exception:  # noqa: BLE001 — never lose the current variants
+        pass
+    for line in lines:
         if line not in seen:
             seen.add(line)
             out.append(line)
     return out
 
 
+_ROLE_PHRASE = {"infra": "INFRA ROLE", "quality": "QUALITY ROLE",
+                "review": "REVIEW ROLE"}
+
+
 def variant_check():
     """Return a list of error strings ([] == every variant is valid). Locks, per
     variant: renders, ≤ GOAL_ARM_CHAR_CAP, NO turn cap, carries every required
-    clause, and — for sequential — the sequential phrase present + the refill
-    phrase absent; for infra — the infra phrase present; for quality — the
-    quality phrase present (#1074). The gk-full-only
-    `review` variant (#1000) is checked SEPARATELY below for BUDGET + no-turn-cap
-    only — its required-clause leg is skipped because it legitimately SUBSTITUTES
-    the (B) proof/obligation clauses (clause (h) supersedes them), which the
-    profile-level `clause_ids()` coverage leg cannot model."""
+    clause, the bundle clause exactly once and its role phrase. The review and
+    quality variants SUBSTITUTE the (B) proof/obligation clauses (their own (B)
+    supersedes them); the profile-level `clause_ids()` coverage leg is
+    authority-scoped, so it is unaffected."""
     errs = []
-    for authority, mode, role in variant_specs():
+    for authority, role in variant_specs():
+        tag = "%s/%s" % (authority, role)
         try:
-            line = render_goal_line(authority, mode, role)
+            line = render_goal_line(authority, role)
         except Exception as exc:  # noqa: BLE001
-            errs.append("render(%s,%s,%s) raised: %r" % (authority, mode, role, exc))
+            errs.append("render(%s) raised: %r" % (tag, exc))
             continue
-        tag = "%s/%s/%s" % (authority, mode, role)
         if len(line) > GOAL_ARM_CHAR_CAP:
             errs.append("%s over budget: %d > %d" % (tag, len(line), GOAL_ARM_CHAR_CAP))
         if _TURN_CAP_RE.search(line):
@@ -491,40 +489,14 @@ def variant_check():
         for cid in REQUIRED_BY_PROFILE.get(authority, REQUIRED_CLAUSES):
             if cid not in clause_ids(authority):
                 errs.append("%s missing required clause %s" % (tag, cid))
-        if mode == "sequential":
-            if "ONE unit at a time" not in line:
-                errs.append("%s sequential missing the one-unit clause" % tag)
-            if "CONTINUOUS REFILL" in line:
-                errs.append("%s sequential still carries the refill clause" % tag)
-        if role == "infra" and "INFRA ROLE" not in line:
-            errs.append("%s infra missing the infra-role clause" % tag)
-        if role == "quality" and "QUALITY ROLE" not in line:  # #1074
-            errs.append("%s quality missing the quality-role clause" % tag)
+        if line.count(_BUNDLE) != 1:
+            errs.append("%s must carry the bundle clause exactly once" % tag)
+        if role and _ROLE_PHRASE[role] not in line:
+            errs.append("%s missing the %s clause" % (tag, _ROLE_PHRASE[role]))
         if authority != "full":  # #1128 — a stream loop has no done-state
             errs += ["%s stream variant carries %r (a backlog-empty "
                      "done-state)" % (tag, t) for t in _STREAM_FORBIDDEN
                      if t in line]
-    # #1000 F1 — the review variant is the TIGHTEST-arming variant and is NOT in
-    # variant_specs (its required-clause leg cannot model the (B) substitution),
-    # so lock its BUDGET + no-turn-cap here so `goal-inventory --check` is honest
-    # that it guards every ARMABLE variant. (Headroom is locked tighter by the
-    # dedicated #1000 test.) Both modes (#1137): the sequential one is what the
-    # gk review window arms; it must also drop the review lane-fill clause (d).
-    for authority, mode, role in _REVIEW_SPECS:
-        tag = "%s/%s/%s" % (authority, mode, role)
-        try:
-            rline = render_goal_line(authority, mode, role)
-        except Exception as exc:  # noqa: BLE001
-            errs.append("render(%s,%s,%s) raised: %r" % (authority, mode, role, exc))
-            continue
-        if len(rline) > GOAL_ARM_CHAR_CAP:
-            errs.append("%s over budget: %d > %d"
-                        % (tag, len(rline), GOAL_ARM_CHAR_CAP))
-        if _TURN_CAP_RE.search(rline):
-            errs.append("%s carries a TURN CAP (banned)" % tag)
-        if mode == "sequential" and (_REVIEW_D_PARALLEL in rline
-                                     or "ONE unit at a time" not in rline):
-            errs.append("%s sequential still carries the lane-fill clause" % tag)
     return errs
 
 
@@ -621,23 +593,6 @@ def render_into(skill_text):
     return _SHIPPED_RE.sub(repl, skill_text)
 
 
-def skill_sequential_drift(skill_text):
-    """[] when SKILL.md's BODY carries the canonical sequential clause
-    (`_SEQUENTIAL_SATURATION`) verbatim; else a one-item error list (#1035).
-
-    The skill body's SEQUENTIAL dispatch block (Step 3.0) must carry THIS clause
-    VERBATIM — the SAME clause the sequential `/goal` variant uses. It is
-    hand-maintained in the body, NOT auto-rendered; `goal-inventory --check`
-    CHECK-LOCKS the two byte-identical via this function, so an UNARMED session
-    (body only, not the goal line) can never disagree with the armed sequential
-    goal on lane saturation. Called alongside `drift()`/`variant_check()`."""
-    if _SEQUENTIAL_SATURATION not in (skill_text or ""):
-        return ["SKILL.md body is missing the canonical sequential clause "
-                "(goal_registry._SEQUENTIAL_SATURATION) — the Step 3.0 "
-                "SEQUENTIAL dispatch block must carry it verbatim (#1035)"]
-    return []
-
-
 def skill_dual_drift(skill_text):
     """[] when SKILL.md's BODY carries the canonical dual dispatch-channel clause
     (`_DUAL_DISPATCH`) verbatim; else a one-item error list (#1060 L3b).
@@ -647,7 +602,7 @@ def skill_dual_drift(skill_text):
     implementer window, ticket-poll fallback, journal-and-continue when no impl
     session, never an in-session Opus worker). Hand-maintained in the body, NOT
     auto-rendered; `goal-inventory --check` CHECK-LOCKS it byte-identical here
-    (alongside `drift()`/`variant_check()`/`skill_sequential_drift()`), so an
+    (alongside `drift()`/`variant_check()`), so an
     UNARMED dual-box session reading only the body can never diverge from the
     canonical dispatch contract."""
     if _DUAL_DISPATCH not in (skill_text or ""):

@@ -12,7 +12,7 @@ Two problems this fixes, both reported by the owner:
    an env units-error can never lower it).
 
 2. **Nudges arrive too often ("chodia jak besne po sebe").** Every job-20
-   keystroke rider (partition-audit / release-gap / queue-arrival / lane-occupancy)
+   keystroke rider (partition-audit / release-gap / queue-arrival)
    keeps its OWN ad-hoc timer namespace. The per-sweep `handled` set bounds
    delivery to one keystroke per pane per SWEEP, but sweeps are 60s apart, so a
    kind whose per-JOB floor was below one hour (queue-arrival's 30-min floor) could
@@ -105,8 +105,8 @@ import time
 #
 # #923 CLASSIFICATION — families split into two classes:
 #
-#   WORK_DRIVING — families whose nudge directly DRIVES new work output (spawning
-#   workers, starting releases, processing arrivals, reconciling lost lanes).
+#   WORK_DRIVING — families whose nudge directly DRIVES new work output
+#   (starting releases, processing arrivals, acting on a bounce verdict).
 #   These have PRIORITY within the shared 1h slot.
 #
 #   AUDIT — families that CHECK state but don't drive new work (footer partition
@@ -115,7 +115,7 @@ import time
 #
 # Every new gated category MUST be added to exactly ONE of these frozensets.
 WORK_DRIVING_CATEGORIES = frozenset({
-    "lane-occupancy", "release-gap", "queue-arrival", "lane-reconcile",
+    "release-gap", "queue-arrival",
     # #1066 lane B — a fresh gk BOUNCE verdict on a reduced-authority stream's
     # own ticket DRIVES work (ACK + dispatch a lane); the goal-lane rider
     # `bounce_verdict_recheck` delivers it under this per-kind 60-min floor.

@@ -242,7 +242,7 @@ def main():
             return result
         # past the #1110 transcript-liveness window, like a real idle pane
         time.sleep(watchdog.goal_turn_liveness.GOAL_TURN_LIVE_WINDOW_S + 5)
-        text = (goal_registry.render_goal_line("full", "parallel")
+        text = (goal_registry.render_goal_line("full")
                 if a.payload == "full" else SHORT_PAYLOAD)
         offset = tp.stat().st_size
         run = PrivateRun(sock)

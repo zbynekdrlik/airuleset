@@ -90,8 +90,7 @@ can drift). Lessons for anyone touching this partition:
   stale is an incomplete fix. **A separate axis — the role SET (#1074 added a THIRD role
   `quality`, making the partition ternary): adding/removing a role additionally touches
   `cli_fleet.WINDOW_ROLES`, `cli_work_class.work_class` (the class the filter maps to),
-  `goal_registry.ROLES` + its role (B)-block, and `gates/lanefill.py`'s `--role`
-  pass-through — plus `airuleset.py`'s `--role` argparse `choices` and
+  `goal_registry.ROLES` + its role (B)-block — plus `airuleset.py`'s `--role` argparse `choices` and
   `_role_filter_footer` guard. Keep the ternary invariant statements (this bullet + the
   `--role` filtering bullet + `_apply_role_filter`'s in-code comment) in lockstep with the
   code exactly as the scope axis above.**

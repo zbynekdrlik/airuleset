@@ -93,16 +93,10 @@ NUDGES_KINDS_STATE = "nudges-kinds.json"  # #1023 per-kind staging state file
 # `nudge=` into `keys`, and it names the per-kind switch state key AND the
 # `nudge_gate` cadence category. `nudges status` enumerates exactly this set.
 MACHINE_NUDGE_KINDS = frozenset({
-    # goal-family riders (into an armed /goal loop).
-    # #1089 -- `lane-occupancy` DELIVERY is RETIRED: the lane-fill Stop gate
-    # (gates/lanefill.py) is the refill lever now (it blocks the turn end WITHOUT
-    # typing into the pane), so `goal_lane_occupancy_nudge` no longer calls any
-    # keystroke-delivery primitive. The identity STAYS here as a recognized
-    # observability/journal category (the "would-refill; DELIVERY RETIRED"
-    # decision line + the nudge_gate cadence bucket) -- staging it ON can no
-    # longer produce a keystroke. Do NOT touch the other kinds.
-    "queue-arrival", "lane-occupancy", "release-gap", "lane-reconcile",
-    "partition-audit", "u-freshness", "goal-guard",
+    # goal-family riders (into an armed /goal loop). #1137 removed the
+    # lane-occupancy and lane-reconcile kinds (Claude decides its own dispatch).
+    "queue-arrival", "release-gap", "partition-audit", "u-freshness",
+    "goal-guard",
     # #1066 lane B — the goal-lane BOUNCE-verdict rider (reduced-authority
     # panes): a fresh gk BOUNCE verdict on the stream's own ticket wakes the
     # armed /goal loop. A GATED priority kind (default OFF, owner stages it);
@@ -1359,7 +1353,7 @@ def send_verified(pane_id, text, run=None, tpath=None, sleep_fn=None, logs=None,
     # the sibling `_pane_busy_waiting` gate every rider consults only catches the
     # ellipsis-free "Waiting for N background agents" line, NOT a mid-render
     # spinner. Defer here at the ONE shared delivery primitive so EVERY caller
-    # (the ops-wait / u-freshness / queue-arrival / release-gap / lane-reconcile
+    # (the ops-wait / u-freshness / queue-arrival / release-gap
     # riders + the batch send) inherits it (#1104-review shared-benefit finding).
     if watchdog._pane_activity_spinner_above_box(fresh):
         _log("send-verified abort: activity spinner above box (suspended turn)")

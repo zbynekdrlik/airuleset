@@ -218,11 +218,11 @@ at STEP 0 (before proceeding to code) and the review comment at CYCLE step 6 (af
 `/requesting-code-review` pass) — plain `gh issue comment <N> --body "..."` calls, same mechanism,
 same file, zero new hooks.
 
-## WORKTREE AWARENESS (fleet dispatch is the DEFAULT — #317, 2026-08-08)
+## WORKTREE AWARENESS (when dispatched with `isolation: "worktree"` — #317)
 
-By default you run in an **isolated git worktree** (`isolation: "worktree"`) — a separate checkout
-of the repo, sharing only `.git` with the main tree and with any sibling worktrees the supervisor
-dispatched alongside you in the SAME round. You can tell from your own `cwd` (something like
+If the supervisor dispatched you with `isolation: "worktree"` (its own choice, #1137), you run in an
+**isolated git worktree** — a separate checkout of the repo, sharing only `.git` with the main tree
+and any sibling worktrees. You can tell from your own `cwd` (something like
 `<repo>/.claude/worktrees/agent-<id>`, distinct from the repo's main checkout path) and from the
 dispatch prompt naming it explicitly. This changes what "done" looks like for you:
 
@@ -278,9 +278,9 @@ dispatch prompt naming it explicitly. This changes what "done" looks like for yo
   `refs/autopilot-wip/<branch>` backup only preserves COMMITTED work, so shape 2 is the only way a
   WORKER recovers a dead lane's uncommitted edits directly (the supervisor can instead
   salvage-commit them itself, then dispatch a shape-1 worker).
-- **Your scratchpad directory is SHARED across every sibling worker dispatched in the SAME fleet
-  round — it is NOT private to you (#432).** It is keyed off the SUPERVISOR's own top-level
-  conversation id, so every worker the supervisor dispatches this round inherits the identical
+- **Your scratchpad directory is SHARED with every sibling worker the same supervisor
+  dispatches — it is NOT private to you (#432).** It is keyed off the SUPERVISOR's own top-level
+  conversation id, so every worker the supervisor dispatches inherits the identical
   path verbatim, even though each of you runs in its own isolated git worktree. A conventionally
   named scratch file (`gh-cli-recipes.md` itself recommends generic names like `body.md` /
   `red-commit-msg.txt`) is a live collision hazard: two siblings writing-then-consuming the same
@@ -360,8 +360,8 @@ dispatch prompt naming it explicitly. This changes what "done" looks like for yo
   version <v> — <one-line evidence: RED sha → GREEN sha, local verify green>"` for EVERY member.
   WHY: the #844 bounded live-hold cap can force a `/compact` on the supervisor while your lane is
   live, and the residual case (a lane-completion notification lost to CC's own overflow
-  auto-compact) must lose NOTHING — the supervisor's post-compact reconcile rider integrates your
-  lane from this comment + the branch. This is SubagentStop-enforced
+  auto-compact) must lose NOTHING — the supervisor integrates your lane from this comment + the
+  branch. This is SubagentStop-enforced
   (`hooks/subagent-stop-check-lane-return.sh`): a worktree-mode return claiming a branch + head with
   no LANE-RETURN comment is blocked ONCE per issue (then you still stop if it genuinely cannot post
   — no wedge), exactly like the design-comment gate.
@@ -371,11 +371,6 @@ dispatch prompt naming it explicitly. This changes what "done" looks like for yo
   regardless of pressure) and reclaims any worktree whose HEAD is reachable from origin and has
   no live process. Any uncommitted scratch/temp files in a returned worktree are discarded after
   24h idle — committed work is preserved via the wip-backup ref on origin.
-- **`lane-needs` resource marker (#970 fix-forward).** The supervisor writes a `lane-needs` file
-  into your worktree's PRIVATE gitdir at dispatch when the ticket needs a declared resource
-  (e.g. `box` for an erp-test box). You do NOT write or modify this file. `box-queue take` exit 1
-  (another lane holds the box) is NOT a block — re-run it; report `blocked: box (…)` only per the
-  shared-test-box bullet below.
 - **Shared test box = `box-queue` ONLY (#1171).** If your ticket deploys to / E2E-tests on the
   stream's shared erp-test box (the dispatch names the exact `--box`), finish everything else first
   (code, unit tests), then enter the box phase ONLY via `python3 ~/devel/airuleset/airuleset.py
@@ -581,8 +576,8 @@ push / PR / merge / deploy, never that backup.
    dispatch metadata itself warns of it). The real completion notification also lands between your tool calls, exactly
    like a foreground CI poll returning. **Rejected:** handing the review back to the supervisor — the
    worktree stop-point contract requires YOU to prove `/review` + `/requesting-code-review` clean
-   locally before returning your branch, and deferring it onto the supervisor's serial integration
-   mutex moves review off the parallel lanes the fleet model exists to keep.
+   locally before returning your branch, and deferring it would stall the supervisor's serial
+   integration mutex.
    **MODEL for the review dispatch (#991): dispatch it model-less** — a `general-purpose` review
    dispatch inherits the main's model natively (#1173); never pass a `model`
    param (a banned model is refused by `hooks/block-banned-model.sh`). There is no budget gate and
@@ -775,7 +770,7 @@ achieved: <per issue, ONE Slovak line of what LANDED on your branch — the supe
 worktree: <your worktree's absolute path>
 branch: <your worktree branch name (the EXACT name, #503 case 1) — the supervisor merges directly from this ref; also state the refs/autopilot-wip/<branch> durability backup you pushed to origin>
 local_verify: <local test suite + lint command → result (green) — the proof the supervisor's integration cycle will re-check before merging>
-lane_return: <per issue: the LANE-RETURN comment posted as your LAST act (#844) — the durable record the supervisor's post-compact reconcile rider integrates from; SubagentStop-enforced>
+lane_return: <per issue: the LANE-RETURN comment posted as your LAST act (#844) — the durable record the supervisor integrates from; SubagentStop-enforced>
 dropped: <#K split out mid-flight (gate violation), issue left OPEN, re-dispatched solo | "none">
 obsolete_closed: <#K closed-as-obsolete in STEP 0 with evidence | "none">
 unverified: <list | "none">

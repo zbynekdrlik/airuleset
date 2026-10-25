@@ -18,9 +18,7 @@ Adaptive thinking with five tiers: `low`, `medium`, `high`, `xhigh`, `max`. **Th
 
 **Effort by what the stage IS.** The MAIN session runs the user's `/model` choice (managed default Opus 5.5) — leave it; raise effort per session with `/effort` when a task needs the depth. The subagent MODEL/TYPE/COUNT is the working model's decision, resolved natively (no forced default — a bare dispatch inherits the main, a per-dispatch `model` param overrides it, only Opus 5 is banned — `model-awareness.md`).
 
-**ultracode** mode = `xhigh` + permission to launch multi-agent workflows (not a separate API tier); NO LONGER a managed launch flag (owner directive 2026-08-30) — sessions launch at effort `high`, ultracode is a per-session opt-in.
-
-**Parallelism is the working model's decision** — the DEFAULT is `sequential` on every box (#1137: one theme with focus, subagents where they naturally help; #1035, ONE lane, no saturation push); parallel lanes only in a pane that declares `mode: parallel`, sized to box and backlog. Workflows: companion `skills/claude-code-workflows/DEEP.md` (#859).
+**ultracode** mode = `xhigh` + permission to launch multi-agent workflows (not a separate API tier); NO LONGER a managed launch flag (owner directive 2026-08-30) — sessions launch at effort `high`, ultracode is a per-session opt-in. Workflows: companion `skills/claude-code-workflows/DEEP.md` (#859).
 
 #### Autonomous Goals (`/goal`)
 
@@ -37,7 +35,7 @@ The evaluator reads ONLY the conversation transcript — it does NOT run command
 
 Do NOT use `/goal` for ambiguous-scope work needing user decisions (the loop has no one to ask) or anything gated on a destructive action. It is for verifiable execution, not design. Applies to all rewordings and semantic equivalents.
 
-For the specific case of working a whole GitHub issue backlog hands-off — solve the WHOLE backlog one issue at a time until empty — use the **`/autopilot` skill**. It drives a `/goal` loop that works each issue itself or, where that naturally helps, through an **in-session background `autopilot-worker` subagent** (`run_in_background: true` → main stays thin AND free/interactive; visible in the agent strip as `main` + `autopilot-worker`; **able to ask you the important per-issue questions directly** — CC's 2026-W26 change surfaces background-subagent prompts in the main session, so the loop works `needs-design`/`needs-decision` issues instead of skipping them). After each issue it picks the next; it never pre-filters or refuses to start. Merging follows `pr-merge-policy.md` default auto-merge (opt-out marker `airuleset:merge=manual`); milestones ping per `milestone-notifications.md`.
+For the specific case of working a whole GitHub issue backlog hands-off — solve the WHOLE backlog until empty — use the **`/autopilot` skill**. It drives a `/goal` loop that works each issue itself or, where that naturally helps, through an **in-session background `autopilot-worker` subagent** (`run_in_background: true` → main stays thin AND free/interactive; visible in the agent strip as `main` + `autopilot-worker`; **able to ask you the important per-issue questions directly** — CC's 2026-W26 change surfaces background-subagent prompts in the main session, so the loop works `needs-design`/`needs-decision` issues instead of skipping them). After each unit it picks the next; it never pre-filters or refuses to start. Merging follows `pr-merge-policy.md` default auto-merge (opt-out marker `airuleset:merge=manual`); milestones ping per `milestone-notifications.md`.
 
 #### `/loop` + Agent view + in-session subagents (3 distinct surfaces)
 

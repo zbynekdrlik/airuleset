@@ -3093,9 +3093,8 @@ SUPPRESSED_ALERT_PREFIXES = (
     # #1096: the `lanestall:` give-up ping (#693) is GONE — its only emitter,
     # `_lane_giveup_decision`, was deleted with the lane-occupancy delivery-cadence
     # machinery (#1089 retired the keystroke DELIVERY, so the give-up branch can no
-    # longer fire). The give-up-cause classification the ping used to name now has
-    # no producer; the surviving lane-occupancy observability is the
-    # `would-refill; DELIVERY RETIRED` decision line + the #662 `stuckalert:` above.
+    # longer fire; #1137 then removed the lane-occupancy branch itself). The
+    # surviving lane observability is the #662 `stuckalert:` above.
     # #704 (2026-08-25 owner ruling, GENERAL): "an idle/stall/no-work/session-stojí
     # state NEVER owner-pings" — the phone keeps ONLY ❓ question / ✅ final done /
     # per-ticket run-card / acctblock / job-35 dead-fleet. These airuleset-OWNED

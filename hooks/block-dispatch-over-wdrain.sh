@@ -10,11 +10,10 @@ set -euo pipefail
 # dispatch action the montalu3 W=34 incident abused — dispatching new I-lanes
 # for days while finished W tickets rotted.
 #
-# The W-drain and #992 receipt gates run ONLY for `subagent_type` ==
-# autopilot-worker (#991: the single I-lane worker type). The #998 sequential
-# gate also runs for ANY type dispatched with `isolation: "worktree"` (#1229).
-# A subagent without isolation (ticket-validator, Explore, a review seat, a
-# consult) is never gated here.
+# The W-drain gate runs ONLY for `subagent_type` == autopilot-worker (#991: the
+# single I-lane worker type); every other subagent is never gated here. #1137
+# (owner 25.10.2026) removed the #992 receipt gate and the #998 lane-count
+# gate: Claude Code decides its own dispatch.
 #
 # Fail-OPEN on missing jq, missing/unparseable cache, stale cache (>30 min),
 # non-int ops_wait (#539/#570 "never a false accusation").
@@ -38,20 +37,9 @@ case "$TOOL_NAME" in
     *) exit 0 ;;
 esac
 
-# Only gate implementation lanes: an autopilot-worker, or (#1229) ANY type
-# dispatched with `isolation: "worktree"`. A plain session on presenter@dev2
-# opened three general-purpose worktree lanes in a sequential pane, unseen.
-# Such a plain lane gets ONLY the #998 sequential gate below (LANE_ONLY=1): the
-# #992 receipt and the W-drain gate are autopilot-loop contracts. A subagent
-# without isolation (review seat, research, design draft) is never gated.
+# Only gate the implementation-lane worker type.
 SUBAGENT_TYPE=$(printf '%s' "$INPUT" | jq -r '.tool_input.subagent_type // empty' 2>/dev/null || echo "")
-ISOLATION=$(printf '%s' "$INPUT" | jq -r '.tool_input.isolation // empty' 2>/dev/null || echo "")
-LANE_ONLY=""
-case "$SUBAGENT_TYPE" in
-    autopilot-worker) ;;
-    *) [ "$ISOLATION" = "worktree" ] || exit 0
-       LANE_ONLY=1 ;;
-esac
+[ "$SUBAGENT_TYPE" = "autopilot-worker" ] || exit 0
 
 # Read cwd from the hook payload
 CWD=$(printf '%s' "$INPUT" | jq -r '.cwd // empty' 2>/dev/null || echo "")
@@ -59,177 +47,6 @@ CWD=$(printf '%s' "$INPUT" | jq -r '.cwd // empty' 2>/dev/null || echo "")
 
 # Compute cwd-key (sha1[:12]) — must match statusbar.cwd_key
 CWD_KEY=$(printf '%s' "$CWD" | sha1sum | cut -c1-12)
-
-# ---------------------------------------------------------------------------
-# #992/#993 — INDEPENDENCE-CHECK GATE (runs for EVERY autopilot-worker dispatch,
-# independent of the W-drain gate below). Before dispatching a lane the
-# supervisor must run `airuleset.py lane-overlap … --issue <N>`, which writes a
-# per-cwd receipt (~/.claude/lane-overlap/<cwd-key>.json). This gate BLOCKS the
-# dispatch unless a FRESH receipt covers every issue named in the prompt — the
-# mechanical half of #992 req 2 (no new hook). Fail-OPEN when the prompt carries
-# no parseable issue number (can't verify → allow; the `Independence:` ticket
-# record is the durable authority). `OVERLAP-BYPASS: <reason>` in the prompt
-# allows + logs, exactly like WDRAIN-BYPASS below.
-OVERLAP_TTL=1800
-PROMPT=$(printf '%s' "$INPUT" | jq -r '.tool_input.prompt // empty' 2>/dev/null || echo "")
-REPO_DIR=$(cd "$(dirname "$0")/.." 2>/dev/null && pwd || echo "")
-# The prompt's tickets come from the ONE shared parser, gates/ticketrefs.py
-# (#1165 round 2) — the same lead line the design-dispatch gate reads: `#N`
-# and the fleet's bare `issue N` / `issues A, B and C`, 1-6 digits, every batch
-# member covered (#993-review), and a `PR #N` / `pull request #N` is never a
-# ticket (no receipt demanded for a PR). This hook had its own grep that saw
-# only `issues? #N` (so `Work issue 4` skipped the receipt check) and counted
-# PR numbers. A parser MALFUNCTION fails open like the rest of this hook
-# (#539/#570), logged to ~/.claude/lane-overlap/parse-error.log.
-ISSUES=""
-if [ -n "$PROMPT" ] && [ -z "$LANE_ONLY" ]; then
-    # shellcheck disable=SC2016  # the python source is single-quoted on purpose
-    if ! ISSUES=$(printf '%s' "$PROMPT" | PYTHONPATH="$REPO_DIR" python3 -P -c \
-'import sys
-from gates.ticketrefs import issue_numbers
-print("\n".join(str(n) for n in issue_numbers(sys.stdin.read())))' 2>/dev/null); then
-        ISSUES=""
-        mkdir -p "$HOME/.claude/lane-overlap" 2>/dev/null || true
-        printf '%s\t%s\tticketrefs parse failed (fail-open)\n' "$(date -Iseconds)" \
-            "$CWD_KEY" >> "$HOME/.claude/lane-overlap/parse-error.log" 2>/dev/null || true
-    fi
-fi
-if [ -n "$ISSUES" ]; then
-    # OVERLAP-BYPASS escape (line-anchored, logged)
-    if printf '%s' "$PROMPT" | grep -qE '^OVERLAP-BYPASS:'; then
-        OV_DIR="$HOME/.claude/lane-overlap"
-        mkdir -p "$OV_DIR" 2>/dev/null || true
-        OV_REASON=$(printf '%s' "$PROMPT" | grep -oiE '^OVERLAP-BYPASS:[[:space:]]*.*' | head -1 || true)
-        printf '%s\t%s\t%s\n' "$(date -Iseconds)" "$CWD_KEY" "$OV_REASON" \
-            >> "$OV_DIR/bypass.log" 2>/dev/null || true
-        exit 0
-    fi
-    OV_RECEIPT="$HOME/.claude/lane-overlap/$CWD_KEY.json"
-    OV_BLOCK=""
-    if [ ! -f "$OV_RECEIPT" ]; then
-        OV_BLOCK="no overlap-check receipt for this box"
-    else
-        OV_TS=$(jq -r '.ts // empty' "$OV_RECEIPT" 2>/dev/null || echo "")
-        OV_TS_INT=${OV_TS%%.*}
-        case "$OV_TS_INT" in
-            ''|*[!0-9]*) OV_BLOCK="unreadable receipt timestamp" ;;
-            *)
-                NOW_OV=$(date +%s)
-                if [ $(( NOW_OV - OV_TS_INT )) -gt "$OVERLAP_TTL" ]; then
-                    OV_BLOCK="overlap-check receipt is stale (> ${OVERLAP_TTL}s)"
-                fi
-                ;;
-        esac
-        if [ -z "$OV_BLOCK" ]; then
-            for _iss in $ISSUES; do
-                COVERED=$(jq -e --argjson n "$_iss" \
-                    '(.checked_issues // []) | index($n) != null' \
-                    "$OV_RECEIPT" >/dev/null 2>&1 && echo 1 || echo 0)
-                if [ "$COVERED" != "1" ]; then
-                    OV_BLOCK="receipt does not cover issue #$_iss"
-                    break
-                fi
-            done
-        fi
-    fi
-    if [ -n "$OV_BLOCK" ]; then
-        {
-            echo "BLOCKED: independence check not run for this dispatch — $OV_BLOCK."
-            echo ""
-            echo "  Before dispatching a lane, run the overlap check so the supervisor"
-            echo "  records the unit's touched paths + topic vs every live lane + open PR"
-            echo "  (#992/#993 — an overlapping lane must WAIT, not race):"
-            echo ""
-            echo "    python3 ~/devel/airuleset/airuleset.py lane-overlap \\"
-            echo "      --paths <p1,p2> --topics <topic> --issue $(printf '%s' "$ISSUES" | tr '\n' ' ')"
-            echo ""
-            echo "  Then re-dispatch. Or bypass with OVERLAP-BYPASS: <reason> in the prompt (logged)."
-        } >&2
-        exit 2
-    fi
-fi
-# ---------------------------------------------------------------------------
-
-# ---------------------------------------------------------------------------
-# #998 — SEQUENTIAL-MODE dispatch gate. When the pane's resolved concurrency
-# mode is `sequential` (the DEFAULT of every box since #1137; also a declared
-# window like gk-infra or a project `.claude/lane-resources.json` mode), the
-# lane cap is total=1 — so a 2nd worktree lane (an autopilot-worker, or any
-# type with isolation: worktree, #1229) is REFUSED while one still counts.
-# `parallel` (an explicit declaration) and any resolver error ALLOW: this gate
-# fails OPEN, never a false block. The verdict is computed in python
-# (cli_dispatch_gate.dispatch_gate_report) — the single resolver + the live-lane
-# count (merged and handed-off lanes excluded, the session's own worktree too).
-#
-# #1229 — several lanes dispatched in ONE message run their hooks before any
-# worktree exists, so each sees 0 lanes. An allowed sequential dispatch claims
-# the repo's pending slot (flock, 20 s) on this hook's SUCCESSFUL exit only,
-# so a dispatch the W-drain gate below refuses never holds it.
-SEQ_REPO=""
-_claim_lane_slot() {
-    local rc=$?
-    trap - EXIT
-    [ "$rc" -eq 0 ] || exit "$rc"
-    local prc=0
-    # shellcheck disable=SC2016  # the python source is single-quoted on purpose
-    PYTHONPATH="$REPO_DIR" python3 -P -c 'import sys, cli_dispatch_gate
-sys.exit(0 if cli_dispatch_gate.claim_pending_lane(sys.argv[1]) else 3)' \
-        "$SEQ_REPO" 2>/dev/null || prc=$?
-    if [ "$prc" -eq 3 ]; then
-        {
-            echo "BLOCKED: sequential-mode gate — this target runs in 'sequential' mode (lane cap = 1)."
-            echo ""
-            echo "  Another worktree lane was dispatched from this repo less than 20 s ago"
-            echo "  (several lanes in one message, or a quick retry). Its worktree may not"
-            echo "  exist yet, so the live count cannot see it. Dispatch ONE lane, let it"
-            echo "  return and integrate it, then the next. If that earlier dispatch was"
-            echo "  refused by another gate, retry after 20 s. Do NOT drop isolation to"
-            echo "  get around the cap: a 2nd implementation lane in the shared checkout is"
-            echo "  the overlap this gate prevents."
-        } >&2
-        exit 2
-    fi
-    exit 0
-}
-if [ -n "$REPO_DIR" ]; then
-    SEQ_REPORT=$(AIRULESET_GATE_CWD="$CWD" AIRULESET_GATE_PROJECT="${CLAUDE_PROJECT_DIR:-}" \
-        PYTHONPATH="$REPO_DIR" python3 -P -c \
-'import os, cli_dispatch_gate; print(cli_dispatch_gate.dispatch_gate_report(os.environ.get("AIRULESET_GATE_CWD",""), project=os.environ.get("AIRULESET_GATE_PROJECT") or None))' \
-        2>/dev/null || echo "allow|error|0|open|")
-    SEQ_LINE=${SEQ_REPORT%%$'\n'*}
-    SEQ_VERDICT=${SEQ_LINE%%|*}
-    SEQ_MODE=$(printf '%s' "$SEQ_LINE" | cut -d'|' -f2)
-    SEQ_WHY=$(printf '%s' "$SEQ_LINE" | cut -d'|' -f4)
-    if [ "$SEQ_VERDICT" = "block" ]; then
-        {
-            echo "BLOCKED: sequential-mode gate — this target runs in '$SEQ_MODE' mode (lane cap = 1)."
-            echo ""
-            echo "  A live worktree lane already counts for this repo (state, branch, path):"
-            printf '%s\n' "$SEQ_REPORT" | tail -n +2 | sed 's/^/    /'
-            echo ""
-            echo "  '$SEQ_MODE' mode means ONE unit at a time: implement it (yourself or with"
-            echo "  one worker) -> main review -> integrate -> verify -> next, with NO refill."
-            echo "  A lane counts until its branch is merged into the integration base"
-            echo "  (develop, else dev, else the default branch) or its ticket is handed off."
-            echo "  - live: its agent still works it. Wait for it, then integrate it."
-            echo "  - idle-unmerged: its agent stopped, the branch is not integrated. Merge it."
-            echo "    If it was abandoned, salvage what it produced, then remove the worktree."
-            echo "  Do NOT drop isolation to get around the cap: a 2nd implementation lane in"
-            echo "  the shared checkout is the overlap this gate prevents. Review seats,"
-            echo "  consults and research subagents (no isolation) are never gated."
-            echo ""
-            echo "  (Mode: the declared window / project .claude/lane-resources.json, else the"
-            echo "  default sequential (#1137); see cli_concurrency.resolve_concurrency.)"
-        } >&2
-        exit 2
-    fi
-    if [ "$SEQ_WHY" = "claim" ]; then
-        SEQ_REPO=$(printf '%s' "$SEQ_LINE" | cut -d'|' -f5-)
-        trap _claim_lane_slot EXIT
-    fi
-fi
-[ -z "$LANE_ONLY" ] || exit 0   # #1229: a plain worktree lane stops here
-# ---------------------------------------------------------------------------
 
 # Read ops_wait from tickets-status cache
 CACHE_DIR="$HOME/.claude/tickets-status"

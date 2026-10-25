@@ -53,24 +53,22 @@ def five_hour_pct(captured):
 
 
 def _default_role_fn(cwd):
-    """The declared (mode, role, source) for `cwd` — lazy import so this leaf
+    """The declared window role for `cwd` (or None) — lazy import so this leaf
     stays import-safe (cli_concurrency pulls cli_fleet)."""
     import cli_concurrency
-    return cli_concurrency.resolve_concurrency(cwd)
+    return cli_concurrency.resolve_role(cwd)
 
 
 def _declared_gk_role(cwd, role_fn):
     """The declared gk role for `cwd` (review/infra/quality) when the pane matches
-    a `cli_fleet` window (source == "role"), else None. Fail-safe None (a resolver
-    fault never fires the notice)."""
+    a `cli_fleet` window, else None. Fail-safe None (a resolver fault never fires
+    the notice)."""
     fn = role_fn or _default_role_fn
     try:
-        _mode, role, src = fn(cwd)
+        role = fn(cwd)
     except Exception:  # noqa: BLE001 — any resolver fault => not a declared role
         return None
-    if src == "role" and role in _GK_ROLES:
-        return role
-    return None
+    return role if role in _GK_ROLES else None
 
 
 def _reset_episode(rec):

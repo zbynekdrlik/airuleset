@@ -1,20 +1,13 @@
-"""cli_lane_liveness — the single lane-LIVENESS derivation for autopilot dispatch (#1103/#1107).
+"""cli_lane_liveness — the single lane-LIVENESS derivation (#1103/#1107).
 
 ``classify_lanes`` maps every worktree lane to one of ``live | merged | finished |
 idle-unmerged`` from evidence (worker transcript / process cwd / hand-off state /
-merged-into-target); ``gather_live_lanes`` and ``state_summary`` are the thin
-consumers built on it. Extracted VERBATIM from ``cli_lane_overlap`` (#1107) so
-the derivation lives in its own leaf — consumed by the ``lane-overlap`` receipt
-(``cli_lane_overlap.cmd_lane_overlap``), the sequential concurrency resolver
-(``cli_concurrency``) and the watchdog finished-worktree prune rung
-(``watchdog/lane_reconcile``).
-
-The overlap/receipt seam ``_run_default`` / ``_lane_files`` / ``_lane_topic``
-stays in ``cli_lane_overlap`` and is imported at the BOTTOM of this module (a
-deferred import that breaks the load-time cycle with the overlap module's own
-bottom-placed back-compat re-exports ``classify_lanes`` etc.; it resolves in
-either import order). Pure, dependency-injected (a ``run`` callable for git),
-stdlib-only apart from the stdlib leaf gates.ticketrefs and the bottom import.
+merged-into-target); ``gather_live_lanes`` is the live subset. Consumed by the
+watchdog finished-worktree prune rung (``watchdog/lane_reconcile``) and the
+#1193 live-lane gate every worktree reclaimer asks. (#1137 removed its other
+consumers: the ``lane-overlap`` receipt and the sequential dispatch gate.)
+Pure, dependency-injected (a ``run`` callable for git), stdlib-only apart from
+the stdlib leaf gates.ticketrefs.
 """
 import json
 import os
@@ -23,6 +16,11 @@ import sys
 import time
 
 from gates import ticketrefs
+
+
+def _run_default(cmd):
+    import subprocess
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=60)
 
 # The Claude Code `isolation: worktree` directory — EVERY dispatched lane is a
 # checkout under `<repo>/.claude/worktrees/`, whatever its branch is named (the
@@ -131,9 +129,8 @@ def _pick_most_advanced_ref(repo_root, candidates, run):
 
 
 def _resolve_base_branch(repo_root, records, run):
-    """The integration base a lane's merged-ness AND its touched-file diff are
-    judged against — the SINGLE source of truth for both (it feeds
-    ``_lane_is_merged`` and ``_lane_files`` inside ``gather_live_lanes``).
+    """The integration base a lane's merged-ness is judged against — the SINGLE
+    source of truth (it feeds ``_lane_is_merged`` inside ``classify_lanes``).
 
     Two steps (#1031 fork follow-up):
 
@@ -151,8 +148,8 @@ def _resolve_base_branch(repo_root, records, run):
        (``origin`` IS the real upstream) against ``origin/develop``; and the
        controller against LOCAL ``main`` when it is ahead of ``origin/main`` — a
        lane merged into local ``main`` but not yet pushed during the ~35-min
-       ``push`` window must not read as unmerged and block the next sequential
-       dispatch (the v0.1.293 unpushed-integration rule, now the SAME "most
+       ``push`` window must not read as unmerged (the v0.1.293
+       unpushed-integration rule, now the SAME "most
        advanced" rule generalised from two candidates to three).
 
     NEVER the main checkout's own branch when it is a FEATURE branch (a stream
@@ -261,14 +258,14 @@ def _is_lane_worktree(record):
 # #1103 — the lane STATES the single liveness derivation returns. A lane is
 # LIVE only while an AGENT still works it; a lane that is merged into its target
 # or handed off to the gatekeeper is FINISHED (not live). The two states that
-# COUNT as live (participate in the overlap set + the sequential cap) are `live`
-# and `idle-unmerged` — the latter is the #998 fail-safe: an unmerged lane with
-# NO positive evidence either way is kept live so a new unit never dispatches
-# onto its files. `merged` and `finished` are EXCLUDED.
+# COUNT as live (never pruned) are `live` and `idle-unmerged` — the latter is
+# the #998 fail-safe: an unmerged lane with NO positive evidence either way is
+# kept live so its worktree is never removed. `merged` and `finished` are
+# EXCLUDED.
 _LIVE_STATES = ("live", "idle-unmerged")
 
-# The tickets-status cache freshness window the hand-off read trusts (mirrors
-# gates/lanefill._CACHE_TTL_S / the footer refresh TTL).
+# The tickets-status cache freshness window the hand-off read trusts (the
+# footer refresh TTL).
 _CACHE_TTL_S = 180
 
 # branch names whose merged-check must be judged against `main`, not the
@@ -417,7 +414,7 @@ def classify_lanes(repo_root, run=None, *, now=None, live_worker_ids=None,
                    proc_cwds=None, handoff_numbers=None, projects_dir=None,
                    cwd=None):
     """The SINGLE liveness derivation (#1103). Return one dict per lane worktree
-    ``{"ref", "path", "files", "topic", "state"}`` where ``state`` is one of:
+    ``{"ref", "path", "state"}`` where ``state`` is one of:
 
       ``live``          — an agent is still working it: a fresh worker transcript
                           matches the worktree OR a live process' cwd is inside it
@@ -429,13 +426,12 @@ def classify_lanes(repo_root, run=None, *, now=None, live_worker_ids=None,
                           handed off (gk / merged-unreleased): done for THIS box,
                           EXCLUDED from live.
       ``idle-unmerged`` — unmerged, no evidence either way: still LIVE (the #998
-                          fail-safe toward the overlap set).
+                          fail-safe: never pruned).
 
     Evidence seams (each None => derived from the box; a set overrides for tests):
     ``live_worker_ids`` (agent-ids), ``proc_cwds`` (process cwd realpaths),
-    ``handoff_numbers`` (handed-off ticket numbers). ``files``/``topic`` are
-    computed only for the LIVE states (the excluded lanes never enter overlap).
-    Fails toward [] (logs, never raises)."""
+    ``handoff_numbers`` (handed-off ticket numbers). Fails toward [] (logs,
+    never raises)."""
     run = run or _run_default
     now = time.time() if now is None else now
     cwd = cwd or repo_root
@@ -468,8 +464,7 @@ def classify_lanes(repo_root, run=None, *, now=None, live_worker_ids=None,
         path = rec.get("path") or ""
         if rec.get("detached"):
             head = rec.get("head") or "detached"
-            out.append({"ref": head[:12], "path": path, "files": [],
-                        "topic": "(detached lane)", "state": "live"})
+            out.append({"ref": head[:12], "path": path, "state": "live"})
             continue
         branch = rec.get("branch")
         if not branch:
@@ -485,8 +480,7 @@ def classify_lanes(repo_root, run=None, *, now=None, live_worker_ids=None,
         if not alive_tx and (_lane_is_merged(repo_root, branch, target, run) or (
                 dev_ref and target == base_branch
                 and _lane_is_merged(repo_root, branch, dev_ref, run))):
-            out.append({"ref": branch, "path": path, "files": [],
-                        "topic": branch, "state": "merged"})
+            out.append({"ref": branch, "path": path, "state": "merged"})
             continue
         if alive:
             state = "live"
@@ -494,45 +488,14 @@ def classify_lanes(repo_root, run=None, *, now=None, live_worker_ids=None,
             state = "finished"
         else:
             state = "idle-unmerged"
-        if state in _LIVE_STATES:
-            out.append({"ref": branch, "path": path,
-                        "files": _lane_files(repo_root, branch, run, target),
-                        "topic": _lane_topic(repo_root, branch, run),
-                        "state": state})
-        else:
-            out.append({"ref": branch, "path": path, "files": [],
-                        "topic": branch, "state": state})
+        out.append({"ref": branch, "path": path, "state": state})
     return out
 
 
-def state_summary(classified):
-    """``"live=X finished=Y idle=Z"`` for the ``lane-overlap`` printer — Y counts
-    both ``finished`` and ``merged`` (both are "done, not an agent"), Z counts
-    ``idle-unmerged`` (unmerged with no evidence, still live)."""
-    live = sum(1 for c in classified if c.get("state") == "live")
-    idle = sum(1 for c in classified if c.get("state") == "idle-unmerged")
-    done = sum(1 for c in classified
-               if c.get("state") in ("finished", "merged"))
-    return "live=%d finished=%d idle=%d" % (live, done, idle)
-
-
 def gather_live_lanes(repo_root, run=None, **seams):
-    """Live worktree lanes for the OVERLAP set + the sequential cap: the subset
-    of ``classify_lanes`` whose state COUNTS as live (``live`` /
-    ``idle-unmerged``). A MERGED lane (#998) or a FINISHED lane (handed off,
-    #1103) is EXCLUDED — liveness = the agent still working, not "the worktree
-    directory still exists". Each returned dict keeps its ``ref``/``files``/
-    ``topic`` contract (``compute_overlap`` / ``dispatch_gate_line`` unchanged)
-    and now also carries ``state``/``path``. Fails toward [] (never raises)."""
+    """The LIVE lanes: the subset of ``classify_lanes`` whose state counts as
+    live (``live`` / ``idle-unmerged``). A MERGED lane (#998) or a FINISHED lane
+    (handed off, #1103) is EXCLUDED — liveness = the agent still working, not
+    "the worktree directory still exists". Fails toward [] (never raises)."""
     return [lane for lane in classify_lanes(repo_root, run=run, **seams)
             if lane.get("state") in _LIVE_STATES]
-
-# The overlap/receipt seam kept in cli_lane_overlap (#1107 recorded lane
-# decision): classify_lanes calls these by bare name. Imported at module
-# BOTTOM so the load-time cycle with cli_lane_overlap's own back-compat
-# re-exports resolves in either import order.
-from cli_lane_overlap import (  # noqa: E402
-    _lane_files,
-    _lane_topic,
-    _run_default,
-)
