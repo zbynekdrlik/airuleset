@@ -124,7 +124,9 @@ class TestHook(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             b = Path(d, "bin")
             b.mkdir()
-            (b / "python3").write_text("#!/bin/sh\n: > %s/called\nexit 0\n" % d)
+            # drain stdin like the real gate: a shim that exits unread SIGPIPEs the
+            # hook's `printf | python3` under load (rc 141, push 25.10.2026)
+            (b / "python3").write_text("#!/bin/sh\n: > %s/called\ncat >/dev/null\nexit 0\n" % d)
             (b / "python3").chmod(0o755)
             tools = ["bash", "cat", "dirname", "env"] + (["jq"] if with_jq else [])
             for t in tools:
