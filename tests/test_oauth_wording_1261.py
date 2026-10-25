@@ -82,7 +82,7 @@ class TestJob1NewWording(unittest.TestCase):
     PANE = "%9"
     SID = "12121212-3434-4565-8787-909090909090"
 
-    def _run(self, now, cred_mtime, age_s, entries=None):
+    def _run(self, now, cred_mtime, age_s, entries=None, preseed=None):
         tmp = TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         proj = Path(tmp.name) / "projects"
@@ -93,6 +93,10 @@ class TestJob1NewWording(unittest.TestCase):
         tpath.write_text("".join(json.dumps(e) + "\n" for e in entries))
         os.utime(tpath, (now - age_s, now - age_s))
         self.badge = Path(tmp.name) / "auth-guard" / "status.json"
+        self.pings = []
+        state_path = Path(tmp.name) / "state.json"
+        if preseed:
+            state_path.write_text(json.dumps(preseed))
         keys = []
 
         def fake_run(argv, timeout=8):
@@ -112,8 +116,8 @@ class TestJob1NewWording(unittest.TestCase):
             return ""
 
         logs = wd.run_once(now=now, dry_run=False, run=fake_run,
-                           send_fn=lambda *a, **k: None, projects_dir=proj,
-                           state_path=Path(tmp.name) / "state.json",
+                           send_fn=lambda *a, **k: self.pings.append(k),
+                           projects_dir=proj, state_path=state_path,
                            pending_prefix=str(Path(tmp.name) / "pending-"),
                            grace=300, interval=300, max_nudges=3,
                            cred_mtime_fn=lambda: cred_mtime)
@@ -162,6 +166,46 @@ class TestJob1NewWording(unittest.TestCase):
         now = 1_800_000_000.0
         self._run(now, cred_mtime=now - 100_000, age_s=3600,
                   entries=[_err(NEW_BANNER, now - 3600)])
+        self.assertTrue(self.badge.exists())
+
+
+    # verification round
+    def _continued(self, first):
+        return {"apierr-authdead:" + self.SID: {
+            "first_401_ts": int(first), "pinged": False, "continued": True,
+            "continued_ts": int(first) + 60, "relaunched": False,
+            "last_seen": int(first) + 60}}
+
+    def test_a_401_after_the_one_continue_is_persisted_not_stale(self):
+        # older CC never clears the file: the fresh token at -1800 failed again
+        now = 1_800_000_000.0
+        entries = [_err(NEW_BANNER, now - 3600),
+                   {"type": "user", "message": {"role": "user", "content": "oauth-resume: x"}},
+                   _err(NEW_BANNER, now - 60)]
+        with unittest.mock.patch("watchdog.goal._recovery_recent_human", return_value=False), \
+                unittest.mock.patch("watchdog.resurrect.pane_is_bare_idle", return_value=False):
+            logs, typed = self._run(now, cred_mtime=now - 1800, age_s=60, entries=entries,
+                                    preseed=self._continued(now - 3600))
+        self.assertTrue(any("persisted through the continue" in ln for ln in logs), logs)
+        self.assertEqual(typed, [], logs)
+
+    def test_the_timer_starts_at_the_first_401_not_an_earlier_529(self):
+        now = 1_800_000_000.0
+        entries = [_err("API Error: 529 overloaded", now - 2400, "overloaded"),
+                   _err(NEW_BANNER, now - 60)]
+        self._run(now, cred_mtime=now - 100_000, age_s=60, entries=entries)
+        self.assertFalse(self.badge.exists())
+        self.assertEqual([k for k in self.pings
+                          if str(k.get("dedup_key", "")).startswith("credential-dead:")], [])
+
+    def test_a_proven_dead_session_paints_the_badge_at_once(self):
+        # the one continue failed: no longer a rotation healing itself
+        now = 1_800_000_000.0
+        with unittest.mock.patch("watchdog.goal._recovery_recent_human", return_value=False), \
+                unittest.mock.patch("watchdog.resurrect.pane_is_bare_idle", return_value=False):
+            self._run(now, cred_mtime=now - 300, age_s=600,
+                      entries=[_err(NEW_BANNER, now - 600)],
+                      preseed=self._continued(now - 600))
         self.assertTrue(self.badge.exists())
 
 
