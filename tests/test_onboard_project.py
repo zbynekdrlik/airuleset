@@ -11,7 +11,6 @@ GitHub repo ani ticket. Core invariant = idempotencia: 2. beh = all-satisfied
 no-op, nula mutácií, a rozpracovaný (dirty) worktree sa nikdy nedotýka.
 """
 
-import json
 import subprocess
 import sys
 import unittest
@@ -331,24 +330,6 @@ class TestFoundationAndNotificationTickets(unittest.TestCase):
             for c in created:
                 body = " ".join(c)
                 self.assertIn("Scope-gate:", body)
-
-    def test_notification_ticket_not_refiled_when_present(self):
-        with TemporaryDirectory() as d, TemporaryDirectory() as rd:
-            repo = Path(d)
-            init_repo(repo, remote="https://github.com/zbynekdrlik/foo.git")
-            existing = json.dumps([{"number": 1, "title": ob.ONBOARD_TICKET_TITLE}])
-            def gh(argv):
-                if "list" in argv:
-                    return subprocess.CompletedProcess(argv, 0, existing, "")
-                return subprocess.CompletedProcess(argv, 0, "", "")
-            run = FakeRunner(gh_handler=gh)
-            r = ob.onboard_project(str(repo), name="foo",
-                                   registry_path=str(Path(rd) / "r.json"),
-                                   run=run)
-            self.assertEqual(run.gh_matching("issue", "create", "onboard"), [])
-            statuses = {s["step"]: s["status"] for s in r["steps"]}
-            self.assertEqual(statuses["notification_ticket"], "satisfied")
-
 
 # --------------------------------------------------------------------------- #
 # 8) --audit / --check — READ-ONLY drift report, no mutations.

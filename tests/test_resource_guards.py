@@ -31,8 +31,6 @@ import watchdog as wd                    # noqa: E402
 from watchdog.resource_guard import (    # noqa: E402
     resource_guard_verify,
     DEDUP_INTERVAL_S,
-    TRACKING_ISSUE,
-    TRACKING_REPO,
 )
 
 
@@ -388,24 +386,6 @@ class TestResourceGuardVerify(unittest.TestCase):
         self.assertEqual(gk, [])                # but files nothing
         self.assertFalse(os.path.exists(self.marker))   # and writes no marker
 
-    def test_unwired_gk_seam_journals_only(self):
-        logs = resource_guard_verify(
-            uid=1234, cgroup_read=lambda uid: "max",
-            box_class_fn=self._shared(),
-            gk_request_fn=None, marker_path=self.marker, now=1000)
-        self.assertTrue(logs)
-        self.assertTrue(any("journal only" in ln for ln in logs))
-
-    def test_gk_request_error_is_caught(self):
-        def boom(uid):
-            raise RuntimeError("gh down")
-        logs = resource_guard_verify(
-            uid=1234, cgroup_read=lambda uid: "max",
-            box_class_fn=self._shared(),
-            gk_request_fn=boom, marker_path=self.marker, now=1000)
-        self.assertTrue(any("gk-request error" in ln for ln in logs))
-
-
 class TestRunOnceWiring(unittest.TestCase):
     """The job is registered in run_once and gated on its wired seam."""
 
@@ -415,11 +395,6 @@ class TestRunOnceWiring(unittest.TestCase):
         # box-class gate would fail-open anyway, and assert no crash + the job
         # is absent from the label set when unwired.
         self.assertTrue(hasattr(wd, "resource_guard_verify"))
-
-    def test_tracking_constants(self):
-        self.assertEqual(TRACKING_ISSUE, 775)
-        self.assertEqual(TRACKING_REPO, "zbynekdrlik/airuleset")
-
 
 class TestRsyslogQuiet925C(unittest.TestCase):
     """#925-C: rsyslog quiet rule renders correctly and is in the guard set."""

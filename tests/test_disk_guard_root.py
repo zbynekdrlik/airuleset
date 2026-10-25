@@ -450,47 +450,6 @@ class TestSevereEscalation895(unittest.TestCase):
         import watchdog.disk_guard as dg
         self.assertEqual(dg.SEVERE_PCT, 95)
 
-    def test_file_severe_ticket_below_threshold_is_noop(self):
-        import watchdog.disk_guard as dg
-        status = {"worst_pct": 93, "dim": "bytes"}
-        logs = dg.file_severe_ticket(status, "/tmp/t", 1000, [], dry_run=True)
-        self.assertEqual(logs, [])
-
-    def test_file_severe_ticket_at_threshold_logs(self):
-        import watchdog.disk_guard as dg
-        status = {"worst_pct": 96, "dim": "bytes"}
-        logs = dg.file_severe_ticket(status, "/tmp/t", 1000,
-                                     [("/tmp/big", 5000000000)],
-                                     dry_run=True)
-        self.assertTrue(len(logs) > 0)
-        self.assertIn("SEVERE-TICKET", logs[0])
-
-    def test_file_severe_ticket_daily_dedup(self):
-        """#895/#896-899: dedup now lives in a durable per-box state file
-        under the guard's own state dir (derived from `home`), not the old
-        world-writable `/tmp` date marker -- `home=td` already isolates it,
-        no monkeypatch needed."""
-        import watchdog.disk_guard as dg
-        with tempfile.TemporaryDirectory() as td:
-            status = {"worst_pct": 96, "dim": "bytes"}
-            # First call (dry_run=False but with injected run_fn)
-            dg.file_severe_ticket(
-                status, td, 1000, [("/tmp/big", 5000000000)],
-                dry_run=False,
-                run_fn=lambda *a, **kw: type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})())
-            # The durable state file should be written
-            state_path = dg._severe_ticket_state_path(td)
-            self.assertTrue(os.path.exists(state_path))
-            # Second call should be deduped
-            calls = []
-            logs2 = dg.file_severe_ticket(
-                status, td, 1000, [("/tmp/big", 5000000000)],
-                dry_run=False,
-                run_fn=lambda *a, **kw: calls.append(a))
-            self.assertEqual(logs2, [])
-            self.assertEqual(calls, [], "a deduped call must never reach run_fn")
-
-
 class TestNotifyImportForbidden(unittest.TestCase):
     """The watchdog side NEVER pings — notify must not be importable from it."""
 

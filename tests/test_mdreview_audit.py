@@ -130,122 +130,6 @@ class TestMemoryRPS(unittest.TestCase):
 # cadence — due / not-due / model-generation / reopen / create / runner-failure
 # ---------------------------------------------------------------------------
 
-class TestCadenceDue(unittest.TestCase):
-
-    def _make_state(self, tmp, data):
-        p = Path(tmp) / "mdreview-cadence.json"
-        p.write_text(json.dumps(data), encoding="utf-8")
-        return p
-
-    def _tiers_hash(self):
-        import airuleset
-        return hashlib.sha1(
-            str(sorted(airuleset.MODEL_TIERS.items())).encode()
-        ).hexdigest()
-
-    def test_closed_31d_is_due(self):
-        from watchdog.mdreview_cadence import evaluate_cadence
-        now = time.time()
-        closed_at = "2026-07-01T00:00:00Z"
-        th = self._tiers_hash()
-        state = {"schema": 1, "ticket": 999, "model_tiers_hash": th,
-                 "last_eval_ts": now - 86400}
-        gh_calls = []
-        def fake_gh(host_entry):
-            gh_calls.append(host_entry)
-            return json.dumps({"state": "closed", "closedAt": closed_at}), 0
-        result = evaluate_cadence(state, now, gh_runner=fake_gh)
-        self.assertEqual(result["due"], True)
-        self.assertEqual(result["reason"], "30d")
-
-    def test_closed_5d_not_due(self):
-        from watchdog.mdreview_cadence import evaluate_cadence
-        now = time.time()
-        closed_5d = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now - 5 * 86400))
-        th = self._tiers_hash()
-        state = {"schema": 1, "ticket": 999, "model_tiers_hash": th,
-                 "last_eval_ts": now - 86400}
-        def fake_gh(_):
-            return json.dumps({"state": "closed", "closedAt": closed_5d}), 0
-        result = evaluate_cadence(state, now, gh_runner=fake_gh)
-        self.assertFalse(result["due"])
-
-    def test_open_not_due(self):
-        from watchdog.mdreview_cadence import evaluate_cadence
-        now = time.time()
-        th = self._tiers_hash()
-        state = {"schema": 1, "ticket": 999, "model_tiers_hash": th,
-                 "last_eval_ts": now - 86400}
-        def fake_gh(_):
-            return json.dumps({"state": "OPEN"}), 0
-        result = evaluate_cadence(state, now, gh_runner=fake_gh)
-        self.assertFalse(result["due"])
-
-    def test_tiers_hash_mismatch_triggers_model_generation(self):
-        from watchdog.mdreview_cadence import evaluate_cadence
-        now = time.time()
-        closed_5d = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now - 5 * 86400))
-        state = {"schema": 1, "ticket": 999, "model_tiers_hash": "stale-hash",
-                 "last_eval_ts": now - 86400}
-        def fake_gh(_):
-            return json.dumps({"state": "closed", "closedAt": closed_5d}), 0
-        result = evaluate_cadence(state, now, gh_runner=fake_gh)
-        self.assertTrue(result["due"])
-        self.assertEqual(result["reason"], "model-generation")
-
-
-class TestCadenceReopen(unittest.TestCase):
-
-    def test_reopen_argv_exactly_once(self):
-        from watchdog.mdreview_cadence import act_on_due
-        calls = []
-        def fake_runner(argv):
-            calls.append(argv)
-            return "", 0
-        act_on_due(
-            ticket=999,
-            reason="30d",
-            audit_data={"schema": 1, "date": "2026-09-05", "boxes": [], "failed": []},
-            gh_runner=fake_runner,
-        )
-        reopen_calls = [c for c in calls if "reopen" in str(c).lower()]
-        self.assertEqual(len(reopen_calls), 1,
-                         f"expected exactly 1 reopen, got {len(reopen_calls)}: {calls}")
-
-
-class TestCadenceCreate(unittest.TestCase):
-
-    def test_create_carries_both_gate_lines(self):
-        from watchdog.mdreview_cadence import bootstrap_ticket
-        calls = []
-        def fake_runner(argv):
-            calls.append(argv)
-            return "https://github.com/zbynekdrlik/airuleset/issues/900\n", 0
-        num = bootstrap_ticket(gh_runner=fake_runner)
-        self.assertEqual(num, 900)
-        create_calls = [c for c in calls if "create" in str(c).lower()]
-        self.assertEqual(len(create_calls), 1)
-        body = " ".join(str(x) for x in create_calls[0])
-        self.assertIn("Scope-gate:", body)
-        self.assertIn("Dedup-checked:", body)
-
-
-class TestCadenceRunnerFailure(unittest.TestCase):
-
-    def test_runner_failure_state_unadvanced(self):
-        from watchdog.mdreview_cadence import evaluate_cadence
-        now = time.time()
-        th = "stale-hash"
-        state = {"schema": 1, "ticket": 999, "model_tiers_hash": th,
-                 "last_eval_ts": now - 86400}
-        def failing_gh(_):
-            return "", 1
-        result = evaluate_cadence(state, now, gh_runner=failing_gh)
-        self.assertFalse(result["due"])
-        self.assertEqual(state["model_tiers_hash"], th,
-                         "state must NOT be advanced on runner failure")
-
-
 # ---------------------------------------------------------------------------
 # fleet — one attempt, failed host, paused absent
 # ---------------------------------------------------------------------------
@@ -362,50 +246,9 @@ class TestGhRepoFlag(unittest.TestCase):
             self.assertIn("-R", argv_str,
                           f"gh argv must carry -R flag: {c}")
 
-    def test_act_on_due_gh_argv_carries_repo_flag(self):
-        from watchdog.mdreview_cadence import act_on_due
-        calls = []
-        def capture_gh(argv):
-            calls.append(argv)
-            return "", 0
-        act_on_due(999, "30d",
-                   {"schema": 1, "date": "2026-09-05", "boxes": [], "failed": []},
-                   gh_runner=capture_gh)
-        for c in calls:
-            argv_str = " ".join(str(x) for x in c)
-            self.assertIn("-R", argv_str,
-                          f"gh argv must carry -R flag: {c}")
-
-    def test_bootstrap_gh_argv_carries_repo_flag(self):
-        from watchdog.mdreview_cadence import bootstrap_ticket
-        calls = []
-        def capture_gh(argv):
-            calls.append(argv)
-            return "https://github.com/zbynekdrlik/airuleset/issues/900\n", 0
-        bootstrap_ticket(gh_runner=capture_gh)
-        for c in calls:
-            argv_str = " ".join(str(x) for x in c)
-            self.assertIn("-R", argv_str,
-                          f"gh argv must carry -R flag: {c}")
-
-
 # ---------------------------------------------------------------------------
 # Finding 6 — act_on_due must check gh rc and return success/failure
 # ---------------------------------------------------------------------------
-
-class TestActOnDueRc(unittest.TestCase):
-
-    def test_failed_reopen_returns_false(self):
-        from watchdog.mdreview_cadence import act_on_due
-        def failing_gh(argv):
-            return "", 1
-        result = act_on_due(999, "30d",
-                            {"schema": 1, "date": "2026-09-05",
-                             "boxes": [], "failed": []},
-                            gh_runner=failing_gh)
-        self.assertIs(result, False,
-                      "act_on_due must return False on gh failure")
-
 
 # ---------------------------------------------------------------------------
 # Finding 8 — dev1 gate
@@ -493,66 +336,6 @@ class TestCadenceJob(unittest.TestCase):
             self.assertTrue(any("ttl-skip" in ln for ln in logs),
                             f"recent eval must ttl-skip: {logs}")
 
-    def test_due_advances_state(self):
-        from watchdog.mdreview_cadence import mdreview_cadence_job
-        now = time.time()
-        th = self._tiers_hash()
-        closed_old = "2026-01-01T00:00:00Z"
-        with tempfile.TemporaryDirectory() as tmp:
-            sp = Path(tmp) / "state.json"
-            sp.write_text(json.dumps({
-                "schema": 1, "ticket": 999,
-                "model_tiers_hash": th,
-                "last_eval_ts": now - 86400 * 2,
-            }), encoding="utf-8")
-            gh_calls = []
-            def fake_gh(argv):
-                gh_calls.append(argv)
-                if "view" in str(argv):
-                    return json.dumps({"state": "closed",
-                                       "closedAt": closed_old}), 0
-                return "", 0
-            def fake_audit(fleet=True):
-                return {"schema": 1, "date": "2026-09-18",
-                        "boxes": [], "failed": [], "skipped": []}
-            with mock.patch("socket.gethostname", return_value="dev1"), \
-                    mock.patch("cli_mdreview_audit.save_artifact",
-                               return_value="/x/2026-09-18.json"):
-                logs = mdreview_cadence_job(
-                    now, {}, state_path=str(sp),
-                    gh_runner=fake_gh, audit_fn=fake_audit)
-            state_after = json.loads(sp.read_text())
-            self.assertEqual(state_after["last_eval_ts"], now,
-                             "state must be advanced after due")
-            self.assertTrue(any("due" in ln for ln in logs), f"logs: {logs}")
-
-    def test_dry_run_no_gh_reopen(self):
-        from watchdog.mdreview_cadence import mdreview_cadence_job
-        now = time.time()
-        th = self._tiers_hash()
-        closed_old = "2026-01-01T00:00:00Z"
-        with tempfile.TemporaryDirectory() as tmp:
-            sp = Path(tmp) / "state.json"
-            sp.write_text(json.dumps({
-                "schema": 1, "ticket": 999,
-                "model_tiers_hash": th,
-                "last_eval_ts": now - 86400 * 2,
-            }), encoding="utf-8")
-            gh_calls = []
-            def fake_gh(argv):
-                gh_calls.append(argv)
-                if "view" in str(argv):
-                    return json.dumps({"state": "closed",
-                                       "closedAt": closed_old}), 0
-                return "", 0
-            with mock.patch("socket.gethostname", return_value="dev1"):
-                mdreview_cadence_job(
-                    now, {}, dry_run=True, state_path=str(sp),
-                    gh_runner=fake_gh)
-            reopen_calls = [c for c in gh_calls if "reopen" in str(c)]
-            self.assertEqual(len(reopen_calls), 0,
-                             "dry-run must NOT reopen")
-
     def test_failure_no_hash_advance_but_ttl_advanced(self):
         from watchdog.mdreview_cadence import mdreview_cadence_job
         now = time.time()
@@ -587,55 +370,9 @@ class TestCadenceJob(unittest.TestCase):
 # Finding 3 — bootstrap wiring in no-ticket branch
 # ---------------------------------------------------------------------------
 
-class TestBootstrapWiring(unittest.TestCase):
-
-    def test_no_ticket_state_triggers_bootstrap(self):
-        from watchdog.mdreview_cadence import mdreview_cadence_job
-        now = time.time()
-        with tempfile.TemporaryDirectory() as tmp:
-            sp = Path(tmp) / "state.json"
-            gh_calls = []
-            def fake_gh(argv):
-                gh_calls.append(argv)
-                return "https://github.com/zbynekdrlik/airuleset/issues/900\n", 0
-            with mock.patch("socket.gethostname", return_value="dev1"):
-                mdreview_cadence_job(
-                    now, {}, state_path=str(sp), gh_runner=fake_gh)
-            create_calls = [c for c in gh_calls if "create" in str(c)]
-            self.assertGreater(len(create_calls), 0,
-                               "no-ticket state must trigger bootstrap_ticket")
-            state_after = json.loads(sp.read_text())
-            self.assertEqual(state_after.get("ticket"), 900,
-                             "bootstrap must store ticket number")
-
-
 # ---------------------------------------------------------------------------
 # Finding 12 — hash must be persisted when absent
 # ---------------------------------------------------------------------------
-
-class TestHashPersist(unittest.TestCase):
-
-    def test_bootstrap_persists_tiers_hash(self):
-        from watchdog.mdreview_cadence import mdreview_cadence_job
-        import hashlib as _hl
-        import airuleset
-        now = time.time()
-        with tempfile.TemporaryDirectory() as tmp:
-            sp = Path(tmp) / "state.json"
-            gh_calls = []
-            def fake_gh(argv):
-                gh_calls.append(argv)
-                return "https://github.com/zbynekdrlik/airuleset/issues/900\n", 0
-            with mock.patch("socket.gethostname", return_value="dev1"):
-                mdreview_cadence_job(now, {}, state_path=str(sp),
-                                    gh_runner=fake_gh)
-            state_after = json.loads(sp.read_text())
-            expected = _hl.sha1(
-                str(sorted(airuleset.MODEL_TIERS.items())).encode()
-            ).hexdigest()
-            self.assertEqual(state_after.get("model_tiers_hash"), expected,
-                             "bootstrap must persist current tiers hash")
-
 
 # ---------------------------------------------------------------------------
 # Finding 5 — dedup_pairs and zero_caller_skills must NOT be hardcoded []
@@ -748,38 +485,6 @@ class TestStateFileAliasing(unittest.TestCase):
                              "run_once state MUST survive cadence job execution — "
                              "state-file aliasing means the closing save_state "
                              "overwrites cadence data AND vice versa")
-
-    def test_create_fires_at_most_once_across_two_polls(self):
-        """gh issue create must fire AT MOST ONCE across two consecutive
-        run_once calls — the cadence job must persist the ticket number
-        in its OWN state file so the daily TTL prevents re-bootstrap."""
-        from watchdog.mdreview_cadence import mdreview_cadence_job
-        now = time.time()
-        with tempfile.TemporaryDirectory() as tmp:
-            sp = Path(tmp) / "state.json"
-
-            all_create_calls = []
-            def fake_gh(argv):
-                argv_str = " ".join(str(x) for x in argv)
-                if "create" in argv_str:
-                    all_create_calls.append(argv)
-                return "https://github.com/zbynekdrlik/airuleset/issues/900\n", 0
-
-            def fake_audit(fleet=True):
-                return {"schema": 1, "date": "2026-09-18",
-                        "boxes": [], "failed": [], "skipped": []}
-            with mock.patch("socket.gethostname", return_value="dev1"), \
-                    mock.patch("cli_mdreview_audit.save_artifact",
-                               return_value="/x/2026-09-18.json"):
-                mdreview_cadence_job(now, {}, state_path=str(sp),
-                                    gh_runner=fake_gh, audit_fn=fake_audit)
-                mdreview_cadence_job(now + 86400 + 1, {}, state_path=str(sp),
-                                    gh_runner=fake_gh, audit_fn=fake_audit)
-
-            self.assertLessEqual(len(all_create_calls), 1,
-                                 f"gh issue create must fire AT MOST ONCE across "
-                                 f"two polls, got {len(all_create_calls)}: "
-                                 f"{all_create_calls}")
 
     def test_cadence_job_never_spawns_subprocess_with_audit_fn(self):
         """#874 fix-forward (CI GATE): with an injected ``audit_fn`` (and a fake

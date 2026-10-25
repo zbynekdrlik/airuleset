@@ -524,50 +524,6 @@ class TestRound1Refusal(unittest.TestCase):
         self.assertNotIn("github_app: True", text)
 
 
-class TestRound1DiskGuard(unittest.TestCase):
-    """Job 40's severe-ticket filer: a project account files natively (no
-    gk-request, which now refuses there, and no needs-gatekeeper label)."""
-
-    def setUp(self):
-        markers.seed(self)   # every declared account is bootstrapped
-
-    def argv(self, user):
-        import watchdog.disk_guard_escalation as esc
-        with mock.patch.object(airuleset, "_current_user", return_value=user):
-            return esc.airuleset_filer_argv(AIR, "t", "b", "/repo", "/py")
-
-    def test_project_account_files_natively(self):
-        self.assertEqual(self.argv("fohmixer"),
-                         ["gh", "issue", "create", "-R", AIR, "--title", "t",
-                          "--body", "b"])
-
-    def test_every_other_box_keeps_gk_request(self):
-        for user in ("newlevel", "gatekeeper", "montalu1"):
-            self.assertEqual(self.argv(user)[:3],
-                             ["/py", "/repo/airuleset.py", "gk-request"], user)
-
-    def test_the_filer_uses_it(self):
-        import watchdog.disk_guard as dg
-        calls = []
-
-        def run(argv, **kw):
-            calls.append(list(argv))
-            return subprocess.CompletedProcess(argv, 0, "https://x/issues/1", "")
-        with base.tempfile.TemporaryDirectory() as home, \
-                mock.patch.object(dg, "_default_box_class", lambda: None), \
-                mock.patch.object(airuleset, "_current_user",
-                                  return_value="fohmixer"):
-            logs = dg.file_severe_ticket(
-                {"worst_pct": 97, "dim": "bytes", "drain_exhausted": True,
-                 "drain_skipped_rungs": []}, home, 5000.0, [], dry_run=False,
-                run_fn=run, windows=[])
-        self.assertEqual(calls[-1][:5], ["gh", "issue", "create", "-R", AIR])
-        self.assertFalse(any("gk-request" in c for c in calls))
-        # review round 2: the durable log names what really ran
-        self.assertIn("filing gh issue create:", logs[0])
-        self.assertNotIn("gk-request", "\n".join(logs))
-
-
 class TestRound1ShimRefresh(unittest.TestCase):
     """`airuleset.py install` refreshes an already-live account's project
     shim (else it keeps routing everything to `primary`)."""

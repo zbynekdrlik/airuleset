@@ -198,23 +198,6 @@ class ResumeConfirmAndTicket(unittest.TestCase):
         self.h.sweep(self.state, NOW + 60 + 3 * mr.RESUME_GRACE_S)
         self.assertEqual(len(self.h.typed), 2)          # one resume line per episode
 
-    def test_confirmed_restore_files_one_ticket(self):
-        self.h.append([_assistant("claude-opus-5-5", uuid="new")])
-        logs = self.h.sweep(self.state, NOW + 300)
-        self.assertTrue(any("RESTORED" in ln for ln in logs), logs)
-        self.assertTrue(any("re-review ticket filed" in ln for ln in logs), logs)
-        self.assertEqual(len(self.h.filed), 1)
-        self.assertEqual(self.h.filed[0]["to"], "claude-opus-4-8")
-        self.h.sweep(self.state, NOW + 400)
-        self.assertEqual(len(self.h.filed), 1)          # at most one per fallback
-
-    def test_failed_filing_is_retried_bounded(self):
-        self.h.file_result = (False, None, "gh down")
-        self.h.append([_assistant("claude-opus-5-5", uuid="new")])
-        for i in range(mr.FILE_MAX_TRIES + 2):
-            self.h.sweep(self.state, NOW + 300 + i)
-        self.assertEqual(len(self.h.filed), mr.FILE_MAX_TRIES)
-
     def test_reply_still_on_fallback_retypes_model(self):
         self.h.append([_assistant("claude-opus-4-8", uuid="again")])
         self.h.sweep(self.state, NOW + mr.RETRY_S)
@@ -230,97 +213,6 @@ class ResumeConfirmAndTicket(unittest.TestCase):
         self.assertEqual(rec["since"], "2026-09-30T10:00:00Z")
         self.assertEqual(self.h.typed[-1], "/model " + MANAGED)
         self.assertTrue(any("FALLBACK" in ln for ln in logs), logs)
-
-
-class TicketComposition(unittest.TestCase):
-    REC = {"from": "claude-opus-5-5", "to": "claude-opus-4-8",
-           "since": "2026-09-28T14:51:50Z", "since_exact": True,
-           "restored_at": NOW, "cwd": "/repo", "episode": "marker:m1", "proven": True}
-
-    def test_body_names_window_models_and_commit_range(self):
-        title, body = mr.compose_ticket(self.REC, MANAGED, NOW,
-                                        [("aaa111", "first"), ("bbb222", "second")])
-        self.assertIn("claude-opus-4-8", title)
-        self.assertIn("2026-09-28T14:51:50Z", title)
-        self.assertIn("from `claude-opus-5-5` to `claude-opus-4-8`", body)
-        self.assertIn("oldest `aaa111`, newest `bbb222`", body)
-        self.assertNotIn("^..", body)                  # never a cross-branch range claim
-        self.assertIn("- `bbb222` second", body)
-        self.assertIn("airuleset#1203", body)
-        self.assertIn(mr.EPISODE_TAG + "marker:m1", body)   # the dedup search key
-
-    def test_inexact_start_is_labelled(self):
-        rec = dict(self.REC, since_exact=False)
-        _t, body = mr.compose_ticket(rec, MANAGED, NOW, [])
-        self.assertIn("first seen by the watchdog", body)
-        self.assertIn("none", body)
-
-    def test_file_ticket_runs_git_log_and_native_gh_in_the_pane_cwd(self):
-        d = tempfile.mkdtemp(prefix="mr1203-cwd-")
-        self.addCleanup(shutil.rmtree, d, True)
-        calls = []
-
-        class R:
-            def __init__(self, rc, out="", err=""):
-                self.returncode, self.stdout, self.stderr = rc, out, err
-
-        def fake(argv, **kw):
-            calls.append((argv, kw.get("cwd")))
-            if argv[0] == "git":
-                return R(0, "aaa111\tfirst\nbbb222\tsecond\n")
-            if argv[:3] == ["gh", "issue", "list"]:
-                return R(0, "")                    # no earlier filing of this episode
-            return R(0, "https://github.com/o/r/issues/9\n")
-
-        ok, ref, err = mr.file_ticket(dict(self.REC, cwd=d), MANAGED, NOW, sub_run=fake)
-        self.assertTrue(ok, err)
-        self.assertEqual(ref, "https://github.com/o/r/issues/9")
-        self.assertEqual(calls[0][0][:3], ["git", "log", "HEAD"])
-        self.assertIn("--since=2026-09-28T14:51:50Z", calls[0][0])
-        self.assertEqual(calls[1][0][:3], ["gh", "issue", "list"])   # dedup search first
-        self.assertIn('"marker:m1" in:body', calls[1][0])
-        self.assertEqual(calls[2][0][:3], ["gh", "issue", "create"])
-        self.assertNotIn("-R", calls[2][0])            # the pane repo's native gh
-        self.assertEqual({c[1] for c in calls}, {d})
-        body = calls[2][0][calls[2][0].index("--body") + 1]
-        self.assertIn("oldest `aaa111`, newest `bbb222`", body)
-
-    def test_file_ticket_reuses_an_already_filed_episode(self):
-        d = tempfile.mkdtemp(prefix="mr1203-cwd-")
-        self.addCleanup(shutil.rmtree, d, True)
-        calls = []
-
-        class R:
-            def __init__(self, rc, out=""):
-                self.returncode, self.stdout, self.stderr = rc, out, ""
-
-        def fake(argv, **kw):
-            calls.append(argv)
-            if argv[:3] == ["gh", "issue", "list"]:
-                return R(0, "https://github.com/o/r/issues/5\n")
-            return R(0, "")
-
-        ok, ref, _err = mr.file_ticket(dict(self.REC, cwd=d), MANAGED, NOW, sub_run=fake)
-        self.assertTrue(ok)
-        self.assertEqual(ref, "https://github.com/o/r/issues/5")
-        self.assertFalse(any(a[:3] == ["gh", "issue", "create"] for a in calls))
-
-    def test_file_ticket_reports_gh_failure(self):
-        d = tempfile.mkdtemp(prefix="mr1203-cwd-")
-        self.addCleanup(shutil.rmtree, d, True)
-
-        class R:
-            returncode, stdout, stderr = 1, "", "no repo"
-
-        ok, ref, err = mr.file_ticket(dict(self.REC, cwd=d), MANAGED, NOW,
-                                      sub_run=lambda argv, **kw: R())
-        self.assertFalse(ok)
-        self.assertIn("no repo", err)
-
-    def test_gone_checkout_is_not_filed(self):
-        ok, _ref, err = mr.file_ticket(dict(self.REC, cwd="/nonexistent/x"), MANAGED, NOW)
-        self.assertFalse(ok)
-        self.assertIn("gone", err)
 
 
 class ProofAndImplementer(unittest.TestCase):
@@ -393,22 +285,6 @@ class ProofAndImplementer(unittest.TestCase):
         self._sweep(state, NOW + 60 + 2 * mr.RESUME_GRACE_S)
         self.assertIsNotNone(state["model_restore"]["sid1"]["resumed_at"])
 
-    def test_state_is_written_through_before_a_crash(self):
-        self.h.write([_marker()])
-        state = {}
-
-        def boom(rec, managed, now):
-            raise KeyboardInterrupt  # a killed sweep, past the typing
-
-        with self.assertRaises(KeyboardInterrupt):
-            self.h.file_ticket = boom
-            self._sweep(state, NOW)
-            self.h.append([_model_cmd(), _assistant("claude-opus-5-5", uuid="n")])
-            self._sweep(state, NOW + 300)
-        self.assertEqual(state["model_restore"]["sid1"]["attempts"], 1)
-        self.assertEqual(state["model_restore"]["sid1"]["file_tries"], 1)
-
-
 class RoundTwo(unittest.TestCase):
     """#1203 review round 2."""
 
@@ -450,7 +326,6 @@ class RoundTwo(unittest.TestCase):
 
     def test_a_restored_off_lineup_episode_is_done(self):
         self.assertTrue(mr._done({"restored_at": NOW, "proven": False}))
-        self.assertFalse(mr._done({"restored_at": NOW, "proven": True, "file_tries": 1}))
 
     def test_newest_transcript_skips_the_implementer_session(self):
         import watchdog

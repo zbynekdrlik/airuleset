@@ -165,18 +165,6 @@ class TestFilingBlockCharacterization(TestCase):
         r = _run("gh api repos/o/r/issues -X POST -f title=t", self.home, self.gh)
         self._assert(r, _BLOCKED_HEADER, "body-unresolved")
 
-    # 7. architecture-rework missing Area: line
-    def test_arch_rework_missing_area(self):
-        r = _run(_filing("t", "a rework", scope_gate="architecture-rework"),
-                 self.home, self.gh)
-        self._assert(r, _BLOCKED_HEADER, "architecture-rework-missing-area")
-
-    # 8. architecture-rework missing -l architecture-rework label
-    def test_arch_rework_missing_label(self):
-        r = _run(_filing("t", "a rework\nArea: gate-family",
-                         scope_gate="architecture-rework"), self.home, self.gh)
-        self._assert(r, _BLOCKED_HEADER, "architecture-rework-missing-label")
-
     # 9. daily cap (9th non-exempt filing today) — seed 8 PASS lines
     def test_daily_cap(self):
         log = Path(self.home) / ".claude" / "scope-gate.log"

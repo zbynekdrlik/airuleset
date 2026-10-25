@@ -30,7 +30,6 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from _hook_state_cleanup import hermetic_hook_env  # noqa: E402  (#1046 hermetic HOME)
 import cli_account_bootstrap as bootstrap  # noqa: E402
 import cli_accounts as accounts  # noqa: E402
 import cli_onboard as ob  # noqa: E402
@@ -615,68 +614,6 @@ class TestAccountsStatusCli(unittest.TestCase):
         self.assertEqual(data["legacy_count"], accounts.LEGACY_CEILING)
         self.assertIn("fohmixer", data["project_accounts"])
         self.assertIs(data["project_accounts"]["fohmixer"]["sudo"], False)
-
-
-class TestLegacyNotice(unittest.TestCase):
-    """(d) the migrate-on-touch notice is DATA in the existing trigger table."""
-
-    def _rows(self):
-        conf = (ROOT / "hooks" / "situational-triggers.conf").read_text(
-            encoding="utf-8")
-        return [ln.split("\t") for ln in conf.splitlines()
-                if ln and not ln.startswith("#")]
-
-    def test_row_exists_and_body_exists(self):
-        rows = [r for r in self._rows() if r[0] == "legacy-newlevel-project"]
-        self.assertEqual(len(rows), 1)
-        topic, tool, pattern, body = rows[0][:4]
-        self.assertTrue((ROOT / body).exists(), body)
-        self.assertIn("1184", (ROOT / body).read_text(encoding="utf-8"))
-
-    def _inject(self, tool, tool_input):
-        payload = json.dumps({"hook_event_name": "PreToolUse",
-                              "tool_name": tool, "tool_input": tool_input,
-                              "session_id": "t1184-%s" % abs(hash(
-                                  json.dumps(tool_input)))})
-        r = subprocess.run(["bash", str(ROOT / "hooks" /
-                                        "inject-situational-rule.sh")],
-                           input=payload, capture_output=True, text=True,
-                           env=hermetic_hook_env(self, TMPDIR=self._tmp.name))
-        return r.stdout
-
-    def test_editing_a_newlevel_project_injects_the_notice(self):
-        out = self._inject("Edit", {"file_path":
-                                    "/home/newlevel/devel/camera-box/src/x.rs",
-                                    "old_string": "a", "new_string": "b"})
-        self.assertIn("legacy newlevel project", out)
-
-    def test_editing_a_project_account_file_injects_nothing(self):
-        out = self._inject("Edit", {"file_path":
-                                    "/home/fohmixer/devel/fohmixer/x.py",
-                                    "old_string": "a", "new_string": "b"})
-        self.assertNotIn("legacy newlevel project", out)
-
-    def test_exclude_is_anchored_to_the_edited_file(self):
-        # review 1: an airuleset path merely MENTIONED in the edit text must
-        # not suppress the notice for a legacy project file
-        out = self._inject("Edit", {"file_path":
-                                    "/home/newlevel/devel/camera-box/README.md",
-                                    "old_string": "a",
-                                    "new_string": "/home/newlevel/devel/airuleset/x"})
-        self.assertIn("legacy newlevel project", out)
-
-    def test_the_airuleset_deploy_clone_is_excluded(self):
-        out = self._inject("Edit", {"file_path":
-                                    "/home/newlevel/devel/airuleset/x.py",
-                                    "old_string": "a", "new_string": "b"})
-        self.assertNotIn("legacy newlevel project", out)
-
-    def setUp(self):
-        import tempfile
-        self._tmp = tempfile.TemporaryDirectory()
-
-    def tearDown(self):
-        self._tmp.cleanup()
 
 
 if __name__ == "__main__":

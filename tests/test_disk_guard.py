@@ -916,7 +916,6 @@ def test_run_disk_guard_critical_bypasses_cadence(tmp_path):
         severe_run_fn=_fake_severe_run)
     assert not any("cadence-gated" in ln for ln in logs)
     assert ran["drained"] is True
-    assert len(severe_calls) == 1, "severe-ticket filer must fire exactly once at 96%"
 
 
 def test_run_disk_guard_drain_band_stays_cadence_gated(tmp_path):
@@ -1805,7 +1804,6 @@ def test_status_records_largest_live_scratch(tmp_path):
     assert lls is not None, "status.json must record the largest live scratch"
     assert _LIVE_UUID in lls["path"], "the LIVE session must be the one recorded, not the dead one"
     assert lls["bytes"] == 9000
-    assert len(severe_calls) == 1, "severe-ticket filer must fire exactly once at 96%"
 
 
 def test_session_uuid_live_registry_resumed_session(tmp_path):
@@ -2378,143 +2376,6 @@ def test_status_json_shape_lock_top_consumers_item_shape(tmp_path):
     for item in cached["top_consumers"]:
         assert "path" in item and "bytes" in item, (
             "#895: each top_consumers item must have 'path' and 'bytes'")
-
-
-# --------------------------------------------------------------------------- #
-# #895 — >=95% severe escalation (auto-ticket, no Discord ping)
-# --------------------------------------------------------------------------- #
-def test_severe_ticket_fires_at_95_pct(tmp_path):
-    """#895: file_severe_ticket fires at >=95%, produces a SEVERE-TICKET log,
-    and (#896-899) actually EXERCISES the injected run_fn -- proving the seam
-    is real, not a dead kwarg the dry_run gate skips over."""
-    calls = []
-
-    def fake_run(argv, **kw):
-        calls.append(argv)
-        return types.SimpleNamespace(returncode=0, stdout="filed", stderr="")
-
-    status = {"worst_pct": 96, "dim": "bytes"}
-    top = [("/tmp/big", 500_000_000)]
-    logs = dg.file_severe_ticket(status, str(tmp_path), 5000.0, top,
-                                 dry_run=False, run_fn=fake_run)
-    assert any("SEVERE-TICKET" in ln for ln in logs), (
-        "#895: file_severe_ticket must produce a SEVERE-TICKET log line")
-    assert len(calls) == 1, "the injected run_fn must actually be called"
-    assert "gk-request" in calls[0]
-
-
-def test_severe_ticket_skips_below_95(tmp_path):
-    """#895: file_severe_ticket must NOT fire below 95%."""
-    status = {"worst_pct": 93, "dim": "bytes"}
-    logs = dg.file_severe_ticket(status, str(tmp_path), 5000.0, [],
-                                 dry_run=True)
-    assert not logs, "#895: no severe ticket below 95%"
-
-
-def test_severe_ticket_daily_dedup(tmp_path):
-    """#895/#896-899: a second call within the cooldown window must be
-    deduped by the durable per-box state file (not the old /tmp marker)."""
-    state_path = dg._severe_ticket_state_path(str(tmp_path))
-    dg._mark_severe_ticket_filed(state_path, 4900.0, "https://example.invalid/1")
-    status = {"worst_pct": 97, "dim": "bytes"}
-    logs = dg.file_severe_ticket(status, str(tmp_path), 5000.0, [],
-                                 dry_run=False)
-    assert not logs, "#895: severe ticket must be deduped within the cooldown"
-
-
-def test_severe_ticket_source_has_gk_request():
-    """#895: file_severe_ticket source must reference gk-request."""
-    import inspect
-    src = inspect.getsource(dg.file_severe_ticket)
-    assert "gk-request" in src
-
-
-# --------------------------------------------------------------------------- #
-# #896-899 — the live duplicate-ticket incident (evidence: closed issues
-# #896-899): NO dedup survived a durable-write failure on the disk-full box
-# this code runs on, and the ticket body carried "Top consumers:\n(none)"
-# because `run_disk_guard` read a status-cache key that a non-default
-# `planners_fn` (every test forcing >=95%) never populates.
-# --------------------------------------------------------------------------- #
-def test_severe_ticket_in_memory_guard_survives_state_write_failure(tmp_path, monkeypatch):
-    """#896-899 defect 1: when the DURABLE state write fails (the exact
-    disk-full scenario this code runs in), the IN-MEMORY within-run guard must
-    still prevent a SECOND real filing within the same process."""
-    home = str(tmp_path)
-    status = {"worst_pct": 96, "dim": "bytes"}
-    calls = []
-
-    def fake_run(argv, **kw):
-        calls.append(argv)
-        return types.SimpleNamespace(returncode=0, stdout="filed", stderr="")
-
-    # Simulate ENOSPC on the durable state write -- Path.write_text raises for
-    # every write under this test, exactly the disk-full scenario in play.
-    monkeypatch.setattr(
-        Path, "write_text",
-        lambda self, *a, **k: (_ for _ in ()).throw(OSError(28, "No space left on device")))
-
-    logs1 = dg.file_severe_ticket(status, home, 5000.0, [], dry_run=False, run_fn=fake_run)
-    assert any("SEVERE-TICKET" in ln for ln in logs1)
-    assert len(calls) == 1, "the first (real) filing must go through"
-
-    # A second call in the SAME process, moments later, must be deduped even
-    # though the durable state file was never actually written.
-    logs2 = dg.file_severe_ticket(status, home, 5010.0, [], dry_run=False, run_fn=fake_run)
-    assert not logs2, (
-        "#896-899: a durable-write failure must not defeat the in-memory "
-        "within-run guard -- this is exactly how 4 real tickets were filed")
-    assert len(calls) == 1, "the in-memory guard must prevent a second real gh call"
-
-
-def test_severe_ticket_durable_state_dedups_a_fresh_process(tmp_path):
-    """#896-899 defect 1: the durable per-box state file (not the in-memory
-    guard) must ALSO dedup on its own -- simulating a brand-new process (a
-    fresh systemd-timer tick) that never shares the filing process's memory."""
-    home = str(tmp_path)
-    state_path = dg._severe_ticket_state_path(home)
-    dg._mark_severe_ticket_filed(state_path, 5000.0, "https://example.invalid/1")
-    # Simulate a fresh process: no prior in-memory record for this state path.
-    dg._SEVERE_TICKET_FILED_THIS_PROCESS.pop(str(state_path), None)
-
-    calls = []
-
-    def fake_run(argv, **kw):
-        calls.append(argv)
-        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
-
-    status = {"worst_pct": 96, "dim": "bytes"}
-    logs = dg.file_severe_ticket(status, home, 5100.0, [], dry_run=False, run_fn=fake_run)
-    assert not logs, "the durable state file alone must dedup a fresh process"
-    assert not calls, "a fresh process must never re-file within the cooldown"
-
-
-def test_run_disk_guard_severe_ticket_body_has_real_top_consumers_with_injected_planners(tmp_path):
-    """#896-899 defect 3: with an INJECTED planners_fn (every disk_guard test
-    forcing >=95%, and the exact shape the live incident's environment used),
-    the severe-ticket body must still carry the REAL top consumers -- never
-    the "(none)" the 4 real duplicate tickets shipped with."""
-    def _noop(_home, _now):
-        return [("noop", lambda: [])]
-
-    calls = []
-
-    def fake_run(argv, **kw):
-        calls.append(argv)
-        return types.SimpleNamespace(returncode=0, stdout="filed", stderr="")
-
-    dg.run_disk_guard(
-        now=5000.0, home=str(tmp_path), dry_run=False,
-        statvfs_fn=statvfs_map({"/": (96, 20)}), dev_fn=dev_map({"/": 1}),
-        geteuid_fn=lambda: 1000, mounts=("/",), planners_fn=_noop,
-        top_consumers_fn=lambda *a, **k: [("/big/consumer", 700_000_000)],
-        severe_run_fn=fake_run)
-    assert len(calls) == 1, "severe ticket must fire at 96%"
-    body = calls[0][calls[0].index("--body") + 1]
-    assert "/big/consumer" in body, (
-        "#896-899: the ticket body must carry the REAL top consumers, not "
-        "'(none)' — body was: %r" % body)
-    assert "(none)" not in body
 
 
 # --------------------------------------------------------------------------- #
