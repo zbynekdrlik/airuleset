@@ -12,7 +12,6 @@ role is not "review", by absolute path; a reduced account keeps the glob.
 """
 import inspect
 import json
-import os
 import sys
 import unittest
 from pathlib import Path
@@ -134,6 +133,8 @@ GK_WINDOWS = [
 ]
 INFRA = "/home/gatekeeper/devel/odoo/odoo-erp-infra/.claude/rules/gk-review-lenses*.md"
 QUALITY = "/home/gatekeeper/devel/odoo/odoo-erp-quality/.claude/rules/gk-review-lenses*.md"
+INFRA_WT = "/home/gatekeeper/devel/odoo/odoo-erp-infra/.claude/worktrees/**/.claude/rules/gk-review-lenses*.md"
+QUALITY_WT = "/home/gatekeeper/devel/odoo/odoo-erp-quality/.claude/worktrees/**/.claude/rules/gk-review-lenses*.md"
 
 
 class TestLensWindows(unittest.TestCase):
@@ -142,21 +143,21 @@ class TestLensWindows(unittest.TestCase):
         with mock.patch.object(cli_fleet, "box_windows", return_value=windows), \
                 mock.patch.object(cli_context_excludes, "_reduced_account",
                                   return_value=reduced), \
-                mock.patch.dict(os.environ, {"HOME": "/home/gatekeeper"}):
+                mock.patch.object(cli_context_excludes, "_account_home", return_value="/home/gatekeeper"):
             return cli_context_excludes.apply(json.loads(json.dumps(settings)))
 
     def test_full_account_excludes_the_non_review_windows(self):
-        self.assertEqual(self._apply({})["claudeMdExcludes"], [INFRA, QUALITY])
+        self.assertEqual(self._apply({})["claudeMdExcludes"], [INFRA, INFRA_WT, QUALITY, QUALITY_WT])
 
     def test_foreign_entry_kept_and_idempotent(self):
         out = self._apply({"claudeMdExcludes": ["/keep/me"]})
         again = self._apply(out)
-        self.assertEqual(again["claudeMdExcludes"], ["/keep/me", INFRA, QUALITY])
+        self.assertEqual(again["claudeMdExcludes"], ["/keep/me", INFRA, INFRA_WT, QUALITY, QUALITY_WT])
 
     def test_stale_managed_entry_removed(self):
         stale = "/home/gatekeeper/devel/old/.claude/rules/gk-review-lenses*.md"
         out = self._apply({"claudeMdExcludes": [stale, INFRA]})
-        self.assertEqual(out["claudeMdExcludes"], [INFRA, QUALITY])
+        self.assertEqual(out["claudeMdExcludes"], [INFRA, INFRA_WT, QUALITY, QUALITY_WT])
 
     def test_reduced_account_keeps_the_glob(self):
         out = self._apply({"claudeMdExcludes": [INFRA]}, reduced=True)
