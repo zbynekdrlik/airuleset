@@ -116,12 +116,12 @@ class TestArmParagraphResolvedVariant(TestCase):
 # (c) the gk-quality window sits next to gk review + gk-infra in the examples
 # --------------------------------------------------------------------------- #
 class TestDeclaredWindowExample(TestCase):
-    def test_gk_quality_named_in_the_1038_declared_window_example(self):
-        # #1038 example was "gk review, gk-infra, d3 today" -> add gk-quality;
-        # #1163 made gk-quality watch-steered (no /goal, never re-armed), so the
-        # re-arm example names the /goal windows and states the watch exception.
-        self.assertIn("gk review, gk-infra, d3 today; a watch-steered window "
-                      "is never re-armed, #1163", _norm(_text()))
+    def test_the_1038_declared_window_rearm_paragraph_is_retired(self):
+        # #1260 (owner 25.10.2026) retired #1038's declared-window virgin arm:
+        # the re-arm example paragraph is gone and the doctrine says no goal
+        # starts without the owner's /autopilot.
+        self.assertNotIn("is RE-ARMED automatically", _norm(_text()))
+        self.assertIn("no goal without the owner's `/autopilot`", _norm(_text()))
 
 
 # --------------------------------------------------------------------------- #
