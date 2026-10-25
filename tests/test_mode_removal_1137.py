@@ -14,6 +14,7 @@ related tickets in the `/goal` text.
 import hashlib
 import inspect
 import json
+import subprocess
 import sys
 import unittest
 import unittest.mock as m
@@ -125,12 +126,22 @@ class TestRemovedFiles(unittest.TestCase):
     def test_files_are_gone(self):
         for rel in ("cli_dispatch_gate.py", "cli_lane_overlap.py",
                     "gates/lanefill.py", "watchdog/lane_resources.py",
-                    ".claude/lane-resources.json",
-                    "hooks/stop-check-lane-fill.sh"):
+                    ".claude/lane-resources.json"):
             self.assertFalse((REPO / rel).exists(), rel)
 
     def test_lane_fill_hook_not_registered(self):
         self.assertNotIn("stop-check-lane-fill", _read("settings/hooks.json"))
+
+    def test_lane_fill_stub_is_a_silent_noop(self):
+        # A session started before the install still calls the old Stop hook
+        # path; a missing file is exit 127 on every Stop. One release keeps a
+        # no-op stub there (never registered).
+        stub = REPO / "hooks" / "stop-check-lane-fill.sh"
+        self.assertTrue(stub.exists())
+        r = subprocess.run(["bash", str(stub)], input='{"stop_hook_active": false}',
+                           capture_output=True, text=True, timeout=10)
+        self.assertEqual((r.returncode, r.stdout, r.stderr), (0, "", ""))
+        self.assertIn("delete in 0.1.557", stub.read_text())
 
     def test_dispatch_hook_keeps_only_the_wdrain_gate(self):
         hook = _read("hooks/block-dispatch-over-wdrain.sh")
@@ -176,6 +187,105 @@ class TestAlwaysOnModules(unittest.TestCase):
         self.assertNotIn("mode: parallel", text)
         self.assertIn("bgIsolation", text)
 
+    def test_worktree_lanes_stay_legal(self):
+        # Review B1: without the worker bullet the module read "any other
+        # branch is a mistake and should be deleted" and "one active worker
+        # per repo" unqualified, which forbids (and invites deleting) a live
+        # subagent worktree lane. One mechanics sentence, module still smaller.
+        text = _read("modules/git/two-branch-workflow.md")
+        self.assertIn('isolation: "worktree"', text)
+        self.assertIn("only once merged", text)
+        self.assertIn("one writer at a time", text)
+        self.assertNotIn("should be deleted", text)
+        self.assertNotIn("one active worker per repo", text)
+        self.assertLess(len(text.encode()), 1980)
+
+
+class TestNoForcedLanes(unittest.TestCase):
+    """Review B2/B4/B6/B7: nothing forces parallel or serial lanes, and the
+    bundling doctrine is an encouragement, never a mandate."""
+
+    def test_bundle_sentence_is_plain_encouragement(self):
+        self.assertEqual(goal_registry._BUNDLE,
+                         "related tickets: work them together in one branch, "
+                         "one PR and one CI cycle when their focus allows;")
+        self.assertNotRegex(goal_registry._BUNDLE,
+                            r"(?i)\b(must|always|never|only|required)\b")
+
+    def test_master_never_forces_concurrency(self):
+        text = _read("skills/autopilot-master/SKILL.md")
+        for banned in ("ALL LANES CONCURRENTLY", "never round-robin",
+                       "All lanes run in parallel", "in parallel — never one",
+                       "run concurrently throughout", "CONCURRENTLY, never"):
+            self.assertNotIn(banned, text, banned)
+
+    def test_worker_docs_carry_no_round_or_default_isolation(self):
+        for rel in ("agents/autopilot-worker.md", "skills/autopilot/SKILL.md"):
+            text = _read(rel)
+            for banned in ("SAME-ROUND", "round's siblings", "Fleet/worktree mode",
+                           "Worktree/fleet mode", "Serial fallback",
+                           "serial-fallback", "the default — see WORKTREE",
+                           "worktree isolation is the default", "worktree-fleet",
+                           "never held for the fleet", "on the DEFAULT dispatch",
+                           "default `isolation: \"worktree\"`"):
+                self.assertNotIn(banned, text, (rel, banned))
+            self.assertIn("one writer at a time", text, rel)
+
+    def test_batch_doctrine_is_encouragement(self):
+        mod = _read("modules/quality/autonomous-batch-issue-development.md")
+        self.assertNotIn("Core invariants", mod)
+        self.assertNotIn("bundle bundle-safe issues on ONE dev branch", mod)
+        for kept in ("when their focus allows", "never prompt between issues",
+                     "single feature = single PR"):
+            self.assertIn(kept, mod)
+        self.assertLessEqual(len(mod.encode()), 1212)
+        skill = _read("skills/batch-issue-development/SKILL.md")
+        self.assertNotIn("batch by default", skill)
+        self.assertNotIn("Splitting is the exception, never the default", skill)
+        self.assertIn("when their focus allows", skill)
+
+
+class TestNoForcedDelegation(unittest.TestCase):
+    """Review B3: the pre-answered "subagent or inline?" question is still never
+    asked, but the answer is Claude's own call, not "always subagent"."""
+    HOOK = REPO / "hooks" / "pre-ask-auto-answer.sh"
+
+    def test_pre_ask_blocks_and_leaves_the_choice_to_claude(self):
+        q = "Two execution options: Subagent-Driven or Inline Execution?"
+        payload = {"tool_name": "AskUserQuestion",
+                   "tool_input": {"questions": [{"question": q}]}}
+        r = subprocess.run(["bash", str(self.HOOK)], input=json.dumps(payload),
+                           capture_output=True, text=True, timeout=10)
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertNotRegex(r.stderr, r"(?i)always use subagent")
+        self.assertIn("yourself", r.stderr)
+
+    def test_no_surface_mandates_subagents(self):
+        for rel in ("hooks/pre-ask-auto-answer.sh",
+                    "hooks/stop-check-prose-violations.sh",
+                    "skills/ask-before-assuming-deep/DEEP.md"):
+            self.assertNotRegex(
+                _read(rel), r"(?i)always use subagent|proceed with subagent-driven"
+                r"|just dispatch subagents|\| \*\*Subagent\*\* \|", rel)
+
+
+class TestLiveDocsNameNoRemovedGates(unittest.TestCase):
+    """Review B5: live docs and docstrings no longer describe removed gates."""
+
+    def test_stale_sentences_are_gone(self):
+        for rel, gone in (
+                (".claude/rules/internals-hooks.md", "INDEPENDENCE gate"),
+                (".claude/rules/internals-skills-modules.md", "round-3 sequential"),
+                (".claude/rules/internals-skills-modules.md", "independence check"),
+                (".claude/rules/internals-statusbar.md", "goal_lane_occupancy_nudge"),
+                (".claude/rules/internals-scripts.md", "goal_lane_occupancy_nudge"),
+                (".claude/rules/internals-cli.md", "stay valid"),
+                ("gates/ticketrefs.py", "lane-overlap"),
+                ("gates/ticketrefs.py", "block-dispatch-over-wdrain"),
+                ("cli_lane_liveness.py", "lane-overlap"),
+                ("watchdog/release_gap.py", "goal_lane_occupancy_nudge")):
+            self.assertNotIn(gone, _read(rel), (rel, gone))
+
 
 class TestAccountBlockPingKept(unittest.TestCase):
     """The account-block owner ping lived inside the removed lane-occupancy
@@ -190,7 +300,7 @@ class TestAccountBlockPingKept(unittest.TestCase):
         self.assertIn("_account_limit_notify_owner(",
                       inspect.getsource(goal.goal_account_limit_check))
 
-    def _run(self, err, rec):
+    def _run(self, err, rec, dry_run=False):
         d = TemporaryDirectory()
         self.addCleanup(d.cleanup)
         proj = Path(d.name)
@@ -208,7 +318,7 @@ class TestAccountBlockPingKept(unittest.TestCase):
         with m.patch.object(wd, "transcript_last_error", return_value=err):
             logs = goal.goal_account_limit_check(
                 100000, tmux, rec, self.SID, self.CWD, "111", tpath, "loc",
-                send, False, captured=GOAL_ARMED_CAP)
+                send, dry_run, captured=GOAL_ARMED_CAP)
         return logs, pings, tmux
 
     def test_monthly_block_pings_owner_once(self):
@@ -231,6 +341,38 @@ class TestAccountBlockPingKept(unittest.TestCase):
         rec = {"alim": {"first_seen": 99000, "resets_at": None}}
         self._run("", rec)
         self.assertNotIn("alim", rec)
+
+    def test_dry_run_never_seeds_the_episode(self):
+        # Review A3: a `watchdog --once --dry-run` used to seed rec['alim'];
+        # run_once saves state on a dry run, so the real sweep then saw an
+        # open episode and never pinged the owner.
+        rec = {}
+        logs, pings, _ = self._run(MONTHLY, rec, dry_run=True)
+        self.assertEqual((rec, pings), ({}, []))
+        self.assertTrue(any("skip:account-limit" in ln for ln in logs), logs)
+        _, real, _ = self._run(MONTHLY, rec)
+        self.assertEqual(len(real), 1, real)
+
+    def test_dry_run_never_clears_an_open_episode(self):
+        rec = {"alim": {"first_seen": 99000, "resets_at": None}}
+        self._run("", rec, dry_run=True)
+        self.assertEqual(rec, {"alim": {"first_seen": 99000, "resets_at": None}})
+
+    def test_ping_names_the_blocked_session(self):
+        _, pings, _ = self._run(MONTHLY, {})
+        body = pings[0][0]
+        self.assertNotIn("dispatch", body)
+        self.assertNotIn("pozastaven", body)
+        self.assertIn("session", body)
+
+
+class TestRetiredHelpersGone(unittest.TestCase):
+    """Review A6: dead helpers with no reader left after the removal."""
+
+    def test_lane_live_evidence_helper_is_gone(self):
+        from watchdog import transcripts
+        self.assertFalse(hasattr(transcripts, "lane_has_live_evidence"))
+        self.assertFalse(hasattr(wd, "lane_has_live_evidence"))
 
 
 if __name__ == "__main__":

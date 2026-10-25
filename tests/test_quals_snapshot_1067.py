@@ -6,9 +6,10 @@ After slice 1c only the ops-wait fetch was off the sweep path; the backlog
 `goal_lane_sweep` (30 s of a 39 s sweep). This suite locks the replacement:
 
 * `core-quals|slice-quals --snapshot-json` prints `{open_count, i_members,
-  dispatchable_count, dispatchable_reason, ops_wait_members}` from ONE
-  `_partition_workable` pass, byte-for-byte consistent with the separate
-  `--count` / `--count-dispatchable` / `--ops-wait` outputs (parity, #367).
+  ops_wait_members}` from ONE `_partition_workable` pass, byte-for-byte
+  consistent with the separate `--count` / `--ops-wait` outputs (parity,
+  #367). #1137 review A6: the dispatchable fields left the snapshot (their
+  only reader, the removed lane nudge, is gone).
 * the detached child (`watchdog.ops_wait_refresh`) runs that ONE command and
   writes ONE versioned per-repo snapshot, preserving prior good fields on a
   failure.
@@ -42,12 +43,11 @@ NOW = 1_000_000
 CWD = "/repo/a"
 
 
-def _snap(open_count=3, i_members=(11, 12, 13), dc=2, dr=None,
-          members=None, ts=NOW - 10, v=None):
+def _snap(open_count=3, i_members=(11, 12, 13), members=None, ts=NOW - 10,
+          v=None):
     return {"v": owref.SNAPSHOT_VERSION if v is None else v,
             "ts": ts, "members_ts": ts,
             "open_count": open_count, "i_members": list(i_members),
-            "dispatchable_count": dc, "dispatchable_reason": dr,
             "members": [{"number": 41}] if members is None else members}
 
 
@@ -77,7 +77,7 @@ class SnapshotReaders(_HomeCase):
         return dict(now=NOW, spawn_fn=spy, alive_fn=lambda c: False)
 
     def test_fresh_snapshot_serves_every_field_without_spawning(self):
-        self._write(_snap(open_count=7, dc=0, dr="dep-wait",
+        self._write(_snap(open_count=7,
                           members=[{"number": 41, "stale": True}]))
         spy = mk.Mock()
         self.assertEqual(owref.backlog_count(CWD, "slice-quals", **self._kw(spy)), 7)
@@ -145,8 +145,6 @@ class SnapshotReaders(_HomeCase):
 class RefreshChildSnapshot(_HomeCase):
     def test_ok_writes_the_whole_snapshot(self):
         out = json.dumps({"open_count": 2, "i_members": [11, 12],
-                          "dispatchable_count": 1,
-                          "dispatchable_reason": None,
                           "ops_wait_members": [{"number": 41, "stale": False}]})
         owref.run_refresh_child(CWD, "core-quals", owref.cache_path(CWD),
                                 owref.pid_path(CWD), "/x/airuleset.py",
@@ -155,25 +153,23 @@ class RefreshChildSnapshot(_HomeCase):
         self.assertEqual(e["v"], owref.SNAPSHOT_VERSION)
         self.assertEqual(e["open_count"], 2)
         self.assertEqual(e["i_members"], [11, 12])
-        self.assertEqual(e["dispatchable_count"], 1)
+        self.assertNotIn("dispatchable_count", e)
         self.assertEqual(e["members"], [{"number": 41, "stale": False}])
         self.assertEqual(e["members_ts"], e["ts"])
         self.assertFalse(os.path.exists(owref.pid_path(CWD)))
 
     def test_failure_preserves_every_prior_good_field(self):
-        self._write(_snap(open_count=5, dc=3, ts=NOW - 100))
+        self._write(_snap(open_count=5, ts=NOW - 100))
         owref.run_refresh_child(CWD, "core-quals", owref.cache_path(CWD),
                                 owref.pid_path(CWD), "/x/airuleset.py",
                                 run_fn=lambda *a: (1, ""))
         e = self._read()
         self.assertTrue(e["error"])
         self.assertEqual(e["open_count"], 5)
-        self.assertEqual(e["dispatchable_count"], 3)
         self.assertEqual(e["members_ts"], NOW - 100)   # age carried forward
 
     def test_bool_open_count_is_rejected_as_malformed(self):
         bad = json.dumps({"open_count": True, "i_members": [],
-                          "dispatchable_count": 0, "dispatchable_reason": None,
                           "ops_wait_members": []})
         owref.run_refresh_child(CWD, "core-quals", owref.cache_path(CWD),
                                 owref.pid_path(CWD), "/x/airuleset.py",
@@ -203,7 +199,7 @@ class WatchdogFetchesNeverBlock(_HomeCase):
         import time
         import watchdog as wd
         self._write(_snap(ts=time.time() - owref.REFRESH_TTL_S - 1,
-                          open_count=37, dc=4))
+                          open_count=37))
         spawn, calls, state = mk.Mock(), [], {}
 
         def _record(*a, **k):
@@ -300,23 +296,20 @@ class SnapshotJsonParity(unittest.TestCase):
         count_out, _ = self._run(cmd, count=True)
         self.assertEqual(snap["open_count"], int(count_out.strip()))
         self.assertEqual(snap["i_members"], [11, 12])
-        disp_out, _ = self._run(cmd, count_dispatchable=True)
-        lines = disp_out.split()
-        self.assertEqual(snap["dispatchable_count"], int(lines[0]))
-        self.assertIsNone(snap["dispatchable_reason"])
+        self.assertNotIn("dispatchable_count", snap)
         ow_out, _ = self._run(cmd, ops_wait=True)
         self.assertEqual(snap["ops_wait_members"], owref.parse_members(ow_out))
         by = {m["number"]: m for m in snap["ops_wait_members"]}
         self.assertTrue(by[41]["stale"])
         self.assertTrue(by[43]["gk_handoff"])
 
-    def test_unmeasurable_dispatchable_parity(self):
+    def test_snapshot_never_reads_the_dep_wait_meta(self):
+        # #1137 review A6: a failing dep-wait meta read no longer touches the
+        # snapshot; it carries no dispatchable fields at all.
         cmd = cli_quals_cmd.cmd_core_quals
         snap = json.loads(self._run(cmd, dep_ok=False, snapshot_json=True)[0])
-        disp_out, _ = self._run(cmd, dep_ok=False, count_dispatchable=True)
-        self.assertEqual(disp_out.strip(),
-                         "unmeasurable:" + snap["dispatchable_reason"])
-        self.assertIsNone(snap["dispatchable_count"])
+        self.assertEqual(snap["open_count"], 2)
+        self.assertFalse({"dispatchable_count", "dispatchable_reason"} & set(snap))
 
     def test_slice_quals_snapshot_matches_count(self):
         def _run(**flag):
@@ -346,8 +339,6 @@ class SnapshotJsonParity(unittest.TestCase):
             return out.getvalue()
         snap = json.loads(_run(snapshot_json=True))
         self.assertEqual(snap["open_count"], int(_run(count=True).strip()))
-        self.assertEqual(snap["dispatchable_count"],
-                         int(_run(count_dispatchable=True).split()[0]))
         self.assertEqual(snap["ops_wait_members"],
                          owref.parse_members(_run(ops_wait=True)))
 
@@ -390,8 +381,6 @@ class SnapshotJsonParity(unittest.TestCase):
         snap = json.loads(_run(snapshot_json=True))
         self.assertEqual(snap["i_members"], [11])
         self.assertEqual(snap["open_count"], int(_run(count=True).strip()))
-        self.assertEqual(snap["dispatchable_count"],
-                         int(_run(count_dispatchable=True).split()[0]))
 
     def test_a_failed_query_prints_no_snapshot(self):
         # the refuse contract: a gh failure exits non-zero, never a JSON 0.
@@ -411,12 +400,11 @@ class SnapshotJsonParity(unittest.TestCase):
         self.assertNotEqual(cm.exception.code, 0)
         self.assertEqual(out.getvalue(), "")
 
-    def test_parse_snapshot_rejects_a_reasonless_unmeasurable_count(self):
-        base = {"open_count": 1, "i_members": [1], "ops_wait_members": [],
-                "dispatchable_count": None, "dispatchable_reason": None}
-        self.assertIsNone(owref.parse_snapshot(json.dumps(base)))
-        base["dispatchable_reason"] = "meta read failed"
+    def test_parse_snapshot_ignores_a_legacy_dispatchable_field(self):
+        base = {"open_count": 1, "i_members": [1], "ops_wait_members": []}
         self.assertEqual(owref.parse_snapshot(json.dumps(base)), base)
+        legacy = dict(base, dispatchable_count=None, dispatchable_reason=None)
+        self.assertEqual(owref.parse_snapshot(json.dumps(legacy))["open_count"], 1)
         self.assertIsNone(owref.parse_snapshot("not json"))
 
     def test_cli_parser_accepts_snapshot_json(self):
@@ -455,7 +443,6 @@ class ReviewFixes(_HomeCase):
         self.assertEqual(self._child(rc=1)["fail_streak"], 1)
         self.assertEqual(self._child(rc=1)["fail_streak"], 2)
         ok = json.dumps({"open_count": 1, "i_members": [1],
-                         "dispatchable_count": 1, "dispatchable_reason": None,
                          "ops_wait_members": []})
         self.assertNotIn("fail_streak", self._child(out=ok))
         self.assertEqual(self._child(rc=1)["fail_streak"], 1)
@@ -475,7 +462,6 @@ class ReviewFixes(_HomeCase):
 
     def test_a_failed_ops_wait_part_keeps_the_backlog_count(self):
         out = json.dumps({"open_count": 4, "i_members": [1, 2, 3, 4],
-                          "dispatchable_count": 2, "dispatchable_reason": None,
                           "ops_wait_members": None})
         e = self._child(out=out)
         self.assertIsNone(e["members"])
@@ -486,12 +472,10 @@ class ReviewFixes(_HomeCase):
 
     def test_parse_snapshot_degrades_per_field(self):
         snap = owref.parse_snapshot(json.dumps(
-            {"open_count": 2, "i_members": "junk", "ops_wait_members": None,
-             "dispatchable_count": 1, "dispatchable_reason": None}))
+            {"open_count": 2, "i_members": "junk", "ops_wait_members": None}))
         self.assertEqual((snap["open_count"], snap["i_members"]), (2, None))
         self.assertIsNone(owref.parse_snapshot(json.dumps(
-            {"open_count": -1, "ops_wait_members": [],
-             "dispatchable_count": 0})))
+            {"open_count": -1, "ops_wait_members": []})))
 
     def test_emitter_isolates_each_failing_part(self):
         import cli_quals_snapshot as qs
@@ -499,20 +483,18 @@ class ReviewFixes(_HomeCase):
         def _boom(*a):
             raise RuntimeError("tagger bug")
 
-        def _run(ops, disp):
+        def _run(ops):
             out = io.StringIO()
             with contextlib.redirect_stdout(out), \
                     contextlib.redirect_stderr(io.StringIO()):
                 qs.emit_snapshot_json({11: {}, 12: {}}, {}, "/r", ["q"], None,
-                                      ops, disp)
+                                      ops)
             return json.loads(out.getvalue())
-        a = _run(_boom, lambda r, root: (2, None))
-        self.assertEqual((a["open_count"], a["ops_wait_members"],
-                          a["dispatchable_count"]), (2, None, 2))
-        b = _run(lambda *x: print("garbage-row"), _boom)
+        a = _run(_boom)
+        self.assertEqual((a["open_count"], a["ops_wait_members"]), (2, None))
+        self.assertNotIn("dispatchable_count", a)
+        b = _run(lambda *x: print("garbage-row"))
         self.assertEqual((b["open_count"], b["ops_wait_members"]), (2, None))
-        self.assertEqual((b["dispatchable_count"], b["dispatchable_reason"]),
-                         (None, "snapshot part failed"))
 
 
 if __name__ == "__main__":

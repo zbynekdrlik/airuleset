@@ -5,7 +5,9 @@ whole #1224/#1245 per-session memory-scope machinery is removed: the
 `BASH_ENV` file, and the install-time adoption of running sessions.
 """
 import inspect
+import shutil
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -36,6 +38,28 @@ class TestScopeModuleGone(unittest.TestCase):
         self.assertNotIn("cli_session_scope", inspect.getsource(airuleset.cmd_install))
         self.assertNotIn("cli_session_scope", inspect.getsource(cli_bashrc_appliers))
         self.assertNotIn("cli_session_scope", inspect.getsource(cli_claude_scripts))
+
+
+
+class TestInstallDropsScopeFiles(unittest.TestCase):
+    """Review A1: an upgraded box must not keep the retired managed files. The
+    launcher install already removes retired files it once deployed next to
+    its scripts (the #649 window-menu helper); the two scope files join it."""
+
+    def test_launcher_install_removes_the_retired_files(self):
+        d = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, d, True)
+        claude = d / ".claude"
+        claude.mkdir()
+        stale = [claude / "airuleset-tool-oom.sh",
+                 claude / "airuleset-session-scope.log",
+                 claude / "airuleset-tmux-window-menu.sh"]
+        for path in stale:
+            path.write_text("stale\n")
+        airuleset.apply_ultracode_launcher(
+            d / ".bashrc", claude / "l.sh", claude / "h.py", claude / "pp.sh",
+            claude / "impl.sh", claude / "impl.md")
+        self.assertEqual([p.name for p in stale if p.exists()], [])
 
 
 if __name__ == "__main__":

@@ -185,7 +185,6 @@ class RunRefreshChild(_HomeCase):
         tsv = ("41\t2026-01-01T00:00:00Z\taction-only\tops-wait\tt\n"
                "43\t2026-01-01T00:00:00Z\taction-only\tops-wait stale!\tt\n")
         out = json.dumps({"open_count": 0, "i_members": [],
-                          "dispatchable_count": 0, "dispatchable_reason": None,
                           "ops_wait_members": owref.parse_members(tsv)})
         owref.run_refresh_child(CWD, "slice-quals", owref.cache_path(CWD),
                                 owref.pid_path(CWD), "/x/airuleset.py",

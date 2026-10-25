@@ -97,7 +97,7 @@ class TestSnapshotCarriesTitles(unittest.TestCase):
         with contextlib.redirect_stdout(buf):
             cli_quals_snapshot.emit_snapshot_json(
                 rows, {}, "/r", [], None,
-                lambda *a, **k: None, lambda r, root: (2, None))
+                lambda *a, **k: None)
         snap = json.loads(buf.getvalue())
         self.assertEqual(snap["i_members"], [1176, 1177])
         self.assertEqual(snap["i_titles"], {"1176": "Checkout freshness",
@@ -111,12 +111,11 @@ class TestSnapshotCarriesTitles(unittest.TestCase):
         with contextlib.redirect_stdout(buf):
             cli_quals_snapshot.emit_snapshot_json(
                 rows, {}, "/r", [], None,
-                lambda *a, **k: None, lambda r, root: (2, None))
+                lambda *a, **k: None)
         self.assertEqual(json.loads(buf.getvalue())["i_bounce"], [7])
 
     def test_parse_snapshot_keeps_valid_titles_drops_malformed(self):
-        base = {"open_count": 1, "i_members": [7], "dispatchable_count": 1,
-                "dispatchable_reason": None, "ops_wait_members": []}
+        base = {"open_count": 1, "i_members": [7], "ops_wait_members": []}
         ok = owref.parse_snapshot(json.dumps(dict(base, i_titles={"7": "x"})))
         self.assertEqual(ok["i_titles"], {"7": "x"})
         bad = owref.parse_snapshot(json.dumps(dict(base, i_titles=["x"])))

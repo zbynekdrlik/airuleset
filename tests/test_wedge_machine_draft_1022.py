@@ -147,6 +147,24 @@ class TestMachineDraftJanitorCleared(unittest.TestCase):
         self.assertTrue(any("janitor-clear" in ln for ln in logs),
                         "a recorded generic nudge must be janitor-cleared: %r" % logs)
 
+    def test_retired_lane_reconcile_draft_is_still_ours(self):
+        # #1137 review A4: `lane-reconcile` left MACHINE_NUDGE_KINDS, but a box
+        # upgraded with that draft still stranded must clear it as our own
+        # text, never treat it as the owner's draft.
+        text = "lane-reconcile: 1 worktree lane returned during a compaction"
+        pane = ("✳ hotovo - suhrn turnu\n"
+                "──── ultracode ─\n"
+                "❯\xa0" + text + "\n"
+                "────\n"
+                "  ctx ██░░  caveman\n")
+        state = {}
+        now = time.time()
+        _seed(state, PID, text, "lane-reconcile", now)
+        run = _mkrun()
+        logs = _sweep2(state, pane, run, now)
+        self.assertEqual(_enters(run), [], run.calls)
+        self.assertTrue(any("janitor-clear" in ln for ln in logs), logs)
+
     def test_machine_draft_cleared_even_when_nudges_on(self):
         state = {}
         now = time.time()

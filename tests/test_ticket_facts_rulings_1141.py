@@ -160,10 +160,9 @@ class Rulings(unittest.TestCase):
         with contextlib.redirect_stdout(buf):
             cli_quals_snapshot.emit_snapshot_json(
                 {1: {}}, {}, "/r", [], None, lambda *a: None,
-                lambda rows, root: (len(rows), ""), owed={7: {}, 8: {}})
+                owed={7: {}, 8: {}})
         out = json.loads(buf.getvalue())
         self.assertEqual(out["open_count"], 3)
-        self.assertEqual(out["dispatchable_count"], 1)
 
     # ruling 3: --explain says the M set is partial when the sweep truncated
     def test_a_quota_hit_marks_the_m_set_partial(self):

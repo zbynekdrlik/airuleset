@@ -578,34 +578,29 @@ class TheTemplatesCarryNoDeadQuestionTimeoutPromise(TestCase):
 
 class TestBatchDispatchMandate(TestCase):
     """#1137 (owner 25.10.2026) removed the #848 continuous-refill / lane-cap
-    doctrine (Claude Code decides dispatch itself). What stays locked: the
-    integration mutex serializes only integration, and autopilot-master runs all
-    its work lanes concurrently with reviews never starving, plus its per-cycle
-    compact reminder."""
+    doctrine and the forced all-lanes-concurrent scheduler (Claude Code decides
+    dispatch itself). What stays locked: the integration mutex serializes only
+    integration, the sub-dev review queue never starves, and the master's
+    per-cycle compact reminder."""
 
     def test_both_bodies_serialize_only_integration_under_the_mutex(self):
         for rel in (SKILL, SKILL_MASTER):
             self.assertIn("integration mutex", read(rel).lower(),
                           "%s missing the integration-mutex" % rel)
 
-    def test_the_master_locks_all_lanes_concurrent_and_reviews_never_starve(self):
-        # Round-2 blocker (#456 decision 3): decisions 1 & 2 got positive locks
-        # (M1/M2 above), but decision 3 -- ALL lanes concurrent, never
-        # round-robin, sub-dev reviews never starve -- had NONE. A one-clause
-        # revert of the master template back to "the LANE SCHEDULER (first lane
-        # with workable items wins)" passed the WHOLE suite. Lock it in BOTH the
-        # /goal template AND the Step-3 body. Every anchor below sits on one
-        # physical line so a markdown reflow cannot split it (the wrap trap).
+    def test_the_master_reviews_never_starve_and_concurrency_is_a_choice(self):
+        # #1137 review round: the review queue's no-starvation guarantee stays
+        # (template AND Step-3 body); the forced "ALL LANES CONCURRENTLY /
+        # never round-robin" scheduling is gone. Anchors sit on one physical
+        # line so a markdown reflow cannot split them (the wrap trap).
         tpl = master_goal_lines()[0]
-        self.assertIn("ALL LANES CONCURRENTLY", tpl,
-                      "master template dropped the all-lanes-concurrent mandate")
         self.assertIn("review queue never starves", tpl.lower(),
                       "master template dropped the reviews-never-starve guarantee")
+        self.assertNotIn("ALL LANES CONCURRENTLY", tpl)
         body = read(SKILL_MASTER).lower()
-        self.assertIn("never round-robin", body,
-                      "master Step-3 body dropped the never-round-robin scheduler")
         self.assertIn("must never starve", body,
                       "master Step-3 body dropped reviews' never-starve precedence")
+        self.assertNotIn("never round-robin", body)
 
     def test_the_master_template_carries_the_per_cycle_compact_reminder(self):
         # master_goal_lines()[0] IndexErrors if the template ever vanishes --
