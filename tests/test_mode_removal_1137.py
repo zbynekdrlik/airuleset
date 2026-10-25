@@ -245,6 +245,22 @@ class TestNoForcedLanes(unittest.TestCase):
         self.assertNotIn("batch by default", skill)
         self.assertNotIn("Splitting is the exception, never the default", skill)
         self.assertIn("when their focus allows", skill)
+        # verification round: no mandate left in the skill body or description
+        for mandate in ("always — no exceptions", "After ALL issues complete",
+                        "Multi-select up front, batch them", "The gate decides",
+                        "the gate decides", "one PR per batch", "push only after ALL"):
+            self.assertNotIn(mandate, skill)
+
+    def test_no_stale_dispatchable_docs(self):
+        for path in ("airuleset.py", ".claude/rules/internals-quals.md", "cli_quals_cmd.py",
+                     "watchdog/transcripts.py", "watchdog/release_gap.py"):
+            text = _read(path)
+            for gone in ("dispatchable_count/_reason", "_watchdog_dispatchable_fetch",
+                         "_lane_dispatchable_decision", "lane nudge journals",
+                         "lane-occupancy", "lane occupancy"):
+                self.assertNotIn(gone, text, path)
+        self.assertNotIn("spawn a lane in the SAME session",
+                         _read("modules/quality/durable-decisions-to-tickets.md"))
 
 
 class TestNoForcedDelegation(unittest.TestCase):
