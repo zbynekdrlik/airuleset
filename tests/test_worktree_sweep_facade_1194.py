@@ -14,7 +14,8 @@ leaves, one per reclaimer. Every caller keeps importing through
 pre-split module defined, taken by AST from origin/main a62ab26c. It is
 deliberately a literal list, never re-derived from the live module: a name
 silently dropped from the facade must fail here, not quietly shrink the
-expectation.
+expectation. #1137 removed the ten tier-0 bypass names deliberately (the
+classifier and its auto-filer were retired with the dev1 local-work doctrine).
 """
 
 import ast
@@ -45,21 +46,17 @@ PRE_SPLIT_SURFACE = (
     "discover_reclaimable_worktrees", "_log_stale_worktree_results",
     "sweep_stale_worktrees", "cmd_sweep_worktrees", "LANE_TARGET_LOG_PATH",
     "LANE_TARGET_STATE_PATH", "LANE_TARGET_MIN_INTERVAL_S",
-    "LANE_TARGET_MERGED_MIN_IDLE_S", "TIER0_FLIP_ISO", "_tier0_flip_epoch",
-    "LANE_TARGET_TIER0_BYPASS_STATE_PATH", "LANE_TARGET_TIER0_BYPASS_REFILE_S",
-    "LANE_TARGET_TIER0_BYPASS_TITLE", "_lane_human_size",
+    "LANE_TARGET_MERGED_MIN_IDLE_S", "_lane_human_size",
     "_branch_reflog_has_authored_commit", "_iter_lane_target_dirs",
-    "_log_lane_target_results", "_lane_repo_slug", "_sample_fresh_target_files",
-    "_tier0_bypass_issue_body", "_default_tier0_bypass_filer",
-    "_record_tier0_bypass", "purge_merged_lane_targets", "cmd_purge_lane_targets",
+    "_log_lane_target_results", "purge_merged_lane_targets", "cmd_purge_lane_targets",
 )
 
 
 class TestFacadeSurface(unittest.TestCase):
 
     def test_snapshot_has_every_pre_split_name_once(self):
-        self.assertEqual(len(PRE_SPLIT_SURFACE), 58)
-        self.assertEqual(len(set(PRE_SPLIT_SURFACE)), 58)
+        self.assertEqual(len(PRE_SPLIT_SURFACE), 48)
+        self.assertEqual(len(set(PRE_SPLIT_SURFACE)), 48)
 
     def test_every_pre_split_name_imports_from_the_facade(self):
         missing = [n for n in PRE_SPLIT_SURFACE if not hasattr(cli_worktree_sweep, n)]

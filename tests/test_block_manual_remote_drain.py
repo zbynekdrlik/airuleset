@@ -5,7 +5,7 @@ target is delivered ONLY as a durable mechanism (a disk-guard rung with a
 liveness proof), never as a one-off manual delete/kill/swapoff over ssh.
 
 Every test shells out to the REAL, shipped hooks/block-manual-remote-drain.sh
-(never mocked) -- same convention as test_tier0_local_build_hook.py.
+(never mocked).
 """
 
 import json

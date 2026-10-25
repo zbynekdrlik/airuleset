@@ -4,7 +4,7 @@ on shared-stream boxes.
 Four behavioural points:
 1. Extended TMP_TEST_PREFIXES (npmcache-*, tmp*) + shared-stream 3h age
 2. Shared-stream scratch age-out = 3h (not 7d)
-3. Doctrine update citing owner ruling
+3. Doctrine update citing owner ruling (retired with the module, #1137)
 4. Transcript gzip-at-rest = 2d on shared-stream (not 7d)
 """
 
@@ -157,22 +157,6 @@ class TestSharedStreamScratchAge(unittest.TestCase):
             box_class_fn=lambda: "workstation")
         self.assertEqual(age, css.CLAUDE_SCRATCH_MIN_AGE_DAYS_DEFAULT,
                          msg="workstation scratch age should be 7d default")
-
-
-# --------------------------------------------------------------------------- #
-# Point 3: Doctrine update
-# --------------------------------------------------------------------------- #
-class TestDoctrineUpdate(unittest.TestCase):
-    """#925 point 3: the #778 module carries the owner ruling citation."""
-
-    def test_module_mentions_925(self):
-        mod_path = os.path.join(
-            os.path.dirname(__file__), "..",
-            "modules", "quality", "no-local-builds.md")
-        text = open(mod_path).read()
-        self.assertIn("#925", text)
-        self.assertIn("MUST clean", text,
-                      "doctrine must state runs MUST clean tmp")
 
 
 # --------------------------------------------------------------------------- #

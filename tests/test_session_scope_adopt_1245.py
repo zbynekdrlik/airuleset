@@ -148,7 +148,7 @@ class _Box:
         if self.lazy and self.sleeps == 2:
             self._land()
 
-    def adopt(self, host="dev1", env=None, mem_kb=DEV1_KB, meminfo=None):
+    def adopt(self, host="dev2", env=None, mem_kb=DEV1_KB, meminfo=None):
         return ss.adopt_unscoped_sessions(
             hostname=host, uid=UID, proc_root=str(self.proc),
             cgroup_root=str(self.cg),
@@ -261,7 +261,7 @@ class AdoptUncapped(unittest.TestCase):
     def test_no_env_given_inherits_the_process_environment(self):
         with mock.patch.dict(os.environ, {"AIRULESET_T1245": "kept"}):
             ss.adopt_unscoped_sessions(
-                hostname="dev1", uid=UID, proc_root=str(self.box.proc),
+                hostname="dev2", uid=UID, proc_root=str(self.box.proc),
                 cgroup_root=str(self.box.cg), meminfo_text="MemTotal: %d kB\n" % DEV1_KB,
                 run=self.box.run, sleep=self.box.sleep)
         self.assertEqual(self.box.calls[0][1].get("AIRULESET_T1245"), "kept")
@@ -291,7 +291,7 @@ class AdoptUncapped(unittest.TestCase):
         with mock.patch.object(ss, "_run", lambda argv, env: calls.append(argv) or (0, "", "")), \
                 mock.patch.dict(os.environ, {"PYTEST_CURRENT_TEST": "t"}):
             lines = ss.adopt_unscoped_sessions(
-                hostname="dev1", uid=UID, proc_root=str(self.box.proc),
+                hostname="dev2", uid=UID, proc_root=str(self.box.proc),
                 cgroup_root=str(self.box.cg), meminfo_text="MemTotal: %d kB\n" % DEV1_KB,
                 env={}, sleep=self.box.sleep)
         self.assertEqual(calls, [])
@@ -367,7 +367,7 @@ class AdoptUncapped(unittest.TestCase):
             b.proc_add(500, "claude", 1, LOGIND)
             with mock.patch("pwd.getpwuid", return_value=mock.Mock(pw_name="newlevel")):
                 lines = ss.adopt_unscoped_sessions(
-                    hostname="dev1", uid=UID, proc_root=str(b.proc), cgroup_root=str(b.cg),
+                    hostname="dev2", uid=UID, proc_root=str(b.proc), cgroup_root=str(b.cg),
                     linger_dir=str(b.linger), meminfo_text="MemTotal: %d kB\n" % DEV1_KB,
                     run=b.run, env={}, sleep=b.sleep)
         self.assertTrue(any("adopted pid 500" in ln for ln in lines), lines)

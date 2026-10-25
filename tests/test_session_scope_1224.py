@@ -2,7 +2,7 @@
 child grew without bound (2.6-2.9 GB) and nothing capped a session's memory.
 
 Every Claude launch now goes through `_airuleset_exec_claude`:
-- On a declared workstation (dev1, dev2) it execs claude inside its own
+- On a declared workstation (dev2; dev1 until #1137) it execs claude inside its own
   `systemd-run --user --scope`, with `MemoryMax` at 40 % of MemTotal (floor
   2 GiB) and `MemorySwapMax` at 10 %.
 - Elsewhere, or when the user manager is unreachable, it falls back to a
@@ -43,7 +43,7 @@ class _Launch:
     """Run a RENDERED launcher with fake claude / systemd-run / hostname on the
     launcher's own `$HOME/.local/bin` PATH seam."""
 
-    def __init__(self, base, *, host="dev1", mem_kb=DEV1_KB, sr_fail=False,
+    def __init__(self, base, *, host="dev2", mem_kb=DEV1_KB, sr_fail=False,
                  script=None, meminfo=True):
         self.home = Path(base)
         b = self.home / ".local" / "bin"
@@ -93,8 +93,9 @@ class TestRender(unittest.TestCase):
                                capture_output=True)
             self.assertEqual(r.returncode, 0, r.stderr)
 
-    def test_the_declared_hosts_are_dev1_and_dev2(self):
-        self.assertEqual(tuple(_scope().SCOPE_HOSTS), ("dev1", "dev2"))
+    def test_dev2_is_a_declared_host(self):
+        # dev1 left the scope with the local-work doctrine (#1137).
+        self.assertIn("dev2", _scope().SCOPE_HOSTS)
 
 
 class TestLaunch(unittest.TestCase):
@@ -137,7 +138,7 @@ class TestLaunch(unittest.TestCase):
 
     def test_dev2_and_the_floor_boundary(self):
         for host, kb, cap in (("dev2", 16244848, 16244848 * 40 // 100),
-                              ("dev1", 5242880, 2097152)):
+                              ("dev2", 5242880, 2097152)):
             with tempfile.TemporaryDirectory() as d:
                 ln = _Launch(d, host=host, mem_kb=kb)
                 ln.run()

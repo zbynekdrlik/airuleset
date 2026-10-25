@@ -10,8 +10,8 @@ find the block of a question it had asked before. The block already lives in
 - the question gate's messages point at the command and carry the exact
   marker text.
 
-Ask 3: a local mutation run on a workstation is capped (`--max-children 2`,
-`nice -n 19 ionice -c3`); the diff gate belongs in CI.
+Ask 3 (a capped local mutation run on dev1) was retired with the dev1
+local-work doctrine (#1137).
 """
 import io
 import json
@@ -224,13 +224,6 @@ class TestDoctrine(unittest.TestCase):
         self.assertIn("airuleset.py question-block", repoke)
         (allusion,) = [ln for ln in lines if "references an OLD question by allusion" in ln]
         self.assertIn("airuleset.py question-block", allusion)
-
-    def test_local_mutation_runs_are_capped(self):
-        s = (ROOT / "skills" / "mutation-testing" / "SKILL.md").read_text()
-        i = s.index("#### A local run on a workstation")
-        para = s[i:s.index("#### ", i + 5)]
-        self.assertIn("--max-children 2", para)
-        self.assertIn("nice -n 19 ionice -c3", para)
 
 
 if __name__ == "__main__":

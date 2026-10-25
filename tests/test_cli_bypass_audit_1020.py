@@ -2,8 +2,7 @@
 CLI-token audit logs (the `~/devel/airuleset/audits/*.log` bypass family + the
 `/tmp/airuleset-main-exec-bypass-<uid>.log` family) that `--bypasses` was BLIND
 to (it counted merged commit messages only). A genuine honored bypass line
-counts; a mixed log's NON-bypass line (tier0 `blocked`, main-exec `refused`)
-does not.
+counts; a mixed log's NON-bypass line (main-exec `refused`) does not.
 """
 import tempfile
 import unittest
@@ -46,16 +45,6 @@ class TestCliBypassReader(unittest.TestCase):
         self.assertEqual(c["per_kind"].get("airuleset:stream-merge-ok"), 1)
         # box derived from cwd basename
         self.assertEqual(c["per_box"].get("repo2"), 1)
-
-    def test_tier0_blocked_line_excluded_bypass_counted(self):
-        self._w("tier0-build-bypasses.log", [
-            "%sT10:00:00+02:00  project=camera-box  blocked  cmd=cargo build" % self.day,
-            "%sT10:01:00+02:00  project=camera-box  inline-bypass  "
-            "cmd=cargo build # airuleset:build-ok" % self.day,
-        ])
-        c = audit.count_cli_bypasses(root=self.audits, tmp_dir=self.tmp)
-        # only the inline-bypass line counts; the `blocked` line does not
-        self.assertEqual(c["total"], 1)
 
     def test_main_exec_refused_excluded_allowed_counted(self):
         Path(self.tmp, "airuleset-main-exec-bypass-1000.log").write_text(
@@ -139,16 +128,6 @@ class TestCliBypassReader(unittest.TestCase):
             "%sT10:00:00+02:00 main-exec bypass session=s tool=Edit marker=main-exec-ok "
             "(allowed, pending-write FAILED, consumed in PreToolUse) reason=policy\n"
             % self.day)
-        c = audit.count_cli_bypasses(root=self.audits, tmp_dir=self.tmp)
-        self.assertEqual(c["total"], 1)
-
-    def test_tier0_inline_bypass_with_blocked_in_cmd_is_counted(self):
-        # review 🔵 -- a genuine inline-bypass whose cmd text contains the word
-        # "blocked" must NOT be false-skipped (the marker anchors on `  blocked  cmd=`).
-        self._w("tier0-build-bypasses.log", [
-            "%sT10:00:00+02:00  project=r  inline-bypass  cmd=echo blocked && cargo "
-            "build # airuleset:build-ok" % self.day,
-        ])
         c = audit.count_cli_bypasses(root=self.audits, tmp_dir=self.tmp)
         self.assertEqual(c["total"], 1)
 

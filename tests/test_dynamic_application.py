@@ -24,7 +24,6 @@ def read(rel):
 
 NEW_SKILLS = {
     "mutation-testing": "modules/ci/mutation-testing.md",
-    "local-builds": "modules/quality/no-local-builds.md",
     "batch-issue-development": "modules/quality/autonomous-batch-issue-development.md",
     "view-image-urls": "modules/core/view-image-urls.md",
     "version-on-dashboard": "modules/quality/version-on-dashboard.md",

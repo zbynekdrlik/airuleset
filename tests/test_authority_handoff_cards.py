@@ -315,7 +315,7 @@ class TestPerBoxSkillScoping(TestCase):
         # slash list, so they are NOT noise on any box.
         for user in ("newlevel", "gatekeeper", "david"):
             names = airuleset.skill_names_for_user(user)
-            for n in ("mutation-testing", "local-builds",
+            for n in ("mutation-testing",
                       "batch-issue-development", "view-image-urls",
                       "version-on-dashboard"):
                 self.assertIn(n, names, f"{n} missing for {user}")

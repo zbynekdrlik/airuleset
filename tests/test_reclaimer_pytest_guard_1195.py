@@ -81,8 +81,7 @@ def test_real_default_paths_are_refused():
     assert isinstance(ei.value, RuntimeError)
 
 
-@pytest.mark.parametrize("name", ["LANE_TARGET_LOG_PATH", "LANE_TARGET_STATE_PATH",
-                                  "LANE_TARGET_TIER0_BYPASS_STATE_PATH"])
+@pytest.mark.parametrize("name", ["LANE_TARGET_LOG_PATH", "LANE_TARGET_STATE_PATH"])
 def test_every_lane_target_default_is_real(name):
     with pytest.raises(rg.RealPathUnderPytest):
         rg.refuse_real_paths_under_pytest("purge", False, **{"p": getattr(ltr, name)})
@@ -107,8 +106,7 @@ def test_home_env_repointed_to_tmp_is_not_the_real_home(tmp_path, monkeypatch):
     assert (tmp_path / "s").exists()
     out = ltr.purge_merged_lane_targets(
         force=True, log_path=tmp_path / "l2", state_path=tmp_path / "s2",
-        bypass_state_path=tmp_path / "b", issue_filer=lambda *a: None,
-        tier0_fn=lambda cwd: True, proc_dir=tmp_path / "proc")
+        proc_dir=tmp_path / "proc")
     assert out == []
     assert (tmp_path / "s2").exists()
 
@@ -187,20 +185,10 @@ def test_purge_with_real_defaults_raises_before_any_work():
     lg.assert_not_called()
 
 
-def test_purge_real_bypass_state_alone_is_refused(tmp_path):
-    disc, log = _lane_net()
-    with disc, log:
-        with pytest.raises(RuntimeError, match=REFUSED):
-            ltr.purge_merged_lane_targets(home=tmp_path, force=True,
-                                          log_path=tmp_path / "l",
-                                          state_path=tmp_path / "s")
-
-
 def test_purge_with_explicit_tmp_paths_runs(tmp_path):
     out = ltr.purge_merged_lane_targets(
         home=tmp_path, force=True, log_path=tmp_path / "l", state_path=tmp_path / "s",
-        bypass_state_path=tmp_path / "b", issue_filer=lambda *a: None,
-        tier0_fn=lambda cwd: True, proc_dir=tmp_path / "proc")
+        proc_dir=tmp_path / "proc")
     assert out == []
     assert (tmp_path / "s").exists()
 
