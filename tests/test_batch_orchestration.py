@@ -205,7 +205,7 @@ class TestToolingModuleReconciled(TestCase):
         body = read(TOOLING)
         self.assertIn("Parallelism is the working model's decision", body)
         self.assertIn("box and backlog", body)
-        self.assertIn("cli_resource_guards", body)
+        # (the `cli_resource_guards` pointer left with Tier-0, #1137)
         self.assertNotIn("BOUNDED BATCHES", body)
 
 
