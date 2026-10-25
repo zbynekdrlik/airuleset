@@ -422,10 +422,11 @@ def _write_auth_badge_cache(state_path, first_401_ts, now):
     """Write the `auth!` footer badge cache (#1075) — the statusline's
     `auth_segment` reads it. Written on every credential-dead sweep that has
     SURFACED (a STALE credential, or a FRESH credential whose 401 PERSISTED
-    through the one continue), and only once the episode is AUTH_STALE_OWNER_S
-    old (#1261: a routine rotation heals within minutes). The cache self-expires AUTH_BADGE_TTL_S (3 h) after the last
-    write, so a resolved episode / restarted session / dead watchdog stops
-    painting `auth!` on its own (a longer window than the 600 s disk badge — see
+    through the one continue): past AUTH_STALE_OWNER_S, or at once when a 401
+    followed the continue (#1261: a routine rotation heals within minutes). The
+    cache self-expires AUTH_BADGE_TTL_S (3 h) after the last write, so a resolved
+    episode / restarted session / dead watchdog stops painting `auth!` on its own
+    (a longer window than the 600 s disk badge — see
     `statusbar.auth_segment` for why). Written next to the watchdog state
     (`<state_dir>/auth-guard/status.json`), which in production is `~/.claude/` —
     the SAME dir `statusbar._claude_dir(home)` reads. Callers must skip this under
@@ -502,10 +503,8 @@ def _handle_authdead_episode(state, key, cred_mtime_fn, now, idle, project, pid,
             state[ad_key] = ad
 
     def _surface(msg, wait=True):
-        # The owner-facing surface for a dead-on-401 session, SHARED by the STALE
-        # case and the FRESH-persistent case (#1075 review A#1/B#1): the `auth!`
-        # footer badge + ONE owner ping past AUTH_STALE_OWNER_S. The ping is
-        # `credential-dead:` (un-suppressed) and latched once per episode.
+        # STALE + FRESH-persistent (#1075 A#1/B#1): `auth!` badge (at once if not `wait`)
+        # + ONE latched, un-suppressed `credential-dead:` ping past AUTH_STALE_OWNER_S.
         if wait and (now - first_401) < AUTH_STALE_OWNER_S:
             return              # #1261: a routine rotation heals in minutes, no auth!
         if not dry_run:
@@ -571,9 +570,10 @@ def _handle_authdead_episode(state, key, cred_mtime_fn, now, idle, project, pid,
                 % (project or key))
     _hrs = int((now - first_401) // 3600)
     _surface("🔴 **%s** — OAuth session je mŕtva na 401: token bol odvolaný od %s "
-             "(~%dh), ~/.claude/.credentials.json je už čerstvý, ale `continue` to "
-             "nevylieči (proces drží starý token) — treba reštart session na boxe."
-             % (project or key, _hhmm, _hrs), wait=False)
+             "(~%dh) a ani `continue` po zmene ~/.claude/.credentials.json to "
+             "nevyliečil — treba /login alebo reštart session na boxe."
+             % (project or key, _hhmm, _hrs),
+             wait=not (last_401_ts or 0) > ad.get("continued_ts", now))
     if not ad.get("relaunched"):
         from watchdog import goal as _goal_mod
         from watchdog import resurrect as _resurrect
