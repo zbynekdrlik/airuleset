@@ -59,10 +59,6 @@ The full-tree run catches up everything the diff-scoped PR gates skipped across 
 
 PR: `--incremental` with the incremental report restored from the main-branch artifact (only mutants for changed code run). Same budget discipline. Keep `thresholds.break` (≥ 50). Schedule a periodic `--force` full run so incremental state can't drift.
 
-#### A local run on a workstation (#1224)
-
-The diff gate belongs in CI. When you must run mutation locally on a shared workstation (dev1: 4 cores, 5-8 Claude sessions), cap it: `nice -n 19 ionice -c3 mutmut run --max-children 2` (or the tool's equivalent worker flag at 2). An uncapped local `mutmut --max-children 4` in 585 s rounds held dev1 at load 15 (2026-09-30). Every session's tools also share that session's memory scope (#1224), so a runaway is OOM-killed, not the box frozen.
-
 #### The rule
 
 Surviving mutants in YOUR diff = the work is NOT done — write assertions that kill them, push again. A slow gate = fix the gate's setup, never the budget. Applies to all rewordings and semantic equivalents.

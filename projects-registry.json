@@ -207,9 +207,7 @@
     "branch_model": "2-branch",
     "default_branch": "master",
     "work_branch": "dev",
-    "overrides": [
-      "local-builds=allowed"
-    ],
+    "overrides": [],
     "onboarded": null,
     "account": "newlevel"
   },

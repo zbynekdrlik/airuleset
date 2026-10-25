@@ -84,9 +84,8 @@ def append_line(log_name, line):
 # #1020 Part 2 item 3 -- the --bypasses READER over per-hook CLI-token audit
 # logs. Registry of the KNOWN bypass audit logs (basename under audits_dir), each
 # with the substring markers that identify a NON-bypass line (an event the log
-# also records but that is NOT an honored bypass -- tier0 records `blocked` real
-# blocks in the SAME file). An empty marker list means every dated line in that
-# log is a bypass (the pure bypass logs). Enumerated EXPLICITLY (not a blanket
+# also records but that is NOT an honored bypass). An empty marker list means
+# every dated line in that log is a bypass (the pure bypass logs). Enumerated EXPLICITLY (not a blanket
 # *.log glob) so a non-bypass .log in the same dir is never miscounted -- the
 # writers were read to fix the exact filenames + line shapes.
 # --------------------------------------------------------------------------- #
@@ -111,12 +110,6 @@ CLI_BYPASS_LOGS = (
     ("subdev-ssh-bypasses.log", ()),
     ("vault-store-reads.log", ()),
     ("script-check-bypasses.log", ()), ("handover-bypasses.log", ()),  # (#1180)
-    # tier0 logs `blocked` (a real block) in the SAME file as `inline-bypass`/
-    # `env-bypass`. The block tag is always immediately followed by the `cmd=`
-    # field (`  blocked  cmd=...`), so `  blocked  cmd=` precisely excludes the
-    # blocks WITHOUT false-skipping an inline-bypass whose OWN cmd= text happens
-    # to contain the word "blocked" (review 🔵).
-    ("tier0-build-bypasses.log", ("  blocked  cmd=",)),
 )
 
 # The /tmp per-uid main-exec bypass log family (block-main-implementation.sh).

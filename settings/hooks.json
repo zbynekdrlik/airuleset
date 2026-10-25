@@ -138,11 +138,6 @@
           },
           {
             "type": "command",
-            "command": "bash ~/devel/airuleset/hooks/block-tier0-local-build.sh",
-            "timeout": 10
-          },
-          {
-            "type": "command",
             "command": "bash ~/devel/airuleset/hooks/block-destructive-remote.sh",
             "timeout": 5
           },

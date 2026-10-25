@@ -14,4 +14,4 @@
 
 If any job fails: `gh run view <run-id> --log-failed` — investigate and fix the root cause immediately. **Never blindly rerun.** One rerun is acceptable to rule out a transient; two reruns of the same failure means the problem is real.
 
-The full foreground bounded poll loop recipe, long-wait background waiter recipe (#29193), deploy/version-live watch classifier, recovery protocol, memory-pressure REAP mitigation, and fail-fast on job-level failure are in the situational companion `skills/ci-monitoring-deep/DEEP.md` — loaded automatically on `gh run view`/`list`/`watch`/`gh pr checks` commands. History + rationale: `.claude/rules-reference/ci-monitoring-history.md` (#859).
+The full foreground bounded poll loop recipe, long-wait background waiter recipe (#29193), deploy/version-live watch classifier, recovery protocol, and fail-fast on job-level failure are in the situational companion `skills/ci-monitoring-deep/DEEP.md` — loaded automatically on `gh run view`/`list`/`watch`/`gh pr checks` commands. History + rationale: `.claude/rules-reference/ci-monitoring-history.md` (#859).

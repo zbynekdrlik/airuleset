@@ -59,8 +59,8 @@ its own scope with the same caps (``adopt_unscoped_sessions``).
 import os
 import re
 
-# The workstations a runaway froze (#1224); data, so another box is one entry.
-SCOPE_HOSTS = ("dev1", "dev2")
+# Workstations a runaway froze (#1224), as data; dev1 left with #1137 (31 GB now).
+SCOPE_HOSTS = ("dev2",)
 MAX_PERCENT = 40
 SWAP_PERCENT = 20
 HIGH_PERCENT = 85      # MemoryHigh, of MemoryMax: reclaim throttles before a kill

@@ -50,8 +50,8 @@ adversarial security, so these are named rather than silently missed):
     ... `EOF`) is not distinguished from a real command — same blind spot
     the old whole-string regex had (it too scanned heredoc bodies for a
     write-verb match). Full heredoc-consumer-awareness is out of scope here
-    (see hooks/block-tier0-local-build.sh's #750 heredoc-strip fix for the
-    general technique, should this ever need addressing).
+    (the internals archive's #750 heredoc-strip lesson has the general
+    technique, should this ever need addressing).
 """
 
 import os

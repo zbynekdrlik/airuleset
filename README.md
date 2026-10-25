@@ -58,7 +58,7 @@ python airuleset.py status
 
 - **core/** — PR policy, CI monitoring, TDD, CAWE, work completion, git fetch
 - **git/** — Two-branch workflow, commit conventions
-- **ci/** — Test strictness, no-local-builds, security audit, coverage thresholds
+- **ci/** — Test strictness, security audit, coverage thresholds
 - **deploy/** — MCP error handling, Windows sessions, SSH deployment, post-deploy verification
 - **quality/** — Architecture first, MVP philosophy, security basics, script failure policy
 

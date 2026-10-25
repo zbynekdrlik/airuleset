@@ -324,7 +324,7 @@ from cli_webterm_only import (  # noqa: E402, F401
 
 
 # Skills directories in the repo that should be symlinked
-SKILL_NAMES = ["ci-monitor", "deploy-ssh", "windows-remote-gui", "issue-planner", "plan-check", "rules-audit", "mdreview", "fast-iterate", "architecture-check", "autopilot", "autopilot-dialog", "mutation-sweep", "meeting-analysis", "playbook-review", "playbook-cleanup", "mutation-testing", "local-builds", "batch-issue-development", "view-image-urls", "version-on-dashboard", "process-subdev", "autopilot-master",
+SKILL_NAMES = ["ci-monitor", "deploy-ssh", "windows-remote-gui", "issue-planner", "plan-check", "rules-audit", "mdreview", "architecture-check", "autopilot", "autopilot-dialog", "mutation-sweep", "meeting-analysis", "playbook-review", "playbook-cleanup", "mutation-testing", "batch-issue-development", "view-image-urls", "version-on-dashboard", "process-subdev", "autopilot-master",
                # Ruleset trim wave 2 (#37, 2026-07-25) — situational always-on
                # modules moved VERBATIM to hidden (user-invocable: false)
                # on-demand skills. See test_ruleset_conversion_wave2.py.
@@ -366,16 +366,16 @@ SKILL_NAMES = ["ci-monitor", "deploy-ssh", "windows-remote-gui", "issue-planner"
 #   MAINTAINER_ONLY — relevant only on the airuleset-maintainer's own boxes
 #     (newlevel@dev1/dev2, airuleset@controller): airuleset self-maintenance
 #     (mdreview, rules-audit), personal workflows (meeting-analysis), tooling
-#     (windows-remote-gui = win-* MCP rigs, fast-iterate + mutation-sweep = his
+#     (windows-remote-gui = win-* MCP rigs, mutation-sweep = his
 #     Rust/mutation-era repos). Sub-dev / gatekeeper boxes never invoke these.
 #   FULL_AUTHORITY_ONLY — deploys are OUTSIDE a reduced-authority stream's job
 #     (pr-merge-policy scope), so deploy-ssh stays off david/marek/montalu boxes.
-# Hidden on-demand skills (user-invocable: false — mutation-testing, local-builds,
+# Hidden on-demand skills (user-invocable: false — mutation-testing,
 # batch-issue-development, view-image-urls, version-on-dashboard) deploy EVERYWHERE:
 # rule stubs point at them and they never appear in the slash list, so they cost
 # nothing. install prunes previously-linked skills that fall outside the box's set.
 SKILLS_MAINTAINER_ONLY = {"mdreview", "rules-audit", "meeting-analysis",
-                          "mutation-sweep", "windows-remote-gui", "fast-iterate"}
+                          "mutation-sweep", "windows-remote-gui"}
 SKILLS_FULL_AUTHORITY_ONLY = {"deploy-ssh", "process-subdev", "autopilot-master"}
 MAINTAINER_USERS = {"newlevel", "airuleset"}
 # Per-user re-grants: a scoped-away skill that IS relevant on one specific box
@@ -768,22 +768,12 @@ def ensure_timezone(want=FLEET_TIMEZONE):
     return cur
 
 
-# --- Tier-0 target/ retention (#315) — extracted to cli_target_purge.py (#433 cluster L2) ---
+# --- shared disk helpers (#315) — cli_target_purge.py (#433 cluster L2) ---
 from cli_target_purge import (  # noqa: E402
-    TARGET_PURGE_LOG_PATH as TARGET_PURGE_LOG_PATH,
-    TARGET_PURGE_STATE_PATH as TARGET_PURGE_STATE_PATH,
-    TARGET_PURGE_MAX_AGE_DAYS_DEFAULT as TARGET_PURGE_MAX_AGE_DAYS_DEFAULT,
-    TARGET_PURGE_MIN_INTERVAL_S as TARGET_PURGE_MIN_INTERVAL_S,
-    _TARGET_PURGE_SKIP_DIRS as _TARGET_PURGE_SKIP_DIRS,
     _human_size as _human_size,
     _disk_usage_summary_line as _disk_usage_summary_line,
-    discover_target_purge_candidates as discover_target_purge_candidates,
-    _tier0_via_hook as _tier0_via_hook,
     _target_in_live_use as _target_in_live_use,
     _dir_stats as _dir_stats,
-    _log_target_purge_results as _log_target_purge_results,
-    purge_stale_tier0_targets as purge_stale_tier0_targets,
-    cmd_purge_targets as cmd_purge_targets,
 )
 
 
@@ -2260,25 +2250,6 @@ def cmd_install(args):
         print(f"  discord questions-thread provision error (non-fatal): {e}",
               file=sys.stderr)
 
-    # --- 8. Tier-0 target/ retention: purge stale build artefacts (#315) ---
-    # Existing Tier-0 (default) local-builds policy bans HEAVY local builds
-    # but still legitimately fills target/ via the cheap checks it DOES
-    # allow (cargo check/clippy/test --no-run) -- and nothing ever purged
-    # it (the local-builds skill's own purge rule is prose, called
-    # on-demand only). Cadence-gated to at most once/day via
-    # purge_stale_tier0_targets' own state file, so this doesn't add a
-    # filesystem sweep to every push -- non-fatal, best-effort, matches
-    # every other step above.
-    try:
-        purge_results = purge_stale_tier0_targets()
-        purged = [r for r in purge_results if r.get("purged")]
-        if purged:
-            total = sum(r.get("size", 0) or 0 for r in purged)
-            print(f"  Purged {len(purged)} stale Tier-0 target/ dir(s), "
-                  f"{_human_size(total)} reclaimed (log: {TARGET_PURGE_LOG_PATH})")
-    except Exception as e:
-        print(f"  target/ purge error (non-fatal): {e}", file=sys.stderr)
-
     # --- 9. Stale worktree sweep: reclaim dead-worker leaks fleet-wide (#345)
     # A worker killed mid-run by an API error / session limit leaves its
     # `.claude/worktrees/agent-<id>` worktree + branch registered forever —
@@ -2298,9 +2269,8 @@ def cmd_install(args):
 
     # --- 9b. Merged worktree-lane target/ reclaim (#545) -------------------
     # A worktree LANE's target/ (1-2 GB of cargo build output) is NOT
-    # reclaimed by the #315 target-purge (its 7-day newest-mtime floor is
-    # defeated by cargo fingerprint churn) nor by step 9 (which waits the full
-    # 24h idle floor to remove the WHOLE lane). This reclaims ONLY the target/
+    # reclaimed by step 9 (which waits the full 24h idle floor to remove the
+    # WHOLE lane). This reclaims ONLY the target/
     # of a lane whose branch is MERGED (0-ahead + authored-commit reflog),
     # idle + not in live use -- pure regenerable waste (6.3 GB measured on
     # dev1, #545). Cadence-gated by its own state file, non-fatal, best-
@@ -2312,13 +2282,6 @@ def cmd_install(args):
             total = sum(r.get("size", 0) or 0 for r in lane_purged)
             print(f"  Reclaimed {len(lane_purged)} merged-lane target/ dir(s), "
                   f"{_human_size(total)} freed (log: {LANE_TARGET_LOG_PATH})")
-        # #545 tier-0 classification: surface any bypass finding (a merged lane
-        # whose target/ held post-#557 build artifacts -- a local cargo build
-        # that escaped the tier-0 gate, auto-filed on the offending repo).
-        lane_bypass = [r for r in lane_results if r.get("tier0_bypass")]
-        for r in lane_bypass:
-            print(f"  ⚠ TIER-0 BYPASS: {r.get('branch')} -- "
-                  f"{r.get('tier0_bypass_filed') or '?'}")
     except Exception as e:
         print(f"  merged-lane target reclaim error (non-fatal): {e}", file=sys.stderr)
 
@@ -2326,7 +2289,7 @@ def cmd_install(args):
     # Every native `claude` auto-update leaves the OLD versioned binary
     # behind (~280-300MB each) under ~/.local/share/claude/versions/ --
     # nothing has ever swept it, fleet-wide. Cadence-gated the same way as
-    # step 8/9 above -- non-fatal, best-effort.
+    # step 9 above -- non-fatal, best-effort.
     try:
         cli_sweep_results = sweep_stale_cli_versions()
         cli_removed = [r for r in cli_sweep_results if r.get("removed")]
@@ -9820,15 +9783,6 @@ def main():
                           help="Compare installed skills against expected set for this account")
     sub.add_parser("push", help="Push to GitHub + install locally + deploy to all remotes")
 
-    # --- Tier-0 target/ retention: manual/testable purge entry point (#315)
-    p_purge = sub.add_parser(
-        "purge-targets",
-        help="Purge stale target/ dirs in maintained Tier-0 repos (#315)")
-    p_purge.add_argument("--dry-run", dest="dry_run", action="store_true",
-                         help="Report what would be purged without deleting anything")
-    p_purge.add_argument("--max-age-days", dest="max_age_days", type=int, default=None,
-                         help=f"Age threshold in days (default {TARGET_PURGE_MAX_AGE_DAYS_DEFAULT})")
-
     # --- Stale worktree sweep: manual/testable entry point (#345) ---------
     p_sweep_wt = sub.add_parser(
         "sweep-worktrees",
@@ -10641,7 +10595,7 @@ def main():
                                 "path derivation — e.g. a client-cluster prefix)")
     p_onboard.add_argument("--override", action="append", default=[],
                            help="Convention override tag, repeatable "
-                                "(3-branch, merge=manual, local-builds=...)")
+                                "(3-branch, merge=manual)")
     p_onboard.add_argument("--audit", "--check", dest="audit",
                            action="store_true",
                            help="READ-ONLY: report drift from the canonical "
@@ -11503,7 +11457,6 @@ SUBCOMMANDS = {
     "validate": cmd_validate,
     "status": cmd_status,
     "push": cmd_push,
-    "purge-targets": cmd_purge_targets,
     "sweep-worktrees": cmd_sweep_worktrees,
     "sweep-lane-targets": cmd_purge_lane_targets,
     "sweep-cli-versions": cmd_sweep_cli_versions,

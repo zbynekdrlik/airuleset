@@ -389,8 +389,6 @@ _HOOK_PROSE_PAIRS = [
     ("block-destructive-remote.sh",
      "modules/quality/no-destructive-remote-actions.md",
      "hook blocks remote shutdown/reboot/drop/truncate over ssh"),
-    ("block-tier0-local-build.sh", "modules/quality/no-local-builds.md",
-     "hook blocks cargo compile locally under Tier 0"),
     ("block-gh-invalid-json-flag.sh", "modules/core/gh-cli-recipes.md",
      "hook blocks invalid gh --json flags"),
     ("stop-check-prose-violations.sh",

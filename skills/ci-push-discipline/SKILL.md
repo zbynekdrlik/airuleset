@@ -23,8 +23,6 @@ Run the right lint for the project. Fix failures BEFORE pushing.
 | Python | `ruff check .` |
 | Node.js | `npm run lint` |
 
-**Only lint/format runs locally by default.** Everything that compiles (`clippy`, `test`, `build`, `check`, `trunk build`, `cargo tauri build`) runs on CI unless project CLAUDE.md says otherwise. Rust compiles generate 10-20GB of artifacts — CI-only.
-
 #### Before pushing — sync the base, then check for a running CI
 
 1. **Sync the base FIRST so the push can't land behind / conflict** (`git-fetch-first.md`):

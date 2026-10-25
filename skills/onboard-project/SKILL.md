@@ -16,7 +16,7 @@ python3 ~/devel/airuleset/airuleset.py onboard-project <path> [--host dev1|dev2]
 
 - `<path>` — the project directory. Repo name is derived deterministically from the path (leaf dir, `_`→`-`; a nested path under a client-cluster dir like `montalu/` gets the `montalu-<leaf>` prefix). Pass `--name` for an exception.
 - `--host` — where the project lives (`dev1` = local default; a `REMOTE_HOSTS` name runs EVERY step — detect AND act — over ssh on that box, expanding `~` against the REMOTE home; nothing local is created). Fail-safe: an unreachable host or a missing remote directory REFUSES the run (real and dry-run) rather than proceeding on local false-negatives (#583).
-- `--override` — a convention tag, repeatable: `3-branch` (odoo develop/staging/main), `merge=manual`, `local-builds=allowed`.
+- `--override` — a convention tag, repeatable: `3-branch` (odoo develop/staging/main), `merge=manual`.
 - `--dry-run` — report would-apply for every step, change nothing.
 
 What it ensures (each step: detect → act only if absent → report `satisfied`/`applied`/`skipped`):

@@ -113,71 +113,6 @@ Without this, post-deploy verification cannot confirm new code is live and front
 
 **Do NOT proceed to Step 2 until the foundation gate is resolved** (either issue filed and queued, or user explicitly chose skip).
 
-### 1e. Disk hygiene — purge stale local build artifacts (MANDATORY)
-
-**Per `no-local-builds.md`, the dev machine is for editing — CI compiles. Stale `target/`, `node_modules/`, `dist/` directories are silent disk hogs that fill the machine over time. Audit them before any new work.**
-
-#### Detect per-project override first
-
-Before any purge, identify projects with Tier 1 (`<!-- airuleset:local-builds=allowed -->`) OR Tier 2 (`<!-- airuleset:local-builds=fast-iterate -->`) in their CLAUDE.md — both are EXEMPT from purge (their `target/` is a working asset, not waste).
-
-```bash
-# Find exempt projects (both Tier 1 and Tier 2 markers exempt target/ from purge)
-EXEMPT=$(grep -rlE '<!--\s*airuleset:local-builds=(allowed|fast-iterate)\s*-->' \
-  ~/devel/*/CLAUDE.md ~/devel/*/repo/CLAUDE.md ~/devel/*/.claude/CLAUDE.md 2>/dev/null \
-  | xargs -I{} dirname {} | sort -u)
-echo "Exempt projects (local builds allowed):"
-echo "$EXEMPT"
-```
-
-#### Audit waste (excluding exempt projects)
-
-```bash
-# Per-project waste (current project) — only if NOT in $EXEMPT
-du -sh target node_modules dist .next .nuxt build 2>/dev/null
-
-# Cross-project waste (entire ~/devel) — exclude exempt
-for d in ~/devel/*/target ~/devel/*/node_modules ~/devel/*/dist ~/devel/*/.next ~/devel/*/build; do
-  proj=$(echo "$d" | awk -F/ '{print "/" $2 "/" $3 "/" $4 "/" $5}')
-  echo "$EXEMPT" | grep -q "$proj" && continue
-  [ -d "$d" ] && du -sh "$d" 2>/dev/null
-done | sort -h
-
-# Total disk pressure on home
-df -h ~ | tail -1
-```
-
-**Decision rules (applied to NON-exempt projects only):**
-
-- **Current project's `target/` (or equivalent) exists AND is older than 24 h** → propose purge.
-- **Cross-project total exceeds 10 GB across non-exempt `~/devel/*/target` etc.** → propose multi-project purge.
-- **Home partition has < 20 GB free** → BLOCK and force purge regardless of age (exempt projects still skipped).
-
-**Exempt-project handling:** If the CURRENT project is exempt, skip the purge gate entirely for it — but still audit cross-project waste in OTHER non-exempt projects, and still block on the < 20 GB free rule (purging non-exempt projects).
-
-If any of the above triggers, AskUserQuestion BEFORE Step 2:
-
-- **"Purge stale build artifacts now"** — run the appropriate `rm -rf` (current project only, OR cross-project sweep if total > 10 GB), report freed space, then continue
-- **"Skip for now, show issues"** — proceed without purging (user explicitly chose to skip; record the disk waste in Step 4 presentation as a known cost)
-
-**Purge commands (run after explicit user approval — `rm -rf` is destructive):**
-
-```bash
-# Current project
-rm -rf target/ node_modules/ dist/ .next/ .nuxt/ build/ .turbo/ .svelte-kit/
-
-# Cross-project Rust sweep
-find ~/devel -maxdepth 3 -type d -name target -exec rm -rf {} +
-
-# Cross-project Node sweep
-find ~/devel -maxdepth 3 -type d \( -name node_modules -o -name dist -o -name .next -o -name build \) -exec rm -rf {} +
-
-# Python caches
-find ~/devel -type d \( -name __pycache__ -o -name .pytest_cache -o -name .mypy_cache -o -name .ruff_cache \) -exec rm -rf {} +
-```
-
-**Do NOT proceed to Step 2 until disk hygiene is resolved** (either purged or user explicitly chose skip). Cross-project waste compounds — every issue you plan adds more if the baseline isn't clean.
-
 ## Step 2: Fetch open issues
 
 ```bash
@@ -215,8 +150,7 @@ gh pr list --state merged --search "fixes #<number> OR closes #<number> OR resol
 # 5. VERIFY THE CURRENT STATE — reproduce LIVE, don't trust the months-old repro in the issue
 #    — old issue says "function X panics on empty input"; check if X still exists, still panics
 grep -rn "<function or symbol>" src/ 2>/dev/null
-# For Rust: grep the source above / let CI compile (cargo check et al. are CI-only on Tier-0, #557);
-#   for behavioral claims: REPRODUCE with the tools you actually have —
+# For behavioral claims: REPRODUCE with the tools you actually have —
 #   the running app, MCP tools (e.g. read-only DB/service bridges), curl, SSH, a quick repro test.
 #   A bug that no longer reproduces against current dev is already solved → propose closing it.
 #   (See verify-issue-still-valid.md and autonomous-verification.md — you have eyes, use them.)
@@ -271,7 +205,7 @@ for issue in selected_bundle:
     3. brainstorm if non-trivial (superpowers:brainstorming)
     4. write plan if multi-step (superpowers:writing-plans)
     5. implement + tests (TDD per tdd-workflow.md)
-    6. local lint/format only (no compile per no-local-builds.md)
+    6. local lint/format + tests
     7. git commit -m "fix(...): ... \n\nCloses #<N>"
     # NO push, NO PR, NO completion report yet — go to next issue
 ```
@@ -293,7 +227,6 @@ For SOLO 🔴 issues: run the same cycle but push + PR + completion report after
 
 - Always run the CI health audit FIRST — missing quality gates AND missing build cache are more important than any single issue
 - The build-cache audit (Step 1b) is per-job, not per-workflow — one cached job ≠ healthy CI
-- Disk hygiene (Step 1e) is non-negotiable — stale `target/` / `node_modules/` directories must be purged or explicitly skipped before issue selection
 - The "already overcome" check (Step 3) runs for EVERY open issue, not a sample
 - Step 4 ALWAYS uses `multiSelect: true` — single-select is a violation of `autonomous-batch-issue-development.md`
 - Step 5 NEVER pauses between bundled issues — chain them on the same `dev` branch, single push at the end

@@ -57,7 +57,7 @@ For each selected issue, run the full development cycle, but DO NOT pause betwee
    starts — a genuine fork goes to the user as a `❓` ask-and-continue question, never a silent pick.
 3. Write plan (use `superpowers:writing-plans` if multi-step)
 4. Implement + write tests (TDD per `tdd-workflow.md`)
-5. Verify locally (lint, type-check; CI handles compilation per `no-local-builds.md`). Any review
+5. Verify locally (lint, type-check, tests). Any review
    pass on this member — self-applied or dispatched — MUST additionally REFUTE it on structural
    grounds (#414): structureless script growth on production-classified code, duplicating a
    framework the repo already has, or breaking the ~1000-line/~300-line-function budgets; an "it's

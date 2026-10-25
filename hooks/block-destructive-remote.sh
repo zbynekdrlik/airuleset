@@ -173,8 +173,8 @@ except Exception: pass' 2>/dev/null || echo "")
 
 # #249: the win-* MCP gate needs the TOOL's own cwd (a project can genuinely
 # differ from wherever this hook process's own $PWD happens to be) — prefer
-# the JSON payload's `.cwd`, same fallback shape block-tier0-local-build.sh
-# already uses (`dir="${CWD:-$PWD}"`), never trust bash's own cwd alone.
+# the JSON payload's `.cwd` (`dir="${CWD:-$PWD}"` shape), never trust bash's
+# own cwd alone.
 HOOK_CWD=$(printf '%s' "$PAYLOAD" | python3 -c 'import json,sys
 try: print(json.load(sys.stdin).get("cwd","") or "")
 except Exception: pass' 2>/dev/null || echo "")

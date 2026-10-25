@@ -106,7 +106,7 @@ When work hits a missing locally-installable dependency — `command not found`,
 - **BANNED: switching to a degraded workaround instead of installing.** Install the missing piece; the workaround costs more than the install every time.
 - **BANNED: burning turns diagnosing "broken" behavior that is just an uninstalled utility.**
 - **No sudo on a restricted box** → file via `python3 ~/devel/airuleset/airuleset.py gk-request --title "..."`. New runtime deps go into `RUNTIME_DEPS` in airuleset.py.
-- **EXCEPTION — a heavy build toolchain is NEVER installed on a shared-stream box** (subdev); run on **dev2** instead; see `no-local-builds.md`. History + incidents: `.claude/rules-reference/autonomous-verification-history.md` (#859).
+- **EXCEPTION — a heavy build toolchain is NEVER installed on a shared-stream box** (subdev); run on **dev2** instead; see `hooks/block-heavy-build-toolchain.sh`. History + incidents: `.claude/rules-reference/autonomous-verification-history.md` (#859).
 
 Applies to all rewordings and semantic equivalents — any "X doesn't work here because Y isn't installed, so I'll do Z instead" is this violation.
 
