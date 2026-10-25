@@ -214,8 +214,11 @@ class Job1CredentialDeadStale(unittest.TestCase):
                           "credential-dead: must NOT be an owner-suppressed class")
 
     def test_stale_writes_auth_badge_cache(self):
+        # #1261: the badge waits for AUTH_STALE_OWNER_S like the ping (a routine
+        # rotation heals within minutes), so the stale episode is an hour old
         now = 1_800_000_000.0
-        logs, keys, pings, state_path = self._harness(now, cred_mtime=now - 100_000)
+        logs, keys, pings, state_path = self._harness(now, cred_mtime=now - 100_000,
+                                                      age_s=3600)
         cache = state_path.parent / "auth-guard" / "status.json"
         self.assertTrue(cache.exists(),
                         "a stale credential-dead sweep must write the auth-guard "
