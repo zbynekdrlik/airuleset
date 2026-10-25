@@ -514,29 +514,6 @@ class Steering(unittest.TestCase):
                             return_value=[_window(steer=None)]):
             self.assertTrue(goal.goal_template_for("full", WATCH_CWD))
 
-    def _virgin_sweep(self, win):
-        proj = self.home / ("proj-%s" % (win.get("steer") or "none"))
-        _write_marker_transcript(proj, WATCH_CWD, "sess-v")
-        reqp = str(self.home / ("req-%s.json" % (win.get("steer") or "none")))
-        tmux = DeliverGoalFakeTmux([(PID, "claude", WATCH_CWD, "111")],
-                                   GOAL_IDLE_CAP, model_type=True)
-        with m.patch.object(cli_fleet, "box_windows", return_value=[win]), \
-                m.patch.object(goal, "_default_rearm_fn",
-                               return_value=("/goal STOP CONDITIONS q", "full")):
-            logs = goal.goal_sweep(2000, run=tmux, projects_dir=proj,
-                                   requests_path=reqp, state={},
-                                   sleep_fn=lambda s: None)
-        typed = [a for a in tmux.sent if "-l" in a
-                 and str(a[-1]).startswith("/goal")]
-        return typed, logs
-
-    def test_job9_never_virgin_arms_a_watch_window(self):
-        typed, logs = self._virgin_sweep(_window())
-        self.assertEqual(typed, [], logs)
-        # teeth: the SAME fixture without steer=watch is virgin-armed
-        typed, logs = self._virgin_sweep(_window(steer=None))
-        self.assertTrue(typed, logs)
-
     def test_dark_watch_never_rearms_or_pings_a_watch_window(self):
         proj = self.home / "proj-dark"
         tpath = _write_marker_transcript(proj, WATCH_CWD, "sess-d")

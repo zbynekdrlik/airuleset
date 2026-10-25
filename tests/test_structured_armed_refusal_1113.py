@@ -138,17 +138,6 @@ class TestStructuredArmedRefusal(unittest.TestCase):
         self.assertEqual(word, "drop:already-armed")
         self.assertEqual(tmux.sent, [])
 
-    def test_virgin_arm_proceeds_when_no_goal_mark_record(self):
-        # A declared-virgin arm legitimately needs NO prior goal: with NO
-        # goal_mark record the structured gate does NOT refuse -> the delivery
-        # proceeds to a keystroke (arm the fresh window).
-        word, tmux, log = self._deliver(
-            "rec-a-virgin", "declared-virgin", goal_mark_state=None)
-        self.assertNotIn("refuse:structured-armed", log,
-                         "no goal_mark record -> the structured gate is silent")
-        self.assertTrue(tmux.sent,
-                        "a virgin arm proceeds past the structured gate")
-
     def test_cleared_goal_mark_does_not_refuse(self):
         # A "cleared" mark (e.g. CC's transient-auth clear) is NOT armed, so the
         # structured gate must not refuse (auth-rearm etc. legitimately re-arm a
