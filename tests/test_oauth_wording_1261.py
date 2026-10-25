@@ -13,6 +13,7 @@ import os
 import sys
 import unittest
 import unittest.mock
+from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -49,6 +50,15 @@ def tearDownModule():
         _SV.stop()
 
 
+def _err(text, ts=None, kind="authentication_failed"):
+    e = {"type": "assistant", "isApiErrorMessage": True, "error": kind,
+         "message": {"role": "assistant", "content": [{"type": "text", "text": text}]}}
+    if ts is not None:
+        e["timestamp"] = datetime.fromtimestamp(ts, timezone.utc).isoformat(
+            timespec="milliseconds").replace("+00:00", "Z")
+    return e
+
+
 class TestNewWording(unittest.TestCase):
 
     def test_new_banner_is_a_rotation_revoke(self):
@@ -72,19 +82,17 @@ class TestJob1NewWording(unittest.TestCase):
     PANE = "%9"
     SID = "12121212-3434-4565-8787-909090909090"
 
-    def _run(self, now, cred_mtime, age_s):
+    def _run(self, now, cred_mtime, age_s, entries=None):
         tmp = TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         proj = Path(tmp.name) / "projects"
         enc = wd.encode_project_dir(self.CWD)
         (proj / enc).mkdir(parents=True)
         tpath = proj / enc / (self.SID + ".jsonl")
-        entry = {"type": "assistant", "isApiErrorMessage": True,
-                 "error": "authentication_failed",
-                 "message": {"role": "assistant",
-                             "content": [{"type": "text", "text": NEW_BANNER}]}}
-        tpath.write_text(json.dumps(entry) + "\n")
+        entries = entries or [_err(NEW_BANNER)]
+        tpath.write_text("".join(json.dumps(e) + "\n" for e in entries))
         os.utime(tpath, (now - age_s, now - age_s))
+        self.badge = Path(tmp.name) / "auth-guard" / "status.json"
         keys = []
 
         def fake_run(argv, timeout=8):
@@ -123,6 +131,38 @@ class TestJob1NewWording(unittest.TestCase):
         logs, typed = self._run(now, cred_mtime=now - 100_000, age_s=700)
         self.assertEqual(typed, [], logs)
         self.assertTrue(any(ln.startswith("auth:") and "stale" in ln for ln in logs), logs)
+
+
+    # review round: CC 2.1.30x clears the dead tokens on disk just BEFORE it
+    # writes the 401, so that write must never read as a refresh
+    def test_the_clear_cc_writes_before_the_401_is_not_a_refresh(self):
+        now = 1_800_000_000.0
+        t401 = now - 60 + 0.55
+        logs, typed = self._run(now, cred_mtime=t401 - 0.15, age_s=60,
+                                entries=[_err(NEW_BANNER, t401)])
+        self.assertEqual(typed, [], logs)
+
+    def test_an_earlier_529_in_the_run_is_not_the_anchor(self):
+        now = 1_800_000_000.0
+        t401 = now - 60
+        entries = [_err("API Error: 529 overloaded", t401 - 120, "overloaded"),
+                   _err(NEW_BANNER, t401)]
+        logs, typed = self._run(now, cred_mtime=t401 - 0.1, age_s=60, entries=entries)
+        self.assertEqual(typed, [], logs)
+
+    def test_a_routine_rotation_paints_no_auth_badge(self):
+        # the refresher lags the 401 by a minute or two; auth! would then stay
+        # red for 3 h after every rotation (footer = owner-actionable only)
+        now = 1_800_000_000.0
+        self._run(now, cred_mtime=now - 100_000, age_s=120,
+                  entries=[_err(NEW_BANNER, now - 120)])
+        self.assertFalse(self.badge.exists())
+
+    def test_a_long_stale_credential_paints_the_badge(self):
+        now = 1_800_000_000.0
+        self._run(now, cred_mtime=now - 100_000, age_s=3600,
+                  entries=[_err(NEW_BANNER, now - 3600)])
+        self.assertTrue(self.badge.exists())
 
 
 if __name__ == "__main__":
