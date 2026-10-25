@@ -305,6 +305,7 @@ _LIVE_BG_TASK_RX = re.compile(r"\b\d+\s+(?:shells?|monitors?)\b", re.I)
 # cross_stream / janitor, hooks, tests) resolves unchanged. `_LIVE_BG_TASK_RX`
 # (bound just above) stays in __init__ and is read by decide.py at its call site
 # via `watchdog._LIVE_BG_TASK_RX` (C4), like pane_text.py's `_QUEUED_COMPACT_RX`.
+from watchdog.thrash import is_autocompact_thrash, hold as _thrash_hold  # noqa: E402,F401 (#1260)
 from watchdog.decide import (  # noqa: E402
     _pane_live_shell_evidence as _pane_live_shell_evidence,
     _pane_live_task_count as _pane_live_task_count,
@@ -3992,12 +3993,11 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
 
             # --- (1) STALLED ON AN API ERROR → auto-resume (ACTS: injects `continue`) -
             # ERROR signal = Claude Code's OWN `isApiErrorMessage` flag on the last
-            # assistant entry — the ONLY trigger (an earlier pane-text fallback false-
-            # nudged a meta-conversation merely DISPLAYING api-error text). The grace is
-            # tracked from when the last reply BECAME an error (in state, via decide),
-            # NOT from transcript mtime: CC's own retries + queue/snapshot writes keep
-            # touching the transcript, so an mtime-idle gate never trips for a rate-
-            # limited session (that bug left `presenter` unnudged).
+            # assistant entry — the ONLY trigger (a pane-text fallback false-nudged a
+            # meta-conversation merely DISPLAYING api-error text). The grace counts from
+            # when the last reply BECAME an error (state, via decide), NOT transcript
+            # mtime: CC's retries + queue/snapshot writes keep touching the transcript
+            # (that bug left `presenter` unnudged). A thrash stop is held, never resumed.
             err_text = transcript_last_error(tpath)
             if err_text:
                 # (#175 F1) Mark this episode ALIVE for THIS sweep the instant we
@@ -4171,11 +4171,11 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
                         tpath, captured, draft_pending, run, send_fn, owner,
                         sleep_fn, dry_run, logs, state_path, first_401_seed)
                     continue
-                if action == "nudge" and is_usage_cap(err_text):
-                    # quota USAGE cap — time-based, `continue` can't fix it. Ping ONCE,
-                    # mark dormant (decide() then returns 'wait' for this hash while the
-                    # entry survives — #175's widening back-off does NOT apply here: only
-                    # the external reset clock fixes a quota cap, never re-nudging). This
+                if action == "nudge" and is_autocompact_thrash(err_text):
+                    _thrash_hold(state, key, entry, project, logs)   # #1260: never `continue`
+                elif action == "nudge" and is_usage_cap(err_text):
+                    # quota USAGE cap — time-based, `continue` can't fix it: ping ONCE, mark
+                    # dormant (decide() → 'wait' for this hash; only the reset clock fixes it). This
                     # is RE-DERIVED from is_usage_cap(err_text) on every sweep that reaches
                     # a fresh 'nudge', not solely remembered in the stored flag (#175 F4) —
                     # so even if the cleanup pass below ever drops this entry (the

@@ -19,6 +19,7 @@ import json      # load_hooks_json, cmd_validate, cmd_diff
 import shutil    # symlink_global_rules
 import difflib   # unified_diff
 import re        # frontmatter_errors
+import cli_context_excludes  # #1260 claudeMdExcludes + per-model compact window
 from pathlib import Path
 
 # 1-line leaf-dup of airuleset.REPO_DIR: identical value (this leaf is a sibling
@@ -332,13 +333,12 @@ def apply_managed_settings_defaults(settings: dict) -> dict:
       rendering suggestions until they restart, which is precisely why
       `deliver_with_stash` was made independent of what the box appears to hold.
 
-    - `autoCompactWindow` is ACTIVELY STRIPPED (2026-07-25 correction batch —
-      reverts the SAME-DAY "krok 1c" addition). A low auto-compact threshold
-      cuts big tasks off mid-work and defeats the 1M context window; context
-      is bounded at ticket boundaries instead (the per-ticket `/compact`,
-      watchdog job 14). This must POP the key, not merely stop setting it —
-      an already-deployed settings.json from the reverted feature would
-      otherwise keep carrying it forward untouched on every future install.
+    - `autoCompactWindow` is ACTIVELY STRIPPED (2026-07-25 correction batch),
+      top-level AND per model (`modelSettings.<model>`, the shape CC's
+      autoCompactOffer writes, #1260), and stream accounts exclude the gk review
+      lenses from the always-on context (`claudeMdExcludes`): cli_context_excludes.
+      It must POP the key, not merely stop setting it — an already-deployed
+      settings.json would otherwise keep carrying it forward on every install.
 
     - `env["CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION"] = MANAGED_MAX_SUBAGENTS_PER_SESSION`
       (#288) raises the default 200-cumulative-spawn-per-session cap so a
@@ -389,7 +389,7 @@ def apply_managed_settings_defaults(settings: dict) -> dict:
     # allowed managed default. See the docstring's `model` bullet.
     result["model"] = airuleset.MANAGED_MODEL
     result["promptSuggestionEnabled"] = False
-    result.pop("autoCompactWindow", None)
+    cli_context_excludes.apply(result)
     # A malformed/legacy `env` (a string/int/list rather than an object) must
     # be SELF-HEALED to a fresh dict, never crashed on — `dict(existing or
     # {})` raises on a non-dict-but-truthy value, which would escape
