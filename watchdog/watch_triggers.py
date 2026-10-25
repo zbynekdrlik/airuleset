@@ -50,8 +50,8 @@ MECHANISM
     keeps its per-kind floor. At most ONE delivery per window per sweep.
   * STEERING — `/autopilot` / `goal-arm --self` in a watch window arm NO
     `/goal`: they print + record `watch armed (N triggers, next …)`
-    (`arm_line` / `record_armed`). Job 9's virgin arm, the variant source
-    `goal_template_for` and job 20's dark-watch all skip a watch window.
+    (`arm_line` / `record_armed`). The variant source `goal_template_for`
+    and job 20's dark-watch skip a watch window (no job 9 arm since #1260).
   * VISIBILITY — `airuleset.py status` renders the window's `goal:` row via
     `status_row` (next slot, last slot + its outcome, any missed slot).
 

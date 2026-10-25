@@ -148,18 +148,18 @@ MACHINE_NUDGE_KINDS = frozenset({
 # dropping the switch gate removed no rate bound. PRIORITY nudges (every
 # MACHINE_NUDGE_KINDS member) stay gated + floored + per-kind staged.
 #
-# #1038 (owner, 2026-09-15) — `goal-arm`: the arm keystroke into a DECLARED
-# managed window (gk review, gk-infra, d3 today — any box that declares
-# `windows` in cli_fleet). A declared
-# window that comes back DARK after a reboot is a dead/blocked session the
-# owner needs REVIVED with zero staging — semantically the same revival class
-# as `resume`/`compact` — so its arm rides an always-on recovery nudge and is
-# NEVER suppressed by the machine-nudge OFF switch. NON-declared boxes keep the
-# staged PRIORITY `goal-sweep` identity (unchanged). Delivery derives which of
-# the two identities to use from the pane's cwd (declared-window == source
-# "role" in `cli_concurrency.resolve_concurrency`); see `watchdog/goal.py`
-# `deliver_goal`. Its own recent-human + tri-state-armed + boundary + per-sid
-# rate-floor gates bound it, exactly as the other recovery nudges keep theirs.
+# #1038/#1181/#1260 — `goal-arm`: the ALWAYS-ON identity of the owner's own
+# `/autopilot` arm (`self-callback`, on any pane) and of the owner-authorized
+# `stream-migrate` watcher (#1128); NEVER suppressed by the machine-nudge OFF
+# switch, because the owner just asked for it. Every watchdog re-arm keeps the
+# staged PRIORITY `goal-sweep` identity, on a declared window too: #1260
+# (owner 25.10.2026) retired #1038's declared-window always-on arm together
+# with its virgin arm, because a goal exists only when the owner typed
+# `/autopilot`. Delivery picks the identity from the request's origin; see
+# `watchdog/goal.py` `_declared_window_nudge` / `deliver_goal`. Its own
+# recent-human + tri-state-armed + boundary gates bound it, exactly as the
+# other recovery nudges keep theirs.
+#
 #
 # #1063 (owner incident, 2026-09-17) — `goal-disarm`: the `/goal clear` disarm
 # keystroke the #522 question-repoke backstop (Job 33) types into a `/goal` loop

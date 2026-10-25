@@ -161,7 +161,7 @@ def resolve_declared_window_pane(cwd, run=None, projects_dir=None):
     semantics, never containment), for `airuleset.py status`'s goal row run
     OUTSIDE a tmux pane (over ssh, no `$TMUX_PANE`, so `resolve_self_pane`
     yields nothing). Uses the SAME `watchdog._reconcile_candidate_panes`
-    enumeration seam job 9's virgin scan uses (`tmux list-panes -a -F
+    enumeration seam the watchdog pane scans use (`tmux list-panes -a -F
     '#{pane_id}\\t#{pane_current_command}\\t#{pane_current_path}'`).
 
     Returns `(pane_id, cwd, sid)` — like `resolve_self_pane`, so the status

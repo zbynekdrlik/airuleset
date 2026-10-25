@@ -300,6 +300,8 @@ _GOAL_ANSWER_REARM_ORIGIN = "answer-rearm"
 # the owner opened without `/autopilot`). No longer produced; recognised only
 # so `deliver_goal` DROPS a leftover on-disk request (the `stale-rearm` shape).
 _GOAL_DECLARED_VIRGIN_ORIGIN = "declared-virgin"
+# Origins no longer produced; a leftover request of one is only ever dropped.
+_GOAL_RETIRED_ORIGINS = (_GOAL_STALE_REARM_ORIGIN, _GOAL_DECLARED_VIRGIN_ORIGIN)
 # The watchdog-INITIATED re-arm origins that honour deliver_goal's recent-human
 # gate (never type into a pane a human just touched) — as opposed to the user's
 # own `self-callback` arm, whose origin IS the user.
@@ -1621,6 +1623,7 @@ _GOAL_TERMINAL_WORDS = frozenset((
                                  # typed (the origin is retired); cleared in one
                                  # sweep. (The #623 `drop:already-current` word is
                                  # removed with the stale-rearm REPLACE path.)
+    "drop:declared-virgin-retired",  # #1260 -- the same for a leftover #1038 request
 ))
 
 
@@ -1646,24 +1649,16 @@ def _verify_fail_word(tpath, age_before, now):
 def _declared_window_nudge(cwd, origin=None):
     """The keystroke NUDGE identity of a `/goal` arm into `cwd`'s pane. The
     ALWAYS-ON `goal-arm` recovery kind (never withheld by the #1023 per-kind
-    switch) for: a DECLARED managed window (#1038 -- `source == "role"`, a
-    session-revival surface, so ANY arm into it; declared windows re-arm after a
-    reboot with zero staging); the owner's OWN `self-callback` arm on ANY pane
-    (#1181 -- they just typed /autopilot, #752; the staged kind, OFF on every box,
-    withheld every keystroke of it on dev1 iemmixer/fohmixer 29.9.); the
-    owner-authorized `stream-migrate` watcher (#1128). Every other watchdog
-    re-arm keeps the staged PRIORITY `goal-sweep`. Fail-safe toward `goal-sweep`
-    on a resolver error -- never a wrongly-always-on non-declared pane."""
+    switch) for the owner's OWN `self-callback` arm on ANY pane (#1181 -- they
+    just typed /autopilot, #752; the staged kind, OFF on every box, withheld every
+    keystroke of it on dev1 iemmixer/fohmixer 29.9.) and the owner-authorized
+    `stream-migrate` watcher (#1128). Every watchdog re-arm keeps the staged
+    PRIORITY `goal-sweep`, on a declared window too: #1260 retired #1038's
+    declared-window always-on kind with its virgin arm. `cwd` is kept for the
+    callers' signature."""
     if origin in (_GOAL_SELF_CALLBACK_ORIGIN, _stream_migrate.ORIGIN):
         return "goal-arm"
-    try:
-        import cli_concurrency
-        source = cli_concurrency.resolve_concurrency(cwd)[2]
-    except Exception as e:  # noqa: BLE001 -- any resolver failure keeps the staged default
-        _log_goal_sync("declared-window-nudge resolve-error cwd=%s (%r) "
-                       "-> goal-sweep" % (cwd, e))
-        return "goal-sweep"
-    return "goal-arm" if source == "role" else "goal-sweep"
+    return "goal-sweep"
 
 
 def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
@@ -2222,12 +2217,21 @@ def goal_sweep(now, run=None, dry_run=False, projects_dir=None,
     THIS sweep (by /compact or the lane nudge) is skipped, never double-
     typed into."""
     logs = []
+    # #1260 -- a RETIRED-origin request leaves the store first, before the owner
+    # kill-switch and the #731 cap: never typed, never pinged, never a phantom
+    # "arming" status on a paused box (david3's 25.10. 14:56 leftover).
+    for _rsid, _req in sorted(load_goal_requests(requests_path).items()):
+        _rorig = (_req or {}).get("origin") if isinstance(_req, dict) else None
+        if _rorig in _GOAL_RETIRED_ORIGINS and not dry_run:
+            clear_goal_request(_rsid, path=requests_path)
+            _log_goal_sync("DROP %s-retired sid=%s (sweep purge)" % (_rorig, _rsid))
+            logs.append("DROP (goal-sweep) sid=%s -> %s-retired" % (_rsid, _rorig))
+    if state is not None and not dry_run:
+        state.pop("goal_virgin_arm", None)     # #1260: the retired #1038 rate-floor store
     if watchdog._owner_disabled("goal"):
         logs.append("goal jobs DISABLED by owner flag "
                     "~/.claude/watchdog-disable-goal (rm to re-enable)")
         return logs
-    if state is not None and not dry_run:
-        state.pop("goal_virgin_arm", None)     # #1260: the retired #1038 rate-floor store
     reqs = load_goal_requests(requests_path)
     # #566 -- the per-sid consecutive `slot occupied` livelock counter. Reap any
     # sid no longer pending (an episode-end pop, not a rolling window): the store
@@ -5043,7 +5047,7 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
     # keystroke delivery entirely (the gates/lanefill.py Stop gate is the refill
     # lever now). What remains is the DECISION line below + the shared per-kind
     # cadence gate; keystroke safety is moot because no keystroke is typed.
-    # #442: the SAME shared check job 9's virgin-arm gate uses, but through
+    # #442: the SAME shared check deliver_goal's recent-human gate uses, through
     # the lane path's OWN short window (never the 30-min default -- see
     # GOAL_LANE_LIVE_CONVO_S above). The `window_s` seam already exists on
     # the shared function, so job 9's own default-window semantics stay

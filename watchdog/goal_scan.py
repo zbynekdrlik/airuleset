@@ -1,11 +1,11 @@
-"""Goal-marker transcript scan, `◎ /goal` footer read, and virgin-arm
+"""Goal-marker transcript scan, `◎ /goal` footer read, and the
 human-recency gate (the watchdog's goal-sweep engine primitives).
 
 Extracted verbatim from ``watchdog/__init__.py`` as item G step 10 of the
 definitive module split (issue #433). Six functions, two source blocks:
 
-* ``_goal_autoarm_recent_human_activity`` -- #339 job-9 gate: refuses a virgin
-  auto-arm while a live human is using the pane (presence marker + transcript
+* ``_goal_autoarm_recent_human_activity`` -- #339 gate (deliver_goal's recent-human
+  hold since #1260 retired the virgin arm): refuses an arm while a live human is using the pane (presence marker + transcript
   human-prompt recency, symmetric clamp).
 * ``goal_templates_path`` / ``_goal_marker_content`` / ``_parse_goal_marker`` /
   ``scan_goal_markers`` -- the installed-SKILL.md resolver and the incremental

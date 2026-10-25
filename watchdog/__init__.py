@@ -1497,7 +1497,7 @@ GOAL_AUTOARM_RECENT_HUMAN_S = 30 * 60
 # #433 item G step 10 -- the goal-marker transcript scan (`scan_goal_markers`
 # + its `_goal_marker_content`/`_parse_goal_marker` parsers), the `◎ /goal`
 # footer/header read (`pane_goal_armed`), the installed-SKILL.md resolver
-# (`goal_templates_path`), and job 9's virgin-arm human-recency gate
+# (`goal_templates_path`), and the goal recent-human gate
 # (`_goal_autoarm_recent_human_activity`) now live in `watchdog/goal_scan.py`,
 # re-exported in place with the same positional-facade convention as the other
 # split blocks, so every `watchdog.<name>` seam (goal.py's deliver_goal +

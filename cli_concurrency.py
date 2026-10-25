@@ -217,8 +217,8 @@ def goal_variant_label(mode, role):
     """#1038 -- the owner-facing name of a pane's `/goal` VARIANT: ``<role>/<mode>``
     when a role is resolved (``review/sequential``, ``infra/sequential`` -- the
     owner's own ticket examples), else just ``<mode>`` (``sequential`` for the
-    default since #1137, ``parallel`` only for an explicit declaration). ONE label shared by the watchdog virgin-arm
-    journal line AND the ``airuleset.py status`` goal row so the two never drift."""
+    default since #1137, ``parallel`` only for an explicit declaration). ONE label for the ``airuleset.py
+    status`` goal row (#1260 retired the virgin-arm journal line that shared it)."""
     return "%s/%s" % (role, mode) if role else "%s" % mode
 
 
@@ -243,10 +243,10 @@ def goal_status_row(cwd, armed, pending=False, *, pane_found=True,
     #1038 lane's honesty defect: over ssh it read no pane at all yet said NOT
     armed); a pane resolved but ``pane_goal_armed`` returned ``None`` (a busy /
     scrolled / empty capture -- undeterminable, not dark) -> ``armed state
-    undeterminable`` (the #1038-review residual). This matches the virgin scan's
-    own "None is doubt, never act" stance so the two tri-state consumers agree.
-    A declared window that genuinely reads ``False`` is the post-reboot state
-    #1038 fixes; the row then tells the owner the one word (`/autopilot`) is the
+    undeterminable`` (the #1038-review residual). Same "None is doubt, never act"
+    stance as deliver_goal's tri-state armed check, so the consumers agree.
+    A declared window that genuinely reads ``False`` is simply unarmed (#1260:
+    no automatic arm, even after a reboot); the row then tells the owner the one word (`/autopilot`) is the
     whole procedure.
 
     ``pane_found`` and everything after it are KEYWORD-ONLY (#1038-review 2):
@@ -268,8 +268,8 @@ def goal_status_row(cwd, armed, pending=False, *, pane_found=True,
         # scrolled / empty capture -> pane_goal_armed None). NOT a dark pane,
         # so NEVER a NOT-armed verdict (the #1038-review residual): report the
         # undeterminable state honestly and point the owner at an idle re-check.
-        # Matches the virgin scan's own "None is doubt, never act" stance so the
-        # two tri-state consumers agree.
+        # Same "None is doubt, never act" stance as deliver_goal's tri-state
+        # armed check, so the consumers agree.
         return ("goal: armed state undeterminable (pane busy) — variant %s; "
                 "re-check when the pane is idle" % variant)
     return "goal: NOT armed — type /autopilot (variant %s)" % variant

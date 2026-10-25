@@ -175,14 +175,14 @@ NUDGE_TOTAL_GAP_MIN_S = 3 * 3600
 # imported so nudge_gate stays a LEAF module: several modules rely on
 # `from watchdog import nudge_gate` being import-safe, and tmux_io pulls in the
 # whole watchdog package.
-# #1038 — `goal-arm` (any arm delivered into a DECLARED managed window) is a
-# session revival, so it joins the recovery set here in lockstep with tmux_io
-# (the drift-lock test asserts identity). Exempting it from the cadence gate
-# adds no unbounded keystorm: a fresh post-reboot virgin arm is bounded by its
-# per-sid floor (`state["goal_virgin_arm"]`), and any other origin it carries
-# into a declared window (self-callback / dark-/stale-/auth-/fulfilled-rearm)
-# keeps its OWN bound — the per-request `GOAL_DELIVERY_ATTEMPT_CAP` plus each
-# rearm origin's `*_attempts` rate state — exactly like the other recovery kinds.
+# #1038/#1181/#1260 — `goal-arm` (the owner's own `/autopilot` self-callback arm
+# and the owner-authorized `stream-migrate` watcher; #1260 retired its #1038
+# declared-window use together with the virgin arm) joins the recovery set here
+# in lockstep with tmux_io (the drift-lock test asserts identity). Exempting it
+# from the cadence gate adds no unbounded keystorm: the owner's arm is one human
+# action, and `stream-migrate` keeps its OWN bound — the per-request
+# `GOAL_DELIVERY_ATTEMPT_CAP` plus its `*_attempts` rate state — exactly like
+# the other recovery kinds.
 # #1063 — `goal-disarm` (the `/goal clear` #522 question-repoke backstop) is a
 # session recovery / damage-control action too, so it joins the recovery set here
 # in lockstep with tmux_io (the drift-lock test asserts identity). Its OWN bounds
