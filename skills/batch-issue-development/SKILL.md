@@ -1,6 +1,6 @@
 ---
 name: batch-issue-development
-description: Batch-issue bundling gate (≤300 LoC/issue, ≤4 issues/PR), one PR per batch, single-feature-single-PR. Load at /autopilot or /issue-planner start.
+description: Encouraged bundling of related issues — gate ≤300 LoC/issue, ≤4 issues/PR; single-feature-single-PR. Load at /autopilot or /issue-planner start.
 user-invocable: false
 ---
 
@@ -10,8 +10,7 @@ user-invocable: false
 - `ask-before-assuming.md` — pre-answered questions table; spec/plan/proceed prompts are banned
 - `complete-planned-work.md` — finish the entire batch, no stopping between issues
 - `autonomous-quality-discipline.md` — keep working until ALL bundled issues green
-- `pr-merge-policy.md` / `two-branch-workflow.md` — exactly ONE PR (dev→main) per batch
-- `ci-push-discipline.md` — one push per batch, not one push per issue
+- `pr-merge-policy.md` / `two-branch-workflow.md` / `ci-push-discipline.md` — a bundle ships as one push and one PR (dev→main)
 - `architecture-first.md` — production-by-default + framework-first apply to EVERY bundled
   member, batched or not; bundling small issues never licenses skipping structure on a member that
   is actually production-classified
@@ -22,12 +21,12 @@ user-invocable: false
 
 When `/issue-planner` runs:
 
-1. Step 4 presents issues with **`multiSelect: true`** (always — no exceptions). Selecting a single issue is a deliberate user choice, not the default.
+1. Step 4 presents issues with `multiSelect: true`, so related ones can be picked together.
 2. After selection, the agent processes ALL chosen issues on the SAME `dev` branch, in sequence:
    - Issue N: brainstorm → plan → implement → test → commit (locally, no push)
    - Issue N+1: same cycle, same branch, more commits
    - ... until all selected issues done
-3. After ALL issues complete: ONE push, ONE CI cycle, ONE PR, ONE completion report.
+3. The bundle then ships together: one push, one CI cycle, one PR, one completion report.
 
 #### Bundling gate — what's safe to batch
 
@@ -79,7 +78,7 @@ NOT reasons to interrupt:
 
 - "This issue's plan looks bigger than expected" → it either fits the gate or it doesn't; decide silently and proceed
 - "Should I commit issue #N before starting #N+1?" → yes, always, every time, never ask
-- "Want me to push now or after the next issue?" → push only after ALL selected issues done
+- "Want me to push now or after the next issue?" → don't ask; a bundle pushes once at the end
 
 #### Banned phrases (intent, not just exact wording)
 
@@ -90,7 +89,7 @@ These prompts violate the rule. NEVER write them or any rewording:
 - "Approve before I start the next one?"
 - "Issue #N done — proceed to #N+2?"
 - "Want me to commit and move on, or pause first?"
-- "Should I bundle these or do separate PRs?" (the gate decides — apply it, don't ask)
+- "Should I bundle these or do separate PRs?" (decide it yourself, don't ask)
 - "Should I push now (after issue 1) or wait for issue 2?"
 - Any rewording that asks the user to gate continuation between bundled issues
 
@@ -108,9 +107,8 @@ After all selected issues are committed locally:
 
 #### Anti-patterns (all rewordings apply)
 
-- Selecting one issue → finishing → pushing → opening PR → telling user "ready for next issue?" — **WRONG.** Multi-select up front, batch them.
-- Pushing after each issue's commit — **WRONG.** Each push burns a CI cycle; bundle commits, push once.
-- Asking "should I bundle?" — **WRONG.** The gate decides. Apply it silently.
+- Telling the user "ready for next issue?" after a PR — **WRONG.** Never prompt between issues.
+- Asking "should I bundle?" — **WRONG.** Decide it yourself.
 - Splitting trivial related issues across PRs only because "review is easier" — needless CI cycles; keep them together when their focus allows.
 - Pausing between bundled issues to "let the user verify the first one" — **WRONG.** That's three CI cycles + three review rounds for work that fits in one.
 - Stopping the batch when CI fails on issue #2's commit — **WRONG.** Investigate, fix, continue. CI failure inside a batch is the same as CI failure at the end — debug the root cause and keep going.

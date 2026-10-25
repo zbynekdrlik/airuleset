@@ -9515,8 +9515,8 @@ def _add_dispatch_flags(parser):
              "counts, #1078 item 1)")
     parser.add_argument(
         "--snapshot-json", action="store_true",
-        help="Print ONE JSON object: open_count, i_members, dispatchable_count/"
-             "_reason and ops_wait_members, all from ONE derivation (the "
+        help="Print ONE JSON object: open_count, i_members and "
+             "ops_wait_members, all from ONE derivation (the "
              "watchdog's detached quals refresher, #1067 slice 1d)")
     parser.add_argument(
         "--role", choices=("review", "infra", "quality"), default=None,

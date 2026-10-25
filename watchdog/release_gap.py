@@ -25,9 +25,7 @@ train bez prestojov"; was 6h until a live gk stall proved 6h outlasts how often
 the release-in-flight signal flaps, so the anchor never aged to cadence), for an
 armed `/goal` pane on a FULL-authority box whose integration branch is ahead of
 prod AND no release is in flight, deliver ONE verified keystroke reminding the
-session to run its release pipeline. The FULL-authority gate is the INVERSE of #618: #618
-narrowed the lane-occupancy nudge's SKIP to `authority is None` (widening THAT
-nudge to reduced-authority stream boxes too), whereas a release train is run ONLY
+session to run its release pipeline. A release train is run ONLY
 by the gatekeeper, so THIS nudge fires ONLY where `resolve_authority(cwd) ==
 "full"`. Since airuleset#827 `resolve_authority` fails SAFE to `fork-no-merge`
 for an unmapped user (only the explicit full accounts resolve "full"), so the

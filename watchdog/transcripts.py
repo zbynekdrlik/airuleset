@@ -1015,9 +1015,7 @@ def _count_live_subagents(transcript_path, now, window):
     `subagent_active` above: that function only answers "is at least one
     alive", this answers "how many". Same directory convention
     (`<session-dir>/<session-id>/subagents/**/*.jsonl`), same fail-safe
-    direction -- a missing/unreadable dir returns 0 (never a guess), which
-    only ever ALLOWS a lane-occupancy nudge to fire, never blocks it on a
-    filesystem hiccup."""
+    direction -- a missing/unreadable dir returns 0 (never a guess)."""
     try:
         d = Path(transcript_path).parent / Path(transcript_path).stem / "subagents"
         if not d.is_dir():
@@ -1230,7 +1228,7 @@ def count_live_workers(projects_dir, cwd, session_id, now, freshness_s,
         tail line, not a dead worker).
 
     `freshness_s` is required (no silent default): the G3 consumer tunes its own
-    window. Today's lane-occupancy consumer uses 15 min precisely so a live worker
+    window. With 15 min, a live worker
     in a long foreground CI-wait — which writes nothing to its transcript for up to
     ~9 min — is not misread as dead.
 

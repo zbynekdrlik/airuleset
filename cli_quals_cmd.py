@@ -1242,12 +1242,9 @@ def _emit_count_dispatchable(rows, root):
     """`--count-dispatchable`: the dispatchable-candidate count + a `reason:`
     line when it is 0 (#993 item 3). dispatchable = workable ∧ ¬dep-wait — the
     SAME set the picker and both nudges use (the class-based infra-serial gate
-    was removed in round 2b). A `reason:dep-wait` line follows a 0 count so the
-    lane nudge journals WHY it will not refill. When dep resolution is UNMEASURABLE
-    (batched read failed) print `unmeasurable:meta read failed` so the watchdog
-    fetch flows the REASON into the journal (`skip:dispatchable-unknown (meta
-    read failed)`) — the fail-safe direction (unmeasurable never nudges) is
-    unchanged, only the explanation is added (#1021; #993 review 5)."""
+    was removed in round 2b). A `reason:dep-wait` line follows a 0 count. When
+    dep resolution is UNMEASURABLE (batched read failed) it prints
+    `unmeasurable:meta read failed` (#1021; #993 review 5)."""
     count, reason = _dispatchable_fields(rows, root)
     if count is None:
         print("unmeasurable:" + reason)   # #1021: the reason says WHY
