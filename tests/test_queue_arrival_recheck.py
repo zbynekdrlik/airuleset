@@ -41,7 +41,6 @@ from _goal_arm_helpers import (  # noqa: E402
     GOAL_ARMED_CAP,
     _write_marker_transcript,
 )
-from _parallel_mode_pin import PARALLEL_PIN  # noqa: E402  (#1137)
 
 NOW = 1_000_000
 DAY = 24 * 3600
@@ -272,10 +271,12 @@ class _OrchBase(unittest.TestCase):
                 dry_run, handled, queue_fetch=fetch,
                 state=state if state is not None else {},
                 sleep_fn=lambda *a, **k: None, captured=captured,
-                classify_builder=classify_builder)
+                classify_builder=classify_builder,
+                # #1137: an ARMED review pane gets no arrival nudge any more;
+                # the delivery mechanics run on the #1178 ended-pane path.
+                deliver_hold=lambda: None)
 
 
-@PARALLEL_PIN  # #1137 owner ROZHODNUTÉ 2026-09-30: sequential default; declared-parallel suite
 class TestOrchestrator(_OrchBase):
     def test_reduced_authority_watches_its_own_slice(self):
         # #1178 REVERSES the #733 full-only gate: the union is now the box's
@@ -295,7 +296,7 @@ class TestOrchestrator(_OrchBase):
             logs = qa.goal_queue_arrival_recheck(
                 NOW, self._tmux(), qrecs, self.sid, self.CWD, "%9", self.tpath,
                 "sess:0", False, set(), queue_fetch=lambda cwd: [1],
-                state={}, sleep_fn=lambda *a, **k: None)
+                state={}, sleep_fn=lambda *a, **k: None, deliver_hold=lambda: None)
         self.assertTrue(any("seed" in ln for ln in logs), logs)
 
     def test_none_fetch_undetermined_no_mutation(self):
@@ -429,11 +430,9 @@ class TestOrchestrator(_OrchBase):
 # 6. Integration — the wiring into goal_lane_sweep.
 # --------------------------------------------------------------------------- #
 
-@PARALLEL_PIN  # #1137 owner ROZHODNUTÉ 2026-09-30: sequential default; declared-parallel suite
 class TestLaneSweepWiring(unittest.TestCase):
-    """RED against the pre-wiring tree: `goal_lane_sweep` produces NO
-    queue-arrival nudge for an armed FULL-authority pane whose gk queue GREW.
-    GREEN once the sweep calls `goal_queue_arrival_recheck`."""
+    """The rider rides `goal_lane_sweep`; since #1137 an ARMED review pane is
+    never nudged (no refill push) and its baseline is left alone."""
 
     CWD = "/home/newlevel/devel/qalane"
 
@@ -477,32 +476,15 @@ class TestLaneSweepWiring(unittest.TestCase):
                 sleep_fn=lambda *a, **k: None)
         return sid, tmux
 
-    def test_queue_arrival_is_nudged(self):
-        state = {"queue_arrival": {
-            "sess-733-lane": {"base": [1, 2], "first_seen": NOW - DAY}}}
-        sid, tmux = self._armed_sweep(
-            state, queue_fetch=lambda cwd: [1, 2, 5177])
-        typed = "".join(tmux.typed_texts())
-        self.assertIn("stuck-check:", typed,
-                      "an armed full-authority pane whose gk queue grew must be "
-                      "nudged (RED before goal_lane_sweep wires "
-                      "goal_queue_arrival_recheck)")
-        self.assertIn("#5177", typed)
-        self.assertEqual(state["queue_arrival"][sid]["base"], [1, 2, 5177])
-
-    def test_first_observation_only_seeds(self):
-        state = {}
-        sid, tmux = self._armed_sweep(state, queue_fetch=lambda cwd: [1, 2])
-        self.assertEqual(tmux.typed_texts(), [])
-        self.assertEqual(state["queue_arrival"][sid]["base"], [1, 2])
-
-    def test_reduced_authority_box_is_nudged_on_its_own_slice(self):
-        # #1178 (was `..._not_nudged` under #733's full-only gate)
-        state = {"queue_arrival": {
-            "sess-733-lane": {"base": [1], "first_seen": NOW - DAY}}}
-        sid, tmux = self._armed_sweep(
-            state, authority="fork-no-merge", queue_fetch=lambda cwd: [1, 9])
-        self.assertIn("#9", "".join(tmux.typed_texts()))
+    def test_armed_review_pane_is_never_nudged(self):
+        for authority in ("full", "fork-no-merge"):
+            state = {"queue_arrival": {
+                "sess-733-lane": {"base": [1, 2], "first_seen": NOW - DAY}}}
+            sid, tmux = self._armed_sweep(
+                state, authority=authority,
+                queue_fetch=lambda cwd: [1, 2, 5177])
+            self.assertEqual(tmux.typed_texts(), [], authority)
+            self.assertEqual(state["queue_arrival"][sid]["base"], [1, 2])
 
     def test_no_queue_fetch_is_a_noop(self):
         state = {}

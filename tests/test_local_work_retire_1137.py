@@ -24,7 +24,6 @@ import airuleset  # noqa: E402
 import cli_context_excludes  # noqa: E402
 import cli_fleet  # noqa: E402
 import cli_lane_target_reclaim  # noqa: E402
-import cli_session_scope  # noqa: E402
 
 
 def read(rel):
@@ -113,9 +112,9 @@ class TestInstall(unittest.TestCase):
 
 class TestScope(unittest.TestCase):
 
-    def test_dev1_is_not_session_scoped(self):
-        self.assertNotIn("dev1", cli_session_scope.SCOPE_HOSTS)
-        self.assertIn("dev2", cli_session_scope.SCOPE_HOSTS)
+    def test_no_workstation_is_session_scoped(self):
+        # #1137 follow-up: dev2 left too, so the scope module itself is gone.
+        self.assertFalse((ROOT / "cli_session_scope.py").exists())
 
 
 class TestLiveness(unittest.TestCase):

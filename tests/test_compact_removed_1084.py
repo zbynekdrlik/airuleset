@@ -464,8 +464,8 @@ KEPT_COMPACT_SYMBOLS = (
     "resolve_self_pane", "resolve_declared_window_pane",
     "_COMPACT_COMPLETION_HEADING_RX", "_compact_recent_human_activity",
     "compact_sync_log_path",
-    # KEPT: gates/lanefill.py (the lane-fill Stop gate) imports this constant as
-    # its single source for watchdog.count_live_workers() (#1084 L2 review BLOCKER).
+    # KEPT: cli_lane_live_gate (the #1193 live-lane gate) imports this constant
+    # as its single source for watchdog.count_live_workers().
     "COMPACT_LIVE_WORKER_FRESHNESS_S",
 )
 

@@ -69,8 +69,7 @@ def _utc(ts):
 
 
 def _window(steer="watch", cwd=WATCH_CWD):
-    w = {"name": "gk-quality", "cwd": cwd, "role": "quality",
-         "mode": "sequential", "tz": "Europe/Bratislava",
+    w = {"name": "gk-quality", "cwd": cwd, "role": "quality", "tz": "Europe/Bratislava",
          "triggers": [
              {"name": "watch", "cron": "17 7,19 * * *",
               "prompt": "Spusti gk-quality watch."},

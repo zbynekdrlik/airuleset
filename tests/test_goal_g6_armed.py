@@ -38,7 +38,6 @@ from _goal_arm_helpers import (  # noqa: E402
     DeliverGoalFakeTmux,
     _write_marker_transcript,
 )
-from _parallel_mode_pin import PARALLEL_PIN  # noqa: E402  (#1137)
 
 # A pane whose FOOTER is off the captured view (the `◎ /goal` statusline row
 # scrolled past the bottom behind a worker strip / chrome redraw) so
@@ -100,24 +99,24 @@ class TestG6StructuredArmedGate(unittest.TestCase):
             logs = goal.goal_lane_sweep(now, run=tmux, projects_dir=proj,
                                         state=state,
                                         backlog_fetch=lambda cwd: backlog)
+        self.state = state
         return logs, tmux
 
-    @PARALLEL_PIN  # #1137 owner ROZHODNUTÉ 2026-09-30: declared-parallel pane
-    def test_obscured_footer_with_structured_arm_reaches_the_refill_decision(self):
+    def test_obscured_footer_with_structured_arm_reaches_the_armed_branch(self):
         # THE #486 G6 CASE (RED against pre-G6): footer obscured
         # (pane_goal_armed -> None), heartbeat reads NOT-armed (the 4 MB-tail
         # lie), but dark_watch's tail-proof goal_mark says the /goal IS armed.
-        # The structured gate MUST let the empty-lane nudge REACH its refill
-        # decision. #1089: the keystroke delivery is RETIRED (the lane-fill Stop
-        # gate is the lever now), so "reaches the decision" is the DELIVERY
-        # RETIRED observability line, never a keystroke.
+        # The structured gate MUST let the pane reach the armed-pane branch
+        # (#1137: the lane-occupancy refill decision is gone; the armed branch
+        # persists the pane's goal_lane rec, the account-block check and the
+        # riders run there), never a keystroke here.
         self.assertIsNone(wd.pane_goal_armed(OBSCURED_IDLE_CAP))
         logs, tmux = self._run_sweep(goal_mark_state="set", hb_goal_armed=False,
                                      backlog=5, cap=OBSCURED_IDLE_CAP)
-        self.assertTrue(any("DELIVERY RETIRED" in ln for ln in logs),
-                        "structured-armed obscured pane must reach the refill "
-                        "decision: %r" % logs)
-        self.assertEqual(tmux.sent, [], "delivery retired -- no keystroke")
+        self.assertIn("sess-g6", self.state.get("goal_lane", {}),
+                      "structured-armed obscured pane must reach the armed "
+                      "branch: %r" % logs)
+        self.assertEqual(tmux.sent, [], "no keystroke")
         # the pre-G6 render gate must be GONE -- no armed-undeterminable skip
         self.assertFalse(any("armed-undeterminable" in ln for ln in logs), logs)
 
@@ -129,6 +128,7 @@ class TestG6StructuredArmedGate(unittest.TestCase):
         logs, tmux = self._run_sweep(goal_mark_state="cleared", hb_goal_armed=True,
                                      backlog=5, cap=OBSCURED_IDLE_CAP)
         self.assertEqual(tmux.sent, [], "a cleared goal must never be nudged")
+        self.assertNotIn("sess-g6", self.state.get("goal_lane", {}))
         self.assertFalse(any("lane-occupancy nudge" in ln for ln in logs), logs)
 
     def test_no_structured_signal_and_heartbeat_not_armed_never_types(self):
@@ -162,8 +162,8 @@ class TestG6StructuredArmedGate(unittest.TestCase):
         # clear THIS sweep) is harmless BY CONSTRUCTION. The structured gate armed
         # this pane (goal_mark set) so it reaches the refill decision, but NO
         # keystroke is ever sent. The genuine-clear safety the old race guard
-        # protected is subsumed by "the kind never types"
-        # (test_lanefill_enforce_1089.test_kind_never_calls_a_delivery_primitive).
+        # protected is subsumed by "the kind never types" (#1137 then removed
+        # the lane-occupancy kind altogether).
         self.assertIs(wd.pane_goal_armed(READABLE_NOT_ARMED_CAP), False)
         logs, tmux = self._run_sweep(goal_mark_state="set", hb_goal_armed=True,
                                      backlog=5, cap=READABLE_NOT_ARMED_CAP)

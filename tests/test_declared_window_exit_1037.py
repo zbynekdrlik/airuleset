@@ -39,11 +39,11 @@ import cli_tmux_provisioning as ctp  # noqa: E402
 # declared windows (gk-infra, gk-quality), the exact shape the owner runs on gk.
 _GK3 = [
     {"name": "gk", "cwd": "~/devel/odoo/odoo-erp",
-     "role": "review", "mode": "parallel"},
+     "role": "review"},
     {"name": "gk-infra", "cwd": "~/devel/odoo/odoo-erp-infra",
-     "role": "infra", "mode": "sequential"},
+     "role": "infra"},
     {"name": "gk-quality", "cwd": "~/devel/odoo/odoo-erp-quality",
-     "role": "quality", "mode": "sequential"},
+     "role": "quality"},
 ]
 
 # The bare-launcher window command the OLD (defective) renderer produced -- the

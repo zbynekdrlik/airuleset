@@ -288,10 +288,8 @@ class TheUnwiredGuardHasTeeth(unittest.TestCase):
                # on its own trailing line; the mutation target vault_purge=None
                # is untouched.
                "             release_state_fetch=None, queue_fetch=None, queue_classify=None,\n"
-               # #993 item 3 re-pin: dispatchable_fetch=None (the lane-occupancy
-               # candidate-count seam) inserted on its own trailing line after
-               # queue_classify; the mutation target vault_purge=None is untouched.
-               "             dispatchable_fetch=None,\n"
+               # #993 item 3 re-pin: dispatchable_fetch=None was inserted on its
+               # own trailing line after queue_classify; #1137 removed it again.
                "             reaper_ps_fetch=None, reaper_kill_fn=None,\n"
                "             resource_guard_gk_request=None,\n"
                # #866 re-pin: nice_check_enabled=False (job 42's nice-check
@@ -328,8 +326,8 @@ class TheUnwiredGuardHasTeeth(unittest.TestCase):
                # a NEW trailing line after deploy_state_fetch=None (before the
                # health-probe line), so the closing `):` stays on the
                # health_probes line; vault_purge=None is untouched.
-               "             u_fetch=None, reconcile_fetch=None, "
-               "disk_guard_enabled=False,\n"
+               # #1137 re-pin: reconcile_fetch=None removed from this line.
+               "             u_fetch=None, disk_guard_enabled=False,\n"
                "             nice_check_enabled=False,\n"
                "             mdreview_cadence_enabled=False,\n"
                "             priority_policy_enabled=False,\n"

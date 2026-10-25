@@ -577,83 +577,16 @@ class TheTemplatesCarryNoDeadQuestionTimeoutPromise(TestCase):
         self.assertEqual(over, [])
 
 class TestBatchDispatchMandate(TestCase):
-    """#848 -- autopilot's dispatch RETURNS from #723 BATCH mode to CONTINUOUS
-    REFILL (#456): keep up to 5 parallel worktree lanes live, refill a returned
-    lane's slot immediately, integrate serially as branches return, and compact
-    at EVERY integration cycle (live lanes or not). The STEP-0 experiment proved
-    a compact over live lanes does not break the task registry, so the batch
-    model's drained-boundary premise (CC issue 29193) is retired.
-
-    autopilot-MASTER got the SAME reversal for its LANE 3. So the SKILL and
-    SKILL_MASTER assertions now lock the CONTINUOUS-REFILL doctrine -- a future
-    edit that reverts either back to batch mode fails loudly.
-
-    This class locks that autopilot's AND autopilot-master's continuous-refill
-    protocol TEXT is present, plus the master's per-cycle compact reminder inside
-    the MASTER LOOP /goal condition. The 4000-char cap stays locked separately.
-    """
-
-    def test_autopilot_mandates_continuous_refill(self):
-        body = read(SKILL).lower()
-        self.assertIn("continuous refill", body, "SKILL missing the #848 continuous-refill mandate")
-        self.assertIn("refill a returned lane's slot", body,
-                      "SKILL missing the #848 immediate-refill mandate")
-        self.assertNotIn("no refill while a batch", body,
-                         "SKILL still carries the retired #723 no-refill-while-open mandate")
-
-    def test_master_now_mandates_continuous_lane_dispatch(self):
-        # #848: master's LANE 3 returns from #723 batch mode to #456 continuous
-        # refill -- keep up to 5 live lanes, refill immediately. The batch
-        # affirmatives must be gone.
-        body = read(SKILL_MASTER).lower()
-        self.assertIn("continuous refill", body, "SKILL_MASTER missing the #848 continuous-refill mandate")
-        self.assertNotIn("no refill while a batch", body,
-                         "SKILL_MASTER still carries the retired #723 no-refill-while-open mandate")
-
-    def test_both_bodies_bound_saturation_on_a_resource_signal(self):
-        for rel in (SKILL, SKILL_MASTER):
-            self.assertIn("resource signal", read(rel).lower(),
-                          "%s missing the real-resource-signal back-off bound" % rel)
+    """#1137 (owner 25.10.2026) removed the #848 continuous-refill / lane-cap
+    doctrine (Claude Code decides dispatch itself). What stays locked: the
+    integration mutex serializes only integration, and autopilot-master runs all
+    its work lanes concurrently with reviews never starving, plus its per-cycle
+    compact reminder."""
 
     def test_both_bodies_serialize_only_integration_under_the_mutex(self):
         for rel in (SKILL, SKILL_MASTER):
             self.assertIn("integration mutex", read(rel).lower(),
                           "%s missing the integration-mutex" % rel)
-
-    def test_autopilot_names_a_lane_count_not_a_batch_cap(self):
-        # #991: no fixed lane cap — the live lane COUNT is sized to what the box
-        # and backlog bear; the retired "batch cap" and pre-#723 "3-5 fixed cap"
-        # / "keep the lanes full" must not appear.
-        body = read(SKILL).lower()
-        self.assertIn("lane count", body, "SKILL dropped the #991 lane-count doctrine")
-        self.assertIn("box and backlog", body, "SKILL dropped the box+backlog sizing")
-        self.assertNotIn("batch cap", body, "SKILL still carries the retired #723 batch-cap")
-        self.assertNotIn("keep the lanes full", body)
-        self.assertIsNone(re.search(r"3[-–]5", body),
-                          "SKILL still names a fixed 3-5 cap (any spelling)")
-
-    def test_master_now_names_a_lane_cap_not_a_batch_cap(self):
-        # #848: master's LANE 3 primary bound is now the lane cap (up to 5,
-        # refilled continuously); the batch-cap and keep-lanes-full phrasings
-        # must not appear.
-        body = read(SKILL_MASTER).lower()
-        self.assertIn("lane cap", body, "SKILL_MASTER dropped the #848 lane-cap doctrine")
-        self.assertIn("up to 5", body, "SKILL_MASTER dropped the up-to-5 lane size")
-        self.assertNotIn("batch cap", body, "SKILL_MASTER still carries the retired #723 batch-cap")
-        self.assertNotIn("keep the lanes full", body,
-                         "SKILL_MASTER still carries the superseded #442 keep-lanes-full mandate")
-        self.assertIsNone(re.search(r"3[-–]5", body),
-                          "SKILL_MASTER still names a fixed 3-5 cap (any spelling)")
-
-    def test_the_integration_mutex_bullet_locks_refill_decoupling(self):
-        # #848: the mutex still guards INTEGRATION only, never the refill
-        # decision (dispatch is paced by the lane cap, not the mutex). Scoped to
-        # SKILL (autopilot), where the narrowed #8-lock bullet lives.
-        body = read(SKILL).lower()
-        self.assertIn("integration mutex (hard)", body,
-                      "SKILL dropped the narrowed integration-mutex bullet")
-        self.assertIn("gates only integration, never the refill decision", body,
-                      "SKILL dropped the #848 mutex-gates-only-integration guarantee")
 
     def test_the_master_locks_all_lanes_concurrent_and_reviews_never_starve(self):
         # Round-2 blocker (#456 decision 3): decisions 1 & 2 got positive locks

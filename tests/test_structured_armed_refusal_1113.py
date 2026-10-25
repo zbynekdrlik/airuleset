@@ -52,8 +52,8 @@ from test_never_type_into_armed_1113 import (  # noqa: E402
 # The real shipped fork-no-merge /goal line (the david1 payload) and a DIFFERENT
 # variant (full parallel) — the recurrence is that the box held one variant while
 # the janitor was handed another.
-_FORK = goal_registry.render_goal_line("fork-no-merge", "parallel", None)
-_FULL = goal_registry.render_goal_line("full", "parallel", None)
+_FORK = goal_registry.render_goal_line("fork-no-merge", None)
+_FULL = goal_registry.render_goal_line("full", None)
 
 PANE = [("%9", "claude", "/home/newlevel/devel/rec1113", "111")]
 CWD = "/home/newlevel/devel/rec1113"
@@ -159,20 +159,18 @@ class TestTemplateVariantRecognition(unittest.TestCase):
         self.assertTrue(all(v.startswith("/goal ") for v in variants))
 
     def test_every_locked_variant_is_recognised(self):
-        # Completeness lock (review 🟡): EVERY (authority, mode, role) the
-        # `goal-inventory --check` set locks — `variant_specs()` PLUS the
-        # gk-full-only review variant — must be in `all_goal_line_variants()`.
+        # Completeness lock (review 🟡): EVERY (authority, role) the
+        # `goal-inventory --check` set locks (`variant_specs()`, the review
+        # variant included since #1137) must be in `all_goal_line_variants()`.
         # A shipped/armable variant dropped from this set silently reintroduces
         # the exact recurrence for that variant (the janitor reverts to
         # `cleanup=declined` on its own leftover). No dupes; all `/goal `-lines.
         variants = goal_registry.all_goal_line_variants()
-        specs = list(goal_registry.variant_specs()) + [("full", "parallel",
-                                                        "review")]
-        for authority, mode, role in specs:
-            line = goal_registry.render_goal_line(authority, mode, role)
+        for authority, role in goal_registry.variant_specs():
+            line = goal_registry.render_goal_line(authority, role)
             self.assertIn(line, variants,
-                          "variant %s/%s/%s missing from all_goal_line_variants"
-                          % (authority, mode, role))
+                          "variant %s/%s missing from all_goal_line_variants"
+                          % (authority, role))
         self.assertEqual(len(variants), len(set(variants)), "no duplicates")
 
     def test_grid_box_matches_a_template_variant_without_provenance(self):

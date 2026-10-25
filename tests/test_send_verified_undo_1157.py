@@ -760,7 +760,6 @@ class TruthfulCallerVerbs(unittest.TestCase):
         rec = {"id": 6883, "kind": "ticket", "num": 6883,
                "permalink": "https://x/6883", "tag": "infra"}
         with m.patch("airuleset.resolve_authority", return_value="full"), \
-                m.patch("cli_concurrency.resolve_mode", return_value="sequential"), \
                 m.patch.object(wd, "_owner_disabled", return_value=False), \
                 m.patch.object(wd, "nudges_enabled",
                                lambda kind=None: kind == "queue-arrival"):

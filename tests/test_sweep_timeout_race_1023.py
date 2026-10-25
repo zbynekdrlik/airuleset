@@ -40,7 +40,6 @@ from _goal_arm_helpers import (  # noqa: E402
     GOAL_ARMED_CAP,
     _write_marker_transcript,
 )
-from _parallel_mode_pin import PARALLEL_PIN  # noqa: E402  (#1137)
 
 NOW = 1_000_000
 DAY = 24 * 3600
@@ -97,7 +96,6 @@ class _Base(unittest.TestCase):
 # (1) WRITE-THROUGH — the killed-sweep reproduction.
 # --------------------------------------------------------------------------- #
 
-@PARALLEL_PIN  # #1137 owner ROZHODNUTÉ 2026-09-30: sequential default; declared-parallel suite
 class TestWriteThroughDirect(_Base):
     def _run_direct(self, now, qrecs, state, sv, persist):
         with m.patch("airuleset.resolve_authority", return_value="full"), \
@@ -108,7 +106,7 @@ class TestWriteThroughDirect(_Base):
                 now, self._tmux(), qrecs, self.sid, CWD, "%9", self.tpath,
                 "sess:0", False, set(), queue_fetch=lambda cwd: [1, 2],
                 state=state, sleep_fn=lambda *a, **k: None,
-                persist=persist)
+                persist=persist, deliver_hold=lambda: None)  # #1137 ended-pane path
 
     def test_delivered_unconfirmed_mark_is_on_disk_before_end_of_sweep_save(self):
         # The rider delivers (unconfirmed) and marks the floor; the WRITE-THROUGH
@@ -152,7 +150,6 @@ class TestWriteThroughBatch(_Base):
         state.setdefault("goal_mark", {})[self.sid] = {
             "off": 0, "mark": {"state": "set", "ts": now}}
         with m.patch("airuleset.resolve_authority", return_value="full"), \
-                m.patch("cli_concurrency.resolve_mode", return_value="sequential"), \
                 m.patch.object(wd, "_owner_disabled", return_value=False), \
                 m.patch.object(wd, "nudges_enabled",
                                lambda kind=None: kind == "queue-arrival"), \
@@ -190,14 +187,13 @@ class TestFetchBudgetSkip(_Base):
     def _run(self, budget_left_fn, fetch_spy):
         qrecs = {self.sid: {"base": [1], "first_seen": NOW - DAY}}
         with m.patch("airuleset.resolve_authority", return_value="full"), \
-                m.patch("cli_concurrency.resolve_mode", return_value="review"), \
                 m.patch.object(wd, "nudges_enabled",
                                lambda kind=None: kind == "queue-arrival"):
             logs = qa.goal_queue_arrival_recheck(
                 NOW, self._tmux(), qrecs, self.sid, CWD, "%9", self.tpath,
                 "sess:0", False, set(), queue_fetch=fetch_spy,
                 state={}, sleep_fn=lambda *a, **k: None,
-                budget_left_fn=budget_left_fn)
+                budget_left_fn=budget_left_fn, deliver_hold=lambda: None)
         return qrecs, logs
 
     def test_low_budget_skips_the_fetch_untouched_baseline_zero_gh(self):

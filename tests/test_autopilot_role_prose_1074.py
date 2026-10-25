@@ -5,8 +5,9 @@ Live evidence 22.9.2026 (gk-quality window, owner watching): the session read
 `skills/autopilot/SKILL.md` Step 3 routing (`--role infra`/`--role review` only)
 and the three by-authority `/goal STOP CONDITIONS` blocks, found no `quality`,
 and rightly REFUSED to arm — while the ARM path IS role-aware
-(`resolve_concurrency(.../odoo-erp-quality)` -> `("sequential","quality","role")`,
-`render_goal_line("full","sequential","quality")` = the QUALITY CONTRACT loop).
+(`resolve_role(.../odoo-erp-quality)` -> `quality`,
+`render_goal_line("full","quality")` = the QUALITY CONTRACT loop; #1137 removed
+the mode half of both).
 The doctrine (prose) must say what the code already does. Owner verbatim on the
 confusion: "to co mi odpovedal na to aka je jeho uloha je uplna blbost".
 
@@ -97,19 +98,20 @@ class TestArmParagraphResolvedVariant(TestCase):
     def setUp(self):
         self.w = _norm(_text())
 
+    # #1137 (owner 25.10.2026): the variant is the ROLE only (no mode).
     def test_default_blocks_are_not_what_gets_armed(self):
-        self.assertIn("the DEFAULT blocks below are NOT what gets armed", self.w)
+        self.assertIn("the blocks below are NOT what gets armed", self.w)
 
     def test_goal_arm_self_arms_the_resolved_variant(self):
-        self.assertIn("`goal-arm --self` arms the resolved variant", self.w)
+        self.assertIn("`goal-arm --self` arms the role variant", self.w)
 
     def test_do_not_tell_the_owner_to_paste_a_default_block(self):
-        self.assertIn(
-            "do NOT tell the owner to paste a default block there", self.w)
+        self.assertIn("do NOT tell the owner to paste a block there", self.w)
 
     def test_print_the_resolved_line_instead(self):
-        self.assertIn("this pane resolves to `<mode>/<role>`", self.w)
-        self.assertIn("the roster/`status` `goal:` row confirms it", self.w)
+        self.assertIn("this pane resolves to role `<role>`", self.w)
+        self.assertIn("the `status` `goal:` row confirms it", self.w)
+        self.assertNotIn("<mode>/<role>", self.w)
 
 
 # --------------------------------------------------------------------------- #

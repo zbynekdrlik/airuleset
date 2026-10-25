@@ -1,11 +1,12 @@
-"""#1074 — the third gk session `gk-quality`: a declared SEQUENTIAL window with
-its own role, obligation set and /goal loop, provisioned like the INFRA window.
+"""#1074 — the third gk session `gk-quality`: a declared window with its own
+role, obligation set and /goal loop, provisioned like the INFRA window. (#1137
+removed the window mode; the role half stays.)
 
 One new role token end-to-end (Approach 1, main-authored design):
  (a) fleet — `WINDOW_ROLES` accepts `quality`; gk declares THREE windows, the
-     third `gk-quality` at `~/devel/odoo/odoo-erp-quality`, sequential; the
-     data-driven `resolve_concurrency` resolves it to `("sequential","quality",
-     "role")` while the review window stays parallel and gk-infra is unchanged.
+     third `gk-quality` at `~/devel/odoo/odoo-erp-quality`; the data-driven
+     `resolve_role` resolves it to `quality` while the review window stays
+     `review` and gk-infra `infra`.
  (b) work class + partition — `work_class` maps the `gk-quality` label to the
      new `quality` class (precedence: gk-quality -> quality; infra/
      architecture-rework -> infra; else independent; None -> infra unchanged);
@@ -13,9 +14,9 @@ One new role token end-to-end (Approach 1, main-authored design):
      #1065 invariant extended: U(review)+U(infra)+U(quality) == U(all); the
      footer status row names the quality role.
  (c) goal loop — `goal_registry.ROLES` includes `quality`; the
-     `(full, sequential, quality)` variant renders the charter clauses within
-     the 4000 cap with >= 150 headroom, carries no turn cap, and is the 10th
-     locked `goal-inventory --check` variant.
+     `(full, quality)` variant renders the charter clauses within the 4000
+     cap with >= 150 headroom, carries no turn cap, and is a locked
+     `goal-inventory --check` variant.
  (d) provisioning — the tmux create body renders the third gk window
      (data-driven from the declaration, no hardcoded install step).
  (e) doctrine — the quality role + `gk-quality` label are documented in
@@ -53,7 +54,7 @@ class TestGkDeclaresThreeWindows(TestCase):
 
     def test_validate_windows_accepts_role_quality(self):
         w = [{"name": "gk-quality", "cwd": "devel/odoo/odoo-erp-quality",
-              "role": "quality", "mode": "sequential"}]
+              "role": "quality"}]
         self.assertEqual(cli_fleet.validate_windows(w), [])
 
     def test_gk_declares_review_infra_and_quality(self):
@@ -64,30 +65,25 @@ class TestGkDeclaresThreeWindows(TestCase):
         q = [x for x in self._gk() if x["name"] == "gk-quality"][0]
         self.assertEqual(q["cwd"], "~/devel/odoo/odoo-erp-quality")
         self.assertEqual(q["role"], "quality")
-        self.assertEqual(q["mode"], "sequential")
+        self.assertNotIn("mode", q)
 
     def test_gk_declaration_validates(self):
         self.assertEqual(cli_fleet.validate_windows(self._gk()), [])
 
-    def test_quality_window_resolves_sequential_quality_by_cwd(self):
-        mode, role, src = cli_concurrency.resolve_concurrency(
+    def test_quality_window_resolves_quality_by_cwd(self):
+        self.assertEqual(cli_concurrency.resolve_role(
             GK_HOME + "/devel/odoo/odoo-erp-quality",
-            windows=self._gk(), home=GK_HOME)
-        self.assertEqual((mode, role, src), ("sequential", "quality", "role"))
+            windows=self._gk(), home=GK_HOME), "quality")
 
-    def test_review_window_is_sequential_1137(self):
-        # #1137 (owner ROZHODNUTÉ 2026-09-30): the review window runs
-        # sequential like every other target (was parallel).
-        mode, role, src = cli_concurrency.resolve_concurrency(
+    def test_review_window_resolves_review(self):
+        self.assertEqual(cli_concurrency.resolve_role(
             GK_HOME + "/devel/odoo/odoo-erp",
-            windows=self._gk(), home=GK_HOME)
-        self.assertEqual((mode, role, src), ("sequential", "review", "role"))
+            windows=self._gk(), home=GK_HOME), "review")
 
     def test_infra_window_unchanged(self):
-        mode, role, src = cli_concurrency.resolve_concurrency(
+        self.assertEqual(cli_concurrency.resolve_role(
             GK_HOME + "/devel/odoo/odoo-erp-infra",
-            windows=self._gk(), home=GK_HOME)
-        self.assertEqual((mode, role, src), ("sequential", "infra", "role"))
+            windows=self._gk(), home=GK_HOME), "infra")
 
     def test_quality_and_infra_siblings_never_cross_match(self):
         # sibling dirs (odoo-erp / odoo-erp-infra / odoo-erp-quality) each pin
@@ -191,32 +187,31 @@ class TestFooterConcurrencyRow(TestCase):
         return cli_fleet.box_windows("gatekeeper")
 
     def test_goal_variant_label_quality(self):
-        # #1038 convention is <role>/<mode>, so the quality window's variant.
-        self.assertEqual(
-            cli_concurrency.goal_variant_label("sequential", "quality"),
-            "quality/sequential")
+        # #1038: the variant label is the role (#1137 dropped the /<mode> half).
+        self.assertEqual(cli_concurrency.goal_variant_label("quality"), "quality")
+        self.assertEqual(cli_concurrency.goal_variant_label(None), "default")
 
     def test_status_row_names_the_quality_role(self):
-        row = cli_concurrency.concurrency_status_row(
+        row = cli_concurrency.role_status_row(
             GK_HOME + "/devel/odoo/odoo-erp-quality",
             windows=self._gk(), home=GK_HOME)
-        self.assertIn("concurrency: sequential", row)
-        self.assertIn("role=quality", row)
+        self.assertEqual(row, "role: quality")
 
 
 # --------------------------------------------------------------------------- #
-# (c) GOAL LOOP — the (full, sequential, quality) variant
+# (c) GOAL LOOP — the (full, quality) variant
 # --------------------------------------------------------------------------- #
 class TestQualityGoalVariant(TestCase):
     def _q(self):
-        return gr.render_goal_line("full", "sequential", "quality")
+        return gr.render_goal_line("full", "quality")
 
     def test_roles_includes_quality(self):
         self.assertIn("quality", gr.ROLES)
 
-    def test_renders_and_is_sequential(self):
+    def test_renders_with_the_bundle_clause_and_no_mode_clause(self):
         line = self._q()
-        self.assertIn("ONE unit at a time", line)
+        self.assertIn("one branch, one PR and one CI cycle", line)
+        self.assertNotIn("ONE unit at a time", line)
         self.assertNotIn("CONTINUOUS REFILL", line)
 
     def test_carries_the_charter_clauses(self):
@@ -249,15 +244,15 @@ class TestQualityGoalVariant(TestCase):
         # like review, the quality charter hardcodes full-authority gk semantics.
         for auth in ("branch-merge", "fork-no-merge"):
             with self.assertRaises(ValueError):
-                gr.render_goal_line(auth, "sequential", "quality")
+                gr.render_goal_line(auth, "quality")
 
     def test_variant_check_clean(self):
         self.assertEqual(gr.variant_check(), [])
 
-    def test_ten_locked_variants_including_quality(self):
+    def test_locked_variants_include_quality(self):
         specs = gr.variant_specs()
-        self.assertIn(("full", "sequential", "quality"), specs)
-        self.assertEqual(len(specs), 10)
+        self.assertIn(("full", "quality"), specs)
+        self.assertEqual(len(specs), 8)
 
 
 # --------------------------------------------------------------------------- #

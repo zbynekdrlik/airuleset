@@ -31,7 +31,7 @@ from tests._goal_arm_helpers import (  # noqa: E402
 )
 
 D3_CWD = "/home/david3/devel/odoo/odoo-erp"
-WINS = [{"name": "d3", "cwd": D3_CWD, "role": None, "mode": "sequential"}]
+WINS = [{"name": "d3", "cwd": D3_CWD, "role": None}]
 
 
 class TestLeftoverGone1260(unittest.TestCase):

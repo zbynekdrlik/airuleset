@@ -167,32 +167,8 @@ class TestListActionColumn(TestCase):
 
 
 class TestWatchdogSeams(TestCase):
-    """#993 review 8 — the two production watchdog seams: the dispatchable-count
-    fetch (protocol + fail-safe) and the queue-classify factory (fail-safe)."""
-
-    def _fetch(self, count, reason=None, snapshot=True):
-        # #1067 1d: reads the detached quals snapshot, never a subprocess.
-        import time, unittest.mock as mk, airuleset  # noqa: E401
-        from watchdog import ops_wait_refresh as w
-        e = {"v": w.SNAPSHOT_VERSION, "members_ts": time.time(), "ts": 0,
-             "dispatchable_count": count, "dispatchable_reason": reason}
-        with mk.patch("airuleset._repo_root", return_value="/root"), \
-             mk.patch("airuleset.resolve_authority", return_value="full"), \
-             mk.patch.object(w, "read_snapshot",
-                             return_value=e if snapshot else None):
-            return airuleset._watchdog_dispatchable_fetch("/root")
-
-    def test_count_and_reason_parsed(self):
-        self.assertEqual(self._fetch(0, "dep-wait"),
-                         [{"count": 0, "reason": "dep-wait"}])
-        self.assertEqual(self._fetch(3), [{"count": 3, "reason": None}])
-
-    def test_unmeasurable_is_none(self):
-        self.assertIsNone(self._fetch(None))
-
-    def test_nonzero_rc_is_none(self):
-        # a failed/refused derivation never produced a snapshot -> None
-        self.assertIsNone(self._fetch(5, snapshot=False))
+    """#993 review 8 — the production queue-classify factory (fail-safe). (#1137
+    removed the dispatchable-count fetch with the lane-occupancy nudge.)"""
 
     def test_queue_classify_non_full_is_none(self):
         import unittest.mock as mk

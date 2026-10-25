@@ -1,10 +1,9 @@
 """#1021 — the batched dependency-meta read must SPLIT (bodies-only batch +
 per-row comments only where a body `Depends-on:` exists) so it survives a large
 repo (odoo-erp: the 3-field `number,body,comments -L 1000` batch dies with
-`unexpected end of JSON input`), and the `--count-dispatchable` /
-`_lane_dispatchable_decision` inert-nudge must journal WHY (`meta read failed`),
-never a bare `unmeasurable` — while the fail-safe direction is preserved
-(unmeasurable never nudges).
+`unexpected end of JSON input`), and `--count-dispatchable` must say WHY
+(`meta read failed`), never a bare `unmeasurable`. (#1137 removed the
+lane-occupancy nudge that journalled the same reason.)
 
 Injected-runner tests (the `tests/test_dep_wait_993.py` fake-runner pattern),
 no live gh.
@@ -23,7 +22,6 @@ sys.path.insert(0, str(REPO))
 import cli_work_class as wc          # noqa: E402
 import cli_quals_cmd                 # noqa: E402
 import airuleset                     # noqa: E402
-import watchdog.goal as goal         # noqa: E402
 
 SLUG = "zbynekdrlik/odoo-erp"
 
@@ -228,41 +226,6 @@ class TestEmitCountDispatchable(TestCase):
             return ""
         out = self._emit(boom)
         self.assertEqual(out[0], "unmeasurable:meta read failed")
-
-
-class TestWatchdogReasonFlow(TestCase):
-    def _fetch(self, count, reason):
-        # #1067 1d: the fetch reads the detached quals snapshot; the reason
-        # rides the snapshot's `dispatchable_reason` field.
-        import time
-        from watchdog import ops_wait_refresh as owref
-        entry = {"v": owref.SNAPSHOT_VERSION, "ts": time.time(),
-                 "members_ts": time.time(), "members": [], "open_count": 1,
-                 "i_members": [1], "dispatchable_count": count,
-                 "dispatchable_reason": reason}
-        with mk.patch("airuleset._repo_root", return_value="/root"), \
-             mk.patch("airuleset.resolve_authority", return_value="full"), \
-             mk.patch.object(owref, "read_snapshot", return_value=entry):
-            return airuleset._watchdog_dispatchable_fetch("/root")
-
-    def test_unmeasurable_with_reason_flows_through(self):
-        # the reason survives from `unmeasurable:meta read failed` to the nudge.
-        self.assertEqual(self._fetch(None, "meta read failed"),
-                         [{"count": None, "reason": "meta read failed"}])
-
-    def test_bare_unmeasurable_still_none(self):
-        # an unmeasurable count with no reason stays None (legacy / unknown).
-        self.assertIsNone(self._fetch(None, None))
-
-    def test_lane_decision_journals_the_reason(self):
-        # a reason-carrying fetch -> the journal says WHY (today: the res dict's
-        # count is None -> the legacy `(candidate count unmeasurable)` text).
-        skip, log, cand = goal._lane_dispatchable_decision(
-            lambda cwd: [{"count": None, "reason": "meta read failed"}],
-            "/c", {}, 100, "loc", 0, 0, 5)
-        self.assertTrue(skip)
-        self.assertIn("skip:dispatchable-unknown", log)
-        self.assertIn("meta read failed", log)
 
 
 if __name__ == "__main__":

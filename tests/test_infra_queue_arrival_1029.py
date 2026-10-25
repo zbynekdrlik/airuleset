@@ -2,8 +2,8 @@
 
 The FLOW `gk` session routes infra-caused STOP: / GATEKEEPER-ACTION (INFRA) as
 comments on odoo-erp #6883 and on `infra`-labelled tickets; nothing pushes that
-into the INFRA `gk-infra` session (role=infra, mode=sequential, owner-present, NO
-/goal), so the infra session is blind to arrivals until it next reads its queue.
+into the INFRA `gk-infra` session (role=infra, owner-present, NO /goal), so the
+infra session is blind to arrivals until it next reads its queue.
 
 Today the queue-arrival rider is blind to the infra pane for TWO reasons:
   * GATE 2 (rider): `skip:sequential-mode` (#998 excluded sequential panes).
@@ -16,6 +16,9 @@ sequential skip bypassed for the infra role) and lets the sweep reach the
 owner-present infra pane. RED against the pre-implementation tree: the new
 `infra_queue_fetch` / `resolve_role_fn` kwargs do not exist, and a sequential
 infra pane returns `skip:sequential-mode` instead of nudging.
+
+#1137 (owner 25.10.2026) removed the window mode: an armed non-infra pane now
+reads `skip:armed-review`; the infra role still gets its nudge.
 """
 import json
 import os
@@ -73,10 +76,8 @@ class _InfraOrchBase(unittest.TestCase):
                                    transcript_path=self.tpath, **kw)
 
     def _run(self, qrecs, infra_fetch, tmux, *, role="infra", dry_run=False,
-             handled=None, state=None, authority="full", captured=None,
-             seq_mode="sequential"):
-        with m.patch("airuleset.resolve_authority", return_value=authority), \
-                m.patch("cli_concurrency.resolve_mode", return_value=seq_mode):
+             handled=None, state=None, authority="full", captured=None):
+        with m.patch("airuleset.resolve_authority", return_value=authority):
             return qa.goal_queue_arrival_recheck(
                 NOW, tmux, qrecs, self.sid, self.CWD, "%9", self.tpath,
                 "gk-infra:0", dry_run, handled, queue_fetch=None,
@@ -88,33 +89,31 @@ class _InfraOrchBase(unittest.TestCase):
 
 class TestInfraRiderPath(_InfraOrchBase):
     def test_sequential_infra_pane_nudges_on_arrival(self):
-        # GATE 2 fix: role=infra + mode=sequential must NOT skip:sequential-mode;
+        # GATE 2 fix: role=infra must NOT be skipped like an armed review pane;
         # the infra fetch is used and an arrival fires ONE nudge naming the
         # arrivals + pointing at the infra queue.
         qrecs = {self.sid: {"base": [1, 2], "first_seen": NOW - DAY}}
         tmux = self._tmux()
         recs = [_rec(1), _rec(2), _rec(6883)]
         logs = self._run(qrecs, lambda cwd: recs, tmux, handled=set(), state={})
-        self.assertFalse(any("skip:sequential-mode" in ln for ln in logs), logs)
+        self.assertFalse(any("skip:armed-review" in ln for ln in logs), logs)
         typed = "".join(tmux.typed_texts())
         self.assertIn("stuck-check:", typed)
         self.assertIn("#6883", typed)
         self.assertIn("--role infra", typed)
         self.assertEqual(qrecs[self.sid]["base"], [1, 2, 6883])
 
-    def test_review_role_still_skips_sequential(self):
-        # The review path is byte-identical: a sequential review pane still
-        # returns skip:sequential-mode (#998 unchanged).
+    def test_review_role_armed_pane_is_skipped(self):
+        # An ARMED review pane gets no arrival nudge (#1137: no refill push).
         qrecs = {self.sid: {"base": [1], "first_seen": NOW - DAY}}
         tmux = self._tmux()
-        with m.patch("airuleset.resolve_authority", return_value="full"), \
-                m.patch("cli_concurrency.resolve_mode", return_value="sequential"):
+        with m.patch("airuleset.resolve_authority", return_value="full"):
             logs = qa.goal_queue_arrival_recheck(
                 NOW, tmux, qrecs, self.sid, self.CWD, "%9", self.tpath,
                 "gk:0", False, set(), queue_fetch=lambda cwd: [1, 2],
                 state={}, sleep_fn=lambda *a, **k: None,
                 resolve_role_fn=lambda cwd: "review")
-        self.assertTrue(any("skip:sequential-mode" in ln for ln in logs), logs)
+        self.assertTrue(any("skip:armed-review" in ln for ln in logs), logs)
         self.assertEqual(tmux.typed_texts(), [])
 
     def test_infra_role_unwired_skips(self):
@@ -159,8 +158,7 @@ class TestInfraRiderPath(_InfraOrchBase):
         # never seen) yet WELL WITHIN the 3600s nudge floor -> NOW+700 exercises
         # exactly the floor-hold this design-of-record lock targets.
         tmux2 = self._tmux()
-        with m.patch("airuleset.resolve_authority", return_value="full"), \
-                m.patch("cli_concurrency.resolve_mode", return_value="sequential"):
+        with m.patch("airuleset.resolve_authority", return_value="full"):
             logs = qa.goal_queue_arrival_recheck(
                 NOW + 700, tmux2, qrecs, self.sid, self.CWD, "%9", self.tpath,
                 "gk-infra:0", False, set(), queue_fetch=None, state=state,
@@ -262,7 +260,6 @@ class TestSweepInfraNonArmed(unittest.TestCase):
                                    GOAL_ARMED_CAP, model_type=True,
                                    transcript_path=tpath)
         with m.patch("airuleset.resolve_authority", return_value="full"), \
-                m.patch("cli_concurrency.resolve_mode", return_value="sequential"), \
                 m.patch.object(wd, "_owner_disabled", return_value=False):
             goal.goal_lane_sweep(
                 NOW, run=tmux, projects_dir=proj, state=state, dry_run=False,

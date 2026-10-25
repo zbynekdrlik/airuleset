@@ -36,13 +36,13 @@ import cli_tmux_provisioning as ctp  # noqa: E402
 # The exact gk 3-window declaration, non-primary windows carrying repo+branch.
 _GK3 = [
     {"name": "gk", "cwd": "~/devel/odoo/odoo-erp",
-     "role": "review", "mode": "parallel"},
+     "role": "review"},
     {"name": "gk-infra", "cwd": "~/devel/odoo/odoo-erp-infra",
      "repo": "zbynekdrlik/odoo-erp", "branch": "develop",
-     "role": "infra", "mode": "sequential"},
+     "role": "infra"},
     {"name": "gk-quality", "cwd": "~/devel/odoo/odoo-erp-quality",
      "repo": "zbynekdrlik/odoo-erp", "branch": "develop",
-     "role": "quality", "mode": "sequential"},
+     "role": "quality"},
 ]
 
 _MARKER = {"base_url": "http://gw", "key_file": "~/.secrets/k",
@@ -116,12 +116,12 @@ class TestValidateWindowsRepoBranch(unittest.TestCase):
             self.assertTrue(any("branch" in e for e in errs), (bad, errs))
 
     def test_absent_repo_branch_add_no_error(self):
-        # the #998 `test_validate_rejects_bad_shapes` lock: EXACTLY 4 errors for
-        # a repo/branch-less window (bad name, absolute cwd, bad role, bad mode).
-        # Optional repo/branch must add ZERO errors when absent.
+        # EXACTLY 3 errors for a repo/branch-less window (bad name, absolute
+        # cwd, bad role; #1137 removed the mode field). Optional repo/branch
+        # must add ZERO errors when absent.
         errs = cli_fleet.validate_windows(
-            [{"name": "a b", "cwd": "/abs", "role": "boss", "mode": "q"}])
-        self.assertEqual(len(errs), 4, errs)
+            [{"name": "a b", "cwd": "/abs", "role": "boss"}])
+        self.assertEqual(len(errs), 3, errs)
 
 
 # --------------------------------------------------------------------------- #
@@ -367,13 +367,13 @@ class TestDeclaredWindowStatusLines(unittest.TestCase):
         self.assertEqual(
             lines[0],
             "window gk: cwd ~/devel/odoo/odoo-erp (present) "
-            "role=review mode=parallel")
+            "role=review")
         self.assertTrue(any("gk-infra" in ln and "(present)" in ln
                             for ln in lines), lines)
         quality = [ln for ln in lines if "gk-quality" in ln][0]
         self.assertIn("(MISSING)", quality)
         self.assertIn("role=quality", quality)
-        self.assertIn("mode=sequential", quality)
+        self.assertNotIn("mode=", quality)
         self.assertIn("~/devel/odoo/odoo-erp-quality", quality)
 
     def test_empty_windows_is_empty(self):

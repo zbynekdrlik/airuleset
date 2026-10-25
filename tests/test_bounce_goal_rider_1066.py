@@ -75,25 +75,23 @@ class TestBounceProofClauseReduced(unittest.TestCase):
         # state). The lane-A flag survives as the IDLE gate: the loop idles on
         # its stream-wait only once the flag prints nothing.
         for prof in ("branch-merge", "fork-no-merge"):
-            for mode in ("parallel", "sequential"):
-                line = gr.render_goal_line(prof, mode, None)
-                self.assertIn("slice-quals --bounces --unhandled", line,
-                              "%s/%s idle gate must name the lane-A flag" % (prof, mode))
-                # STATEMENT lock: the flag printing nothing == no unhandled bounce
-                self.assertIn("prints nothing", line, prof)
-                self.assertLess(line.index("--bounces --unhandled"),
-                                line.index("stream-wait"), prof)
+            line = gr.render_goal_line(prof, None)
+            self.assertIn("slice-quals --bounces --unhandled", line,
+                          "%s idle gate must name the lane-A flag" % prof)
+            # STATEMENT lock: the flag printing nothing == no unhandled bounce
+            self.assertIn("prints nothing", line, prof)
+            self.assertLess(line.index("--bounces --unhandled"),
+                            line.index("stream-wait"), prof)
 
     def test_full_proof_has_no_bounce_clause(self):
-        for mode in ("parallel", "sequential"):
-            line = gr.render_goal_line("full", mode, None)
-            self.assertNotIn("slice-quals --bounces --unhandled", line)
-            self.assertNotIn("bounce K", line)
+        line = gr.render_goal_line("full", None)
+        self.assertNotIn("slice-quals --bounces --unhandled", line)
+        self.assertNotIn("bounce K", line)
 
     def test_the_old_verbose_parenthetical_is_gone_from_reduced(self):
         # the pre-#1066 parenthetical is REPLACED, not appended to (net budget)
         for prof in ("branch-merge", "fork-no-merge"):
-            line = gr.render_goal_line(prof, "sequential", None)
+            line = gr.render_goal_line(prof, None)
             self.assertNotIn("gatekeeper-owned/user-parked/ops-wait", line)
 
 
@@ -103,33 +101,29 @@ class TestBounceProofClauseReduced(unittest.TestCase):
 
 class TestInfraRoleScopedProof(unittest.TestCase):
     def test_full_infra_proof_names_role_infra(self):
-        line = gr.render_goal_line("full", "sequential", "infra")
+        line = gr.render_goal_line("full", "infra")
         self.assertIn("core-quals --role infra --count", line)
 
     def test_full_non_infra_proof_stays_plain_core_quals(self):
-        for mode in ("parallel", "sequential"):
-            line = gr.render_goal_line("full", mode, None)
-            self.assertIn("core-quals --count", line)
-            self.assertNotIn("--role infra --count", line)
+        line = gr.render_goal_line("full", None)
+        self.assertIn("core-quals --count", line)
+        self.assertNotIn("--role infra --count", line)
 
     def test_the_item2_substitution_never_leaks_to_a_non_infra_variant(self):
-        for a, mode, role in gr.variant_specs():
+        for a, role in gr.variant_specs():   # the review variant included
             if role == "infra":
                 continue
-            line = gr.render_goal_line(a, mode, role)
+            line = gr.render_goal_line(a, role)
             self.assertNotIn("--role infra --count", line,
-                             "%s/%s/%s must not carry the infra substitution"
-                             % (a, mode, role))
-        # the review variant too (not in variant_specs)
-        self.assertNotIn("--role infra --count",
-                         gr.render_goal_line("full", "parallel", "review"))
+                             "%s/%s must not carry the infra substitution"
+                             % (a, role))
 
     def test_reduced_infra_keeps_plain_slice_quals_count(self):
         # documented HOW-decision (Anchors-confirmed): item 2 is FULL-only, so
         # the lock-only reduced+infra defensive variants keep the plain command
         # and hold the ≥ 20-headroom invariant.
         for prof in ("branch-merge", "fork-no-merge"):
-            line = gr.render_goal_line(prof, "sequential", "infra")
+            line = gr.render_goal_line(prof, "infra")
             self.assertIn("slice-quals --count", line)
             self.assertNotIn("--role infra --count", line)
 
@@ -145,15 +139,11 @@ class TestVariantHeadroom(unittest.TestCase):
 
     def test_every_variant_render_under_cap_with_margin(self):
         short = []
-        for a, mode, role in gr.variant_specs():
-            line = gr.render_goal_line(a, mode, role)
+        for a, role in gr.variant_specs():   # the review variant included
+            line = gr.render_goal_line(a, role)
             hr = self.CAP - len(line)   # len() == code points
             if hr < self.MIN_HEADROOM:
-                short.append(("%s/%s/%s" % (a, mode, role), hr))
-        # the review variant (not in variant_specs) is checked too
-        rl = gr.render_goal_line("full", "parallel", "review")
-        if self.CAP - len(rl) < self.MIN_HEADROOM:
-            short.append(("full/parallel/review", self.CAP - len(rl)))
+                short.append(("%s/%s" % (a, role), hr))
         self.assertEqual(short, [], "variants below >=%d headroom: %r"
                          % (self.MIN_HEADROOM, short))
 
@@ -162,41 +152,11 @@ class TestVariantHeadroom(unittest.TestCase):
 
     def test_the_three_skill_md_lines_keep_150_headroom(self):
         for prof in gr.PROFILES:
-            hr = self.CAP - len(gr.render(prof))   # render() == sequential/no-role (#1137)
+            hr = self.CAP - len(gr.render(prof))   # render() == the no-role line
             self.assertGreaterEqual(
                 hr, self.MIN_SKILL_HEADROOM,
                 "%s SKILL.md /goal line headroom %d < %d"
                 % (prof, hr, self.MIN_SKILL_HEADROOM))
-
-    def test_variants_item_1_and_2_never_touch_are_byte_identical_to_main(self):
-        # the variants that carry NEITHER the reduced proof (item 1) NOR the
-        # infra substitution (item 2) must render byte-for-byte as main did.
-        # #1137 (owner ROZHODNUTÉ 2026-09-30) deliberately rewords the
-        # sequential clause, so the */sequential/* variants leave this
-        # vs-main lock (their exact text is golden-locked in
-        # test_goal_variants_998 and test_stream_no_done_state_1128); the
-        # parallel ones stay byte-identical.
-        main_gr = _load_main_goal_registry()
-        untouched = [("full", "parallel", None),
-                     ("full", "parallel", "review")]
-        for a, mode, role in untouched:
-            self.assertEqual(
-                gr.render_goal_line(a, mode, role),
-                main_gr.render_goal_line(a, mode, role),
-                "%s/%s/%s drifted from main" % (a, mode, role))
-
-
-def _load_main_goal_registry():
-    """Import `git show main:goal_registry.py` as a throwaway module (the #1074
-    snapshot pattern) so the byte-identical lock reads the SHIPPED main render,
-    not a hardcoded copy."""
-    import importlib.util
-    src = subprocess.check_output(
-        ["git", "-C", str(REPO), "show", "main:goal_registry.py"])
-    spec = importlib.util.spec_from_loader("goal_registry_main", loader=None)
-    mod = importlib.util.module_from_spec(spec)
-    exec(compile(src, "goal_registry_main.py", "exec"), mod.__dict__)
-    return mod
 
 
 # --------------------------------------------------------------------------- #

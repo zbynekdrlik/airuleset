@@ -77,23 +77,24 @@ class TestClauseCoverage(TestCase):
             self.assertEqual(gr.missing_required(p), [],
                              "%s is missing required clauses" % p)
 
-    def test_every_profile_carries_the_saturation_clause(self):
-        # the #621 fix: the directive that dispatches a parallel worktree fleet
+    def test_every_profile_carries_the_bundle_clause(self):
+        # #1137: the ONE remaining dispatch sentence — an encouragement to
+        # bundle related tickets (it replaced the saturation clauses).
         for p in gr.PROFILES:
             ids = gr.clause_ids(p)
-            self.assertIn("saturation-core", ids, p)
-            self.assertIn("saturation-delivery", ids, p)
+            self.assertIn("bundle", ids, p)
+            self.assertNotIn("saturation-core", ids, p)
+            self.assertNotIn("saturation-delivery", ids, p)
 
-    def test_saturation_core_is_ONE_shared_definition(self):
-        # owner: "jedna definícia, jedno miesto pravdy" — the reusable saturation
-        # directive is a single shared string carried by all three profiles.
-        c = next(c for c in gr.CLAUSES if c.id == "saturation-core")
-        self.assertIsInstance(c.text, str, "saturation-core must be one shared text")
+    def test_bundle_is_ONE_shared_definition(self):
+        # owner: "jedna definícia, jedno miesto pravdy".
+        c = next(c for c in gr.CLAUSES if c.id == "bundle")
+        self.assertIsInstance(c.text, str, "bundle must be one shared text")
         self.assertEqual(set(c.profiles), set(gr.PROFILES))
+        self.assertIn("one branch, one PR and one CI cycle", c.text)
 
-    def test_required_set_includes_saturation_and_compact_boundary(self):
-        self.assertIn("saturation-core", gr.REQUIRED_CLAUSES)
-        self.assertIn("saturation-delivery", gr.REQUIRED_CLAUSES)
+    def test_required_set_includes_bundle_and_compact_boundary(self):
+        self.assertIn("bundle", gr.REQUIRED_CLAUSES)
         self.assertIn("compact-boundary", gr.REQUIRED_CLAUSES)
 
     def test_clause_ids_are_unique_within_a_profile(self):
@@ -127,52 +128,9 @@ class TestClauseCoverage(TestCase):
         self.assertEqual(gr.missing_required("full"), [])
 
 
-class TestSaturationDirectiveIsReal(TestCase):
-    """Acceptance guard (#848 CONTINUOUS REFILL, retiring the #723 batch mode):
-    "the template contains the word worktree" is NOT the fix. Lock the actual
-    directive — keep up to 5 parallel worktree lanes live, refilling a returned
-    lane's slot immediately, with serial integration as branches return; and it
-    must NOT read as batch mode."""
-
-    def test_saturation_core_states_the_full_directive(self):
-        # #993 r2b: the refill directive is DEPENDENCY AWARE — refill ONLY with a
-        # DISPATCHABLE unit (dependencies closed). The class-based infra-serial
-        # half was REMOVED (infra serialisation is ROUTING via --role).
-        core = next(c for c in gr.CLAUSES if c.id == "saturation-core").text
-        for token in ("CONTINUOUS REFILL", "isolation:worktree",
-                      "autopilot-worker", "DISPATCHABLE", "dependencies closed"):
-            self.assertIn(token, core)
-        # TEETH: the retired batch wording must be GONE, and #991 dropped the
-        # fixed lane cap wording (count = box + backlog). #993 r2: the retired
-        # blanket-refill pressure phrase is GONE too. #993 r2b: the infra-serial
-        # half is GONE (routing replaces it).
-        self.assertNotIn("up to 5", core)
-        self.assertNotIn("BATCH MODE", core)
-        self.assertNotIn("NO refill", core)
-        self.assertNotIn("IMMEDIATELY while backlog remains", core)
-        self.assertNotIn("infra units are SERIAL", core)
-        self.assertNotIn("one live infra lane", core)
-
-    def test_saturation_delivery_integrates_serially(self):
-        for p in gr.PROFILES:
-            d = next(c for c in gr.CLAUSES if c.id == "saturation-delivery").text_for(p)
-            self.assertIn("SERIALLY", d)
-            self.assertIn("as they return", d)
-
-
-class TestSaturationReconcilesCompactBoundary(TestCase):
-    """The owner required the reconciliation to be VISIBLE in the registry, not
-    buried in prose (#848 CONTINUOUS REFILL, retiring #723 batch mode):
-    saturation-core keeps up to 5 parallel lanes live and refills a returned
-    slot immediately; saturation-delivery integrates each returned branch
-    serially; compact-boundary now just ENDS each integration cycle with the
-    report — machine compacts are REMOVED (#1084), no `/compact` is ever typed.
-    They cannot contradict."""
-
-    def test_the_reconciled_pair_is_registered(self):
-        self.assertEqual(gr.SATURATION_RECONCILES_COMPACT,
-                         ("saturation-core", "saturation-delivery",
-                          "compact-boundary"))
+class TestCompactBoundary(TestCase):
+    """compact-boundary ENDS each integration cycle with the report — machine
+    compacts are REMOVED (#1084), no `/compact` is ever typed."""
 
     def test_compact_boundary_is_removed_1084(self):
         # #1084: machine compacts are REMOVED for good; the clause must name the
@@ -320,34 +278,17 @@ class TestShippedSkillMatchesRegistry(TestCase):
                          "SKILL.md /goal lines drifted from the registry: %r"
                          % [p for p, _, _ in d])
 
-    def test_every_shipped_goal_line_is_the_sequential_default_1137(self):
-        # #1137 (owner ROZHODNUTÉ 2026-09-30): the SHIPPED (default) lines are
-        # the SEQUENTIAL variant — one unit at a time, no refill push.
+    def test_every_shipped_goal_line_bundles_and_steers_no_lanes(self):
+        # #1137 (owner 25.10.2026): the shipped lines carry the bundling
+        # sentence, no mode clause and no lane steering.
         import re
         lines = re.findall(r"^/goal STOP CONDITIONS.*$", skill_text(), re.MULTILINE)
         self.assertEqual(len(lines), 3)
         for line in lines:
-            self.assertIn(gr._SEQUENTIAL_SATURATION, line)
-            self.assertNotIn("CONTINUOUS REFILL", line)
-            # TEETH: no batch wording survives in the shipped lines.
-            self.assertNotIn("BATCH MODE", line)
-            self.assertNotIn("NO refill while a batch runs", line)
-
-    def test_parallel_variant_carries_the_continuous_refill_directive(self):
-        # The PARALLEL variant (explicit declaration only since #1137) keeps the
-        # #993 r2b dispatchable-only refill wording.
-        for p in gr.PROFILES:
-            line = gr.render_goal_line(p, "parallel", None)
-            self.assertIn("CONTINUOUS REFILL", line)
-            self.assertIn("isolation:worktree", line)
-            # #993 r2b: refill is dispatchable-only (deps closed); the infra-serial
-            # half was removed (routing replaces it). The retired blanket "refill a
-            # returned lane's slot IMMEDIATELY" is gone.
-            self.assertIn("refill ONLY with a DISPATCHABLE unit", line)
-            self.assertNotIn("infra units are SERIAL", line)
-            self.assertNotIn("returned lane's slot IMMEDIATELY", line)
-            self.assertNotIn("BATCH MODE", line)
-            self.assertNotIn("NO refill while a batch runs", line)
+            self.assertIn(gr._BUNDLE, line)
+            for gone in ("CONTINUOUS REFILL", "ONE unit at a time",
+                         "FREE lane", "BATCH MODE", "NO refill while a batch runs"):
+                self.assertNotIn(gone, line)
 
 
 class TestRenderIntoIsSurgical(TestCase):

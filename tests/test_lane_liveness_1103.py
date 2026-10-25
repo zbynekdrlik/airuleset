@@ -26,8 +26,6 @@ from unittest import TestCase, main, mock
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 import cli_lane_liveness as lo  # noqa: E402
-import cli_lane_overlap as ovl  # noqa: E402
-import cli_concurrency as cc  # noqa: E402
 import watchdog.lane_reconcile as lr  # noqa: E402
 
 # The pre-move commit (merge-base of this lane and main): its
@@ -40,7 +38,8 @@ _MOVED_FUNCS = [
     "_is_lane_worktree", "_ref_exists", "_lane_target",  # _resolve_base_branch: #1229
     "_worktree_process_cwds", "_path_has_proc",  # _live_worker_agent_ids: changed, #1193
     "_handoff_numbers",  # _lane_ticket_numbers: changed, #1165; classify_lanes: #1229
-    "state_summary", "gather_live_lanes",
+    # state_summary: removed with the lane-overlap printer; gather_live_lanes:
+    # docstring reworded — both #1137
 ]
 
 _ENV = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
@@ -233,8 +232,8 @@ class TestClassifyStates(TestCase):
                          "an incidental #7000 in the subject must not finish #7840")
 
 
-class TestDispatchGateCountsOnlyLive(TestCase):
-    def test_sequential_counts_live_not_finished(self):
+class TestGatherCountsOnlyLive(TestCase):
+    def test_counts_live_not_finished(self):
         lanes = ([("agent-live6", "montalu/7906-live"),
                   ("agent-live7", "montalu/7907-live")]
                  + [("agent-fin%d" % i, "montalu/78%02d-done" % i)
@@ -246,13 +245,6 @@ class TestDispatchGateCountsOnlyLive(TestCase):
             live_worker_ids={"agent-live6", "agent-live7"}, proc_cwds=set(),
             handoff_numbers={int("78%02d" % i) for i in range(8)}))
         self.assertEqual(live_count, 2)
-        d = tempfile.mkdtemp(prefix="seq1103-")
-        claude = Path(d) / ".claude"
-        claude.mkdir()
-        (claude / "lane-resources.json").write_text('{"mode": "sequential"}')
-        self.assertEqual(
-            cc.dispatch_gate_line(d, live_count=live_count),
-            "block|sequential|2")
 
 
 class TestTicketNumberParse(TestCase):
@@ -461,22 +453,9 @@ class TestVerbatimMove1107(TestCase):
                                  "%s drifted from its pre-move source" % name)
 
 
-class TestBackCompatReexport1107(TestCase):
-    """cli_lane_overlap re-exports the moved public names for one release — the
-    SAME objects (identity), so an out-of-tree caller of cli_lane_overlap keeps
-    reading the canonical derivation."""
-
-    def test_public_names_are_the_leaf_objects(self):
-        for name in ("classify_lanes", "state_summary", "gather_live_lanes",
-                     "_LIVE_STATES"):
-            with self.subTest(name=name):
-                self.assertIs(getattr(ovl, name), getattr(lo, name))
-
-
 class TestConsumersImportLeaf1107(TestCase):
-    """AST lock: cli_concurrency and watchdog/lane_reconcile import the liveness
-    derivation from the leaf cli_lane_liveness, NOT from cli_lane_overlap
-    (#1107 item 3 — every consumer reads the canonical home)."""
+    """AST lock: watchdog/lane_reconcile imports the liveness derivation from
+    the leaf cli_lane_liveness (#1107 item 3; #1137 removed cli_lane_overlap)."""
 
     def _imported_modules(self, relpath):
         src = (REPO / relpath).read_text(encoding="utf-8")
@@ -489,39 +468,9 @@ class TestConsumersImportLeaf1107(TestCase):
                 mods.add(node.module)
         return mods
 
-    def test_cli_concurrency_imports_the_leaf(self):
-        mods = self._imported_modules("cli_concurrency.py")
-        self.assertIn("cli_lane_liveness", mods)
-        self.assertNotIn("cli_lane_overlap", mods)
-
     def test_lane_reconcile_imports_the_leaf(self):
         mods = self._imported_modules("watchdog/lane_reconcile.py")
         self.assertIn("cli_lane_liveness", mods)
-        self.assertNotIn("cli_lane_overlap", mods)
-
-
-class TestBothImportOrders1107(TestCase):
-    """The deferred bottom cross-imports break the load-time cycle in EITHER
-    order — importing the leaf first, or the overlap module first, both succeed
-    and resolve classify_lanes to the same object."""
-
-    def _probe(self, first):
-        code = (
-            "import %s as m; import cli_lane_liveness as L; "
-            "import cli_lane_overlap as O; "
-            "assert O.classify_lanes is L.classify_lanes; "
-            "assert L._run_default is O._run_default; print('OK')" % first)
-        r = subprocess.run([sys.executable, "-c", code], cwd=str(REPO),
-                           capture_output=True, text=True)
-        self.assertEqual(r.returncode, 0,
-                         "import-first=%s failed: %s" % (first, r.stderr))
-        self.assertIn("OK", r.stdout)
-
-    def test_leaf_first(self):
-        self._probe("cli_lane_liveness")
-
-    def test_overlap_first(self):
-        self._probe("cli_lane_overlap")
 
 
 if __name__ == "__main__":

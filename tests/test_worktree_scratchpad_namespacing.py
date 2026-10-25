@@ -27,12 +27,12 @@ SKILL_DOC = ROOT / "skills" / "autopilot" / "SKILL.md"
 
 
 def _dispatch_the_round_item(text):
-    """SKILL.md's top-level numbered item "2. **Dispatch the ROUND ..."
+    """SKILL.md's top-level numbered item "2. **Dispatch ..." (ex "Dispatch the ROUND", #1137)
     -- from its own line up to (not including) the next top-level
     numbered item (`^[0-9]+\\. `). This is the item #435's own new
     scratchpad-precreation bullet lives inside (#435-review MAJOR:
     #435 shipped with no locking test at all -- this class closes it)."""
-    m = re.search(r"(?m)^2\.\s+\*\*Dispatch the ROUND\b.*?$", text)
+    m = re.search(r"(?m)^2\.\s+\*\*Dispatch\b.*?$", text)
     if not m:
         return ""
     rest = text[m.end():]
@@ -174,7 +174,7 @@ class TestSupervisorPrecreatesScratchpadInSkillMd(TestCase):
     silently reword or drop the whole bullet and no test would notice,
     silently regressing to the #432 hazard this ticket exists to close.
 
-    Scoped to the ONE sub-bullet inside the "2. **Dispatch the ROUND"
+    Scoped to the ONE sub-bullet inside the "2. **Dispatch"
     item that mentions "scratchpad" (`_precreate_bullet`), never the
     whole item -- the same vacuous-whole-section trap the #432 class
     above already documents and guards against."""
@@ -184,11 +184,11 @@ class TestSupervisorPrecreatesScratchpadInSkillMd(TestCase):
             SKILL_DOC.read_text(encoding="utf-8"))
         self.assertTrue(
             self.item.strip(),
-            "SKILL.md must have a '2. **Dispatch the ROUND' item")
+            "SKILL.md must have a '2. **Dispatch' item")
         self.bullet = _precreate_bullet(self.item)
         self.assertTrue(
             self.bullet,
-            "no sub-bullet inside the Dispatch-the-ROUND item mentions "
+            "no sub-bullet inside the Dispatch item mentions "
             "'scratchpad' at all")
 
     def test_instructs_precreating_the_subdirectory_before_dispatch(self):

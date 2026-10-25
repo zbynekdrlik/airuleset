@@ -1,11 +1,8 @@
-"""#502 — the lane-occupancy nudge must NOT dispatch into an account that just
-died on a cap (session / weekly / usage / MONTHLY-SPEND / org-disabled), and its
-text must not assert OPEN-ticket counts as if they were all dispatchable.
-
-Two defects, two RED->GREEN pairs:
-  (a) `goal_lane_occupancy_nudge` reads the supervisor's own transcript and backs
-      off (bounded, self-releasing) while it shows an account-level dispatch block.
-  (b) the nudge TEXT qualifies `backlog=N` as OPEN (not necessarily workable).
+"""#502 — the account-block guard: an account that just died on a cap (session /
+weekly / usage / MONTHLY-SPEND / org-disabled) opens a bounded, self-releasing
+episode, and a no-reset block (monthly spend / org disable) pings the owner once.
+#1137 moved it out of the removed lane-occupancy branch into
+`goal_account_limit_check`, which Job 20 runs for every armed pane.
 """
 
 import unittest
@@ -26,7 +23,6 @@ from _goal_arm_helpers import (  # noqa: E402
     DeliverGoalFakeTmux,
     _write_marker_transcript,
 )
-from _parallel_mode_pin import PARALLEL_PIN  # noqa: E402  (#1137)
 
 # #875 Pass B: remove the repo root from sys.path after imports complete so
 # later test modules under `unittest discover` don't re-import cli_remote as a
@@ -162,7 +158,6 @@ class TestAccountLimitDecisionHelper(unittest.TestCase):
         self.assertGreater(skips, 700)      # the vast majority of sweeps back off
 
 
-@PARALLEL_PIN  # #1137 owner ROZHODNUTÉ 2026-09-30: sequential default; declared-parallel suite
 class TestAccountLimitBackoff(unittest.TestCase):
     CWD = "/home/newlevel/devel/lanenudge-alim"
     SID = "sess-lane-alim-1"
@@ -179,23 +174,19 @@ class TestAccountLimitBackoff(unittest.TestCase):
         tmux = DeliverGoalFakeTmux([("%9", "claude", self.CWD, "111")],
                                    GOAL_ARMED_CAP, model_type=True,
                                    transcript_path=tpath)
-        with m.patch("airuleset.resolve_authority", return_value="full"), \
-             m.patch.object(wd, "transcript_last_error", return_value=err_text):
-            logs, owns = goal.goal_lane_occupancy_nudge(
+        with m.patch.object(wd, "transcript_last_error", return_value=err_text):
+            logs = goal.goal_account_limit_check(
                 now, tmux, rec if rec is not None else {}, self.SID, self.CWD,
-                "111", GOAL_ARMED_CAP, tpath, tmtime, "loc", None, False, None,
-                proj, backlog_fetch=lambda cwd: 5, state={},
-                sleep_fn=lambda s: None)
-        return logs, owns, tmux, (rec if rec is not None else None)
+                "111", tpath, "loc", None, False, captured=GOAL_ARMED_CAP)
+        return logs, None, tmux, (rec if rec is not None else None)
 
     def test_account_limit_skips_the_nudge_and_seeds_the_episode(self):
         now = 100000
         tmtime = now - goal.GOAL_LANE_IDLE_S - 100
         rec = {}
         logs, owns, tmux, _ = self._call(now, tmtime, WEEKLY, rec=rec)
-        # NEVER dispatched into the dead cap
+        # never types into the pane
         self.assertEqual(tmux.sent, [], tmux.sent)
-        self.assertFalse(any("lane-occupancy nudge" in ln for ln in logs), logs)
         # journalled a decision line (never silent)
         self.assertTrue(any("skip:account-limit" in ln for ln in logs), logs)
         # a bounded episode was seeded on the lane's own state dict
@@ -225,12 +216,10 @@ class TestAccountLimitBackoff(unittest.TestCase):
             pings.append((body, kw))
             return "ok"
 
-        with m.patch("airuleset.resolve_authority", return_value="full"), \
-             m.patch.object(wd, "transcript_last_error", return_value=err_text):
-            goal.goal_lane_occupancy_nudge(
-                now, tmux, {}, self.SID, self.CWD, "111", GOAL_ARMED_CAP, tpath,
-                tmtime, "loc", rec_send, False, None, proj,
-                backlog_fetch=lambda cwd: 5, state={}, sleep_fn=lambda s: None)
+        with m.patch.object(wd, "transcript_last_error", return_value=err_text):
+            goal.goal_account_limit_check(
+                now, tmux, {}, self.SID, self.CWD, "111", tpath, "loc", rec_send,
+                False, captured=GOAL_ARMED_CAP)
         return pings
 
     def test_monthly_org_block_pings_owner_but_weekly_defers_to_job6(self):
@@ -245,16 +234,12 @@ class TestAccountLimitBackoff(unittest.TestCase):
             self.assertIn("acctblock:", pings[0][1].get("dedup_key", ""), pings)
         self.assertEqual(self._call_send(now, tmtime, WEEKLY), [])   # job 6's job
 
-    def test_recovered_transcript_clears_the_episode_and_nudges(self):
+    def test_recovered_transcript_clears_the_episode(self):
         now = 100000
         tmtime = now - goal.GOAL_LANE_IDLE_S - 100
         rec = {"alim": {"first_seen": now - 60, "resets_at": None}}
         logs, owns, tmux, _ = self._call(now, tmtime, "", rec=rec)   # recovered
         self.assertNotIn("alim", rec)                                # cleared
-        # #1089: the account-limit episode still CLEARS on recovery (that logic is
-        # unchanged), but the lane-occupancy keystroke delivery is RETIRED — the
-        # refill decision is reached without typing (the lane-fill Stop gate is the
-        # lever now).
         self.assertEqual(tmux.sent, [], tmux.sent)
 
     def test_back_off_elapsed_reprobes_once_and_rearms(self):
@@ -263,9 +248,6 @@ class TestAccountLimitBackoff(unittest.TestCase):
         # first_seen 7h ago -> release (<=6h cap) already elapsed
         rec = {"alim": {"first_seen": now - 7 * 3600, "resets_at": None}}
         logs, owns, tmux, _ = self._call(now, tmtime, WEEKLY, rec=rec)
-        # #1089: the release-cap re-arm still fires (that logic is unchanged), but
-        # the lane-occupancy keystroke delivery is RETIRED — no keystroke on the
-        # re-probe (the lane-fill Stop gate is the refill lever now).
         self.assertEqual(tmux.sent, [], tmux.sent)                    # not typed
         self.assertEqual(rec["alim"]["first_seen"], now)              # re-armed
 

@@ -211,8 +211,7 @@ class _RiderBase(unittest.TestCase):
 
     def _run(self, qrecs, recs, tmux, *, state, receipt_post_fn=None,
              handled=None, captured=None):
-        with m.patch("airuleset.resolve_authority", return_value="full"), \
-                m.patch("cli_concurrency.resolve_mode", return_value="sequential"):
+        with m.patch("airuleset.resolve_authority", return_value="full"):
             return qa.goal_queue_arrival_recheck(
                 NOW, tmux, qrecs, self.sid, self.CWD, "%9", self.tpath,
                 "gk-infra:0", False, handled, queue_fetch=None,
@@ -298,8 +297,7 @@ class TestGkStallNotice(unittest.TestCase):
     def _fire(self, *, now, rec, verdict="stuck", pct=94, limited=True,
               role="infra", send_fn=None, dry_run=False):
         def role_fn(cwd):
-            return ("sequential", role, "role") if role else (
-                "parallel", None, "default")
+            return role or None   # #1137: the resolver returns the role only
         return gsn.gk_stall_notice(
             now, rec, self._Glance(verdict), self._cap(pct, limited),
             self.CWD, "sess-x", "%9", "gk-infra:0", send_fn, dry_run,

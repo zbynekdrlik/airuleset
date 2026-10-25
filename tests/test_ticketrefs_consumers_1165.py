@@ -5,9 +5,7 @@ design gate only. Two consumers still parsed ticket numbers their own way, so
 a young repo (fohmixer, tickets 1-9) still slipped past them:
 
 - `hooks/block-dispatch-over-wdrain.sh` matched the lane-overlap receipt only
-  on an `issues? #N` line: the fleet's bare `Work issue 4` parsed to nothing
-  (receipt check skipped = fail-open), and every `#N` on the line counted, so
-  `rides PR #201` demanded a receipt for a PR (false block).
+  on an `issues? #N` line (#1137 later removed that receipt gate entirely).
 - `cli_lane_liveness._lane_ticket_numbers` required >= 2 digits, so a
   single-digit ticket's lane never carried its number and could never be
   classified `finished`.
@@ -17,14 +15,12 @@ away from the real `issue N` line (design gate fail-open: the PR is skipped,
 the ticket is never design-checked). A `PR #N` / `pull #N` / `pull request #N`
 reference is never a ticket, for every consumer.
 """
-import hashlib
 import json
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
-import time
 import unittest
 from pathlib import Path
 
@@ -187,83 +183,28 @@ class TestDesignGatePrOnlyFallback(unittest.TestCase):
         self.assertIn("#7", r)
 
 
-class TestWdrainReceiptUsesTheSharedParser(unittest.TestCase):
-    def setUp(self):
-        self.home = tempfile.mkdtemp(prefix="a1165r2-home-")
-        self.cwd = tempfile.mkdtemp(prefix="a1165r2-cwd-")
-        self.key = hashlib.sha1(self.cwd.encode()).hexdigest()[:12]
+class TestWdrainHookNeedsNoReceipt(unittest.TestCase):
+    """#1137 (owner 25.10.2026) removed the #992 lane-overlap receipt gate: a
+    worker dispatch with no receipt is no longer blocked by it."""
 
-    def tearDown(self):
-        shutil.rmtree(self.home, ignore_errors=True)
-        shutil.rmtree(self.cwd, ignore_errors=True)
-
-    def _seed(self, issues):
-        d = Path(self.home) / ".claude" / "lane-overlap"
-        d.mkdir(parents=True, exist_ok=True)
-        (d / (self.key + ".json")).write_text(json.dumps(
-            {"checked_issues": issues, "ts": time.time(),
-             "verdict": "clear", "overlaps": []}))
-
-    def _run(self, prompt):
-        payload = json.dumps({
-            "tool_name": "Agent", "cwd": self.cwd,
-            "tool_input": {"subagent_type": "autopilot-worker", "prompt": prompt}})
-        return subprocess.run(["bash", str(HOOK)], input=payload,
-                              capture_output=True, text=True, timeout=60,
-                              env={**os.environ, "HOME": self.home})
-
-    def test_bare_single_digit_issue_needs_a_receipt(self):
-        r = self._run("Work issue 4 (S0 bootstrap) in fohmixer")
-        self.assertEqual(r.returncode, 2, r.stderr)
-        self.assertIn("overlap", r.stderr.lower())
-
-    def test_bare_single_digit_issue_with_covering_receipt_allows(self):
-        self._seed([4])
-        r = self._run("Work issue 4 (S0 bootstrap) in fohmixer")
-        self.assertEqual(r.returncode, 0, r.stderr)
-
-    def test_bare_issue_not_covered_blocks(self):
-        self._seed([1060])
-        r = self._run("Work airuleset issue 1061 now")
-        self.assertEqual(r.returncode, 2, r.stderr)
-        self.assertIn("1061", r.stderr)
-
-    def test_pr_on_the_issue_line_is_not_demanded_in_the_receipt(self):
-        self._seed([1165])
-        for prompt in ("Work issue #1165, rides PR #201",
-                       "Work issue #1165 (PR #7 open)"):
+    def test_dispatch_without_a_receipt_is_allowed(self):
+        home = tempfile.mkdtemp(prefix="a1165r2-home-")
+        cwd = tempfile.mkdtemp(prefix="a1165r2-cwd-")
+        self.addCleanup(shutil.rmtree, home, True)
+        self.addCleanup(shutil.rmtree, cwd, True)
+        for prompt in ("Work issue 4 (S0 bootstrap) in fohmixer",
+                       "Review PR #201 fixes first\nWork issue 1165"):
             with self.subTest(prompt=prompt):
-                r = self._run(prompt)
+                payload = json.dumps({
+                    "tool_name": "Agent", "cwd": cwd,
+                    "tool_input": {"subagent_type": "autopilot-worker",
+                                   "prompt": prompt}})
+                r = subprocess.run(["bash", str(HOOK)], input=payload,
+                                   capture_output=True, text=True, timeout=60,
+                                   env={**os.environ, "HOME": home})
                 self.assertEqual(r.returncode, 0, r.stderr)
-
-    def test_pr_on_an_earlier_line_does_not_hide_the_ticket(self):
-        self._seed([201])
-        r = self._run("Review PR #201 fixes first\nWork issue 1165")
-        self.assertEqual(r.returncode, 2, r.stderr)
-        self.assertIn("1165", r.stderr)
-
-    def test_context_line_does_not_steal_the_receipt_lead(self):
-        self._seed([1165])
-        r = self._run("Context: follow-up of #1100 (merged).\nWork issue #1165")
-        self.assertEqual(r.returncode, 0, r.stderr)
-
-    def test_parser_malfunction_fails_open_and_is_logged(self):
-        # a hook copy with no gates/ package beside it: the import fails, the
-        # receipt check is skipped (this hook's fail-open doctrine) and logged.
-        d = tempfile.mkdtemp(prefix="a1165r2-nogates-")
-        self.addCleanup(shutil.rmtree, d, True)
-        (Path(d) / "hooks").mkdir()
-        shutil.copy(HOOK, Path(d) / "hooks" / HOOK.name)
-        payload = json.dumps({
-            "tool_name": "Agent", "cwd": self.cwd,
-            "tool_input": {"subagent_type": "autopilot-worker",
-                           "prompt": "Work issue 4 in fohmixer"}})
-        r = subprocess.run(["bash", str(Path(d) / "hooks" / HOOK.name)],
-                           input=payload, capture_output=True, text=True,
-                           timeout=60, env={**os.environ, "HOME": self.home})
-        self.assertEqual(r.returncode, 0, r.stderr)
-        log = Path(self.home) / ".claude" / "lane-overlap" / "parse-error.log"
-        self.assertIn("ticketrefs parse failed", log.read_text())
+                self.assertNotIn("overlap", r.stderr.lower())
+        self.assertFalse((Path(home) / ".claude" / "lane-overlap").exists())
 
 
 class _R:

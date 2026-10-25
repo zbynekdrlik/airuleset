@@ -1,37 +1,22 @@
-"""#1031 (REOPENED regression) — the SEQUENTIAL-mode dispatch gate was a no-op
-on stream boxes because `cli_lane_overlap.gather_live_lanes` recognised a lane
-ONLY by a `worktree-` branch-name prefix. A stream autopilot-worker names its
-branch by the project convention (`david3/<issue>-<slug>`, `lane5337`), so every
-real lane was invisible -> live_count 0 -> `cli_concurrency.dispatch_gate_line`
-answered `allow|sequential|0` -> `hooks/block-dispatch-over-wdrain.sh` never
-refused the 2nd..Nth dispatch (owner saw 5-6 parallel lanes on a `sequential`
-box, 2026-09-15).
-
-Fix (Approach 2 in the #1031 design comment): a lane = a worktree whose PATH is
-under `<repo>/.claude/worktrees/` (Claude Code's `isolation: worktree` dir —
-what EVERY dispatched lane is, whatever its branch is named) OR whose branch
-keeps the `worktree-` prefix (today's controller lanes). Base branch = the repo
-default (`git symbolic-ref --quiet refs/remotes/origin/HEAD`), fallback to the
-first worktree's branch. Merged lanes stay EXCLUDED; a detached-HEAD worktree
-under the isolation dir counts as live (a lane mid-operation).
+"""#1031 (REOPENED regression) — `gather_live_lanes` recognised a lane ONLY by a
+`worktree-` branch-name prefix, so a stream autopilot-worker's lane
+(`david3/<issue>-<slug>`, `lane5337`) was invisible. A lane = a worktree whose
+PATH is under `<repo>/.claude/worktrees/` (Claude Code's `isolation: worktree`
+dir) OR whose branch keeps the `worktree-` prefix. Base branch = the repo
+default, the most advanced of upstream/origin/local. Merged lanes stay
+EXCLUDED; a detached-HEAD worktree under the isolation dir counts as live.
+(#1137 removed the sequential dispatch gate and the overlap receipt these
+locks first served; the liveness derivation feeds the worktree prune.)
 """
 import contextlib
 import io
-import json
-import os
-import subprocess
 import sys
-import tempfile
 import unittest
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
-import cli_concurrency as cc  # noqa: E402
 import cli_lane_liveness as lo  # noqa: E402
-import cli_lane_overlap as ovl  # noqa: E402  (compute_overlap — overlap half)
-
-HOOK = REPO / "hooks" / "block-dispatch-over-wdrain.sh"
 
 D3 = "/home/david3/devel/odoo/odoo-erp"
 
@@ -84,14 +69,6 @@ class _FakeGit:
         return _R(1)
 
 
-def _seq_cwd():
-    d = tempfile.mkdtemp(prefix="d3seq-")
-    claude = Path(d) / ".claude"
-    claude.mkdir()
-    (claude / "lane-resources.json").write_text(json.dumps({"mode": "sequential"}))
-    return d
-
-
 class TestStreamLaneCounted(unittest.TestCase):
     # (1) a stream-named lane under .claude/worktrees/ is LIVE (today: invisible).
     def test_stream_named_worktree_lane_is_live(self):
@@ -100,13 +77,6 @@ class TestStreamLaneCounted(unittest.TestCase):
         self.assertEqual(len(lanes), 1,
                          "a stream lane under .claude/worktrees/ must count")
         self.assertEqual(lanes[0]["ref"], "david3/7184-vyroba-dokoncenie")
-
-    def test_dispatch_gate_blocks_second_stream_lane(self):
-        fake = _FakeGit(STREAM_PORCELAIN)
-        d = _seq_cwd()
-        self.assertEqual(
-            cc.dispatch_gate_line(d, repo_root=D3, run=fake, live_count=None),
-            "block|sequential|1")
 
 
 class TestBaseBranchIsDefault(unittest.TestCase):
@@ -169,29 +139,6 @@ class TestDetachedLaneCounted(unittest.TestCase):
         fake = _FakeGit(porc)
         lanes = lo.gather_live_lanes(D3, run=fake)
         self.assertEqual(len(lanes), 1, "a detached lane mid-operation is live")
-
-
-class TestReceiptSeesStreamLane(unittest.TestCase):
-    # Owner ROZHODNUTÉ (#1031, 2026-09-15): sequential mode is NOT a hard count
-    # — its goal is (a) "the right hand knows the left" (no two lanes on similar
-    # work unaware of each other) and (b) no nudge pushing max parallelism. The
-    # lane-overlap RECEIPT (compute_overlap over gather_live_lanes) is the (a)
-    # instrument and shares gather_live_lanes with the dispatch gate, so a new
-    # unit touching the same file as a STREAM-named live lane must report
-    # OVERLAP — before the fix gather_live_lanes returned 0 live lanes, so the
-    # receipt falsely read CLEAR against "0 live lane(s)".
-    def test_receipt_reports_overlap_against_stream_lane_same_file(self):
-        fake = _FakeGit(STREAM_PORCELAIN)  # the lane touches addons/x/models/y.py
-        lanes = lo.gather_live_lanes(D3, run=fake)
-        self.assertEqual(len(lanes), 1, "the stream lane must be seen at all")
-        verdict, overlaps = ovl.compute_overlap(
-            paths=["addons/x/models/y.py"], topics=["vyroba dokoncenie"],
-            live_lanes=lanes, open_prs=[])
-        self.assertEqual(verdict, "overlap")
-        self.assertTrue(
-            any(o[0] == "lane" and o[1] == "david3/7184-vyroba-dokoncenie"
-                for o in overlaps),
-            "receipt must flag the stream lane by its full ref, not read CLEAR")
 
 
 class _AheadFake:
@@ -395,12 +342,10 @@ class TestForkBaseResolvesUpstream(unittest.TestCase):
         self.assertEqual(lo.gather_live_lanes(D3, run=fake), [],
                          "a lane merged UPSTREAM must not count live")
 
-    def test_lane_files_diff_against_upstream_develop(self):
+    def test_merged_check_against_upstream_develop(self):
         fake = self._fake(lane_merged=False)
         lanes = lo.gather_live_lanes(D3, run=fake)
         self.assertEqual(len(lanes), 1)
-        self.assertIn("upstream/develop", fake.diff_bases,
-                      "_lane_files must diff against merge-base(upstream/develop, lane)")
         lane_bases = {b for a, b in fake.calls
                       if a == "david3/7184-vyroba-dokoncenie"}
         self.assertEqual(lane_bases, {"upstream/develop"},
@@ -455,54 +400,6 @@ class TestDivergedBaseCandidates(unittest.TestCase):
         self.assertEqual(base, "origin/develop",
                          "the newest-commit-date candidate wins on divergence")
         self.assertIn("base candidates diverged", err.getvalue())
-
-
-_ENV = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
-        "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
-
-
-def _git(cwd, *a):
-    subprocess.run(["git", "-C", str(cwd), *a], check=True,
-                   capture_output=True, text=True, env=_ENV)
-
-
-class TestHookEndToEndStreamLane(unittest.TestCase):
-    # (4) the REAL hook, over stdin JSON, against a REAL git repo whose live
-    # lane is a stream-named worktree under .claude/worktrees/ -> exit 2.
-    def setUp(self):
-        self.tmp = tempfile.mkdtemp()
-        self.home = tempfile.mkdtemp()
-        self.repo = Path(self.tmp) / "repo"
-        self.repo.mkdir()
-        _git(self.repo, "init", "-q", "-b", "main")
-        (self.repo / "f.txt").write_text("x")
-        _git(self.repo, "add", "f.txt")
-        _git(self.repo, "commit", "-qm", "base")
-        (self.repo / ".claude").mkdir()
-        (self.repo / ".claude" / "lane-resources.json").write_text(
-            json.dumps({"mode": "sequential"}))
-        wt = self.repo / ".claude" / "worktrees" / "agent-xyz"
-        _git(self.repo, "worktree", "add", "-q", "-b",
-             "david3/7184-vyroba-dokoncenie", str(wt))
-        (wt / "g.txt").write_text("y")
-        _git(wt, "add", "g.txt")
-        _git(wt, "commit", "-qm", "lane work")
-
-    def _run_hook(self, prompt):
-        payload = {"tool_name": "Agent", "cwd": str(self.repo),
-                   "tool_input": {"subagent_type": "autopilot-worker",
-                                  "prompt": prompt}}
-        return subprocess.run(
-            ["bash", str(HOOK)], input=json.dumps(payload),
-            capture_output=True, text=True,
-            env={**os.environ, "HOME": self.home})
-
-    def test_stream_lane_blocks_second_dispatch(self):
-        # NO issue number in the prompt -> the #992/#993 overlap-receipt gate is
-        # skipped, so the #998 sequential gate is exercised directly.
-        r = self._run_hook("Do the stream work")
-        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
-        self.assertIn("sequential-mode gate", r.stderr)
 
 
 if __name__ == "__main__":

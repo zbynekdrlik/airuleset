@@ -37,7 +37,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import airuleset  # noqa: E402
 import cli_quals_cmd  # noqa: E402
 from watchdog import ops_wait_refresh as owref  # noqa: E402
-from _parallel_mode_pin import PARALLEL_PIN  # noqa: E402  (#1137)
 
 NOW = 1_000_000
 CWD = "/repo/a"
@@ -82,8 +81,6 @@ class SnapshotReaders(_HomeCase):
                           members=[{"number": 41, "stale": True}]))
         spy = mk.Mock()
         self.assertEqual(owref.backlog_count(CWD, "slice-quals", **self._kw(spy)), 7)
-        self.assertEqual(owref.dispatchable(CWD, "slice-quals", **self._kw(spy)),
-                         [{"count": 0, "reason": "dep-wait"}])
         self.assertEqual(
             owref.fetch_or_refresh(CWD, "slice-quals", object(), **self._kw(spy)),
             [{"number": 41, "stale": True}])
@@ -95,19 +92,6 @@ class SnapshotReaders(_HomeCase):
         self.assertEqual(owref.backlog_count(CWD, "core-quals", now=NOW,
                                              spawn_fn=mk.Mock(),
                                              alive_fn=lambda c: True), 0)
-
-    def test_unmeasurable_dispatchable_keeps_its_reason(self):
-        self._write(_snap(dc=None, dr="meta read failed"))
-        self.assertEqual(
-            owref.dispatchable(CWD, "core-quals", now=NOW, spawn_fn=mk.Mock(),
-                               alive_fn=lambda c: True),
-            [{"count": None, "reason": "meta read failed"}])
-
-    def test_reasonless_unmeasurable_dispatchable_is_none(self):
-        self._write(_snap(dc=None, dr=None))
-        self.assertIsNone(owref.dispatchable(
-            CWD, "core-quals", now=NOW, spawn_fn=mk.Mock(),
-            alive_fn=lambda c: True))
 
     def test_no_snapshot_backlog_is_none_never_zero_and_spawns_once(self):
         spy = mk.Mock()
@@ -139,7 +123,6 @@ class SnapshotReaders(_HomeCase):
         self._write(entry)
         kw = dict(now=NOW, spawn_fn=mk.Mock(), alive_fn=lambda c: True)
         self.assertIsNone(owref.backlog_count(CWD, "core-quals", **kw))
-        self.assertIsNone(owref.dispatchable(CWD, "core-quals", **kw))
 
     def test_snapshot_ttl_is_the_short_consumer_window(self):
         # ONE snapshot TTL, the shortest the consumers need (~5 min).
@@ -154,7 +137,7 @@ class SnapshotReaders(_HomeCase):
         spy = mk.Mock()
         kw = dict(now=NOW, spawn_fn=spy, alive_fn=lambda c: False)
         owref.backlog_count(CWD, "core-quals", **kw)
-        owref.dispatchable(CWD, "core-quals", **kw)
+        owref.workable_records(CWD, "core-quals", **kw)
         owref.fetch_or_refresh(CWD, "core-quals", object(), **kw)
         self.assertEqual(spy.call_count, 1)
 
@@ -208,72 +191,44 @@ class RefreshChildSnapshot(_HomeCase):
         self.assertEqual(run.call_args[1]["timeout"], owref.CHILD_TIMEOUT_S)
 
 
-@PARALLEL_PIN  # #1137 owner ROZHODNUTÉ 2026-09-30: sequential default; declared-parallel suite
 class WatchdogFetchesNeverBlock(_HomeCase):
-    """The three airuleset fetches, driven through job 20's per-pane body
-    (`goal_lane_occupancy_nudge`, the `goal_lane_sweep` loop body) with a
-    STALE snapshot: ZERO blocking subprocess calls, the spawn seam once."""
+    """The airuleset sweep fetches (backlog + ops-wait) with a STALE snapshot:
+    ZERO blocking subprocess calls, the spawn seam once."""
 
     def test_stale_snapshot_makes_zero_blocking_quals_calls(self):
-        # review F2/F1: the snapshot must be stale against the READERS' clock
-        # (time.time(), not the synthetic NOW) yet within MAX_SERVE_AGE_S, so
-        # BOTH readers serve it and the decision reaches the dispatchable
-        # read; subprocess calls are RECORDED (never raised — the backlog
-        # cache swallows exceptions, which made a raising seam blind).
+        # the snapshot is stale against the READERS' clock (time.time(), not
+        # the synthetic NOW) yet within MAX_SERVE_AGE_S, so the readers serve
+        # it; subprocess calls are RECORDED (never raised — the backlog cache
+        # swallows exceptions, which made a raising seam blind).
         import time
-        from tempfile import TemporaryDirectory as _TD
         import watchdog as wd
-        from watchdog import goal
-        from _goal_arm_helpers import (DeliverGoalFakeTmux, GOAL_ARMED_CAP,
-                                       _encode, _write_marker_transcript)
         self._write(_snap(ts=time.time() - owref.REFRESH_TTL_S - 1,
                           open_count=37, dc=4))
         spawn, calls, state = mk.Mock(), [], {}
-        d = _TD()
-        self.addCleanup(d.cleanup)
-        proj = Path(d.name)
-        cwd, sid = CWD, "sess-1067-1d"
-        _write_marker_transcript(proj, cwd, sid)
-        tpath = proj / _encode(cwd) / (sid + ".jsonl")
-        tmux = DeliverGoalFakeTmux([("%9", "claude", cwd, "111")],
-                                   GOAL_ARMED_CAP, model_type=True,
-                                   transcript_path=tpath)
-        disp = mk.Mock(wraps=owref.dispatchable)
 
         def _record(*a, **k):
             calls.append(a[:1])
             raise AssertionError("blocking subprocess on the sweep path")
 
-        with mk.patch.object(airuleset, "_repo_root", return_value=cwd), \
+        with mk.patch.object(airuleset, "_repo_root", return_value=CWD), \
                 mk.patch.object(airuleset, "resolve_authority",
                                 return_value="full"), \
                 mk.patch("statusbar.obligation_count",
                          return_value=(None, None)), \
                 mk.patch("statusbar._spawn_refresh"), \
                 mk.patch.object(owref, "spawn_refresher", spawn), \
-                mk.patch.object(owref, "dispatchable", disp), \
                 mk.patch.object(owref, "refresher_alive",
                                 lambda c, now=None: False), \
-                mk.patch.object(wd, "count_live_workers",
-                                return_value=(0, [])), \
                 mk.patch("subprocess.run", side_effect=_record), \
                 mk.patch("subprocess.Popen", side_effect=_record):
-            logs, _owns = goal.goal_lane_occupancy_nudge(
-                NOW, tmux, {}, sid, cwd, "111", GOAL_ARMED_CAP, tpath,
-                NOW - 100, "loc", None, False, None, proj,
-                backlog_fetch=airuleset._watchdog_backlog_fetch, state=state,
-                sleep_fn=lambda s: None,
-                dispatchable_fetch=airuleset._watchdog_dispatchable_fetch)
-            airuleset._watchdog_ops_wait_fetch(cwd)
+            count = wd._cached_backlog_count(
+                CWD, airuleset._watchdog_backlog_fetch, state, NOW)
+            airuleset._watchdog_ops_wait_fetch(CWD)
         self.assertEqual(calls, [], "no subprocess on the sweep path")
-        self.assertEqual(spawn.call_count, 1, logs)   # 3 readers, ONE spawn
+        self.assertEqual(spawn.call_count, 1)   # 2 readers, ONE spawn
         self.assertEqual(spawn.call_args[0][1], "core-quals")
-        self.assertEqual(state["backlog_cache"][cwd]["count"], 37)
-        disp.assert_called_once()                      # the reader ran
-        self.assertEqual(state["dispatchable_cache"][cwd]["members"],
-                         [{"count": 4, "reason": None}])
-        self.assertFalse(any("skip:dispatchable-unknown" in ln for ln in logs),
-                         logs)
+        self.assertEqual(count, 37)
+        self.assertEqual(state["backlog_cache"][CWD]["count"], 37)
 
     def test_backlog_fetch_without_snapshot_is_none(self):
         with mk.patch.object(airuleset, "_repo_root", return_value=CWD), \
@@ -287,7 +242,6 @@ class WatchdogFetchesNeverBlock(_HomeCase):
                                 lambda c, now=None: False), \
                 mk.patch("subprocess.run") as run:
             self.assertIsNone(airuleset._watchdog_backlog_fetch(CWD))
-            self.assertIsNone(airuleset._watchdog_dispatchable_fetch(CWD))
         run.assert_not_called()
         self.assertEqual(spawn.call_count, 1)
         self.assertEqual(spawn.call_args[0][1], "slice-quals")

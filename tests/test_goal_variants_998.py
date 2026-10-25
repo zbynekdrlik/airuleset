@@ -1,11 +1,12 @@
-"""#998 item 3 — goal renderer per (authority, role, mode) + no-turn-cap lock.
+"""#998 item 3 — goal renderer per (authority, role) + no-turn-cap lock.
 
-`goal_registry.render_goal_line` substitutes the refill clause for the
-sequential one and appends the infra-role clause; NO variant carries a turn
-cap. `watchdog.goal.goal_template_for` resolves the pane's (mode, role) from
-cwd and uses the SAME renderer for variants (SKILL.md read for the default).
+`goal_registry.render_goal_line` appends the infra-role clause and swaps the
+(B) block for the review / quality roles; NO variant carries a turn cap.
+`watchdog.goal.goal_template_for` resolves the pane's role from cwd and uses the
+SAME renderer for role variants (SKILL.md read for the no-role line). #1137
+(owner 25.10.2026) removed the parallel/sequential mode axis: every variant
+carries the one bundling sentence instead of a mode clause.
 """
-import json
 import sys
 import tempfile
 from pathlib import Path
@@ -17,45 +18,41 @@ import goal_registry as gr  # noqa: E402
 from watchdog import goal  # noqa: E402
 
 
+BUNDLE = "one branch, one PR and one CI cycle"
+
+
 class TestRenderGoalLine(TestCase):
     def test_default_variant_equals_the_shipped_skill_line(self):
         # #998-review: NOT tautological (render delegates to render_goal_line, so
-        # comparing the two proves nothing) — assert the DEFAULT (no-role)
-        # variant byte-equals the line SHIPPED in SKILL.md, the real drift
-        # target: if render_goal_line's default path ever diverges from the
-        # shipped artifact the watchdog arms, this fails. #1137 (owner
-        # ROZHODNUTÉ 2026-09-30): the DEFAULT is the SEQUENTIAL variant.
+        # comparing the two proves nothing) — assert the no-role variant
+        # byte-equals the line SHIPPED in SKILL.md, the real drift target.
         with open(gr.skill_path(), encoding="utf-8") as fh:
             shipped = gr.shipped_lines(fh.read())
         self.assertEqual(set(shipped), set(gr.PROFILES))
-        self.assertEqual(gr.DEFAULT_MODE, "sequential")
         for p in gr.PROFILES:
-            self.assertEqual(gr.render_goal_line(p, "sequential", None), shipped[p])
+            self.assertEqual(gr.render_goal_line(p, None), shipped[p])
             self.assertEqual(gr.render_goal_line(p), shipped[p])
-            self.assertIn("ONE unit at a time", shipped[p])
+            self.assertIn(BUNDLE, shipped[p])
+            self.assertNotIn("ONE unit at a time", shipped[p])
             self.assertNotIn("CONTINUOUS REFILL", shipped[p])
 
-    def test_sequential_substitutes_refill(self):
-        for p in gr.PROFILES:
-            line = gr.render_goal_line(p, "sequential", None)
-            self.assertIn("ONE unit at a time", line)
-            self.assertNotIn("CONTINUOUS REFILL", line)
-
     def test_infra_role_appends_scope_clause(self):
-        line = gr.render_goal_line("full", "sequential", "infra")
+        line = gr.render_goal_line("full", "infra")
         self.assertIn("INFRA ROLE", line)
         self.assertIn("only tickets labelled", line)
         self.assertIn("box-maintenance steps stop", line)
+        # the infra clause follows the bundle clause
+        self.assertLess(line.index(BUNDLE), line.index("INFRA ROLE"))
 
     def test_no_variant_carries_a_turn_cap(self):
-        for authority, mode, role in gr.variant_specs():
-            line = gr.render_goal_line(authority, mode, role)
+        for authority, role in gr.variant_specs():
+            line = gr.render_goal_line(authority, role)
             self.assertIsNone(gr._TURN_CAP_RE.search(line),
-                              "%s/%s/%s has a turn cap" % (authority, mode, role))
+                              "%s/%s has a turn cap" % (authority, role))
 
     def test_every_variant_under_budget(self):
-        for authority, mode, role in gr.variant_specs():
-            line = gr.render_goal_line(authority, mode, role)
+        for authority, role in gr.variant_specs():
+            line = gr.render_goal_line(authority, role)
             self.assertLessEqual(len(line), gr.GOAL_ARM_CHAR_CAP)
 
     def test_variant_check_clean(self):
@@ -63,11 +60,9 @@ class TestRenderGoalLine(TestCase):
 
     def test_unknown_args_raise(self):
         with self.assertRaises(ValueError):
-            gr.render_goal_line("full", "turbo", None)
+            gr.render_goal_line("full", "boss")
         with self.assertRaises(ValueError):
-            gr.render_goal_line("full", "parallel", "boss")
-        with self.assertRaises(ValueError):
-            gr.render_goal_line("nope", "parallel", None)
+            gr.render_goal_line("nope", None)
 
 
 class TestGoalTemplateFor(TestCase):
@@ -76,30 +71,16 @@ class TestGoalTemplateFor(TestCase):
             got = goal.goal_template_for("full", d)
             self.assertEqual(got, goal.goal_template_for_authority("full"))
 
-    def test_sequential_project_serves_the_default_skill_line(self):
-        # #1137 (owner ROZHODNUTÉ 2026-09-30): sequential IS the default, so a
-        # sequential pane is served the shipped SKILL.md default line (read
-        # from the repo SKILL here, hermetic — never the box's installed copy).
-        with tempfile.TemporaryDirectory() as d:
-            claude = Path(d) / ".claude"
-            claude.mkdir()
-            (claude / "lane-resources.json").write_text(
-                json.dumps({"mode": "sequential"}))
-            got = goal.goal_template_for("full", d, path=gr.skill_path())
-            self.assertIn("ONE unit at a time", got)
-            self.assertNotIn("CONTINUOUS REFILL", got)
-            self.assertEqual(got, gr.render_goal_line("full", "sequential"))
-
-    def test_explicit_mode_role_override(self):
-        got = goal.goal_template_for("full", "/x", role="infra", mode="sequential")
+    def test_explicit_role_override(self):
+        got = goal.goal_template_for("full", "/x", role="infra")
         self.assertIn("INFRA ROLE", got)
 
 
 # --------------------------------------------------------------------------- #
-# #1000 — the review-ROLE variant (mode parallel). The gk review window's
-# /goal is the RENDERED review variant (no hand-written FLOW text): early
-# advisory review of every open stream PR + 1 h hand-off SLA + lane-fill
-# invariant + release-train-never-idles + per-cycle status, NO turn cap. The
+# #1000 — the review-ROLE variant. The gk review window's /goal is the
+# RENDERED review variant (no hand-written FLOW text): early advisory review of
+# every open stream PR + 1 h hand-off SLA + release-train-never-idles +
+# per-cycle status, NO turn cap. The
 # owner directive ("uz mam dost tvojich patchworkov") is ONE renderer, no
 # second text source; the 4000 arm cap makes appending the clauses to the
 # full template impossible (5081 > 4000), so the review role REPLACES the
@@ -108,7 +89,7 @@ class TestGoalTemplateFor(TestCase):
 # --------------------------------------------------------------------------- #
 class TestReviewRoleVariant1000(TestCase):
     def _review(self):
-        return gr.render_goal_line("full", "parallel", "review")
+        return gr.render_goal_line("full", "review")
 
     def test_review_variant_contains_each_clause_a_to_h(self):
         line = self._review()
@@ -122,20 +103,20 @@ class TestReviewRoleVariant1000(TestCase):
         # (c) hand-off verdict/action within 1 h, montalu first
         self.assertIn("gk verdikt alebo akčný komentár do 1 h", line)
         self.assertIn("stream:montalu prvé", line)
-        # (d) lane-fill with dispatchable units; CI never holds a slot
-        self.assertIn("lanes plním DISPATCHOVATEĽNÝMI jednotkami", line)
-        self.assertIn("čakanie na CI nikdy nedrží slot", line)
+        # (d) CI waits never block the window (#1137: no lane saturation)
+        self.assertIn("čakanie na CI nikdy neblokuje ďalšiu prácu", line)
+        self.assertNotIn("lanes plním", line)
         # (e) merged PR into develop; red/DIRTY gk PR -> fix lane same cycle
         self.assertIn("merged PR do develop", line)
         self.assertIn("červený/DIRTY gk PR dostane fix lane v tom istom cykle", line)
         # (f) release train never idles; every STOP reported on odoo-erp#6883
         self.assertIn("release train nikdy nestojí", line)
         self.assertIn("odoo-erp#6883", line)
-        # (g) per-cycle status print — the exact command + lanes N/cap
+        # (g) per-cycle status print — the exact command (#1137: no lanes N/cap)
         self.assertIn(
             "python3 ~/devel/airuleset/airuleset.py core-quals --role review --count",
             line)
-        self.assertIn("lanes N/cap", line)
+        self.assertNotIn("lanes N/cap", line)
         # (h) review-specific DONE + no turn limit
         self.assertIn("montalu/slovnormal/miva == main", line)
         self.assertIn("bez akéhokoľvek turn limitu", line)
@@ -175,69 +156,52 @@ class TestReviewRoleVariant1000(TestCase):
         self.assertNotIn("core-quals --count`", line)
 
     def test_review_variant_keeps_other_clauses_present_verbatim(self):
-        # every NON-(B) clause the full/parallel template carries appears
+        # every NON-(B) clause the full no-role template carries appears
         # VERBATIM in the review render — this catches a DROPPED clause; a
         # REWORD (which moves both the live clause text and the render together)
-        # is caught instead by the 9-variant sha snapshot + goal-inventory
+        # is caught instead by the variant sha snapshot + goal-inventory
         # --check drift lock (#1000 F6: honest about what this test proves).
         line = self._review()
         for cid in ("header", "stop-a", "irreversible", "work-intro",
-                    "saturation-core", "saturation-delivery", "prod-gate",
+                    "bundle", "prod-gate",
                     "ask", "parked", "night", "bounce", "verify-sources",
                     "compact-boundary"):
             txt = next(c for c in gr.CLAUSES if c.id == cid).text_for("full")
             self.assertIn(txt, line, "review variant dropped/reworded %s" % cid)
 
-    # Golden sha256[:24] of the 9 pre-#1000 variants (default×3, sequential×3,
-    # infra×3) — the review role must NOT alter any of them. 24 hex chars = 96
-    # bits (collision-proof for a 9-entry snapshot; kept < 32 so the entropy
-    # scanner never mistakes it for a secret). Regenerate ONLY on a DELIBERATE
-    # clause edit (a shared clause change moves every hash).
+    # Golden sha256[:24] of the 6 non-review variants (no role + infra per
+    # authority) — the review role must NOT alter any of them. 24 hex chars =
+    # 96 bits (kept < 32 so the entropy scanner never mistakes it for a
+    # secret). Regenerate ONLY on a DELIBERATE clause edit (a shared clause
+    # change moves every hash). History: #1084, #1066 lane B, #1128 and
+    # #1137 (owner ROZHODNUTÉ 2026-09-30) re-goldened the mode-keyed table;
+    # #1137 (owner 25.10.2026) removed the mode axis and replaced the mode
+    # clauses with the bundling sentence — every variant changed.
     _GOLDEN = {
-        # #1084 re-golden: the compact-boundary clause changed (machine compacts
-        # REMOVED — native autocompact only), so every non-review variant's
-        # rendered goal line changed. Regenerated deliberately.
-        # #1066 lane B re-golden: item 1 (reduced proof bounce clause) changed
-        # every branch-merge/fork-no-merge variant; item 2 (infra proof
-        # role-scope, FULL-only) changed full/sequential/infra. full/parallel and
-        # full/sequential are UNTOUCHED (item 1 skips full, item 2 skips
-        # non-infra). Regenerated deliberately.
-        # #1128 re-golden (owner ruling 2026-09-23): the reduced profiles LOST
-        # their (B) done-state and gained the stream-idle clause, so every
-        # branch-merge/fork-no-merge variant changed. full/* are UNTOUCHED.
-        # Regenerated deliberately.
-        # #1137 re-golden (owner ROZHODNUTÉ 2026-09-30): the sequential clause
-        # no longer forces a worker per unit, so every */sequential/* variant
-        # changed; */parallel/* are UNTOUCHED.
-        "full/parallel/None": "2d9a5539f472a22cda96177c",
-        "full/sequential/None": "5aa6169676175202824de5f1",
-        "full/sequential/infra": "19aef76411deb3e9b6dda220",
-        "branch-merge/parallel/None": "baeaa60a576d206e5e031d3d",
-        "branch-merge/sequential/None": "18e1e9ce2e3fef9a952e9f11",
-        "branch-merge/sequential/infra": "9dfce54370b4b9c2800930df",
-        "fork-no-merge/parallel/None": "adf7e0904676c259633645cc",
-        "fork-no-merge/sequential/None": "680c351e1f87a0be532c5dde",
-        "fork-no-merge/sequential/infra": "92b74d96321574fbc8a7b8dd",
+        "full/None": "50d0bc6877013e6cd04e4b23",
+        "full/infra": "80d411270fb48c2d3634ac89",
+        "branch-merge/None": "fdff8185079b95ed76ba7cb8",
+        "branch-merge/infra": "f227e7add3dbb98c8eb05fc2",
+        "fork-no-merge/None": "a4694ecd24c94588381211c9",
+        "fork-no-merge/infra": "5777f7f0c6608352acd7f041",
     }
 
     def test_nonreview_variants_byte_identical_snapshot(self):
         import hashlib
         for key, want in self._GOLDEN.items():
-            a, m, r = key.split("/")
+            a, r = key.split("/")
             role = None if r == "None" else r
             got = hashlib.sha256(
-                gr.render_goal_line(a, m, role).encode()).hexdigest()[:24]
+                gr.render_goal_line(a, role).encode()).hexdigest()[:24]
             self.assertEqual(got, want, "%s changed (not byte-identical)" % key)
 
     def test_review_markers_never_leak_into_nonreview_variants(self):
         for a in gr.PROFILES:
-            for m in ("parallel", "sequential"):
-                for tok in ("REVIEW ROLE", "SUBDEVS NIKDY NEČAKAJÚ NA GK",
-                            "skoré advisory review"):
-                    self.assertNotIn(tok, gr.render_goal_line(a, m, None),
-                                     "%s/%s leaked review marker %r" % (a, m, tok))
-            self.assertNotIn("REVIEW ROLE",
-                             gr.render_goal_line(a, "sequential", "infra"))
+            for tok in ("REVIEW ROLE", "SUBDEVS NIKDY NEČAKAJÚ NA GK",
+                        "skoré advisory review"):
+                self.assertNotIn(tok, gr.render_goal_line(a, None),
+                                 "%s leaked review marker %r" % (a, tok))
+            self.assertNotIn("REVIEW ROLE", gr.render_goal_line(a, "infra"))
 
     def test_review_role_is_gk_full_only(self):
         # #1000 F5 — the review block hardcodes full-authority gk semantics, so
@@ -245,20 +209,19 @@ class TestReviewRoleVariant1000(TestCase):
         # clauses into a branch-merge/fork-no-merge goal).
         for a in ("branch-merge", "fork-no-merge"):
             with self.assertRaises(ValueError):
-                gr.render_goal_line(a, "parallel", "review")
+                gr.render_goal_line(a, "review")
 
     def test_variant_check_locks_the_review_variant_budget(self):
-        # #1000 F1 — goal-inventory --check / variant_check must guard the
-        # tightest-arming (review) variant's budget + no-turn-cap even though it
-        # is not in variant_specs. variant_check renders it; a clean run proves
-        # it is under the cap and carries no turn cap.
+        # #1000 F1 — goal-inventory --check / variant_check guards the review
+        # variant's budget + no-turn-cap (#1137: it is in variant_specs now).
+        self.assertIn(("full", "review"), gr.variant_specs())
         self.assertEqual(gr.variant_check(), [])
-        line = gr.render_goal_line("full", "parallel", "review")
+        line = gr.render_goal_line("full", "review")
         self.assertLessEqual(len(line), gr.GOAL_ARM_CHAR_CAP)
 
     def test_goal_template_for_review_window_uses_the_variant(self):
-        # a pane resolved to (parallel, review) arms the RENDERED review variant.
-        got = goal.goal_template_for("full", "/x", role="review", mode="parallel")
+        # a pane resolved to role review arms the RENDERED review variant.
+        got = goal.goal_template_for("full", "/x", role="review")
         self.assertIsNotNone(got)
         self.assertIn("SUBDEVS NIKDY NEČAKAJÚ NA GK", got)
         self.assertIn("core-quals --role review --count", got)

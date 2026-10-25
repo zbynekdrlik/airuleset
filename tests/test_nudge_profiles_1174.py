@@ -37,11 +37,12 @@ import watchdog as wd  # noqa: E402
 
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
-# The LIVE sets read on 28.9.2026 (ticket #1174 body, verbatim lists).
-LIVE_GK = {"goal-guard", "infra-priority", "lane-occupancy", "lane-reconcile",
+# The LIVE sets read on 28.9.2026 (ticket #1174 body, verbatim lists), minus
+# lane-occupancy / lane-reconcile, which #1137 removed (owner 25.10.2026).
+LIVE_GK = {"goal-guard", "infra-priority",
            "partition-audit", "queue-arrival", "release-gap", "task-hygiene",
            "u-freshness", "watch-trigger"}
-LIVE_STREAM = {"bounce", "goal-guard", "lane-occupancy", "lane-reconcile",
+LIVE_STREAM = {"bounce", "goal-guard",
                "partition-audit", "queue-arrival", "release-gap", "task-hygiene",
                "u-freshness", "checkout-lag"}   # + checkout-lag: #1176 census 30.9.
 LIVE_CONTROLLER = {"queue-arrival"}
@@ -320,7 +321,7 @@ class TestStatus(unittest.TestCase):
             _write_state(home, {"on": sorted(LIVE_STREAM)})
             np.apply_profile(home=home, user="montalu1")
             out = self._status(home, "montalu1")
-            self.assertIn("profile: stream (10 kinds)", out)
+            self.assertIn("profile: stream (8 kinds)", out)
             self.assertIn("deviation: none", out)
             self.assertIn("nudges: ON", out)     # fleet parser shape kept
 
@@ -372,7 +373,7 @@ class TestStatus(unittest.TestCase):
     def test_status_before_first_apply_names_the_declared_profile(self):
         with TemporaryDirectory() as home:
             out = self._status(home, "gatekeeper")
-            self.assertIn("profile: gk (10 kinds)", out)
+            self.assertIn("profile: gk (8 kinds)", out)
 
 
 class TestVocabulary(unittest.TestCase):

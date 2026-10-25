@@ -37,7 +37,7 @@ SHORT_GOAL = "/goal STOP CONDITIONS sequential"
 
 
 def _declared_d3(cwd=D3_CWD):
-    return [{"name": "d3", "cwd": cwd, "role": None, "mode": "sequential"}]
+    return [{"name": "d3", "cwd": cwd, "role": None}]
 
 
 def _typed_goal(tmux):

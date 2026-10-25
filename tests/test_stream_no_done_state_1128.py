@@ -32,20 +32,20 @@ IDLE = ("keep exactly ONE background "
 # design's acceptance: "the full profiles are byte-unchanged").
 FULL_GOLDEN = {
     # #1137 re-golden (owner ROZHODNUTÉ 2026-09-30): the sequential clause no
-    # longer forces a worker per unit; full/*/sequential changed, parallel not.
-    ("full", "parallel", None): "2d9a5539f472a22cda96177c",
-    ("full", "sequential", None): "5aa6169676175202824de5f1",
-    ("full", "sequential", "infra"): "19aef76411deb3e9b6dda220",
-    ("full", "sequential", "quality"): "09daaec5f321536a649f20f6",
-    ("full", "parallel", "review"): "a3b487a9e9cf0c9fd5ddd8a8",
+    # longer forced a worker per unit. #1137 (owner 25.10.2026): the mode axis
+    # is gone and the bundling sentence replaced the mode clauses, so every
+    # full variant changed again (now keyed by (authority, role)).
+    ("full", None): "50d0bc6877013e6cd04e4b23",
+    ("full", "infra"): "80d411270fb48c2d3634ac89",
+    ("full", "quality"): "db7d4af0bc0ade2cec966636",
+    ("full", "review"): "644e95bf176d7476dc25b526",
 }
 
 
 def reduced_variants():
     for a in REDUCED:
-        for m, r in (("parallel", None), ("sequential", None),
-                     ("sequential", "infra")):
-            yield (a, m, r), gr.render_goal_line(a, m, r)
+        for r in (None, "infra"):
+            yield (a, r), gr.render_goal_line(a, r)
 
 
 class TestStreamLoopHasNoDoneState(unittest.TestCase):
@@ -102,10 +102,10 @@ class TestStreamLoopHasNoDoneState(unittest.TestCase):
 
 class TestFullProfilesByteUnchanged(unittest.TestCase):
     def test_full_variants_match_the_pre_1128_golden(self):
-        for (a, m, r), want in FULL_GOLDEN.items():
+        for (a, r), want in FULL_GOLDEN.items():
             got = hashlib.sha256(
-                gr.render_goal_line(a, m, r).encode()).hexdigest()[:24]
-            self.assertEqual(got, want, "%s/%s/%s changed" % (a, m, r))
+                gr.render_goal_line(a, r).encode()).hexdigest()[:24]
+            self.assertEqual(got, want, "%s/%s changed" % (a, r))
 
     def test_full_keeps_its_b_proof(self):
         line = gr.render("full")

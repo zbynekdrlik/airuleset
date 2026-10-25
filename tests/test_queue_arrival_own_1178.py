@@ -49,7 +49,6 @@ from _goal_arm_helpers import (  # noqa: E402
     GOAL_IDLE_CAP,
     _write_marker_transcript,
 )
-from _parallel_mode_pin import PARALLEL_PIN  # noqa: E402  (#1137)
 
 NOW = 1_000_000
 HOUR = 3600
@@ -280,13 +279,12 @@ class TestWatchdogPath(unittest.TestCase):
                         src.index("logs = run_once("))
 
 
-@PARALLEL_PIN  # #1137 owner ROZHODNUTÉ 2026-09-30: sequential default; declared-parallel suite
 class TestUndeterminedIsVisible(unittest.TestCase):
     def _sweep(self, state, now, fetch=lambda cwd: None):
         return qa.goal_queue_arrival_recheck(
             now, DeliverGoalFakeTmux([], GOAL_IDLE_CAP), {}, "sid-u", CWD, "%1",
             None, "box:0.0", False, set(), queue_fetch=fetch, state=state,
-            sleep_fn=lambda *a, **k: None)
+            sleep_fn=lambda *a, **k: None, deliver_hold=lambda: None)  # #1137
 
     def test_persistent_undetermined_warns_once_per_hour_and_shows_in_status(self):
         # a WALL-clock base: `nudges status` shows only a record seen within the
@@ -371,8 +369,8 @@ class TestClassifyMemo(unittest.TestCase):
 # the rider on the own-workable set (any authority, titled nudge).
 # --------------------------------------------------------------------------- #
 
-@PARALLEL_PIN  # #1137 owner ROZHODNUTÉ 2026-09-30: sequential default; declared-parallel suite
 class TestRiderOwnSet(unittest.TestCase):
+    # #1137: the own-set delivery runs on the ended-pane path (deliver_hold).
     def setUp(self):
         self._proj = TemporaryDirectory()
         self.addCleanup(self._proj.cleanup)
@@ -387,7 +385,7 @@ class TestRiderOwnSet(unittest.TestCase):
                 NOW, tmux, qrecs, self.sid, CWD, "%9", self.tpath, "box:0.0",
                 False, set(), queue_fetch=fetch,
                 state=state if state is not None else {},
-                sleep_fn=lambda *a, **k: None)
+                sleep_fn=lambda *a, **k: None, deliver_hold=lambda: None)
         return logs, tmux
 
     def test_reduced_authority_box_now_watches_its_own_slice(self):

@@ -49,9 +49,9 @@ from tests._goal_arm_helpers import (  # noqa: E402
     _isolate_goal_state,
 )
 
-# A gk review-window cwd (the fleet declares role="review", mode="parallel").
+# A gk review-window cwd (the fleet declares role="review").
 GK_REVIEW_CWD = "/home/gatekeeper/devel/odoo/odoo-erp"
-SHORT_REVIEW_GOAL = "/goal STOP CONDITIONS review/parallel"
+SHORT_REVIEW_GOAL = "/goal STOP CONDITIONS review"
 
 
 def _short_rearm(cwd):
@@ -60,8 +60,8 @@ def _short_rearm(cwd):
     return (SHORT_REVIEW_GOAL, "full")
 
 
-def _declared_windows(cwd, role="review", mode="parallel"):
-    return [{"name": "gk", "cwd": cwd, "role": role, "mode": mode}]
+def _declared_windows(cwd, role="review"):
+    return [{"name": "gk", "cwd": cwd, "role": role}]
 
 
 def _typed_goal(tmux):
@@ -73,25 +73,21 @@ def _typed_goal(tmux):
 class TestGoalStatusRow1038(unittest.TestCase):
     GK_REVIEW_CWD = GK_REVIEW_CWD
 
-    def _win(self, role="review", mode="parallel"):
-        return [{"name": "gk", "cwd": self.GK_REVIEW_CWD, "role": role, "mode": mode}]
+    def _win(self, role="review"):
+        return [{"name": "gk", "cwd": self.GK_REVIEW_CWD, "role": role}]
 
     def test_variant_label(self):
-        self.assertEqual(cli_concurrency.goal_variant_label("parallel", "review"),
-                         "review/parallel")
-        self.assertEqual(cli_concurrency.goal_variant_label("sequential", "infra"),
-                         "infra/sequential")
-        self.assertEqual(cli_concurrency.goal_variant_label("sequential", None),
-                         "sequential")
-        self.assertEqual(cli_concurrency.goal_variant_label("parallel", None),
-                         "parallel")
+        # #1137 dropped the /<mode> half: the variant is the role alone.
+        self.assertEqual(cli_concurrency.goal_variant_label("review"), "review")
+        self.assertEqual(cli_concurrency.goal_variant_label("infra"), "infra")
+        self.assertEqual(cli_concurrency.goal_variant_label(None), "default")
 
     def test_armed_row_names_the_variant(self):
         with m.patch.object(cli_fleet, "box_windows", return_value=self._win()):
             row = cli_concurrency.goal_status_row(self.GK_REVIEW_CWD, armed=True,
                                                   pending=False)
         self.assertIn("goal: armed", row)
-        self.assertIn("review/parallel", row)
+        self.assertIn("review", row)
 
     def test_not_armed_row_points_to_autopilot(self):
         with m.patch.object(cli_fleet, "box_windows", return_value=self._win()):
@@ -102,11 +98,11 @@ class TestGoalStatusRow1038(unittest.TestCase):
 
     def test_pending_row_reads_arming(self):
         with m.patch.object(cli_fleet, "box_windows",
-                            return_value=self._win("infra", "sequential")):
+                            return_value=self._win("infra")):
             row = cli_concurrency.goal_status_row(self.GK_REVIEW_CWD, armed=False,
                                                   pending=True)
         self.assertIn("arming", row)
-        self.assertIn("infra/sequential", row)
+        self.assertIn("infra", row)
 
 
 class TestGoalRowOutsidePane1038(unittest.TestCase):
@@ -136,8 +132,8 @@ class TestGoalRowOutsidePane1038(unittest.TestCase):
         # this test's pending read, and a stray real request never leaks in.
         self.reqp, self.syncp = _isolate_goal_state(self)
 
-    def _win(self, role="review", mode="parallel"):
-        return [{"name": "gk", "cwd": self.GK_REVIEW_CWD, "role": role, "mode": mode}]
+    def _win(self, role="review"):
+        return [{"name": "gk", "cwd": self.GK_REVIEW_CWD, "role": role}]
 
     # ---- the pane-by-cwd resolver (watchdog.compact.resolve_declared_window_pane) ----
 
@@ -182,7 +178,7 @@ class TestGoalRowOutsidePane1038(unittest.TestCase):
             row = airuleset.goal_status_probe(self.GK_REVIEW_CWD, run=tmux,
                                               pane_env="")
         self.assertIn("goal: armed", row)
-        self.assertIn("review/parallel", row)
+        self.assertIn("review", row)
         self.assertNotIn("NOT armed", row)
 
     def test_b_outside_pane_dark_window_reads_not_armed(self):
@@ -194,7 +190,7 @@ class TestGoalRowOutsidePane1038(unittest.TestCase):
                                               pane_env="")
         self.assertIn("NOT armed", row)
         self.assertIn("type /autopilot", row)
-        self.assertIn("review/parallel", row)
+        self.assertIn("review", row)
 
     def test_c_outside_pane_no_pane_is_unmeasurable(self):
         import airuleset
@@ -207,7 +203,7 @@ class TestGoalRowOutsidePane1038(unittest.TestCase):
                                               pane_env="")
         self.assertIn("unmeasurable", row)
         self.assertNotIn("NOT armed", row)
-        self.assertIn("review/parallel", row)
+        self.assertIn("review", row)
 
     def test_d_inside_pane_uses_self_pane_and_skips_cwd_resolver(self):
         import airuleset
@@ -227,7 +223,7 @@ class TestGoalRowOutsidePane1038(unittest.TestCase):
             row = airuleset.goal_status_probe(self.GK_REVIEW_CWD, run=tmux,
                                               pane_env="%9")
         self.assertIn("goal: armed", row)
-        self.assertIn("review/parallel", row)
+        self.assertIn("review", row)
 
     def test_unmeasurable_branch_is_distinct_from_not_armed(self):
         with m.patch.object(cli_fleet, "box_windows", return_value=self._win()):
@@ -235,7 +231,7 @@ class TestGoalRowOutsidePane1038(unittest.TestCase):
                 self.GK_REVIEW_CWD, armed=None, pending=False, pane_found=False)
         self.assertIn("unmeasurable", row)
         self.assertNotIn("NOT armed", row)
-        self.assertIn("review/parallel", row)
+        self.assertIn("review", row)
 
     def test_resolved_pane_undeterminable_is_never_not_armed(self):
         # #1038-review 🟡: a pane WAS resolved (pane_found=True) but its armed
@@ -247,13 +243,13 @@ class TestGoalRowOutsidePane1038(unittest.TestCase):
                 self.GK_REVIEW_CWD, armed=None, pending=False, pane_found=True)
         self.assertIn("undeterminable", row)
         self.assertNotIn("NOT armed", row)
-        self.assertIn("review/parallel", row)
+        self.assertIn("review", row)
 
     def test_undeterminable_pending_still_reads_arming(self):
         # a pending request wins over an undeterminable read (a request IS in
         # flight, so "arming" is the honest state, not "undeterminable").
         with m.patch.object(cli_fleet, "box_windows",
-                            return_value=self._win("infra", "sequential")):
+                            return_value=self._win("infra")):
             row = cli_concurrency.goal_status_row(
                 self.GK_REVIEW_CWD, armed=None, pending=True, pane_found=True)
         self.assertIn("arming", row)
@@ -272,7 +268,7 @@ class TestGoalRowOutsidePane1038(unittest.TestCase):
                                               pane_env="")
         self.assertIn("undeterminable", row)
         self.assertNotIn("NOT armed", row)
-        self.assertIn("review/parallel", row)
+        self.assertIn("review", row)
 
     def test_pane_found_is_keyword_only(self):
         # #1038-review 2 🔵: pane_found was inserted between `pending` and

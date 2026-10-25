@@ -1,5 +1,5 @@
 """#1023 + fix-forward — the shared `nudge_gate` gate, wired into the job-20
-keystroke riders (partition-audit / release-gap / queue-arrival /
+keystroke riders (partition-audit / release-gap / queue-arrival; #1137 removed
 lane-occupancy). Each rider consults `nudge_gate.gate_ok(state, sid, category,
 now)` right before its send:
   - a recent SAME kind (within `_min_interval()`, 60 min) → `hold:floor`;
@@ -24,7 +24,6 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import airuleset  # noqa: F401
-from watchdog import goal
 from watchdog import ops_wait_recheck as owr
 from watchdog import release_gap as rg
 from watchdog import queue_arrival_recheck as qa
@@ -34,7 +33,6 @@ from _goal_arm_helpers import (  # noqa: E402
     GOAL_ARMED_CAP,
     _write_marker_transcript,
 )
-from _parallel_mode_pin import PARALLEL_PIN  # noqa: E402  (#1137)
 
 NOW = 1_000_000
 DAY = 24 * 3600
@@ -133,7 +131,6 @@ class TestReleaseGapGate(_Base):
         self.assertEqual(state["nudge_cadence"][self.sid]["release-gap"], NOW)
 
 
-@PARALLEL_PIN  # #1137 owner ROZHODNUTÉ 2026-09-30: sequential default; declared-parallel suite
 class TestQueueArrivalGate(_Base):
     def _run(self, tmux, state):
         with m.patch("airuleset.resolve_authority", return_value="full"):
@@ -142,7 +139,8 @@ class TestQueueArrivalGate(_Base):
                 {self.sid: {"base": [1, 2], "first_seen": NOW - DAY}},
                 self.sid, self.CWD, "%9", self.tpath, "sess:0", False, set(),
                 queue_fetch=lambda cwd: [1, 2, 9], state=state,
-                sleep_fn=lambda *a, **k: None)
+                sleep_fn=lambda *a, **k: None,
+                deliver_hold=lambda: None)   # #1137: the ended-pane delivery path
 
     def test_recent_same_kind_defers(self):
         tmux = self._tmux()
@@ -164,49 +162,6 @@ class TestQueueArrivalGate(_Base):
         self._run(tmux, state)
         self.assertIn("stuck-check:", "".join(tmux.typed_texts()))
         self.assertEqual(state["nudge_cadence"][self.sid]["queue-arrival"], NOW)
-
-
-@PARALLEL_PIN  # #1137 owner ROZHODNUTÉ 2026-09-30: sequential default; declared-parallel suite
-class TestLaneOccupancyGate(_Base):
-    def _run(self, tmux, state):
-        with m.patch("airuleset.resolve_authority", return_value="full"):
-            return goal.goal_lane_occupancy_nudge(
-                NOW, tmux, {}, self.sid, self.CWD, "%9", GOAL_ARMED_CAP,
-                self.tpath, NOW - goal.GOAL_LANE_IDLE_S - 100, "loc",
-                lambda msg, **k: None, False, None, Path(self._proj.name),
-                backlog_fetch=lambda cwd: 5, state=state,
-                sleep_fn=lambda *a, **k: None)
-
-    def test_recent_same_kind_defers(self):
-        tmux = self._tmux()
-        logs, owns = self._run(tmux, _recent(self.sid, "lane-occupancy"))
-        self.assertEqual(tmux.typed_texts(), [],
-                         "a recent SAME-kind delivery must DEFER the lane nudge")
-        self.assertTrue(any("hold:floor" in ln for ln in logs))
-
-    def test_recent_different_kind_held_by_total_cap(self):
-        tmux = self._tmux()
-        logs, owns = self._run(tmux, _recent(self.sid, "u-freshness"))
-        self.assertEqual(tmux.typed_texts(), [],
-                         "a DIFFERENT priority kind's recent delivery must HOLD "
-                         "the lane nudge (restored cross-kind total cap)")
-        self.assertTrue(any("hold:total-cap" in ln for ln in logs), logs)
-
-    def test_control_open_gate_reaches_refill_decision_without_delivery(self):
-        # #1089: the cadence GATE still defers lane-occupancy (hold:floor /
-        # hold:total-cap — locked above), but the keystroke DELIVERY is RETIRED.
-        # With an OPEN gate the nudge reaches the refill DECISION (the DELIVERY
-        # RETIRED observability line) WITHOUT typing, and — because it no longer
-        # delivers — it no longer stamps the shared cadence clock (a retired kind
-        # consumes nothing from the cross-kind total cap).
-        tmux = self._tmux()
-        state = {}
-        logs, owns = self._run(tmux, state)
-        self.assertFalse(any("hold:floor" in ln for ln in logs), logs)
-        self.assertTrue(any("DELIVERY RETIRED" in ln for ln in logs), logs)
-        self.assertEqual(tmux.typed_texts(), [])
-        self.assertIsNone(
-            state.get("nudge_cadence", {}).get(self.sid, {}).get("lane-occupancy"))
 
 
 if __name__ == "__main__":

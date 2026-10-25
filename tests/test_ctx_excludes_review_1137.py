@@ -1,7 +1,7 @@
 """#1137 review round: the gk lens excludes must never abort an install, must
 resolve a window cwd against the ACCOUNT's home, must never strip the review
 window that shares a cwd, and must also cover worktree lanes of a non-review
-window. Plus: dev2 stays the ONLY session-scoped host.
+window. Plus: no session-scoped host remains (the #1224 module is gone).
 """
 import json
 import os
@@ -16,7 +16,6 @@ sys.path.insert(0, str(REPO))
 
 import cli_context_excludes as cx  # noqa: E402
 import cli_fleet  # noqa: E402
-import cli_session_scope  # noqa: E402
 
 HOME = "/home/gatekeeper"
 SUFFIX = cx.LENS_SUFFIX
@@ -71,8 +70,10 @@ class TestLanes(unittest.TestCase):
 
 
 class TestScopeHosts(unittest.TestCase):
-    def test_dev2_is_the_only_scoped_host(self):
-        self.assertEqual(cli_session_scope.SCOPE_HOSTS, ("dev2",))
+    def test_no_session_scope_module_remains(self):
+        # owner 25.10.2026: no Tier-0-style limit on any workstation, dev2
+        # included, so the #1224 scope module is gone (no host left).
+        self.assertFalse((REPO / "cli_session_scope.py").exists())
 
 
 if __name__ == "__main__":

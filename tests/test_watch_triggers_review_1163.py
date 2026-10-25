@@ -64,8 +64,7 @@ def _at(y, mo, d, h, mi, s=0):
 
 
 def _win(triggers=None, tz="Europe/Bratislava"):
-    return {"name": "gk-quality", "cwd": CWD, "role": "quality",
-            "mode": "sequential", "steer": "watch", "tz": tz,
+    return {"name": "gk-quality", "cwd": CWD, "role": "quality", "steer": "watch", "tz": tz,
             "triggers": triggers or [
                 {"name": "watch", "cron": "17 7,19 * * *", "prompt": "W."},
                 {"name": "weekly-review", "cron": "17 8 * * 1",

@@ -100,8 +100,8 @@ class TestAutopilotSkillLoopBody(TestCase):
         self.assertIn("ARMED GOAL", t)
         self.assertIn("◎ /goal", t)
         # #1084: machine compacts are REMOVED — no HOLD turn; the loop continues
-        # immediately to the next lane refill after the cycle's report.
-        self.assertIn("continues immediately to the next lane refill", t)
+        # immediately after the cycle's report (#1137 dropped the "lane refill").
+        self.assertIn("after an integration cycle's report it continues immediately", t)
 
     def test_old_immediately_assemble_language_is_gone(self):
         t = read(self.SKILL)

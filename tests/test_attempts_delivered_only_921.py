@@ -263,7 +263,6 @@ class TestRidersIdleOnly1023(unittest.TestCase):
 
     def test_riders_use_plain_pane_busy_waiting(self):
         for module_name, fn_name in (
-                ("lane_reconcile", "goal_lane_reconcile_recheck"),
                 ("queue_arrival_recheck", "goal_queue_arrival_recheck"),
                 ("u_freshness", "goal_u_freshness_recheck"),
                 ("release_gap", "goal_release_gap_recheck"),

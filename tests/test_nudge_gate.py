@@ -1,7 +1,7 @@
 """#797 — the shared per-session / per-kind nudge CADENCE GATE
 (`watchdog/nudge_gate.py`): the ONE floor gate that the u-freshness rider AND
-the job-20 keystroke riders (partition-audit, release-gap, queue-arrival,
-lane-occupancy, lane-reconcile) consult, so no machine nudge reaches a session's
+the job-20 keystroke riders (partition-audit, release-gap, queue-arrival)
+consult (#1137 removed the lane-occupancy / lane-reconcile kinds), so no machine nudge reaches a session's
 prompt more often than 1×/hour (the owner's hard strop).
 
 #1023 (owner directive 2026-09-14): the ONE floor is a per-pane-per-KIND 60-min
@@ -79,15 +79,15 @@ class TestCadenceFloors(unittest.TestCase):
         self.assertEqual(ng._category_floor("u-freshness"),
                          max(ng._min_interval(), ng._u_cadence()))
         self.assertEqual(ng._category_floor("goal-guard"), ng.GOAL_GUARD_FLOOR_S)
-        for cat in ("partition-audit", "release-gap", "queue-arrival",
-                    "lane-occupancy", "lane-reconcile"):
+        for cat in ("partition-audit", "release-gap", "queue-arrival"):
             self.assertEqual(ng._category_floor(cat), ng._min_interval())
             self.assertGreaterEqual(ng._category_floor(cat), HOUR)
 
-    def test_gated_categories_includes_lane_reconcile(self):
-        """#913: lane-reconcile already calls gate_ok/mark_sent — it must be
-        in GATED_CATEGORIES for documentation + enumeration completeness."""
-        self.assertIn("lane-reconcile", ng.GATED_CATEGORIES)
+    def test_removed_lane_kinds_are_not_gated(self):
+        """#1137 (owner 25.10.2026): the lane-occupancy / lane-reconcile
+        nudges are gone, so neither kind is gated any more."""
+        self.assertNotIn("lane-reconcile", ng.GATED_CATEGORIES)
+        self.assertNotIn("lane-occupancy", ng.GATED_CATEGORIES)
 
 
 class TestGateOk(unittest.TestCase):
@@ -128,7 +128,7 @@ class TestGateOk(unittest.TestCase):
         # the total cap is 3 h per pane everywhere — still held at 1 h, allowed
         # only past 3 h.
         st = {}
-        ng.mark_sent(st, "sess-a", "lane-occupancy", NOW)
+        ng.mark_sent(st, "sess-a", "release-gap", NOW)
         self.assertFalse(ng.gate_ok(st, "sess-a", "release-gap", NOW + 60))
         self.assertFalse(ng.gate_ok(st, "sess-a", "release-gap", NOW + 59 * 60))
         self.assertFalse(ng.gate_ok(st, "sess-a", "release-gap", NOW + HOUR))
@@ -188,7 +188,7 @@ class TestClassification923(unittest.TestCase):
 
     def test_work_driving_members(self):
         self.assertEqual(ng.WORK_DRIVING_CATEGORIES, frozenset({
-            "lane-occupancy", "release-gap", "queue-arrival", "lane-reconcile",
+            "release-gap", "queue-arrival",
             "bounce-verdict",   # #1066 lane B — the BOUNCE-verdict goal-lane rider
         }))
 
@@ -225,18 +225,18 @@ class TestBatchEligible923(unittest.TestCase):
         # TOTAL cap, so NO new batch is composed this hour (was: other kinds
         # stayed eligible — the two-nudges-per-hour hole via the batch path).
         st = {}
-        ng.mark_sent(st, "s", "lane-occupancy", NOW)
+        ng.mark_sent(st, "s", "release-gap", NOW)
         self.assertEqual(ng.batch_eligible(st, "s", NOW + 60), [])
 
     def test_gap_open_returns_all_eligible(self):
         st = {}
-        ng.mark_sent(st, "s", "lane-occupancy", NOW)
-        # After 3 h (the owner's 2026-09-17 total cap; lane-occupancy's own 1 h
+        ng.mark_sent(st, "s", "release-gap", NOW)
+        # After 3 h (the owner's 2026-09-17 total cap; release-gap's own 1 h
         # floor expired long before): all eligible again
         self.assertEqual(ng.batch_eligible(st, "s", NOW + HOUR), [])
         result = ng.batch_eligible(st, "s", NOW + 3 * HOUR)
         self.assertGreater(len(result), 0)
-        self.assertIn("lane-occupancy", result)
+        self.assertIn("release-gap", result)
         self.assertIn("partition-audit", result)
 
     def test_total_cap_then_floor_gates_the_batch(self):
@@ -256,13 +256,13 @@ class TestBatchEligible923(unittest.TestCase):
 
     def test_starvation_impossible_with_batching(self):
         """The gk starvation shape is impossible with batching: when the slot
-        opens, BOTH lane-occupancy AND partition-audit are in the batch."""
+        opens, BOTH release-gap AND partition-audit are in the batch."""
         st = {}
-        ng.mark_sent(st, "s", "lane-occupancy", NOW - 2 * HOUR)
+        ng.mark_sent(st, "s", "release-gap", NOW - 2 * HOUR)
         ng.mark_sent(st, "s", "partition-audit", NOW)
         # After 3 h from the latest mark_sent (the total cap): gap opens
         result = ng.batch_eligible(st, "s", NOW + 3 * HOUR)
-        self.assertIn("lane-occupancy", result)
+        self.assertIn("release-gap", result)
         self.assertIn("partition-audit", result)
 
     def test_mark_batch_sent_stamps_all(self):
@@ -270,7 +270,7 @@ class TestBatchEligible923(unittest.TestCase):
         the cross-kind total cap then holds the WHOLE batch (even an unmarked
         kind) for the hour — the batch WAS the one hourly interruption."""
         st = {}
-        cats = ["lane-occupancy", "partition-audit", "u-freshness"]
+        cats = ["release-gap", "partition-audit", "u-freshness"]
         ng.mark_batch_sent(st, "s", cats, NOW)
         for cat in cats:
             self.assertEqual(st["nudge_cadence"]["s"][cat], NOW)
@@ -298,15 +298,15 @@ class TestComposeBatch923(unittest.TestCase):
     """#923: compose_batch formats items into a BATCH_PREFIX-headed message."""
 
     def test_prefix_leads(self):
-        text, included = ng.compose_batch([("lane-occupancy", "refill 3 lanes")])
+        text, included = ng.compose_batch([("release-gap", "release 3 commits")])
         self.assertTrue(text.startswith(ng.BATCH_PREFIX))
-        self.assertIn("lane-occupancy", included)
+        self.assertIn("release-gap", included)
 
     def test_orders_wd_first(self):
         items = [("partition-audit", "I5 U0"),
-                 ("lane-occupancy", "refill 3")]
+                 ("release-gap", "release 3")]
         text, included = ng.compose_batch(items)
-        lo_pos = text.index("[lane-occupancy]")
+        lo_pos = text.index("[release-gap]")
         pa_pos = text.index("[partition-audit]")
         self.assertLess(lo_pos, pa_pos)
 
@@ -316,11 +316,11 @@ class TestComposeBatch923(unittest.TestCase):
         self.assertEqual(included, [])
 
     def test_max_chars_trims_audit_first(self):
-        items = [("lane-occupancy", "refill"),
+        items = [("release-gap", "release"),
                  ("partition-audit", "I5 U0 W0 skip0")]
         text, included = ng.compose_batch(items, max_chars=50)
         # Work-driving kept, audit trimmed if needed
-        self.assertIn("[lane-occupancy]", text)
+        self.assertIn("[release-gap]", text)
         self.assertTrue(len(text) <= 50)
 
     def test_batch_prefix_is_machine_recognized(self):
@@ -337,9 +337,9 @@ class TestMarkSent(unittest.TestCase):
 
     def test_mark_sent_does_not_clobber_other_categories(self):
         st = {}
-        ng.mark_sent(st, "sess-a", "lane-occupancy", NOW - 100)
+        ng.mark_sent(st, "sess-a", "release-gap", NOW - 100)
         ng.mark_sent(st, "sess-a", "u-freshness", NOW)
-        self.assertEqual(st["nudge_cadence"]["sess-a"]["lane-occupancy"],
+        self.assertEqual(st["nudge_cadence"]["sess-a"]["release-gap"],
                          NOW - 100)
         self.assertEqual(st["nudge_cadence"]["sess-a"]["u-freshness"], NOW)
 
@@ -383,7 +383,7 @@ class TestBatchCallerRefactor923(unittest.TestCase):
 
     def test_compose_batch_returns_tuple_with_included(self):
         """compose_batch returns (text, included_categories), not just text."""
-        items = [("lane-occupancy", "refill 3"),
+        items = [("release-gap", "release 3"),
                  ("u-freshness", "U=2")]
         result = ng.compose_batch(items)
         # Must be a 2-tuple: (text, included_categories)
@@ -391,15 +391,15 @@ class TestBatchCallerRefactor923(unittest.TestCase):
         self.assertEqual(len(result), 2)
         text, included = result
         self.assertTrue(text.startswith(ng.BATCH_PREFIX))
-        self.assertIn("lane-occupancy", included)
+        self.assertIn("release-gap", included)
         self.assertIn("u-freshness", included)
 
     def test_compose_batch_trim_excludes_audit(self):
         """When max_chars trims audit, included_categories omits the trimmed."""
-        items = [("lane-occupancy", "refill 3"),
+        items = [("release-gap", "release 3"),
                  ("partition-audit", "I5 U0 W0 gk0 skip0")]
         text, included = ng.compose_batch(items, max_chars=50)
-        self.assertIn("lane-occupancy", included)
+        self.assertIn("release-gap", included)
         # audit may or may not be trimmed depending on exact lengths,
         # but included must match what's actually in the text
         for cat in included:
@@ -416,10 +416,10 @@ class TestBatchCallerRefactor923(unittest.TestCase):
         stamps BOTH; the cross-kind total cap then closes the next batch entirely
         for the hour (an unbatched kind no longer leaks a second interruption)."""
         st = {}
-        cats = ["lane-occupancy", "u-freshness"]
+        cats = ["release-gap", "u-freshness"]
         ng.mark_batch_sent(st, "s", cats, NOW)
         sess = st["nudge_cadence"]["s"]
-        self.assertEqual(sess["lane-occupancy"], NOW)
+        self.assertEqual(sess["release-gap"], NOW)
         self.assertEqual(sess["u-freshness"], NOW)
         # The total cap holds the whole batch within the hour.
         self.assertEqual(ng.batch_eligible(st, "s", NOW + 60), [])

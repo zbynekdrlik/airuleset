@@ -2,7 +2,7 @@
 no background lane is live; with lanes live use ASK-AND-CONTINUE and let the
 footer U carry the question.
 
-The sentence renders into every `variant_specs()` (authority, mode, role) variant
+The sentence renders into every `variant_specs()` (authority, role) variant
 via a new `stop-a-livelane` clause (byte-identical join after `stop-a`); the
 tightest-arming gk-review variant DROPS it (it already carries the #1007 rule in
 its own (B) block) so it stays byte-identical + under its headroom cap. The #1074
@@ -26,17 +26,19 @@ SENTENCE_TAIL = "ASK-AND-CONTINUE and let the footer U carry the question"
 
 class GoalLiveLane1007(TestCase):
     def test_sentence_present_in_every_variant_spec(self):
-        # #1074: variant_specs() now has 10 entries (incl. full/sequential/
-        # quality); the quality (B)-block embeds the #1007 sentence verbatim,
-        # so the sweep still finds it in every variant.
-        for authority, mode, role in gr.variant_specs():
-            line = gr.render_goal_line(authority, mode, role)
+        # #1074: the quality (B)-block embeds the #1007 sentence verbatim, so
+        # the sweep finds it in every variant but review (#1137 put review in
+        # variant_specs; it carries the rule in its own Slovak (B) block).
+        for authority, role in gr.variant_specs():
+            if role == "review":
+                continue
+            line = gr.render_goal_line(authority, role)
             self.assertIn(SENTENCE_KEY, line,
-                          "%s/%s/%s missing the #1007 live-lane sentence"
-                          % (authority, mode, role))
+                          "%s/%s missing the #1007 live-lane sentence"
+                          % (authority, role))
             self.assertIn(SENTENCE_TAIL, line,
-                          "%s/%s/%s missing the ASK-AND-CONTINUE tail"
-                          % (authority, mode, role))
+                          "%s/%s missing the ASK-AND-CONTINUE tail"
+                          % (authority, role))
 
     def test_stop_a_livelane_is_a_required_clause(self):
         self.assertIn("stop-a-livelane", gr.REQUIRED_CLAUSES)
@@ -44,7 +46,7 @@ class GoalLiveLane1007(TestCase):
             self.assertEqual(gr.missing_required(p), [], p)
 
     def test_review_variant_drops_the_clause_and_stays_under_headroom(self):
-        line = gr.render_goal_line("full", "parallel", "review")
+        line = gr.render_goal_line("full", "review")
         # dropped from review (it already carries the #1007 rule in its (B) block)
         self.assertNotIn(SENTENCE_KEY, line)
         # and it must still arm with the #384/#730 headroom margin
@@ -52,11 +54,11 @@ class GoalLiveLane1007(TestCase):
                              "review variant headroom < 150 (len=%d)" % len(line))
 
     def test_every_variant_under_budget(self):
-        for authority, mode, role in gr.variant_specs():
-            line = gr.render_goal_line(authority, mode, role)
+        for authority, role in gr.variant_specs():
+            line = gr.render_goal_line(authority, role)
             self.assertLessEqual(len(line), gr.GOAL_ARM_CHAR_CAP,
-                                 "%s/%s/%s over budget: %d"
-                                 % (authority, mode, role, len(line)))
+                                 "%s/%s over budget: %d"
+                                 % (authority, role, len(line)))
 
     def test_variant_check_clean(self):
         self.assertEqual(gr.variant_check(), [])

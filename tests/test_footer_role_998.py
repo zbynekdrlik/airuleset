@@ -83,12 +83,12 @@ class TestRoleFilterFooter(TestCase):
 
 
 class TestStatusRow(TestCase):
-    def test_concurrency_status_row_names_source_and_role(self):
-        with m.patch.object(cli_concurrency, "resolve_concurrency",
-                            return_value=("sequential", "infra", "role")):
-            row = cli_concurrency.concurrency_status_row("/x")
-        self.assertIn("concurrency: sequential (source: role)", row)
-        self.assertIn("role=infra", row)
+    def test_role_status_row_names_the_role(self):   # #1137: role only, no mode
+        with m.patch.object(cli_concurrency, "resolve_role",
+                            return_value="infra"):
+            self.assertEqual(cli_concurrency.role_status_row("/x"), "role: infra")
+        with m.patch.object(cli_concurrency, "resolve_role", return_value=None):
+            self.assertIsNone(cli_concurrency.role_status_row("/x"))
 
 
 if __name__ == "__main__":

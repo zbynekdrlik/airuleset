@@ -40,17 +40,9 @@ _UNSET = "unset CLAUDE_CODE_DISABLE_MOUSE CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN"
 # --------------------------------------------------------------------------- #
 # (a) static: the unset is present in every rendered mode, before the exec
 # --------------------------------------------------------------------------- #
-# #1224: a call of the scope helper (or a raw exec claude) anywhere in a line;
-# the helper's own definition line is not a launch site.
-_LAUNCH_SITE = re.compile(r"(?:^|[;&|(]|\bthen\b|\bdo\b)\s*"
-                          r"(?:_airuleset_exec_claude\b(?!\(\))|exec claude\b)")
-
-
-def _helper_end(lines):
-    """Index of the `}` closing the #1224 scope helper: its own exec runs only
-    when a launch site below calls it."""
-    start = next(i for i, ln in enumerate(lines) if ln.startswith("_airuleset_exec_claude() {"))
-    return next(i for i in range(start, len(lines)) if lines[i] == "}")
+# an `exec claude` launch site anywhere in a line (#1137 removed the #1224
+# scope helper, so the launchers exec claude directly again).
+_LAUNCH_SITE = re.compile(r"(?:^|[;&|(]|\bthen\b|\bdo\b)\s*exec claude\b")
 
 
 class TestLauncherUnsetsMouseEnv(unittest.TestCase):
@@ -90,8 +82,7 @@ class TestLauncherUnsetsMouseEnv(unittest.TestCase):
         unset_line = next(i for i, ln in enumerate(lines) if _UNSET in ln)
         # #1224: a launch site is a call of the scope helper, whose own
         # `exec claude` only runs when one of these calls it
-        exec_lines = [i for i, ln in enumerate(lines)     # #1224 launch sites,
-                      if i > _helper_end(lines) and _LAUNCH_SITE.search(ln)]
+        exec_lines = [i for i, ln in enumerate(lines) if _LAUNCH_SITE.search(ln)]
         self.assertTrue(exec_lines, "no launch site found in the launcher")
         for ei in exec_lines:
             self.assertLess(
@@ -120,8 +111,7 @@ class TestLauncherUnsetsMouseEnv(unittest.TestCase):
         self.assertIn(_UNSET, content)
         lines = content.splitlines()
         unset_line = next(i for i, ln in enumerate(lines) if _UNSET in ln)
-        exec_lines = [i for i, ln in enumerate(lines)     # #1224 launch sites,
-                      if i > _helper_end(lines) and _LAUNCH_SITE.search(ln)]
+        exec_lines = [i for i, ln in enumerate(lines) if _LAUNCH_SITE.search(ln)]
         self.assertTrue(exec_lines, "no launch site in the impl launcher")
         for ei in exec_lines:
             self.assertLess(unset_line, ei,

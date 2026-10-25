@@ -32,7 +32,6 @@ import watchdog as wd  # noqa: E402
 from watchdog import queue_arrival_recheck as qa  # noqa: E402
 from _goal_arm_helpers import (  # noqa: E402
     DeliverGoalFakeTmux, GOAL_ARMED_CAP, _write_marker_transcript)
-from _parallel_mode_pin import PARALLEL_PIN  # noqa: E402  (#1137)
 
 NOW = 1_000_000
 DAY = 24 * 3600
@@ -57,7 +56,6 @@ class _SV:
         return self.result
 
 
-@PARALLEL_PIN  # #1137 owner ROZHODNUTÉ 2026-09-30: sequential default; declared-parallel suite
 class TestUnconfirmedNotTerminal(unittest.TestCase):
     CWD = "/home/newlevel/devel/unconf"
 
@@ -84,7 +82,8 @@ class TestUnconfirmedNotTerminal(unittest.TestCase):
             return qa.goal_queue_arrival_recheck(
                 now, self._tmux(), qrecs, self.sid, self.CWD, "%9", self.tpath,
                 "sess:0", False, set(), queue_fetch=lambda cwd: [1, 2],
-                state=state, sleep_fn=lambda *a, **k: None)
+                state=state, sleep_fn=lambda *a, **k: None,
+                deliver_hold=lambda: None)   # #1137: the ended-pane delivery path
 
     def test_unconfirmed_advances_floor_but_not_baseline(self):
         qrecs = {self.sid: {"base": [1], "first_seen": NOW - DAY}}

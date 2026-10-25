@@ -47,7 +47,7 @@ from _goal_arm_helpers import (  # noqa: E402
 
 # The REAL david1 payload - the shipped fork-no-merge /goal line (the exact
 # template that stranded in david1-3). Ends `... never a compact HOLD.`.
-_PAYLOAD = goal_registry.render_goal_line("fork-no-merge", "parallel", None)
+_PAYLOAD = goal_registry.render_goal_line("fork-no-merge", None)
 
 # A stale (drifted) armed condition + the shipped template it drifted from, from
 # the #623 signature (shared with test_goal_stale_rearm_623).

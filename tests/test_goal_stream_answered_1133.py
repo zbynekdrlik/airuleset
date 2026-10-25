@@ -105,25 +105,22 @@ class TestStreamPayloadRecognition(unittest.TestCase):
     def test_every_current_reduced_variant_is_a_stream_payload(self):
         n = 0
         for a in sm.STREAM_AUTHORITIES:
-            for mode, role in (("parallel", None), ("sequential", None),
-                               ("sequential", "infra")):
-                line = gr.render_goal_line(a, mode, role)
-                self.assertTrue(sm.is_stream_payload(line), (a, mode, role))
+            for role in (None, "infra"):
+                line = gr.render_goal_line(a, role)
+                self.assertTrue(sm.is_stream_payload(line), (a, role))
                 self.assertTrue(sm.is_stream_payload(line[len("/goal "):]))
                 n += 1
-        self.assertEqual(n, 6)
+        self.assertEqual(n, 4)
 
     def test_old_stream_templates_are_stream_payloads(self):
         self.assertTrue(sm.is_stream_payload(OLD_FORK))
         self.assertTrue(sm.is_stream_payload(_FIX["branch-merge"]))
 
     def test_no_full_template_and_no_hand_goal_is_a_stream_payload(self):
-        for spec in gr.variant_specs():
+        for spec in gr.variant_specs():   # the review variant included
             if spec[0] == "full":
                 self.assertFalse(sm.is_stream_payload(gr.render_goal_line(*spec)),
                                  spec)
-        self.assertFalse(sm.is_stream_payload(gr.render_goal_line(
-            "full", "parallel", "review")))
         self.assertFalse(sm.is_stream_payload(_FIX["full"]))
         for p in (None, "", "/goal fix the tests", "stream-wait"):
             self.assertFalse(sm.is_stream_payload(p), p)

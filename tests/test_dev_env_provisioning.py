@@ -2191,9 +2191,9 @@ class TestApplyStreamTmuxWindowName(TestCase):
 class TestManagedWindowCreation998(TestCase):
     _GK_WINDOWS = [
         {"name": "gk", "cwd": "~/devel/odoo/odoo-erp",
-         "role": "review", "mode": "parallel"},
+         "role": "review"},
         {"name": "gk-infra", "cwd": "~/devel/odoo/odoo-erp-infra",
-         "role": "infra", "mode": "sequential"},
+         "role": "infra"},
     ]
 
     def _tmp(self, content=None):
@@ -2238,7 +2238,7 @@ class TestManagedWindowCreation998(TestCase):
         # A declaration with ONLY the primary window has no NON-primary window
         # to create -> byte-identical to the undeclared render.
         one = [{"name": "gk", "cwd": "~/devel/odoo/odoo-erp",
-                "role": "review", "mode": "parallel"}]
+                "role": "review"}]
         self.assertEqual(
             airuleset.render_stream_tmux_window_block("gk", windows=one),
             airuleset.render_stream_tmux_window_block("gk"),

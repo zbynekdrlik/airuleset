@@ -2,7 +2,7 @@
 "the worktree exists".
 
 A MERGED lane (tip is an ancestor of the base) is FINISHED, so
-cli_lane_overlap.gather_live_lanes EXCLUDES it — this fixes the false OVERLAP
+cli_lane_liveness.gather_live_lanes EXCLUDES it — this fixes the false OVERLAP
 the 8/8 merged worktrees caused (the reason #998's own dispatch needed an
 OVERLAP-BYPASS). RED: merged worktree -> not live; unmerged -> live.
 
@@ -23,7 +23,7 @@ from unittest import TestCase, main
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
-import cli_lane_overlap as lo  # noqa: E402
+import cli_lane_liveness as lo  # noqa: E402  (#1137: cli_lane_overlap removed)
 
 _ENV = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
         "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
