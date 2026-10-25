@@ -597,7 +597,7 @@ push / PR / merge / deploy, never that backup.
    production-classified code is itself a FINDING, never a mitigation — a YES to any of these
    blocks the verdict at the same severity as a correctness bug.
    **The reviewer's brief MUST include the REPO'S LENS LIST (#843).** Read every
-   `.claude/rules/gk-review-lenses*.md` file (the index `gk-review-lenses.md` + `gk-review-lenses-prevencia*` / `-quality*`) from the
+   `.claude/rules/gk-review-lenses*.md` file (the index `gk-review-lenses.md` + every `gk-review-lenses-prevencia*`) from the
    TARGET repo in full when present (page through a file too big for one Read): a stream account
    does not auto-load them (#1260, `claudeMdExcludes`). Else the built-in seven:
    security / correctness / test-integrity / evidence-integrity / design-doctrine / process /

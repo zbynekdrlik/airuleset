@@ -3065,9 +3065,9 @@ SUPPRESSED_ALERT_PREFIXES = (
     # "OAuth access token has been revoked" is NORMAL subscription-switching by
     # the Claude project + its watchers, not an incident. Same #546 audience
     # split: no Discord PING, the machine channel keeps the signal (watchdog
-    # journal + the `suppressed` delivery-log line). The watchdog's job stays
-    # the silent auto-resume (#675 owns the work-resume half).
+    # journal + the `suppressed` delivery-log line); the job stays the silent auto-resume (#675).
     ("oauthblock", "oauth-revoke (#676)"),  # watchdog job 1 escalation (#662 alarm — owner-ruled spam)
+    ("thrash", "autocompact-thrash (#1260)"),  # job 1 hold: a session-stopped state (#704); the pane shows CC's banner
     # #1075 — `credential-dead:` is DELIBERATELY NOT in this table (a
     # boundary-matched sibling of `oauthblock:` above, but the OPPOSITE ruling).
     # #676 suppressed `oauthblock:` because a transient revoke-and-resume is

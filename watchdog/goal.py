@@ -1907,11 +1907,11 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
         # user's own /autopilot callback (whose origin IS the user). Never
         # type /goal into a pane a human just touched -- they may have
         # deliberately stopped the loop without a `/goal clear`. Left pending
-        # (a "skip:" word) so a later sweep re-tries once the human leaves,
-        # or the 30-min age cap eventually expires it with the "arm failed"
-        # ping. `tpath` is guaranteed defined here (pane resolution above
-        # already required an active transcript). #675 -- auth-rearm is ALSO
-        # watchdog-initiated, so it honours the SAME gate.
+        # (a "skip:" word) for a later sweep or the 30-min age cap. `tpath` is
+        # defined here (pane resolution required a transcript). #675: auth-rearm
+        # too. #1260: never re-arm a thrash-held session (a turn replays it).
+        if origin in _GOAL_WATCHDOG_REARM_ORIGINS and watchdog.thrash_held(tpath):
+            return "skip:thrash-held"
         if origin in _GOAL_WATCHDOG_REARM_ORIGINS:
             # #675 -- delivery passes the SMALL future clock-skew tolerance (not
             # the full window): a grossly-future presence marker vetoing this

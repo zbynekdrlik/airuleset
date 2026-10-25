@@ -8,16 +8,23 @@ already over the window before the first step: it only replays the thrash. On
 david3 (24./25.10.2026) job 1 typed 31 of them in one night, ~40 % of a weekly
 limit with no work done. Only a human `/clear` or a smaller baseline fixes it.
 
-So a held session gets NO machine keystroke at all: job 1 holds the episode,
-`send_verified` and the stash route refuse every non-owner text, `pane_ready`
-refuses every idle-pane rider, and job 1b never resumes a thrashing worker. The
-owner's own Discord reply still goes through. The owner gets ONE notice per
-episode.
+So a held session gets no machine text: job 1 holds the episode, `send_verified`
+and the stash route refuse every non-owner text, `pane_ready` refuses every
+idle-pane rider, a watchdog goal re-arm skips it, and job 1b never resumes a
+thrashing worker. The owner's own Discord reply still goes through. ONE notice
+per episode goes to the machine channel (`thrash:` is suppressed at send, the
+#704 "session stojí never pings" rule); the stopped pane shows CC's own banner.
+
+NOT held: CC's "after shrinking fallback" variant ("…fell back from X to Y …
+Your next message tries X first"). The cause is a temporary model fallback, the
+next message retries the bigger window, so job 1's ordinary bounded `continue`
+(and model_restore) are the cure there.
 """
 import re
 
 API_ERROR_KIND = "autocompact_thrashing"
 _AUTOCOMPACT_THRASH_RX = re.compile(r"autocompact is thrashing", re.I)
+_RECOVERABLE_RX = re.compile(r"your next message tries|fell back from", re.I)
 NOTICE = ("🛑 **%s** — Claude Code zastavil session: *Autocompact is thrashing* "
           "(kontext je plný hneď po zhrnutí). Watchdog do nej už nič nepíše; "
           "pomôže len `/clear` alebo nová session.")
@@ -41,8 +48,9 @@ def _last_api_error_kind(tpath):
 
 def is_stop(err_text, tpath):
     """`err_text` = `transcript_last_error(tpath)`: a non-empty error that is the
-    thrash banner OR carries the structured `autocompact_thrashing` kind."""
-    if not err_text:
+    thrash banner OR carries the structured `autocompact_thrashing` kind, and is
+    not the recoverable fallback variant."""
+    if not err_text or _RECOVERABLE_RX.search(err_text):
         return False
     return is_autocompact_thrash(err_text) or (
         bool(tpath) and _last_api_error_kind(tpath) == API_ERROR_KIND)

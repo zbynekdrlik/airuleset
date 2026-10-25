@@ -4,7 +4,7 @@ Two keys `cli_config.apply_managed_settings_defaults` delegates here:
 
 - `claudeMdExcludes` (CC setting, picomatch on absolute paths; it also covers
   `.claude/rules/**` files). The odoo-erp gatekeeper review lenses
-  (`.claude/rules/gk-review-lenses*.md`: index + prevencia/quality parts, ~400 KB,
+  (`.claude/rules/gk-review-lenses*.md`: the index + its prevencia parts, ~400 KB,
   72 % of a stream's always-on instructions on 25.10.2026) are excluded on every
   account whose BASE authority is not `full`. The gatekeeper keeps them loaded as
   its cold-review checklist. Every self-review path reads them explicitly

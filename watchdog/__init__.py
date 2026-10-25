@@ -305,7 +305,7 @@ _LIVE_BG_TASK_RX = re.compile(r"\b\d+\s+(?:shells?|monitors?)\b", re.I)
 # cross_stream / janitor, hooks, tests) resolves unchanged. `_LIVE_BG_TASK_RX`
 # (bound just above) stays in __init__ and is read by decide.py at its call site
 # via `watchdog._LIVE_BG_TASK_RX` (C4), like pane_text.py's `_QUEUED_COMPACT_RX`.
-from watchdog.thrash import is_autocompact_thrash, hold as _thrash_hold, is_stop as _thrash_stop  # noqa: E402,F401 (#1260)
+from watchdog.thrash import is_autocompact_thrash, hold as _thrash_hold, is_stop as _thrash_stop, held as thrash_held  # noqa: E402,F401 (#1260)
 from watchdog.decide import (  # noqa: E402
     _pane_live_shell_evidence as _pane_live_shell_evidence,
     _pane_live_task_count as _pane_live_task_count,
