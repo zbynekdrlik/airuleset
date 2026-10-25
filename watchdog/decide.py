@@ -239,12 +239,16 @@ def is_account_dispatch_block(text):
 # is always an `isApiErrorMessage` transcript entry (CC's own definitive error
 # marker, never prose), so the match domain is already constrained to real
 # errors CC actually hit.
-_OAUTH_REVOKED_RX = re.compile(r"(?:OAuth )?access token has been revoked", re.I)
+# #1261: Claude Code 2.1.306 writes the same 401 as "OAuth token revoked · Please
+# run /login" (error type authentication_failed, agent deaths too); both match.
+_OAUTH_REVOKED_RX = re.compile(
+    r"(?:OAuth )?access token has been revoked|OAuth token revoked", re.I)
 
 
 def is_oauth_revoked(text):
     """True for the OAuth-rotation 401 REVOKED class (#602) -- the literal
-    "access token has been revoked" (the full "Please run /login · … revoked"
+    "access token has been revoked" or, since CC 2.1.306, "OAuth token revoked"
+    (#1261) (the full "Please run /login · … revoked"
     banner AND the "Agent … failed: … revoked" agent-death variant). A bare
     "Please run /login" (login-expired / not-logged-in, the 71% non-rotation
     majority in the corpus) is DELIBERATELY excluded -- it is not a rotation
