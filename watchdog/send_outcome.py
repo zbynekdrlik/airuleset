@@ -312,10 +312,16 @@ def stash_pointer(pid, run, text, nudge, logs):
     """#1157 slice 3 — the text `cross_stream._try_stash_nudge` hands to
     `deliver_with_stash` (bounce / gk-request / card into a pane holding the
     owner's draft), the same `machine_pointer` decision as `send_verified`.
-    None when the file could not be written: the caller types nothing."""
+    None when the file could not be written or the pane's session is
+    thrash-held (#1260): the caller types nothing."""
+    from watchdog import thrash
+
     def _log(line):
         if isinstance(logs, list):
             logs.append(line)
+    if thrash.pane_held(pid, run):
+        _log("stash abort: thrash-held session (#1260)")
+        return None
     ptr = machine_pointer(pid, run, text, nudge, False, _log)
     return None if ptr is None else ptr[0]
 

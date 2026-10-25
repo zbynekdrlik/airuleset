@@ -305,7 +305,7 @@ _LIVE_BG_TASK_RX = re.compile(r"\b\d+\s+(?:shells?|monitors?)\b", re.I)
 # cross_stream / janitor, hooks, tests) resolves unchanged. `_LIVE_BG_TASK_RX`
 # (bound just above) stays in __init__ and is read by decide.py at its call site
 # via `watchdog._LIVE_BG_TASK_RX` (C4), like pane_text.py's `_QUEUED_COMPACT_RX`.
-from watchdog.thrash import is_autocompact_thrash, hold as _thrash_hold  # noqa: E402,F401 (#1260)
+from watchdog.thrash import is_autocompact_thrash, hold as _thrash_hold, is_stop as _thrash_stop  # noqa: E402,F401 (#1260)
 from watchdog.decide import (  # noqa: E402
     _pane_live_shell_evidence as _pane_live_shell_evidence,
     _pane_live_task_count as _pane_live_task_count,
@@ -4171,8 +4171,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
                         tpath, captured, draft_pending, run, send_fn, owner,
                         sleep_fn, dry_run, logs, state_path, first_401_seed)
                     continue
-                if action == "nudge" and is_autocompact_thrash(err_text):
-                    _thrash_hold(state, key, entry, project, logs)   # #1260: never `continue`
+                if action == "nudge" and _thrash_stop(err_text, tpath):   # #1260: never `continue`
+                    _thrash_hold(state, key, entry, project, logs, send_fn, owner, "thrash:%s:%s:%s" % (key, err_hash, fs), dry_run)
                 elif action == "nudge" and is_usage_cap(err_text):
                     # quota USAGE cap — time-based, `continue` can't fix it: ping ONCE, mark
                     # dormant (decide() → 'wait' for this hash; only the reset clock fixes it). This
@@ -4372,7 +4372,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
             if (sub_path is not None
                     and transcript_last_marker(tpath) == "⏳"):
                 sub_err = transcript_last_error(sub_path)
-                if sub_err:
+                if sub_err and not _thrash_stop(sub_err, sub_path):   # #1260: a thrash is not resumable
                     try:
                         sub_idle = now - sub_path.stat().st_mtime
                     except OSError:

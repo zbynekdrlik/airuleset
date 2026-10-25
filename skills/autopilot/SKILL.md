@@ -1163,7 +1163,9 @@ gap in either.
    >    or is folded into it. Also confirm the claimed
    >    commits, RED/GREEN test pairs, and clean `/review` + `/requesting-code-review` results
    >    genuinely exist on that branch. Result: INTEGRATE if it passes, or BOUNCE it back with the
-   >    findings on the ticket + re-dispatch a fresh worker from durable state.
+   >    findings on the ticket + re-dispatch a fresh worker from durable state. A repo with gk
+   >    review lenses: read every `.claude/rules/gk-review-lenses*.md` in full for this review and
+   >    for your own self-review (a stream account does not auto-load them, #1260).
    > 2. **BEFORE each `--no-ff` merge, ASSERT the shared checkout's HEAD is still the integration
    >    target** — `git symbolic-ref --short HEAD` MUST print exactly `main` (local-merge repo) or
    >    `dev` (`dev`→`main` PR repo). If it names a `worktree-agent-*`/`worktree-issue-*` branch

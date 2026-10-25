@@ -44,6 +44,9 @@ def pane_ready(pid, cwd, kind, *, projects_dir, find_transcript, capture,
     sid = sid[:-len(".jsonl")] if sid.endswith(".jsonl") else sid
     if handled is not None and sid in handled:
         return False, "handled-this-sweep", sid, tpath
+    from watchdog import thrash
+    if thrash.held(tpath):
+        return False, "thrash-held", sid, tpath    # #1260: a turn only replays the thrash
     if in_mode(pid):
         return False, "in-mode", sid, tpath
     captured = capture(pid)

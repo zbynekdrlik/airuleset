@@ -596,10 +596,10 @@ push / PR / merge / deploy, never that backup.
    An "it's just a script / MVP" justification for missing structure, error paths, or tests on
    production-classified code is itself a FINDING, never a mitigation — a YES to any of these
    blocks the verdict at the same severity as a correctness bug.
-   **The reviewer's brief MUST include the REPO'S LENS LIST (#843).** Read
-   `.claude/rules/gk-review-lenses.md` AND every `gk-review-lenses-prevencia*.md` companion from the
-   TARGET repo when present: a stream account does not auto-load them (#1260, `claudeMdExcludes`),
-   so the reviewer reads them explicitly. Else the built-in seven:
+   **The reviewer's brief MUST include the REPO'S LENS LIST (#843).** Read every
+   `.claude/rules/gk-review-lenses*.md` file (the index `gk-review-lenses.md` + `gk-review-lenses-prevencia*` / `-quality*`) from the
+   TARGET repo in full when present (page through a file too big for one Read): a stream account
+   does not auto-load them (#1260, `claudeMdExcludes`). Else the built-in seven:
    security / correctness / test-integrity / evidence-integrity / design-doctrine / process /
    shared-benefit (a change whose benefit extends beyond the requesting client implemented as
    single-client is a FINDING at correctness severity; the diff's placement must match the design

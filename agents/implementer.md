@@ -84,7 +84,8 @@ OPEN for the main — never close it yourself.
    so finished work survives even a box loss.
 5. **Two adversarial reviews on your OWN backend** — dispatch two fresh-context `general-purpose`
    reviews (the SAME shape the worker template's CYCLE step 6 uses), fed the diff + the repo's review
-   lenses + the #414 structural refutation; fix EVERY actionable finding in THIS branch, RED→GREEN
+   lenses (every `.claude/rules/gk-review-lenses*.md`, read in full: a stream account does not
+   auto-load them, #1260) + the #414 structural refutation; fix EVERY actionable finding in THIS branch, RED→GREEN
    order held. Run the repo's local gates green (lint, tests, and airuleset's `ruff` /
    `size_ratchet --check` / `context-baseline --check` / `goal-inventory --check` where they apply).
 

@@ -1275,7 +1275,7 @@ def send_verified(pane_id, text, run=None, tpath=None, sleep_fn=None, logs=None,
     rescued and the send aborted. `user_authored` (#994): True ONLY for the
     owner's own Discord reply; it bypasses the nudge kill switch, which is
     enforced at the `keys` primitive (#1002)."""
-    from watchdog import send_outcome as _so
+    from watchdog import send_outcome as _so, thrash as _thrash
     run = run or watchdog._default_run
     sleep_fn = sleep_fn or time.sleep
 
@@ -1283,8 +1283,8 @@ def send_verified(pane_id, text, run=None, tpath=None, sleep_fn=None, logs=None,
         if isinstance(logs, list):
             logs.append(reason)
 
-    if not tpath:
-        _log("send-verified abort: no transcript path")
+    if not tpath or (not user_authored and _thrash.held(tpath)):   # #1260
+        _log("send-verified abort: " + ("thrash-held session (#1260)" if tpath else "no transcript path"))
         return _so.OUT_NOT_TYPED
     # A FRESH capture right before typing (the sibling helpers' own race
     # guard): the caller proved the box bare a moment ago, but round-trips pass
