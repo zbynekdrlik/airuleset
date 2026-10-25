@@ -152,11 +152,11 @@ def is_exact_declared_window(cwd, windows=None, user=None, home=None):
     """#1038 — True iff `cwd` is EXACTLY a declared window's own working directory
     (realpath equality), NOT merely CONTAINED in one. `resolve_concurrency` matches
     by containment on purpose (a pane cd'd into a subdirectory inherits the
-    window's MODE) — but the post-reboot VIRGIN-arm scan asks a stricter question:
-    "is this pane THE declared window itself?" A human sub-pane cd'd into a
-    SUBDIRECTORY of a declared checkout (a worktree, an ad-hoc sub-session) must
-    NEVER be given an unsolicited `/goal`; only the window's own pane is
-    bootstrapped. Fail-safe False on any resolver/expand error."""
+    window's MODE) — but Job 52's watch triggers (`watch_triggers`) ask a stricter
+    question: "is this pane THE declared window itself?" A human sub-pane cd'd
+    into a SUBDIRECTORY of a declared checkout (a worktree, an ad-hoc sub-session)
+    never counts; only the window's own pane does (its first consumer, the #1038
+    virgin arm, is retired, #1260). Fail-safe False on any resolver/expand error."""
     if not cwd:
         return False
     if windows is None:

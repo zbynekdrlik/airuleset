@@ -2518,7 +2518,7 @@ def goal_status_probe(cwd, run=None, pane_env=None, projects_dir=None):
         pane_found = True
         armed = _wd.pane_goal_armed(_wd.capture_pane(pid, run))
         if sid:
-            pending = bool(_goal_mod.load_goal_requests().get(sid))
+            pending = _goal_mod.request_is_live(_goal_mod.load_goal_requests().get(sid))  # #1260
     if _watch is not None:      # #1163 — a steer=watch window: its watch, never a /goal
         return _wt.status_row(_watch, time.time(), _wt.load_watchdog_state(),
                               kind_on=_wd.nudges_enabled(_wt.NUDGE_KIND),

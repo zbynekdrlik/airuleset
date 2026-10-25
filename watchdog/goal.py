@@ -302,6 +302,14 @@ _GOAL_ANSWER_REARM_ORIGIN = "answer-rearm"
 _GOAL_DECLARED_VIRGIN_ORIGIN = "declared-virgin"
 # Origins no longer produced; a leftover request of one is only ever dropped.
 _GOAL_RETIRED_ORIGINS = (_GOAL_STALE_REARM_ORIGIN, _GOAL_DECLARED_VIRGIN_ORIGIN)
+
+
+def request_is_live(req):
+    """#1260 -- True for a pending request delivery will act on. A retired-origin
+    leftover is only ever dropped, so `status` never reads it as "arming" (on a
+    box with the goal kill-switch, `run_once` never runs the sweep that purges it)."""
+    return isinstance(req, dict) and bool(req) \
+        and req.get("origin") not in _GOAL_RETIRED_ORIGINS
 # The watchdog-INITIATED re-arm origins that honour deliver_goal's recent-human
 # gate (never type into a pane a human just touched) — as opposed to the user's
 # own `self-callback` arm, whose origin IS the user.
@@ -328,8 +336,8 @@ _GOAL_RECOVERY_ORIGINS = (_GOAL_AUTH_REARM_ORIGIN, _GOAL_ANSWER_REARM_ORIGIN)
 # re-arm AND every unknown/empty origin PRESERVES the anchor (fail-safe: this
 # is an ALLOWLIST, so a future automatic origin nobody classified defaults to
 # preserve, never to refresh). RULE: every NEW origin string MUST be added to
-# exactly ONE of these two tuples -- the ONE exception is a RETIRED origin no
-# longer PRODUCED (`_GOAL_STALE_REARM_ORIGIN`, #1113): it is recognised only to
+# exactly ONE of these two tuples -- the exception is a RETIRED origin no longer
+# PRODUCED (`_GOAL_RETIRED_ORIGINS`: stale-rearm #1113, declared-virgin #1260): recognised only to
 # DROP a leftover on-disk request, so it joins neither tuple and defaults to the
 # fail-safe "preserve the anchor" branch above, exactly like an unknown origin.
 _GOAL_USER_CALLBACK_ORIGINS = (_GOAL_SELF_CALLBACK_ORIGIN,)
