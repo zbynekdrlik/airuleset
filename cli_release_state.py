@@ -443,7 +443,7 @@ def _compute_two_branch(root, git_full_fn, prefix, ref_exists_fn):
     bare subject ref, `fix: [green] #1114 …`); an extra context `#N` or a
     `Merge pull request #N` number is bounded by `bucketize` (#1141), which
     keeps M to open workable tickets. #1228: a docs/chore/style/ci commit (a
-    design doc naming an epic) carries no ticket at all (`_issue_refs`).
+    design doc naming an epic) puts its tickets in `.docs`, never in M.
 
     ACCEPTED limitations: (a) a revert whose ORIGINAL `feat(#N)` is ALSO in
     range re-adds `#N`; (b) a raw RS byte (\\x1e) in a body truncates its later
@@ -594,8 +594,9 @@ def merged_unreleased_issues(root, git_fn=None, pr_meta_fn=None,
                              cache_path=None, now=None, slug=None, slug_fn=None,
                              remote_fn=None, ref_exists_fn=None,
                              git_full_fn=None):
-    """The set of issue numbers whose fix PR is merged into develop/staging but
-    NOT yet in main (`M`). `slug` (or `slug_fn`) names the canonical owner/repo
+    """The `cli_commit_kind.MergedUnreleased` issue numbers whose fix is merged
+    into develop/staging (or dev) but NOT yet in main (`M`; `.docs` = the ones
+    only a docs change names, #1228). `slug` (or `slug_fn`) names the canonical owner/repo
     for the PR-meta read + the cache file, else it is resolved from the LOCAL
     remote before the range (#1090: zero gh on the hot path, fork-aware). `now`
     is kept for signature stability. Seams: `remote_fn`/`ref_exists_fn` (#1090),

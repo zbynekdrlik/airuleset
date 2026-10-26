@@ -386,7 +386,7 @@ def _emit_waiting(waiting, rows, root, own_stream, supplement=None):
     `ping`), so the list matches the footer's `U N`. `supplement` = the slice
     box's #948 rows, merged in as the cache count adds them (#367). #1218:
     every ❓ entry is attributed against ONE label-U cover of the UNFILTERED
-    `rows` + the supplement — the `question_cover_numbers` the footer saves."""
+    `rows` + the supplement — the `question_cover_*` the footer saves."""
     import airuleset
     extra = supplement or {}
     merged = {**waiting, **extra}

@@ -84,6 +84,8 @@ _M_MERGED = ("fix merged to the integration branch, not yet on main: waits "
              "for the release cut (#1083)")
 _M_PENDING = ("the fix is on main but a PROD instance does not run it yet: "
               "waits for the deploy (#1141)")
+_M_DOCS = ("the fix is live, and a docs/chore change naming it is merged but "
+           "not released: waits for the release cut (#1228)")
 
 
 @dataclass(frozen=True)
@@ -435,8 +437,9 @@ def classify(row, facts=None, box=None, number=None):
        open: a `_C_VETO` label, unreadable labels, or another fix still
        pending (merged, in CI, or any open linked PR) (#1141 slice 3);
     3. P — an open linked PR's checks are still running;
-    4. M — merged to the integration branch (#1083) or on main but not on
-       PROD yet (PENDING); `prio:bounce` keeps it in I (rework was asked for).
+    4. M — merged to the integration branch (#1083), on main but not on
+       PROD yet (PENDING), or live with only a docs change pending (#1228);
+       `prio:bounce` keeps it in I (rework was asked for).
        The old U-label veto is gone: step 1 already took every question;
     5. on a reduced-authority box `facts.handed` moves a remaining I row to gk
        (#391; a handed row parked in W stays there, as the footer counts it).
@@ -464,9 +467,11 @@ def classify(row, facts=None, box=None, number=None):
     if facts.pipeline:
         return ("P", "an open linked PR is in CI: waits for its checks "
                      "(#1141)")
-    if facts.merged or facts.on_main == PENDING:
+    docs_wait = facts.merged_docs and facts.on_main in (DEPLOYED, RELEASED)
+    if facts.merged or facts.on_main == PENDING or docs_wait:
         if _BOUNCE not in names:
-            return "M", (_M_MERGED if facts.merged else _M_PENDING)
+            return "M", (_M_MERGED if facts.merged else
+                         _M_DOCS if docs_wait else _M_PENDING)
         reason += "; merged, but prio:bounce keeps it here (#1083)"
     if facts.handed and bucket == "I" and box.kind == "slice":
         if facts.handed == "released":

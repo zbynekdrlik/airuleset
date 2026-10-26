@@ -41,7 +41,6 @@ def footer(rows, root, slug, merged, own_stream=None, *, handed=None,
         sys.stderr.write("tickets-status: ticket facts skipped (%s)\n" % e)
         cli_ticket_facts.forget(root)
         facts = ts.TicketFacts(merged=frozenset(int(n) for n in merged or ()),
-                               merged_docs=frozenset(getattr(merged, "docs", ())),
                                handed=dict(handed or {}))
     box = ts.Box(own_stream=own_stream,   # #1218: cover BEFORE the role filter
                  asked=asked_refs(root, question_cover(rows, own_stream)))
