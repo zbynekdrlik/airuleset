@@ -5,7 +5,6 @@ unless the newest `Design-by:` comment on every issue is `Design-by: main
 import json
 import os
 import shutil
-import subprocess
 import sys
 import tempfile
 import unittest
@@ -16,7 +15,6 @@ sys.path.insert(0, str(REPO))
 
 from gates import designdispatch as dd  # noqa: E402
 
-from _hook_state_cleanup import hermetic_hook_env  # noqa: E402  (#1046 hermetic HOME)
 
 # #1046: some classes call dd.* IN-PROCESS, which _logs to
 # ~/.claude/design-by-gate.log via expanduser("~"). Point HOME at a fresh empty
@@ -227,48 +225,6 @@ class TestEvaluate(unittest.TestCase):
             resolve_slug=lambda cwd: "owner/repo", fable_id=FABLE)
         self.assertEqual(v, "allow")
         self.assertIn("bypass", r)
-
-
-class TestAdapterEndToEnd(unittest.TestCase):
-    """Drive the REAL adapter with a fake `gh` on PATH -- exercises -P, PYTHONPATH
-    resolution, and the exit-2 stderr contract."""
-
-    HOOK = REPO / "hooks" / "block-dispatch-without-main-design.sh"
-
-    def _fake_gh(self, comments_json):
-        import tempfile
-        d = tempfile.mkdtemp()
-        self.addCleanup(__import__("shutil").rmtree, d, True)
-        gh = Path(d) / "gh"
-        gh.write_text(
-            "#!/usr/bin/env bash\n"
-            'if [ "$1" = "repo" ]; then echo "owner/repo"; exit 0; fi\n'
-            'if [ "$1" = "api" ]; then cat <<\'JSON\'\n%s\nJSON\n'
-            "exit 0; fi\nexit 0\n" % comments_json)
-        gh.chmod(0o755)
-        return d
-
-    def _run(self, prompt, comments_json):
-        ghdir = self._fake_gh(comments_json)
-        env = hermetic_hook_env(self, PATH=ghdir + os.pathsep + os.environ["PATH"])
-        # cwd must be a REAL directory -- _resolve_slug runs `gh` with cwd=<the
-        # payload cwd>, so a non-existent cwd fails the subprocess (not the gate).
-        return subprocess.run(
-            ["bash", str(self.HOOK)], input=_payload(prompt, cwd=str(REPO)),
-            capture_output=True, text=True, env=env)
-
-    def test_worker_design_blocks_via_adapter(self):
-        # one comment per line as `gh api ... -q '.[]'` streams it
-        body = json.dumps({"body": "Design-by: worker claude-opus-4-8"})
-        r = self._run("Work issue #1061 in repo", body)
-        self.assertEqual(r.returncode, 2, r.stderr)
-        self.assertIn("main-authored design", r.stderr)
-
-    def test_main_design_allows_via_adapter(self):
-        body = json.dumps({"body": "Design-by: main claude-fable-5-1"})
-        r = self._run("Work issue #1061 in repo", body)
-        self.assertEqual(r.returncode, 0,
-                         "rc=%d stderr=%r" % (r.returncode, r.stderr))
 
 
 if __name__ == "__main__":

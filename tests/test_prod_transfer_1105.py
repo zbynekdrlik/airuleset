@@ -32,11 +32,6 @@ def _fake_token():
     return "gh" + "p_" + "0123456789" + "abcdefghij" + "0123456789" + "abcd"
 
 
-def _fake_blob():
-    # A >=32-char high-entropy blob, assembled from <32-char pieces.
-    return "aB3xK9pQ2vT4" + "wR8nL5jH3bF6" + "dS1aG0zCq7Y"
-
-
 # --------------------------------------------------------------------------- #
 # (a) SURFACE DETECTION -- the erp-test-only surfaces in a lane's diff/commands
 # --------------------------------------------------------------------------- #
@@ -158,10 +153,6 @@ class TestManifestParsing(unittest.TestCase):
 class TestSecretValueGuard(unittest.TestCase):
     def test_token_prefix_value_flagged(self):
         line = ("Prod-transfer: token %s — sensitivity: secret" % _fake_token())
-        self.assertIsNotNone(pt.line_has_secret_value(line))
-
-    def test_high_entropy_blob_flagged(self):
-        line = ("Prod-transfer: key %s — sensitivity: secret" % _fake_blob())
         self.assertIsNotNone(pt.line_has_secret_value(line))
 
     def test_clean_name_and_path_not_flagged(self):

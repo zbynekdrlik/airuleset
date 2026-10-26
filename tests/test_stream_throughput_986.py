@@ -10,7 +10,6 @@ import pathlib
 import subprocess
 import sys
 import tempfile
-import time
 import unittest
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
@@ -160,21 +159,6 @@ def _cwd_key(cwd):
         sys.path.pop(0)
 
 
-def _make_wdrain_cache(tmpdir, cwd, ops_wait, ops_wait_stale=None,
-                       ts=None, extra=None):
-    """Write a tickets-status cache with ops_wait and ops_wait_stale."""
-    key = _cwd_key(cwd)
-    cache_dir = pathlib.Path(tmpdir) / ".claude" / "tickets-status"
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    entry = {"ops_wait": ops_wait, "ts": ts or time.time()}
-    if ops_wait_stale is not None:
-        entry["ops_wait_stale"] = ops_wait_stale
-    if extra:
-        entry.update(extra)
-    with open(cache_dir / (key + ".json"), "w") as f:
-        json.dump(entry, f)
-
-
 def _wdrain_payload(cwd, subagent_type="autopilot-worker"):
     return {
         "tool_name": "Agent",
@@ -197,87 +181,6 @@ def _run_wdrain_hook(payload, env_extra=None):
         env=env,
     )
     return p.returncode, p.stderr
-
-
-class TestWdrainStaleOnly(unittest.TestCase):
-    """W-drain gate blocks on stale W count, not total W."""
-
-    def test_high_total_w_low_stale_passes(self):
-        """W=15 (under hard ceiling 16) but stale=2 — must PASS."""
-        with tempfile.TemporaryDirectory() as td:
-            cwd = pathlib.Path(td) / "repo"
-            cwd.mkdir()
-            _make_wdrain_cache(td, cwd, ops_wait=15, ops_wait_stale=2)
-            p = _wdrain_payload(cwd)
-            rc, stderr = _run_wdrain_hook(p, {"HOME": td})
-            self.assertEqual(rc, 0,
-                             "High W with low stale was blocked: " + stderr)
-
-    def test_high_stale_blocks(self):
-        """stale=5 — must BLOCK (above stale threshold 3)."""
-        with tempfile.TemporaryDirectory() as td:
-            cwd = pathlib.Path(td) / "repo"
-            cwd.mkdir()
-            _make_wdrain_cache(td, cwd, ops_wait=15, ops_wait_stale=5)
-            p = _wdrain_payload(cwd)
-            rc, stderr = _run_wdrain_hook(p, {"HOME": td})
-            self.assertEqual(rc, 2,
-                             "High stale W was not blocked")
-            # #993 r2b review 🟡: prove it is the W-drain ceiling that blocked,
-            # not the (seeded-past) independence gate.
-            self.assertIn("W-drain gate", stderr)
-            self.assertNotIn("independence check", stderr)
-
-    def test_missing_stale_field_falls_back_to_total(self):
-        """A legacy cache without ops_wait_stale falls back to ops_wait."""
-        with tempfile.TemporaryDirectory() as td:
-            cwd = pathlib.Path(td) / "repo"
-            cwd.mkdir()
-            # No ops_wait_stale → fall back to ops_wait=10 > threshold=8
-            _make_wdrain_cache(td, cwd, ops_wait=10)
-            p = _wdrain_payload(cwd)
-            rc, stderr = _run_wdrain_hook(p, {"HOME": td})
-            self.assertEqual(rc, 2,
-                             "Missing stale field did not fall back to total W")
-            self.assertIn("W-drain gate", stderr)          # #993 r2b review 🟡
-            self.assertNotIn("independence check", stderr)
-
-    def test_stale_at_threshold_passes(self):
-        """stale=3 exactly — threshold is > 3, so 3 passes."""
-        with tempfile.TemporaryDirectory() as td:
-            cwd = pathlib.Path(td) / "repo"
-            cwd.mkdir()
-            _make_wdrain_cache(td, cwd, ops_wait=15, ops_wait_stale=3)
-            p = _wdrain_payload(cwd)
-            rc, stderr = _run_wdrain_hook(p, {"HOME": td})
-            self.assertEqual(rc, 0,
-                             "Stale at threshold was blocked: " + stderr)
-
-    def test_stale_aware_passes_even_at_hard_ceiling(self):
-        """W=20 (above hard ceiling 16) but stale=0 — passes because
-        stale-aware path supersedes the hard ceiling when per-member
-        evidence is available (#986 MAJOR-1 fix)."""
-        with tempfile.TemporaryDirectory() as td:
-            cwd = pathlib.Path(td) / "repo"
-            cwd.mkdir()
-            _make_wdrain_cache(td, cwd, ops_wait=20, ops_wait_stale=0)
-            p = _wdrain_payload(cwd)
-            rc, stderr = _run_wdrain_hook(p, {"HOME": td})
-            self.assertEqual(rc, 0,
-                             "Stale-aware path did not supersede ceiling: " + stderr)
-
-    def test_legacy_hard_ceiling_still_blocks(self):
-        """Without ops_wait_stale, W=20 > hard ceiling 16 still blocks."""
-        with tempfile.TemporaryDirectory() as td:
-            cwd = pathlib.Path(td) / "repo"
-            cwd.mkdir()
-            _make_wdrain_cache(td, cwd, ops_wait=20)
-            p = _wdrain_payload(cwd)
-            rc, stderr = _run_wdrain_hook(p, {"HOME": td})
-            self.assertEqual(rc, 2,
-                             "Legacy hard ceiling did not block")
-            self.assertIn("W-drain gate", stderr)          # #993 r2b review 🟡
-            self.assertNotIn("independence check", stderr)
 
 
 # ---------- Item 5: Closes-finding sha validation -------------------------

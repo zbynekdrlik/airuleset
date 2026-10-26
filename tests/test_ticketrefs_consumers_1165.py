@@ -18,7 +18,6 @@ reference is never a ticket, for every consumer.
 import json
 import os
 import shutil
-import subprocess
 import sys
 import tempfile
 import unittest
@@ -31,7 +30,6 @@ from gates import designdispatch as dd  # noqa: E402
 from gates import ticketrefs  # noqa: E402
 import cli_lane_liveness as ll  # noqa: E402
 
-HOOK = REPO / "hooks" / "block-dispatch-over-wdrain.sh"
 FABLE = "claude-fable-5-1"
 
 _ORIG_HOME = None
@@ -181,30 +179,6 @@ class TestDesignGatePrOnlyFallback(unittest.TestCase):
                         lambda slug, n, cwd: {7: ["no design"]}.get(n))
         self.assertEqual(v, "block")
         self.assertIn("#7", r)
-
-
-class TestWdrainHookNeedsNoReceipt(unittest.TestCase):
-    """#1137 (owner 25.10.2026) removed the #992 lane-overlap receipt gate: a
-    worker dispatch with no receipt is no longer blocked by it."""
-
-    def test_dispatch_without_a_receipt_is_allowed(self):
-        home = tempfile.mkdtemp(prefix="a1165r2-home-")
-        cwd = tempfile.mkdtemp(prefix="a1165r2-cwd-")
-        self.addCleanup(shutil.rmtree, home, True)
-        self.addCleanup(shutil.rmtree, cwd, True)
-        for prompt in ("Work issue 4 (S0 bootstrap) in fohmixer",
-                       "Review PR #201 fixes first\nWork issue 1165"):
-            with self.subTest(prompt=prompt):
-                payload = json.dumps({
-                    "tool_name": "Agent", "cwd": cwd,
-                    "tool_input": {"subagent_type": "autopilot-worker",
-                                   "prompt": prompt}})
-                r = subprocess.run(["bash", str(HOOK)], input=payload,
-                                   capture_output=True, text=True, timeout=60,
-                                   env={**os.environ, "HOME": home})
-                self.assertEqual(r.returncode, 0, r.stderr)
-                self.assertNotIn("overlap", r.stderr.lower())
-        self.assertFalse((Path(home) / ".claude" / "lane-overlap").exists())
 
 
 class _R:

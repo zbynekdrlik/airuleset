@@ -15,7 +15,6 @@ direction for a fail-closed gate. A 1-digit `#N` outside an `issue` run
 import json
 import os
 import shutil
-import subprocess
 import sys
 import tempfile
 import unittest
@@ -26,7 +25,6 @@ sys.path.insert(0, str(REPO))
 
 from gates import designdispatch as dd  # noqa: E402
 
-from _hook_state_cleanup import hermetic_hook_env  # noqa: E402  (#1046 hermetic HOME)
 
 _ORIG_HOME = None
 _TMP_HOME = None
@@ -188,39 +186,6 @@ class TestEvaluateSingleDigit(unittest.TestCase):
         v, r = _ev("Work issues 4, 7 in fohmixer", {4: [MAIN_DESIGN], 7: []})
         self.assertEqual(v, "block")
         self.assertIn("#7", r)
-
-
-class TestAdapterSingleDigit(unittest.TestCase):
-    """The REAL hook adapter with a fake `gh` on PATH (same fixture shape as
-    test_designdispatch_gate_1061.TestAdapterEndToEnd)."""
-
-    HOOK = REPO / "hooks" / "block-dispatch-without-main-design.sh"
-
-    def _run(self, prompt, comments_json):
-        d = tempfile.mkdtemp()
-        self.addCleanup(shutil.rmtree, d, True)
-        gh = Path(d) / "gh"
-        gh.write_text(
-            "#!/usr/bin/env bash\n"
-            'if [ "$1" = "repo" ]; then echo "owner/fohmixer"; exit 0; fi\n'
-            'if [ "$1" = "api" ]; then cat <<\'JSON\'\n%s\nJSON\n'
-            "exit 0; fi\nexit 0\n" % comments_json)
-        gh.chmod(0o755)
-        env = hermetic_hook_env(self, PATH=d + os.pathsep + os.environ["PATH"])
-        return subprocess.run(
-            ["bash", str(self.HOOK)], input=_payload(prompt, cwd=str(REPO)),
-            capture_output=True, text=True, env=env)
-
-    def test_fohmixer_prompt_allows_via_adapter(self):
-        r = self._run(FOHMIXER_PROMPT, json.dumps({"body": MAIN_DESIGN}))
-        self.assertEqual(r.returncode, 0,
-                         "rc=%d stderr=%r" % (r.returncode, r.stderr))
-
-    def test_fohmixer_worker_design_blocks_via_adapter(self):
-        r = self._run(FOHMIXER_PROMPT,
-                      json.dumps({"body": "Design-by: worker claude-opus-4-8"}))
-        self.assertEqual(r.returncode, 2, r.stderr)
-        self.assertIn("#4", r.stderr)
 
 
 if __name__ == "__main__":

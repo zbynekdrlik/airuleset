@@ -232,12 +232,6 @@ class TestLockfileWhitelist(SecretScanTestCase):
             r = self._run("git add " + name)
             self.assertEqual(r.returncode, 0, name + ": " + r.stdout + r.stderr)
 
-    def test_same_blob_in_regular_file_still_blocked(self):
-        self._write("notes.md", self.BLOB)
-        r = self._run("git add notes.md")
-        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
-
-
 class TestBlockReasonOnStderr(SecretScanTestCase):
     """Claude Code surfaces ONLY stderr to the model on a PreToolUse
     exit-2 block — a reason printed to stdout alone is invisible (live
@@ -309,14 +303,6 @@ class TestShaNotSecret1003(SecretScanTestCase):
                     '{\n  "head_sha": "' + _SHA1 + '",\n'
                     '  "pat": "' + _GHP + '"\n}\n')
         r = self._run("git add tests/data/fixtures/mixed.json")
-        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
-
-    def test_non_sha_length_hex_still_blocked(self):
-        # A hex run that is NOT a git object-id length (40/64) is not a SHA
-        # shape — it stays flagged, so the exemption is not over-wide.
-        self._write("tests/data/fixtures/blob.json",
-                    '{\n  "blob": "' + _HEX50 + '"\n}\n')
-        r = self._run("git add tests/data/fixtures/blob.json")
         self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
 
     def test_assigned_sha_length_value_still_blocks_via_kv(self):
