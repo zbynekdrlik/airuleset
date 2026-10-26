@@ -21,6 +21,7 @@ import re
 import time
 
 from gates import read_payload, command_of, field_of, emit_block_stderr, allow
+from gates.shellcmd import split_top_level
 
 DESIGN_BY_LOG = "design-by-gate.log"
 
@@ -37,6 +38,7 @@ _API_WRITE_RE = re.compile(
 
 
 def _posts_comment(cmd):
+    cmd = cmd.replace("\\\n", " ")   # a `\`+newline continuation (review A7)
     if _GH_COMMENT_RE.search(cmd):
         return True
     return any(_API_WRITE_RE.search(cmd[m.start():].split("\n", 1)[0])
@@ -119,11 +121,21 @@ def evaluate(cmd, cwd):
     return "allow", "no Design-by: main in a lane-author comment"
 
 
-def _block_message():
+def _edits_and_posts(cmd):
+    """Another command in the same call names the token — typically the edit
+    that strips it from the draft, which runs only AFTER this hook read it."""
+    return any(re.search(r"Design-?by", seg, re.I) and not _posts_comment(seg)
+               for seg in split_top_level(cmd))
+
+
+def _block_message(cmd=""):
+    split = ("  This call edits the draft and posts it, but the hook reads the draft\n"
+             "  before the edit runs: edit the draft in one call, post it in the next.\n"
+             "\n") if _edits_and_posts(cmd) else ""
     return (
         "BLOCKED: a lane author may not post `Design-by: main` -- the main session's\n"
         "  stamp comes from `python3 ~/devel/airuleset/airuleset.py design-record`.\n"
-        "\n"
+        "\n" + split +
         "  A worker or the dual-agent implementer cites the main's design by its\n"
         "  comment id, WITHOUT the `Design-by: main` token (#1061 / #1060 L3b);\n"
         "  from a worktree, design-record itself stamps `Design-by: worker`.\n"
@@ -141,7 +153,7 @@ def main():
     verdict, reason = evaluate(cmd, cwd)
     if verdict == "block":
         _log("BLOCK", cwd, reason)
-        emit_block_stderr(_block_message())
+        emit_block_stderr(_block_message(cmd))
     allow()
 
 
