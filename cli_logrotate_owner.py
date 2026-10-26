@@ -25,9 +25,17 @@ another file that already rotates the log. Then ``build_logrotate_step``:
 * a detection error: nothing is written for that log, and ``LR_FAIL=1``
   (the read-back turns it into exit 4).
 
-The read-back's own ``logrotate --debug`` duplicate check stays the independent
-oracle. A parser miss (an ``include`` inside a logrotate.d file, a ``{a,b}``
-glob) is still reported loudly there. A stdlib leaf with no airuleset imports;
+The read-back (``build_logrotate_readback``) is the independent oracle, run on
+logrotate's own ``--debug`` parse, in both directions:
+* a missed owner (an ``include`` inside a logrotate.d file, a ``{a,b}`` glob)
+  shows up as a duplicate entry;
+* a yield to a stanza logrotate never reads (a ``tabooext``, a file it skips on
+  a parse error) leaves a managed log without its ``considering log`` line.
+Either way the read-back exits 4.
+
+A foreign file at airuleset's own path (e.g. the pristine distro btmp beside
+gk-auth) is reported, never rewritten, so that duplicate stays loud until a
+human removes one of the two. A stdlib leaf with no airuleset imports;
 ``cli_disk_guard_root`` re-exports the paths and renderers (moved here verbatim).
 """
 import shlex
@@ -96,10 +104,12 @@ import os
 import shlex
 import sys
 
-# logrotate's default taboo extensions: files it never reads from an include dir.
-TABOO = (",v", ".cfsaved", ".disabled", ".dpkg-bak", ".dpkg-del", ".dpkg-dist",
-         ".dpkg-new", ".dpkg-old", ".dpkg-tmp", ".rpmnew", ".rpmorig",
-         ".rpmsave", ".swp", ".ucf-dist", ".ucf-new", ".ucf-old", "~")
+# logrotate's default taboo patterns: files it never reads from an include dir
+# (measured on logrotate 3.21.0, every fleet box: `Ignoring a.bak, because of
+# *.bak pattern match`; plus `*.rhn-cfg-tmp-*` below).
+TABOO = (",v", ".bak", ".cfsaved", ".disabled", ".dpkg-bak", ".dpkg-del",
+         ".dpkg-dist", ".dpkg-new", ".dpkg-old", ".dpkg-tmp", ".rpmnew",
+         ".rpmorig", ".rpmsave", ".swp", ".ucf-dist", ".ucf-new", ".ucf-old", "~")
 SCRIPTS = ("postrotate", "prerotate", "firstaction", "lastaction", "preremove")
 
 
@@ -118,7 +128,9 @@ def log_patterns(text):
         if not line or line.startswith("#"):
             continue
         if in_script:
-            in_script = line != "endscript"
+            if line.split()[0] == "endscript":      # `endscript }` closes both
+                in_script = False
+                in_stanza = "}" not in line.split("#", 1)[0]
             continue
         if in_stanza:
             if line.split()[0] in SCRIPTS:
@@ -143,20 +155,23 @@ def rotates(pattern, log):
         fnmatch.fnmatchcase(p, q) for p, q in zip(path, pat))
 
 
-def config_files(conf, include_dir):
-    """The main config plus every file logrotate reads from its include dir."""
-    files = [conf] if os.path.isfile(conf) else []
-    try:
-        names = sorted(os.listdir(include_dir))
-    except FileNotFoundError:
-        names = []
-    for name in names:
-        if name.endswith(TABOO) or ".rhn-cfg-tmp-" in name:
-            continue
-        path = os.path.join(include_dir, name)
-        if os.path.isfile(path):
-            files.append(path)
-    return files
+def logrotate_reads(st, as_root):
+    """logrotate run as root ignores a config file that is group/other-writable
+    or not owned by root (its own `Ignoring … because the file owner is
+    wrong`); not as root it applies no such rule."""
+    return not as_root or (not st.st_mode & 0o022 and st.st_uid == 0)
+
+
+def config_files(conf, include_dir, as_root=None):
+    """The main config plus every file logrotate reads from its include dir
+    (an absent include dir adds none; an unreadable one raises)."""
+    as_root = os.geteuid() == 0 if as_root is None else as_root
+    names = [conf] if os.path.isfile(conf) else []
+    if os.path.lexists(include_dir):
+        names += [os.path.join(include_dir, n) for n in sorted(os.listdir(include_dir))
+                  if not n.endswith(TABOO) and ".rhn-cfg-tmp-" not in n]
+    return [p for p in names
+            if os.path.isfile(p) and logrotate_reads(os.stat(p), as_root)]
 
 
 def main(argv):
@@ -226,14 +241,40 @@ def _step_for(log, conf, content, mode, mark):
            _install_heredoc(conf, mode, content, mark)))
 
 
+def build_logrotate_readback(logs, lr_conf=LR_CONF):
+    """The read-back half (sets ``fail=1``): logrotate's own ``--debug`` parse
+    of the live config must show (a) NO duplicate log entry — the Fable-flagged
+    #841 fail-open; the grep reads all of the output, since logrotate exits 1
+    on a duplicate (#1223) — and (b) a ``considering log <log>`` for EVERY
+    managed log, i.e. some stanza logrotate really reads still rotates it.
+    (b) is the oracle for the yield above: a yield to a stanza logrotate skips
+    (a taboo name, an unsafe mode, a parse error, a ``tabooext``) fails here
+    instead of leaving the log rotated by nobody. ``case``, not ``grep -q``: an
+    early-exiting grep would SIGPIPE the producer under ``pipefail``."""
+    checks = "".join(
+        "    case \"$LR_DEBUG\"$'\\n' in *\"considering log %s\"$'\\n'*) ;; *)\n"
+        '        echo "  ⚠ DISK-GUARD-ROOT VERIFY FAIL: no stanza logrotate reads '
+        'rotates %s (#1244)" >&2; fail=1 ;; esac\n' % (log, log) for log in logs)
+    return (
+        "if command -v logrotate >/dev/null 2>&1; then\n"
+        "    LR_DEBUG=$(logrotate --debug %s 2>&1 || true)\n"
+        "    if printf '%%s\\n' \"$LR_DEBUG\" | grep -i \"duplicate log entry\" "
+        ">/dev/null; then\n"
+        '        echo "  ⚠ DISK-GUARD-ROOT VERIFY FAIL: a logrotate duplicate log '
+        'entry — a log (likely btmp/wtmp) would silently NOT rotate; check '
+        '/etc/logrotate.d for a second stanza" >&2; fail=1\n'
+        "    fi\n%sfi" % (shlex.quote(lr_conf), checks))
+
+
 def build_logrotate_step(logs, lr_conf=LR_CONF, lr_dir=LR_DIR,
                          heredoc_mark="AIRULESET_DGROOT_EOF"):
     """The apply-script bash that installs each ``(log, conf, content, mode)``
     only when no other logrotate file rotates ``log`` (module docstring). It
     needs the apply script's ``_install`` and an initialised ``LR_FAIL``."""
     parts = [
+        # -I: never import shlex/fnmatch from the working directory (root, sudo)
         "_lr_other() {\n"
-        "    python3 - %s %s \"$1\" \"$2\" <<'%s'\n%s\n%s\n}"
+        "    python3 -I - %s %s \"$1\" \"$2\" <<'%s'\n%s\n%s\n}"
         % (shlex.quote(lr_conf), shlex.quote(lr_dir), _PY_MARK,
            DETECTOR_PY.strip("\n"), _PY_MARK),
         "_lr_ours() {\n"

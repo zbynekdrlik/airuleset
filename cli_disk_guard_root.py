@@ -52,7 +52,8 @@ import sys
 # re-exported here so this module stays the one import for the root leg.
 from cli_logrotate_owner import (  # noqa: F401
     LOGROTATE_BTMP_PATH, LOGROTATE_LOGS, LOGROTATE_ROTATE, LOGROTATE_WTMP_PATH,
-    build_logrotate_step, render_logrotate_btmp, render_logrotate_wtmp)
+    build_logrotate_readback, build_logrotate_step, render_logrotate_btmp,
+    render_logrotate_wtmp)
 
 
 # ---------------------------------------------------------------------------
@@ -566,9 +567,9 @@ def build_apply_script(drain=True, journal_max=None):
     files = guard_files(drain, journal_max)
     parts = ["set -uo pipefail", 'JOURNALD_CHANGED=""', 'LR_FAIL=""', "",
              render_install_fn(), ""]
-    parts.append(build_logrotate_step(
-        [(LOGROTATE_LOGS[p], p, c, m) for p, c, m in files if p in LOGROTATE_LOGS],
-        heredoc_mark=_HEREDOC_MARK))
+    managed = [(LOGROTATE_LOGS[p], p, c, m) for p, c, m in files if p in LOGROTATE_LOGS]
+    managed_logs = [log for log, _p, _c, _m in managed]
+    parts.append(build_logrotate_step(managed, heredoc_mark=_HEREDOC_MARK))
     for path, content, mode in files:
         if path in LOGROTATE_LOGS:
             continue
@@ -647,21 +648,9 @@ def build_apply_script(drain=True, journal_max=None):
         'fail=1\n'
         'fi' % (cap, shlex.quote(JOURNALD_CAP_PATH))
     )
-    # 2. logrotate config parses WITHOUT the duplicate-entry fail-open (the
-    #    Fable-flagged silent no-rotation). `logrotate --debug` never rotates.
-    #    The grep is unscoped (logrotate reports the offending path in the SAME
-    #    line but not always parseably), so the message says "a logrotate
-    #    duplicate log entry" rather than over-attributing to btmp/wtmp.
-    parts.append(
-        'if command -v logrotate >/dev/null 2>&1; then\n'
-        '    if { logrotate --debug /etc/logrotate.conf 2>&1 || true; } | grep -i '
-        '"duplicate log entry" >/dev/null; then\n'
-        '        echo "  ⚠ DISK-GUARD-ROOT VERIFY FAIL: a logrotate duplicate log '
-        'entry — a log (likely btmp/wtmp) would silently NOT rotate; check '
-        '/etc/logrotate.d for a second stanza" >&2; fail=1\n'
-        '    fi\n'
-        'fi'
-    )
+    # 2. logrotate's own `--debug` parse (never rotates): no duplicate entry,
+    #    and every managed log still rotated by a stanza it reads (#1244).
+    parts.append(build_logrotate_readback(managed_logs))
     # 3. the daily report timer is enabled.
     parts.append(
         'if ! systemctl is-enabled airuleset-disk-guard-root.timer '
