@@ -169,7 +169,7 @@ class NoQuestionFlagExemptsAcceptance(unittest.TestCase):
         import unittest.mock as mock
         rows = self._rows((4, "needs-acceptance"))
         with mock.patch.object(statusbar, "question_map_ticket_refs",
-                               lambda cwd=None, home=None: set()):
+                               lambda cwd=None, home=None, cover=None: set()):
             flagged = airuleset._no_question_flagged(
                 rows, comment_state_fn=lambda n, cwd=None: False)
         self.assertEqual(flagged, set(),
@@ -181,7 +181,7 @@ class NoQuestionFlagExemptsAcceptance(unittest.TestCase):
         import unittest.mock as mock
         rows = self._rows((5, "needs-answer"))
         with mock.patch.object(statusbar, "question_map_ticket_refs",
-                               lambda cwd=None, home=None: set()):
+                               lambda cwd=None, home=None, cover=None: set()):
             flagged = airuleset._no_question_flagged(
                 rows, comment_state_fn=lambda n, cwd=None: False)
         self.assertEqual(flagged, {5},

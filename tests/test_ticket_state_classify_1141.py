@@ -569,7 +569,7 @@ class ExplainReviewRound2(unittest.TestCase):
         import statusbar
         asked = []
 
-        def fake_pings(cwd=None):
+        def fake_pings(cwd=None, cover=None):
             asked.append(cwd)
             return [{"question": "which\tone?"}]
 
