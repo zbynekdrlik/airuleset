@@ -23,58 +23,50 @@ from gates.shellcmd import strip_quoted
 
 MAX_FILE_BYTES = 2_000_000  # skip absurdly large files (binaries, dumps)
 
-# --- secret pattern matching (verbatim from the #4 / #1003 classifier) ------
+# --- secret pattern matching -------------------------------------------------
+# Issue 1137 B1 (owner 26.10.2026): a generic 32+ char / 40+ hex blob is NOT a
+# secret (every sampled subdev block was a test class name, a receipt id, a
+# tag sha or a data URI). What blocks: a KNOWN credential format, or a value
+# assigned to a name that says password/passwd/passphrase/secret/token/api key.
 
+_NAMES = (r"password|passphrase|passwd|secret|token|api[_-]?key"
+          r"|(?:access|private|auth|client|signing)[_-]?key")
+# `name = "value"`, `name: 'value'` and the JSON `"name": "value"` shape.
 KV_PAT = re.compile(
-    r"""(?i)(password|passphrase|secret|token|api[_-]?key)"""
+    r"""(?i)(""" + _NAMES + r"""|(?<![A-Za-z])pat)["']?"""
     r"""[ \t]*[=:][ \t]*(['"])[^'"$<{\n]{8,}\2"""
 )
+# Shell / .env assignment: `ODOO_API_KEY=<value>`, `export TOKEN=<value>`.
+BARE_ASSIGN_PAT = re.compile(
+    r"""(?i)(?<![\w.-])[\w.-]*?(""" + _NAMES + r""")=([^\s'"`$<{}()\[\],;]{8,})""")
+# A bare `key` / `auth` / `credentials` name holding a token-shaped value.
+TOKEN_KEY_PAT = re.compile(
+    r"""(?i)(?<![A-Za-z])(key|auth|bearer|credentials?)["']?[ \t]*[=:][ \t]*"""
+    r"""["']([A-Za-z0-9_+/=-]{20,})["']""")
+BEARER_PAT = re.compile(r"(?i)\bbearer[ \t]+([A-Za-z0-9._~+/=-]{20,})")
 SSHPASS_PAT = re.compile(r"""sshpass\s+-p\s+(['"])([^'"\n]{4,})\1""")
-HEX_PAT = re.compile(r"[0-9a-fA-F]{40,}")
-B64_PAT = re.compile(r"(?=[A-Za-z0-9+]*[0-9])[A-Za-z0-9+]{32,}={0,2}")
-# #1003 -- high-confidence PREFIXED secret shapes. Checked FIRST in scan_line
-# so a real token stays blocked even on a line that also carries a git object
-# SHA (which HEX_PAT/B64_PAT below no longer flag).
+# Known credential FORMATS. Checked first, so a real token blocks on any line.
 SECRET_PREFIX_PAT = re.compile(
     r"gh[oprsu]_[A-Za-z0-9]{20,}"
     r"|github_pat_[A-Za-z0-9_]{20,}"
+    r"|glpat-[A-Za-z0-9_-]{20,}"
     r"|sk-ant-api\d{2}-[A-Za-z0-9_-]{20,}"
     r"|sk-proj-[A-Za-z0-9]{20,}"
     r"|sk-[A-Za-z0-9]{20,}"
+    r"|[rs]k_live_[A-Za-z0-9]{20,}"
     r"|AKIA[0-9A-Z]{16}"
+    r"|AIza[0-9A-Za-z_-]{35}"
+    r"|npm_[A-Za-z0-9]{36}"
     r"|xox[baprs]-[A-Za-z0-9-]{10,}"
     r"|-----BEGIN [A-Z ]*PRIVATE KEY-----"
+    r"|eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"
 )
-# #1003 -- a hex RUN of exactly a git object-id length (40 = SHA-1, 64 = SHA-256)
-# is a commit/tree/blob SHA shape, not a credential -- but CONTEXT-AWARE (review
-# F1): a same-length hex ASSIGNED to a secret key must still block.
-_GIT_OBJECT_HEX_LENS = (40, 64)
-_ALL_HEX_RE = re.compile(r"[0-9a-fA-F]+$")
-_ASSIGN_KEY_RE = re.compile(r"([A-Za-z_][\w.-]*)['\"]?[ \t]*[:=][ \t]*['\"]?[ \t]*$")
-_SHA_CTX_KEY_RE = re.compile(
-    r"sha|commit|\boid\b|\btree\b|\bblob\b|parent|revision|checksum|digest|"
-    r"\bhash\b|\brev\b|\bref\b",
-    re.IGNORECASE)
-_SECRET_CTX_KEY_RE = re.compile(
-    r"pass|secret|token|\bapi\b|api[_-]?key|auth|cred|bearer|private|\bpat\b|"
-    r"\bkey\b|access",
-    re.IGNORECASE)
-
-
-def _is_git_object_sha(text, start, run):
-    """True iff ``run`` (a hex substring of ``text`` at offset ``start``) is a
-    git object-id SHA safe to treat as inert: exactly a git object length, all
-    hex, AND either BARE or under a SHA-context key that is not a credential key
-    (review F1)."""
-    if len(run) not in _GIT_OBJECT_HEX_LENS or not _ALL_HEX_RE.match(run):
-        return False
-    m = _ASSIGN_KEY_RE.search(text[:start])
-    if not m:
-        return True                       # bare / unassigned -> SHA shape
-    key = m.group(1)
-    if _SECRET_CTX_KEY_RE.search(key):
-        return False                      # credential key -> never a SHA
-    return bool(_SHA_CTX_KEY_RE.search(key))
+# A Discord bot token: base64 user id . 6 chars . 27+ chars. Both outer parts
+# carry a digit, so a dotted CamelCase identifier is not one.
+DISCORD_PAT = re.compile(
+    r"(?<![\w.-])([MN][A-Za-z0-9_-]{23,25})\.[A-Za-z0-9_-]{6}\.([A-Za-z0-9_-]{27,})")
+_DIGIT_RE = re.compile(r"\d")
+_LETTER_RE = re.compile(r"[A-Za-z]")
 
 
 PLACEHOLDER_RE = re.compile(
@@ -94,11 +86,19 @@ def is_placeholder(val):
     return False
 
 
+def _token_like(val):
+    return bool(_DIGIT_RE.search(val) and _LETTER_RE.search(val)
+                and not is_placeholder(val))
+
+
 def scan_line(text):
     """Return a short violation description for one line, or None."""
     m = SECRET_PREFIX_PAT.search(text)
     if m and not is_placeholder(m.group(0)):
         return "high-confidence secret token prefix"
+    for m in DISCORD_PAT.finditer(text):
+        if _DIGIT_RE.search(m.group(1)) and _DIGIT_RE.search(m.group(2)):
+            return "high-confidence secret token prefix"
     m = SSHPASS_PAT.search(text)
     if m and not is_placeholder(m.group(2)):
         return "sshpass literal password"
@@ -108,16 +108,10 @@ def scan_line(text):
         val = val_m.group(2) if val_m else ""
         if not is_placeholder(val):
             return "literal " + m.group(1).lower() + " value"
-    for m in HEX_PAT.finditer(text):
-        run = m.group(0)
-        if is_placeholder(run) or _is_git_object_sha(text, m.start(), run):
-            continue
-        return "40+ char hex blob (possible key/token)"
-    for m in B64_PAT.finditer(text):
-        run = m.group(0)
-        if is_placeholder(run) or _is_git_object_sha(text, m.start(), run):
-            continue
-        return "32+ char high-entropy blob (possible secret)"
+    for pat in (BARE_ASSIGN_PAT, TOKEN_KEY_PAT, BEARER_PAT):
+        for m in pat.finditer(text):
+            if _token_like(m.group(m.lastindex)):
+                return "literal %s value" % m.group(1).lower()
     return None
 
 
