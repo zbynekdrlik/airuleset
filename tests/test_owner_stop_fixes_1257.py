@@ -890,5 +890,21 @@ class AnNpmClaudeResolvesItsOwnSession(AnNpmClaudeIsAClaude):
         self.assertEqual((_os().pane_latch("%N") or {}).get("fact"), "pause")
 
 
+class EachRecoveryJobJournalsItsHold(base._Latched):
+    """Review 4, finding 5: jobs 1, 4a and 6 shared ONE hold episode key, so
+    only the first job to hold on a latched pane journalled it and the others
+    held silently. Each job journals its own hold once per latch episode."""
+
+    def test_two_jobs_on_one_latched_pane_each_journal_once(self):
+        state, logs, now = {}, [], time.time()
+        for _ in range(2):
+            self.assertTrue(base.wd._latched_hold(state, self.PID, now, logs,
+                                                  "api-error x", "apierr"))
+            self.assertTrue(base.wd._latched_hold(state, self.PID, now, logs,
+                                                  "session-limit x", "sesslimit"))
+        self.assertEqual(sum("api-error x held" in ln for ln in logs), 1, logs)
+        self.assertEqual(sum("session-limit x held" in ln for ln in logs), 1, logs)
+
+
 if __name__ == "__main__":
     unittest.main()
