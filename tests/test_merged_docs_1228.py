@@ -383,5 +383,58 @@ class ReviewRound2(unittest.TestCase):
         self.assertEqual(set(getattr(got, "docs", ()) or ()), {850})
 
 
+class ReviewRound3(unittest.TestCase):
+    """The final delta review."""
+
+    def test_a_live_fix_with_a_pending_docs_pr_stays_m(self):
+        # the ticket's own fix is on PROD; a merged-unreleased docs PR names
+        # it. Base read M (nothing left to implement, waits for the cut); the
+        # docs veto must not drop it into workable I. An epic a spec names has
+        # no on-main fact and stays I.
+        import cli_commit_kind
+        import cli_ticket_facts
+        import cli_ticket_state as ts
+        for live in (ts.DEPLOYED, ts.RELEASED):
+            facts = cli_ticket_facts._facts(
+                cli_commit_kind.MergedUnreleased((), docs={7644}), {}, {},
+                {7644: live})
+            bucket, reason = ts.classify({"labels": []}, facts.of(7644),
+                                         ts.Box(), number=7644)
+            self.assertEqual(bucket, "M", reason)
+            self.assertIn("#1228", reason)
+        facts = cli_ticket_facts._facts(
+            cli_commit_kind.MergedUnreleased((), docs={850}), {}, {}, {})
+        self.assertEqual(ts.classify({"labels": []}, facts.of(850), ts.Box(),
+                                     number=850)[0], "I")
+
+    def test_the_docs_set_survives_the_quals_route(self):
+        # end to end: merged_unreleased_issues -> cli_quals_cmd._merged_unreleased
+        # -> cli_ticket_route.quals -> cli_ticket_facts.load -> classify. A plain
+        # set copy anywhere on the way would read the live fix as C.
+        import cli_commit_kind
+        import cli_ticket_facts
+        import cli_ticket_route
+        import cli_ticket_state as ts
+        from unittest import mock
+        with TemporaryDirectory() as home, TemporaryDirectory() as root:
+            path = cli_ticket_facts.cache_path(root, home)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            import time
+            path.write_text(json.dumps({
+                "ts": time.time(), "root": root, "pipeline": [], "open_pr": [],
+                "on_main": {"7644": ts.DEPLOYED}, "reopened": []}))
+            merged = cli_commit_kind.MergedUnreleased((), docs={7644})
+            real_load = cli_ticket_facts.load
+            with mock.patch.object(rs, "merged_unreleased_issues",
+                                   return_value=merged), \
+                    mock.patch.object(cli_ticket_route, "asked_refs",
+                                      return_value=frozenset()), \
+                    mock.patch.object(cli_ticket_facts, "load",
+                                      lambda r, **kw: real_load(r, home=home, **kw)):
+                buckets, _f = cli_ticket_route.quals(
+                    {7644: {"labels": []}}, root, ts.Box())
+        self.assertIn(7644, buckets["M"])
+
+
 if __name__ == "__main__":
     unittest.main()
