@@ -603,6 +603,9 @@ class TestDeliverGoal(unittest.TestCase):
         _write_marker_transcript(proj, self.CWD, self.SID)
         _write_goal_marker(proj, self.CWD, self.SID,
                            "Goal cleared: some earlier text", ts_epoch=2000)
+        with open(proj / _encode(self.CWD) / (self.SID + ".jsonl"), "a") as f:   # #1257:
+            f.write(json.dumps({"type": "user", "timestamp": "1970-01-01T00:34:10.000Z",
+                                "message": {"content": "ok, beriem to"}}) + "\n")
         tmux = DeliverGoalFakeTmux([("%9", "claude", self.CWD, "111")], GOAL_IDLE_CAP)
         word = goal.deliver_goal(self.SID, self.CWD, self.TEXT, "full",
                                  run=tmux, projects_dir=proj, now=2100,
@@ -617,6 +620,9 @@ class TestDeliverGoal(unittest.TestCase):
         _write_marker_transcript(proj, self.CWD, self.SID)
         _write_goal_marker(proj, self.CWD, self.SID,
                            "Goal cleared: some earlier text", ts_epoch=500)
+        with open(proj / _encode(self.CWD) / (self.SID + ".jsonl"), "a") as f:   # #1257:
+            f.write(json.dumps({"type": "user", "timestamp": "1970-01-01T00:15:00.000Z",
+                                "message": {"content": "<command-name>/autopilot</command-name>"}}) + "\n")
         word, tmux, _ = self._go(GOAL_IDLE_CAP, now=2100, request_ts=1000,
                                  proj=proj)
         self.assertEqual(word, "sent")

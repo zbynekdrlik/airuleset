@@ -298,7 +298,7 @@
     "tests/test_gk_selfservice_gate.py": 274,
     "tests/test_gk_stale_handoff_push_607.py": 181,
     "tests/test_global_rules_symlink.py": 129,
-    "tests/test_goal_arm.py": 902,
+    "tests/test_goal_arm.py": 908,
     "tests/test_goal_arm_verified_720.py": 271,
     "tests/test_goal_auth_clear_675.py": 453,
     "tests/test_goal_backlog_proof.py": 986,
