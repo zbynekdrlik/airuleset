@@ -799,5 +799,47 @@ class RepoPaneHoldIsOnePaneEpisode(base._Latched):
         self.assertEqual(sum("hold:owner-stop" in ln for ln in logs), 1, logs)
 
 
+class AnUnclaimedSessionKeepsItsOwnFacts(_CwdSessions):
+    """Review 4, finding 1: after the round-3 fix an UNRESOLVED pane persisted
+    nothing, so a fact read from its newest session's OWN transcript (not a
+    sibling's, not inherited) — a stop, or a clear matched to the watchdog's
+    own disarm — was lost once it left the 1 MB / 400-entry tail or once the
+    disarm veto was reaped. Such facts belong to that session whichever pane
+    read them: they are persisted when no pane owns the session this sweep."""
+
+    def _sweep(self, state, at):
+        with m.patch.object(base.wd, "_pane_claude_start_epoch",
+                            side_effect=lambda pid, run=None: {"%A": NOW - 950}.get(pid)):
+            return _os().refresh(state, [("%A", self.CWD), ("%B", self.CWD)],
+                                 self.proj, at, run=lambda argv, timeout=8: "")
+
+    def test_a_stop_outlives_the_tail(self):
+        self._session("SA", [_u("sprav ticket 5", NOW - 900),
+                             base._a("robím", NOW - 800)], NOW - 800)
+        sb = [_u("sprav ticket 6", NOW - 600), _u("pauza", NOW - 550)]
+        self._session("SB", sb, NOW - 600)
+        state = {}
+        self._sweep(state, NOW)
+        self.assertEqual((_os().pane_latch("%B") or {}).get("fact"), "pause")
+        self._session("SB", sb + [base._a("task done %d" % i, NOW - 500 + i)
+                                  for i in range(450)], NOW - 10)
+        self._sweep(state, NOW + 60)
+        self.assertEqual((_os().pane_latch("%B") or {}).get("fact"), "pause")
+
+    def test_a_matched_disarm_stays_machine(self):
+        self._session("SA", [_u("sprav ticket 5", NOW - 900),
+                             base._a("robím", NOW - 800)], NOW - 800)
+        clear_ts = NOW - 100
+        self._session("SB", [_u("sprav ticket 6", NOW - 600),
+                             _sys(GOAL_SET, NOW - 590),
+                             _sys(GOAL_CLEARED, clear_ts)], NOW - 90)
+        state = {"goal_disarmed_q": {"SB": {"disarmed_ts": clear_ts - 5}}}
+        self._sweep(state, NOW)
+        self.assertIsNone(_os().pane_latch("%B"))
+        state.pop("goal_disarmed_q")
+        self._sweep(state, NOW + DAY)
+        self.assertIsNone(_os().pane_latch("%B"))
+
+
 if __name__ == "__main__":
     unittest.main()
