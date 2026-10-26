@@ -286,6 +286,10 @@ class LatchFacts(unittest.TestCase):
     def test_watchdogs_own_disarm_is_no_owner_stop(self):
         entries = OWNER_WORK + FACTS["goal-cleared"]
         self.assertIsNone(_latch(entries, machine_clears=(T0 + 5,)))
+        # once matched, the clear stays machine after its veto is reaped: the
+        # match lives in the session's latch record (`mclears`)
+        self.assertIsNone(_latch(entries, rec={"mclears": [T0 + 11]}))
+        # a veto of ANOTHER episode never makes the owner's own clear machine
         self.assertIsNotNone(_latch(entries, machine_clears=(T0 - DAY,)))
 
 
