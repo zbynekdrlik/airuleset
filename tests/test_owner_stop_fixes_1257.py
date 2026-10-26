@@ -782,5 +782,22 @@ class LatchedLaneKeepsItsBookkeeping(unittest.TestCase):
             self.assertNotIn(self.CWD, roster.load_roster())
 
 
+class RepoPaneHoldIsOnePaneEpisode(base._Latched):
+    """Review 3, finding 6: a latched machine-picked pane journalled `repo-pane
+    … hold:owner-stop` on EVERY sweep (the ❓ flag re-fires each fetch) and
+    the caller filed it as "flag-react pending (busy)". The hold is one line
+    per latch episode and a distinct outcome (None, not a busy False)."""
+
+    def test_a_latched_repo_pane_holds_once_and_says_so(self):
+        state, logs = {}, []
+        for _ in range(3):
+            got = base.wd._nudge_repo_pane(
+                self.PID, self.CWD, self._tmux(), "x", False, self.proj,
+                logs=logs, tpath=self.tpath, state=state, now=time.time(),
+                sleep_fn=lambda s: None, user_authored=True)
+            self.assertIsNone(got)
+        self.assertEqual(sum("hold:owner-stop" in ln for ln in logs), 1, logs)
+
+
 if __name__ == "__main__":
     unittest.main()
