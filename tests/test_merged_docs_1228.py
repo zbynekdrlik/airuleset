@@ -1,0 +1,176 @@
+"""#1228: a docs / chore / style / ci change implements no ticket, so it never
+puts a ticket into the footer `M` (merged, not yet released).
+
+presenter 13.10.2026: two design-doc commits on `dev` (`docs(mockups): …
+(#850, #851)`, `docs(spec): … (#850 A + B)`) put two big, mostly unstarted
+epics into M, and the owner saw `I 1` while three epics of work were ahead.
+The three-branch PR path reads PR titles the same way, and its append-only
+PR cache must re-judge entries written before the rule.
+"""
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+import cli_release_state as rs  # noqa: E402
+
+_GENV = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+         "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+
+
+def _git(repo, *args):
+    return subprocess.run(["git", "-C", repo, *args], check=True, env=_GENV,
+                          capture_output=True, text=True).stdout.strip()
+
+
+def _commit(repo, subject, body=""):
+    _git(repo, "commit", "--allow-empty", "-q", "-m",
+         subject if not body else subject + "\n\n" + body)
+    return _git(repo, "rev-parse", "HEAD")
+
+
+def _two_branch(repo, commits):
+    subprocess.run(["git", "init", "-q", "-b", "main", repo], check=True,
+                   env=_GENV, capture_output=True)
+    _git(repo, "remote", "add", "origin", "https://github.com/o/r")
+    _commit(repo, "chore: baseline")
+    _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+    _git(repo, "checkout", "-q", "-b", "dev")
+    for c in commits:
+        _commit(repo, c[0], c[1] if len(c) > 1 else "")
+    _git(repo, "update-ref", "refs/remotes/origin/dev", "HEAD")
+
+
+class TwoBranchDocsCommits(unittest.TestCase):
+
+    def setUp(self):
+        rs._reset_memo()
+
+    def test_presenter_epics_stay_out_of_m(self):
+        with TemporaryDirectory() as repo:
+            _two_branch(repo, [
+                ("docs(mockups): epic screens for both modes (#850, #851)",),
+                ("docs(spec): epic spec (#850 A + B)",),
+                ("fix: prod regression in the timer (#853)",)])
+            got = rs.merged_unreleased_issues(repo)
+        self.assertEqual(set(got), {853})
+
+    def test_every_non_implementing_type_and_the_docs_marker(self):
+        with TemporaryDirectory() as repo:
+            _two_branch(repo, [
+                ("chore(deps): bump tauri (#860)",),
+                ("style: rustfmt (#861)",),
+                ("ci: cache the cargo dir (#862)",),
+                ("docs!: rewrite the README (#863)",),
+                ("feat: user guide page (#864)", "[no-test: docs only]"),
+                ("Docs(readme): capitalised type (#866)",),
+                ("chore: wire up the follow-up", "Closes #1203"),
+                ("docsify: a type that only starts with docs (#867)",),
+                ("test(#870): [red] reproduce the crash",),
+                ("refactor(#871): split the player module",)])
+            got = rs.merged_unreleased_issues(repo)
+        self.assertEqual(set(got), {867, 870, 871})
+
+
+def _git_fn(ranges):
+    def _f(root, rng):
+        return list(ranges.get(rng, []))
+    return _f
+
+
+class ThreeBranchDocsPRs(unittest.TestCase):
+
+    def setUp(self):
+        rs._reset_memo()
+        d = tempfile.mkdtemp()
+        self.addCleanup(lambda: __import__("shutil").rmtree(d, ignore_errors=True))
+        self.cache = str(Path(d) / "pr-issues.json")
+
+    def test_a_docs_pr_title_attributes_nothing(self):
+        git = _git_fn({"origin/main..origin/develop": [
+            ("a", "docs: spec for #900 (#950)"),
+            ("b", "fix: real #901 (#951)"),
+            ("c", "feat: guide #902 (#952)")]})
+        meta = {950: ("docs: spec for #900", ""),
+                951: ("fix: real #901", ""),
+                952: ("feat: guide #902", "[no-test: docs only]")}
+        got = rs.merged_unreleased_issues(
+            "/repo", git_fn=git, pr_meta_fn=lambda pr: meta.get(pr),
+            cache_path=self.cache, slug="o/r")
+        self.assertEqual(set(got), {901})
+
+
+class LegacyCacheEntries(unittest.TestCase):
+    """PR-cache entries written before #1228 carry no `v` and their old refs;
+    they are re-judged from the introducing commit's local git message."""
+
+    def setUp(self):
+        rs._reset_memo()
+
+    def _repo(self, repo):
+        subprocess.run(["git", "init", "-q", "-b", "main", repo], check=True,
+                       env=_GENV, capture_output=True)
+        docs = _commit(repo, "docs(#7421): gk Prevencia batch 15 (#7662)")
+        fix = _commit(repo, "#7644 (M1): stream_merge_guard hardening (#7660)")
+        merge = _commit(repo, "Merge pull request #7700 from s/prevencia",
+                        "docs: prevencia notes\n\nmore text")
+        return docs, fix, merge
+
+    def _seed(self, cache, docs, fix, merge):
+        Path(cache).write_text(json.dumps({
+            "7662": {"issues": [7421], "oid": docs},
+            "7660": {"issues": [7644], "oid": fix},
+            "7700": {"issues": [7421], "oid": merge}}))
+
+    def test_in_range_legacy_docs_entries_leave_m_and_are_rewritten(self):
+        with TemporaryDirectory() as repo, TemporaryDirectory() as d:
+            docs, fix, merge = self._repo(repo)
+            cache = str(Path(d) / "pr-issues.json")
+            self._seed(cache, docs, fix, merge)
+            git = _git_fn({"origin/main..origin/develop": [
+                (docs, "docs(#7421): gk Prevencia batch 15 (#7662)"),
+                (fix, "#7644 (M1): stream_merge_guard hardening (#7660)"),
+                (merge, "Merge pull request #7700 from s/prevencia")]})
+            got = rs.merged_unreleased_issues(
+                repo, git_fn=git, cache_path=cache, slug="o/r",
+                pr_meta_fn=lambda pr: self.fail("a cached PR is never re-read"))
+            saved = json.loads(Path(cache).read_text())
+        self.assertEqual(set(got), {7644})
+        self.assertEqual(saved["7662"]["issues"], [])
+        self.assertEqual(saved["7700"]["issues"], [])
+        self.assertEqual(saved["7660"]["issues"], [7644])
+
+    def test_released_legacy_docs_entries_are_not_on_main(self):
+        with TemporaryDirectory() as repo, TemporaryDirectory() as d:
+            docs, fix, merge = self._repo(repo)
+            cache = str(Path(d) / "pr-issues.json")
+            self._seed(cache, docs, fix, merge)
+            got = rs.merged_released_oids(
+                repo, {7421, 7644}, is_ancestor_fn=lambda oid, root: True,
+                cache_path=cache, slug="o/r")
+        self.assertEqual(got, {7644: [fix]})
+
+
+class ConsumerReadsTheSameSet(unittest.TestCase):
+    """The quals commands, the footer and the dependency check all read
+    `merged_unreleased_issues`; the quals reader shows the rule too."""
+
+    def test_quals_merged_unreleased(self):
+        import cli_quals_cmd
+        rs._reset_memo()
+        with TemporaryDirectory() as repo:
+            _two_branch(repo, [("docs(spec): epic (#850)",),
+                               ("fix: regression (#853)",)])
+            got = cli_quals_cmd._merged_unreleased(repo)
+        rs._reset_memo()
+        self.assertEqual(set(got), {853})
+
+
+if __name__ == "__main__":
+    unittest.main()
