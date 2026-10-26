@@ -398,6 +398,57 @@ class LatchInherits(_Pane):
         self.assertIsNone(_os().cwd_latch(self.proj, self.CWD))
 
 
+class LatchExitPane(_Pane):
+    """Claude Code writes NO transcript record for `/exit` (2.1.306, probed
+    26.10.2026), so the exit fact is the tmux pane itself: a pane at a bare
+    shell whose cwd no live claude pane serves latches the cwd's newest
+    session, and the session the owner starts there next inherits it."""
+
+    def _inventory(self, cmd):
+        line = "%s\t%s\t%s\t4242" % (self.PID, cmd, self.CWD)
+        return lambda argv, timeout=8: line if "list-panes" in argv else ""
+
+    def test_a_bare_shell_pane_latches_until_the_owner_types(self):
+        self._append(*OWNER_WORK)
+        state = {}
+        logs = _os().refresh(state, [], self.proj, NOW, run=self._inventory("bash"))
+        self.assertEqual(state[_os().STATE_KEY][self.SID]["fact"], "exit", logs)
+        self.assertTrue(any("exit" in ln for ln in logs), logs)
+        old = time.time() - 600
+        os.utime(self.tpath, (old, old))
+        fresh = self.tpath.parent / "sess-restarted.jsonl"
+        fresh.write_text(json.dumps(_a("Ready.", T0 + 300)) + "\n")
+        _os().refresh(state, [(self.PID, self.CWD)], self.proj, NOW + 60,
+                      run=self._inventory("claude"))
+        self.assertEqual(_os().pane_latch(self.PID)["fact"], "exit")
+        self.assertFalse(wd.keys(self.PID, "Enter", kind="send", nudge="resume",
+                                 run=lambda argv, timeout=8: ""))
+        with open(fresh, "a", encoding="utf-8") as h:
+            h.write(json.dumps(_u("ahoj, pokračuj", T0 + 400)) + "\n")
+        _os().refresh(state, [(self.PID, self.CWD)], self.proj, NOW + 120,
+                      run=self._inventory("claude"))
+        self.assertIsNone(_os().pane_latch(self.PID))
+
+    def test_a_shell_beside_a_live_claude_is_no_exit(self):
+        state = {}
+        _os().refresh(state, [("%8", self.CWD)], self.proj, NOW,
+                      run=self._inventory("bash"))
+        self.assertNotIn(_os().STATE_KEY, state)
+
+    def test_resurrect_never_relaunches_after_an_exit(self):
+        from watchdog import resurrect as rz
+        _os().refresh({}, [], self.proj, NOW, run=self._inventory("bash"))
+        with m.patch.object(rz, "action_enabled", return_value=True), \
+                m.patch.object(rz, "find_pane", return_value=self.PID), \
+                m.patch.object(rz, "pane_is_bare_idle", return_value=True), \
+                m.patch.object(rz, "relaunch") as rel:
+            logs, _ = goal._resurrect_dead_entry(
+                self.CWD, {"sid": self.SID}, "proj", time.time(),
+                lambda argv, timeout=8: "", self.proj, False)
+        rel.assert_not_called()
+        self.assertTrue(any("owner-stop (exit)" in ln for ln in logs), logs)
+
+
 class LatchRefusesArm(_Latched):
     def setUp(self):
         super().setUp()
