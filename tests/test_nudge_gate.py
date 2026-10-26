@@ -17,8 +17,8 @@ priority kind was delivered within the total gap — per-kind staging alone does
 NOT bound the total (two kinds staged → two nudges/hour). RECOVERY kinds
 (resume/compact) are exempt from both bounds and never count for the cap.
 
-RED against the pre-implementation tree: `from watchdog import nudge_gate`
-ImportErrors. GREEN once the module lands.
+B9 RE-LOCK (owner 26.10.2026, "len raz denne"): every floor and the total cap
+are ONE DAY now (`DAY`); the hour/3 h bands below were re-locked to it.
 """
 
 import os
@@ -33,6 +33,7 @@ from watchdog import nudge_gate as ng
 
 NOW = 1_000_000
 HOUR = 3600
+DAY = 24 * HOUR
 
 
 class TestCadenceFloors(unittest.TestCase):
@@ -44,29 +45,29 @@ class TestCadenceFloors(unittest.TestCase):
     `NUDGE_TOTAL_GAP_S`) is the separate across-kinds bound tested elsewhere. The
     old `NUDGE_FAMILY_GAP_S`/`_family_gap` symbols stay deleted (a new name)."""
 
-    def test_u_reconcile_default_is_one_hour(self):
-        self.assertEqual(ng.U_RECONCILE_CADENCE_S, HOUR)
+    def test_u_reconcile_default_is_one_day(self):
+        self.assertEqual(ng.U_RECONCILE_CADENCE_S, DAY)
 
     def test_u_cadence_env_can_only_raise(self):
         with m.patch.dict(os.environ,
                           {"AIRULESET_U_RECONCILE_CADENCE_S": "60"}):
-            self.assertEqual(ng._u_cadence(), HOUR)  # clamped up to the strop
+            self.assertEqual(ng._u_cadence(), DAY)  # clamped up to the strop
         with m.patch.dict(os.environ,
-                          {"AIRULESET_U_RECONCILE_CADENCE_S": str(3 * HOUR)}):
-            self.assertEqual(ng._u_cadence(), 3 * HOUR)  # a raise is honored
+                          {"AIRULESET_U_RECONCILE_CADENCE_S": str(2 * DAY)}):
+            self.assertEqual(ng._u_cadence(), 2 * DAY)  # a raise is honored
 
     def test_u_cadence_garbage_env_falls_back(self):
         with m.patch.dict(os.environ,
                           {"AIRULESET_U_RECONCILE_CADENCE_S": "not-a-number"}):
-            self.assertEqual(ng._u_cadence(), HOUR)
+            self.assertEqual(ng._u_cadence(), DAY)
 
-    def test_min_interval_default_is_one_hour(self):
-        # #1023: the global per-kind floor replaces the #913 family gap.
-        self.assertEqual(ng.NUDGE_MIN_INTERVAL_S, HOUR)
-        self.assertEqual(ng.NUDGE_MIN_INTERVAL_MIN_S, HOUR)
+    def test_min_interval_default_is_one_day(self):
+        # #1023: the global per-kind floor replaces the #913 family gap (B9: a day).
+        self.assertEqual(ng.NUDGE_MIN_INTERVAL_S, DAY)
+        self.assertEqual(ng.NUDGE_MIN_INTERVAL_MIN_S, DAY)
         with m.patch.dict(os.environ, {"AIRULESET_NUDGE_MIN_INTERVAL_S": "5"}):
-            # env can only RAISE above 1 h, never lower.
-            self.assertEqual(ng._min_interval(), HOUR)
+            # env can only RAISE above a day, never lower.
+            self.assertEqual(ng._min_interval(), DAY)
 
     def test_family_gap_symbols_removed(self):
         # #1023: the cross-kind family gap is deleted, not left as dead code.
@@ -96,56 +97,47 @@ class TestGateOk(unittest.TestCase):
         for cat in ng.GATED_CATEGORIES:
             self.assertTrue(ng.gate_ok(st, "sess-a", cat, NOW))
 
-    def test_u_freshness_blocked_within_the_hour(self):
+    def test_u_freshness_blocked_within_the_day(self):
         st = {}
         ng.mark_sent(st, "sess-a", "u-freshness", NOW)
         self.assertFalse(ng.gate_ok(st, "sess-a", "u-freshness", NOW + 1800))
-        # #1023 fix-forward 2 (owner "3"): the 3 h total cap counts the SAME kind
-        # too, so u-freshness is STILL held at 1 h (its own 1 h floor elapsed but
-        # the total cap has not) — allowed only past the 3 h total gap.
-        self.assertFalse(ng.gate_ok(st, "sess-a", "u-freshness", NOW + HOUR))
-        self.assertTrue(ng.gate_ok(st, "sess-a", "u-freshness", NOW + 181 * 60))
+        # B9: the daily floor + the daily total cap (same kind counts) hold it for
+        # the whole day; allowed only past it.
+        self.assertFalse(ng.gate_ok(st, "sess-a", "u-freshness", NOW + DAY - 60))
+        self.assertTrue(ng.gate_ok(st, "sess-a", "u-freshness", NOW + DAY + 60))
 
     def test_u_freshness_env_raise_extends_the_block(self):
-        # #1023 fix-forward 2: the u-freshness cadence floor still extends via env
-        # (max() semantics preserved) — but the extension is only OBSERVABLE ABOVE
-        # the 3 h total cap: at/below 3 h the total cap dominates. env = 4 h -> the
-        # per-kind floor is 4 h, so it is held at 3.5 h (past the total cap, by the
-        # floor) and allowed only at 4 h.
+        # the u-freshness cadence floor still extends via env (max() semantics),
+        # observable ABOVE the daily total cap: env = 2 days -> held at 1.5 days
+        # (past the total cap, by the floor), allowed only at 2 days. (B9 re-lock.)
         st = {}
         with m.patch.dict(os.environ,
-                          {"AIRULESET_U_RECONCILE_CADENCE_S": str(4 * HOUR)}):
+                          {"AIRULESET_U_RECONCILE_CADENCE_S": str(2 * DAY)}):
             ng.mark_sent(st, "sess-a", "u-freshness", NOW)
             self.assertFalse(ng.gate_ok(st, "sess-a", "u-freshness",
-                                        NOW + 3 * HOUR + 1800))
+                                        NOW + DAY + 12 * HOUR))
             self.assertTrue(ng.gate_ok(st, "sess-a", "u-freshness",
-                                       NOW + 4 * HOUR))
+                                       NOW + 2 * DAY))
 
     def test_different_kind_deferred_by_total_cap_1023ff(self):
-        # #1023 fix-forward: a DIFFERENT kind IS held by the restored cross-kind
-        # TOTAL cap while another priority kind was delivered within the hour
-        # (the #913 rule the #1023 lane wrongly dropped). Owner 2026-09-17 ("3"):
-        # the total cap is 3 h per pane everywhere — still held at 1 h, allowed
-        # only past 3 h.
+        # #1023 fix-forward: a DIFFERENT kind IS held by the cross-kind TOTAL cap
+        # while another budgeted kind was delivered within it — B9: a whole day.
         st = {}
         ng.mark_sent(st, "sess-a", "release-gap", NOW)
-        self.assertFalse(ng.gate_ok(st, "sess-a", "release-gap", NOW + 60))
-        self.assertFalse(ng.gate_ok(st, "sess-a", "release-gap", NOW + 59 * 60))
-        self.assertFalse(ng.gate_ok(st, "sess-a", "release-gap", NOW + HOUR))
-        self.assertTrue(ng.gate_ok(st, "sess-a", "release-gap", NOW + 3 * HOUR))
+        self.assertFalse(ng.gate_ok(st, "sess-a", "partition-audit", NOW + 60))
+        self.assertFalse(ng.gate_ok(st, "sess-a", "partition-audit", NOW + 3 * HOUR))
+        self.assertFalse(ng.gate_ok(st, "sess-a", "partition-audit", NOW + DAY - 60))
+        self.assertTrue(ng.gate_ok(st, "sess-a", "partition-audit", NOW + DAY))
 
-    def test_same_kind_deferred_within_the_hour_1023(self):
-        """#1023: the SAME kind is floored within 60 min (the burst fix). #1023
-        fix-forward 2 (owner "3"): the 3 h total cap now counts the SAME kind too,
-        so past the 60-min floor the repeat is STILL held (by the total cap) —
-        allowed only past the 3 h total gap."""
+    def test_same_kind_deferred_within_the_day_1023(self):
+        """#1023: the SAME kind is floored (the burst fix); B9: for a whole day,
+        by its own floor and by the total cap that counts the same kind too."""
         st = {}
         ng.mark_sent(st, "sess-a", "queue-arrival", NOW)
         self.assertFalse(ng.gate_ok(st, "sess-a", "queue-arrival", NOW + 45 * 60))
-        self.assertFalse(ng.gate_ok(st, "sess-a", "queue-arrival", NOW + 59 * 60))
-        # at 1 h the per-kind floor has elapsed but the 3 h total cap still holds
-        self.assertFalse(ng.gate_ok(st, "sess-a", "queue-arrival", NOW + HOUR))
-        self.assertTrue(ng.gate_ok(st, "sess-a", "queue-arrival", NOW + 181 * 60))
+        self.assertFalse(ng.gate_ok(st, "sess-a", "queue-arrival", NOW + 3 * HOUR))
+        self.assertFalse(ng.gate_ok(st, "sess-a", "queue-arrival", NOW + DAY - 60))
+        self.assertTrue(ng.gate_ok(st, "sess-a", "queue-arrival", NOW + DAY + 60))
 
     def test_floor_is_per_session(self):
         st = {}
@@ -231,26 +223,24 @@ class TestBatchEligible923(unittest.TestCase):
     def test_gap_open_returns_all_eligible(self):
         st = {}
         ng.mark_sent(st, "s", "release-gap", NOW)
-        # After 3 h (the owner's 2026-09-17 total cap; release-gap's own 1 h
-        # floor expired long before): all eligible again
-        self.assertEqual(ng.batch_eligible(st, "s", NOW + HOUR), [])
-        result = ng.batch_eligible(st, "s", NOW + 3 * HOUR)
+        # B9: closed for the whole day, then all eligible again
+        self.assertEqual(ng.batch_eligible(st, "s", NOW + 3 * HOUR), [])
+        result = ng.batch_eligible(st, "s", NOW + DAY)
         self.assertGreater(len(result), 0)
         self.assertIn("release-gap", result)
         self.assertIn("partition-audit", result)
 
     def test_total_cap_then_floor_gates_the_batch(self):
-        """#1023 fix-forward: after a u-freshness delivery at NOW, the total cap
-        holds the WHOLE batch until NOW+HOUR (no batch at NOW+HOUR-1), then at
-        NOW+HOUR the cap opens and u-freshness's own 1h floor has expired too, so
-        it (and every other kind) is eligible."""
+        """After a u-freshness delivery at NOW the total cap holds the WHOLE batch
+        for the day; at NOW+DAY the cap opens and u-freshness's own floor has
+        expired too, so it (and every other kind) is eligible. (B9 re-lock.)"""
         st = {}
         ng.mark_sent(st, "s", "u-freshness", NOW)
-        # At NOW+HOUR-1: total cap still closed -> no batch at all.
-        self.assertEqual(ng.batch_eligible(st, "s", NOW + 3 * HOUR - 1), [])
-        # At NOW+3h (the owner's 2026-09-17 total cap): cap open + own floor
+        # One second before the day: total cap still closed -> no batch at all.
+        self.assertEqual(ng.batch_eligible(st, "s", NOW + DAY - 1), [])
+        # At NOW+DAY: cap open + own floor
         # expired -> included.
-        result = ng.batch_eligible(st, "s", NOW + 3 * HOUR)
+        result = ng.batch_eligible(st, "s", NOW + DAY)
         self.assertIn("u-freshness", result)
         self.assertIn("partition-audit", result)
 
@@ -260,8 +250,8 @@ class TestBatchEligible923(unittest.TestCase):
         st = {}
         ng.mark_sent(st, "s", "release-gap", NOW - 2 * HOUR)
         ng.mark_sent(st, "s", "partition-audit", NOW)
-        # After 3 h from the latest mark_sent (the total cap): gap opens
-        result = ng.batch_eligible(st, "s", NOW + 3 * HOUR)
+        # A day after the latest mark_sent (the total cap): gap opens
+        result = ng.batch_eligible(st, "s", NOW + DAY)
         self.assertIn("release-gap", result)
         self.assertIn("partition-audit", result)
 
@@ -278,8 +268,8 @@ class TestBatchEligible923(unittest.TestCase):
         # kind leaks a second interruption).
         self.assertEqual(ng.batch_eligible(st, "s", NOW + 30 * 60), [])
         self.assertEqual(ng.batch_eligible(st, "s", NOW + HOUR), [])
-        # Past the 3 h total cap every kind is eligible again.
-        self.assertEqual(len(ng.batch_eligible(st, "s", NOW + 3 * HOUR)),
+        # Past the daily total cap every kind is eligible again.
+        self.assertEqual(len(ng.batch_eligible(st, "s", NOW + DAY)),
                          len(ng.GATED_CATEGORIES))
 
     def test_ordering_work_driving_first(self):

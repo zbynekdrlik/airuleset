@@ -110,19 +110,18 @@ class TestUnconfirmedNotTerminal(unittest.TestCase):
         self.assertEqual(sv2.n, 0, logs2)               # never re-typed inside the hour
         self.assertEqual(qrecs[self.sid]["base"], [1])
         self.assertTrue(any("hold:floor" in ln for ln in logs2), logs2)
-        # tick 2b (NOW+61 min: past the 1h floor, inside the 3h TOTAL cap): still
-        # HELD — #1023 fix-forward 2 counts the SAME kind in the total cap (owner
-        # ROZHODNUTÉ "3", 2026-09-17), so the unconfirmed-but-delivered text at
-        # tick 1 blocks a re-type for the full 3 h, not just the hour.
+        # tick 2b (NOW+61 min): still HELD — B9 (owner 26.10.2026): the floor is
+        # a day, so the unconfirmed-but-delivered text at tick 1 blocks a re-type
+        # for the whole day.
         sv2b = _SV(result=True, unconfirmed=False)
         with m.patch.object(wd, "send_verified", sv2b):
             logs2b = self._run(qrecs, state, now=NOW + 3600 + 60)
         self.assertEqual(sv2b.n, 0, logs2b)
         self.assertEqual(qrecs[self.sid]["base"], [1])
-        self.assertTrue(any("hold:total-cap" in ln for ln in logs2b), logs2b)
-        # tick 3 (past the 3h total cap): the send confirms -> baseline advances +
+        self.assertTrue(any("hold:floor" in ln for ln in logs2b), logs2b)
+        # tick 3 (past the day): the send confirms -> baseline advances +
         # cadence re-stamped
-        after = NOW + 3 * 3600 + 60
+        after = NOW + 24 * 3600 + 60
         with m.patch.object(wd, "send_verified", _SV(result=True, unconfirmed=False)):
             self._run(qrecs, state, now=after)
         self.assertEqual(qrecs[self.sid]["base"], [1, 2])

@@ -7,8 +7,8 @@ kinds. Even if a future outcome escapes the per-kind floor stamp (the #1092
 swallowed-batch storm was exactly that), the pane can never receive more than two
 typing attempts an hour.
 
-RED against the pre-#1092 tree: `nudge_gate` has no `PANE_ATTEMPT_BUDGET` /
-`pane_budget_ok` / `mark_pane_attempt` / `pane_budget_hold_reason` at all.
+B9 RE-LOCK (owner 26.10.2026, "len raz denne"): ONE attempt per pane per DAY;
+the 2-per-hour assertions were re-locked to it.
 """
 import os
 import sys
@@ -21,24 +21,25 @@ from watchdog import nudge_gate as ng  # noqa: E402
 
 NOW = 1_000_000
 HOUR = 3600
+DAY = 24 * HOUR
 
 
 class TestPaneBudgetPrimitives(unittest.TestCase):
-    def test_budget_constant_is_two_and_window_one_hour(self):
-        self.assertEqual(ng.PANE_ATTEMPT_BUDGET, 2)
-        self.assertEqual(ng.PANE_ATTEMPT_WINDOW_S, HOUR)
+    def test_budget_constant_is_one_and_window_one_day(self):
+        self.assertEqual(ng.PANE_ATTEMPT_BUDGET, 1)
+        self.assertEqual(ng.PANE_ATTEMPT_WINDOW_S, DAY)
 
     def test_empty_state_allows(self):
         self.assertTrue(ng.pane_budget_ok({}, "%1", NOW))
         self.assertTrue(ng.pane_budget_ok(None, "%1", NOW))
 
-    def test_third_attempt_refused_within_the_hour(self):
+    def test_second_attempt_refused_within_the_day(self):
         state = {}
+        self.assertTrue(ng.pane_budget_ok(state, "%1", NOW))
         ng.mark_pane_attempt(state, "%1", NOW)
-        self.assertTrue(ng.pane_budget_ok(state, "%1", NOW + 60))
-        ng.mark_pane_attempt(state, "%1", NOW + 60)
-        # two attempts in the window -> the third is refused BEFORE any keystroke
-        self.assertFalse(ng.pane_budget_ok(state, "%1", NOW + 120))
+        # one attempt in the window -> the second is refused BEFORE any keystroke
+        self.assertFalse(ng.pane_budget_ok(state, "%1", NOW + 60))
+        self.assertFalse(ng.pane_budget_ok(state, "%1", NOW + DAY - 60))
 
     def test_a_different_pane_has_its_own_budget(self):
         state = {}
@@ -48,13 +49,12 @@ class TestPaneBudgetPrimitives(unittest.TestCase):
         # a DIFFERENT pane is unaffected
         self.assertTrue(ng.pane_budget_ok(state, "%2", NOW + 120))
 
-    def test_budget_reopens_after_the_rolling_hour(self):
+    def test_budget_reopens_after_the_rolling_day(self):
         state = {}
         ng.mark_pane_attempt(state, "%1", NOW)
-        ng.mark_pane_attempt(state, "%1", NOW + 60)
         self.assertFalse(ng.pane_budget_ok(state, "%1", NOW + 120))
-        # past the window from the OLDEST attempt: it ages out -> one slot frees
-        self.assertTrue(ng.pane_budget_ok(state, "%1", NOW + HOUR + 1))
+        # past the window the attempt ages out -> the slot frees
+        self.assertTrue(ng.pane_budget_ok(state, "%1", NOW + DAY + 1))
 
     def test_hold_reason_names_count_and_a_clock_time(self):
         state = {}
@@ -68,7 +68,7 @@ class TestPaneBudgetPrimitives(unittest.TestCase):
         state = {}
         ng.mark_pane_attempt(state, "%1", NOW)
         # a later mark far outside the window drops the stale entry, keeps state bounded
-        ng.mark_pane_attempt(state, "%1", NOW + 2 * HOUR)
+        ng.mark_pane_attempt(state, "%1", NOW + 2 * DAY)
         self.assertEqual(len(state["nudge_pane_attempts"]["%1"]), 1)
 
     def test_malformed_state_reads_as_no_prior_attempt(self):
@@ -81,7 +81,7 @@ class TestPaneBudgetPrimitives(unittest.TestCase):
             "%1", NOW))
 
     def test_prune_reaps_a_gone_pane_with_no_in_window_attempt(self):
-        state = {"nudge_pane_attempts": {"%gone": [NOW - 2 * HOUR],
+        state = {"nudge_pane_attempts": {"%gone": [NOW - 2 * DAY],
                                          "%live": [NOW]}}
         ng.prune(state, visited_sids=set(), now=NOW)
         self.assertNotIn("%gone", state["nudge_pane_attempts"])

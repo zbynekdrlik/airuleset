@@ -18,8 +18,9 @@ The per-pane-per-KIND 60-min floor (#1023) is kept exactly as shipped. RECOVERY
 identities (resume/compact) are exempt from BOTH the floor and the total cap and
 never count as "another kind delivered".
 
-RED against the merged tree (v0.1.278): `NUDGE_TOTAL_GAP_S`/`_total_gap` do not
-exist and the total cap is not enforced. GREEN once the predicate lands.
+B9 RE-LOCK (owner 26.10.2026, "len raz denne"): the total cap and the per-kind
+floor are both ONE DAY now; the 3 h assertions were re-locked to `DAY` and the
+60-179 min floor-vs-cap band tests were retired (that band no longer exists).
 """
 import os
 import sys
@@ -35,46 +36,45 @@ from watchdog import tmux_io as tio    # noqa: E402
 NOW = 1_000_000
 HOUR = 3600
 MIN = 60
+DAY = 24 * HOUR
 
 
 class TestTotalGapConstant(unittest.TestCase):
-    def test_total_gap_default_is_three_hours(self):
-        # Owner decision 2026-09-17 07:1x CEST ("3" on #1023): the cross-kind
-        # total cap is 3 h per pane EVERYWHERE (gk has two Fable panes, so the
-        # former 1 h read as two interruptions an hour). The hard floor moves
-        # with it: env can only RAISE above 3 h.
-        self.assertEqual(ng.NUDGE_TOTAL_GAP_S, 3 * HOUR)
-        self.assertEqual(ng.NUDGE_TOTAL_GAP_MIN_S, 3 * HOUR)
+    def test_total_gap_default_is_one_day(self):
+        # B9 (owner 26.10.2026): the cross-kind total cap is a day per pane; the
+        # hard floor moves with it: env can only RAISE above a day.
+        self.assertEqual(ng.NUDGE_TOTAL_GAP_S, DAY)
+        self.assertEqual(ng.NUDGE_TOTAL_GAP_MIN_S, DAY)
 
     def test_total_gap_env_can_only_raise(self):
         # #504/#543 floor-clamp: the env override can RAISE but never lower the
-        # owner's hard 3 h total cap (2026-09-17).
+        # owner's hard daily total cap (B9).
         with m.patch.dict(os.environ, {"AIRULESET_NUDGE_TOTAL_GAP_S": "5"}):
-            self.assertEqual(ng._total_gap(), 3 * HOUR)
+            self.assertEqual(ng._total_gap(), DAY)
         with m.patch.dict(os.environ,
-                          {"AIRULESET_NUDGE_TOTAL_GAP_S": str(4 * HOUR)}):
-            self.assertEqual(ng._total_gap(), 4 * HOUR)
+                          {"AIRULESET_NUDGE_TOTAL_GAP_S": str(2 * DAY)}):
+            self.assertEqual(ng._total_gap(), 2 * DAY)
 
     def test_total_gap_garbage_env_falls_back(self):
         with m.patch.dict(os.environ,
                           {"AIRULESET_NUDGE_TOTAL_GAP_S": "not-a-number"}):
-            self.assertEqual(ng._total_gap(), 3 * HOUR)
+            self.assertEqual(ng._total_gap(), DAY)
 
 
 class TestGateOkTotalCap(unittest.TestCase):
     """Dispatch RED cases (1)/(2)/(4)."""
 
     def test_case1_other_kind_held_by_total_cap_then_allowed(self):
-        # (1) kind A at t, kind B eligible at t+45m -> held; at t+61m -> STILL
-        # held (the owner's 3 h total cap, 2026-09-17); at t+181m -> allowed.
+        # (1) kind A at t, kind B at t+45m -> held; at t+23h -> STILL held (the
+        # daily total cap, B9); past the day -> allowed.
         st = {}
         ng.mark_sent(st, "s", "queue-arrival", NOW)          # kind A
         self.assertFalse(ng.gate_ok(st, "s", "release-gap", NOW + 45 * MIN),
                          "a DIFFERENT kind within the total cap must be HELD")
-        self.assertFalse(ng.gate_ok(st, "s", "release-gap", NOW + 61 * MIN),
-                         "1 h is inside the 3 h total cap — still HELD")
-        self.assertTrue(ng.gate_ok(st, "s", "release-gap", NOW + 181 * MIN),
-                        "past the 3 h total gap the other kind is allowed")
+        self.assertFalse(ng.gate_ok(st, "s", "release-gap", NOW + 23 * HOUR),
+                         "23 h is inside the daily total cap — still HELD")
+        self.assertTrue(ng.gate_ok(st, "s", "release-gap", NOW + DAY + MIN),
+                        "past the day the other kind is allowed")
 
     def test_case2_same_kind_is_floor_not_total_cap(self):
         # (2) kind A at t, kind A at t+45m -> held by the per-kind FLOOR
@@ -99,10 +99,10 @@ class TestGateOkTotalCap(unittest.TestCase):
         st = {}
         ng.mark_sent(st, "s", "queue-arrival", NOW)
         with m.patch.dict(os.environ,
-                          {"AIRULESET_NUDGE_TOTAL_GAP_S": str(4 * HOUR)}):
+                          {"AIRULESET_NUDGE_TOTAL_GAP_S": str(2 * DAY)}):
             self.assertFalse(ng.gate_ok(st, "s", "release-gap",
-                                        NOW + 3 * HOUR + 30 * MIN))
-            self.assertTrue(ng.gate_ok(st, "s", "release-gap", NOW + 4 * HOUR))
+                                        NOW + DAY + 12 * HOUR))
+            self.assertTrue(ng.gate_ok(st, "s", "release-gap", NOW + 2 * DAY))
 
     def test_empty_state_allows(self):
         self.assertTrue(ng.gate_ok({}, "s", "release-gap", NOW))
@@ -190,8 +190,8 @@ class TestBatchEligibleTotalCap(unittest.TestCase):
     def test_batch_opens_when_total_cap_expires(self):
         st = {}
         ng.mark_sent(st, "s", "queue-arrival", NOW)
-        self.assertEqual(ng.batch_eligible(st, "s", NOW + HOUR), [])   # 3 h cap
-        result = ng.batch_eligible(st, "s", NOW + 3 * HOUR)
+        self.assertEqual(ng.batch_eligible(st, "s", NOW + 3 * HOUR), [])   # a day
+        result = ng.batch_eligible(st, "s", NOW + DAY)
         self.assertGreater(len(result), 0)
         self.assertIn("queue-arrival", result)   # its own floor expired long ago
         self.assertIn("partition-audit", result)
@@ -226,32 +226,6 @@ class TestSameKindCountsInTotalCap(unittest.TestCase):
     band as `hold:total-cap`.
     """
 
-    def test_same_kind_held_by_total_cap_at_150min(self):
-        # RED against the merged tree: 150 min > the 60-min floor, so the floor
-        # passes; the total cap USED to skip queue-arrival -> gate_ok True. It
-        # must now be HELD, with the existing hold:total-cap string naming itself.
-        st = {}
-        ng.mark_sent(st, "s", "queue-arrival", NOW)
-        self.assertFalse(ng.gate_ok(st, "s", "queue-arrival", NOW + 150 * MIN),
-                         "same kind within the 3 h total cap must be HELD")
-        reason = ng.floor_hold_reason(st, "s", "queue-arrival", NOW + 150 * MIN)
-        self.assertEqual(
-            reason, "hold:total-cap (queue-arrival delivered 150 min ago)")
-
-    def test_same_kind_allowed_past_the_total_cap_at_181min(self):
-        st = {}
-        ng.mark_sent(st, "s", "queue-arrival", NOW)
-        self.assertTrue(ng.gate_ok(st, "s", "queue-arrival", NOW + 181 * MIN),
-                        "past the 3 h total cap the same kind is allowed again")
-
-    def test_same_kind_boundary_179_held_180_allowed(self):
-        # RED: 179 min was allowed under the old skip; it must now be held. 180 min
-        # is exactly the gap (now - ts < gap is False) -> allowed on both sides.
-        st = {}
-        ng.mark_sent(st, "s", "queue-arrival", NOW)
-        self.assertFalse(ng.gate_ok(st, "s", "queue-arrival", NOW + 179 * MIN))
-        self.assertTrue(ng.gate_ok(st, "s", "queue-arrival", NOW + 180 * MIN))
-
     def test_same_kind_within_floor_still_reads_as_floor(self):
         # the per-kind floor still fires FIRST for the sub-60-min window, so the
         # journal keeps the honest 'hold:floor (<kind>, N min since last send)'
@@ -271,14 +245,12 @@ class TestSameKindCountsInTotalCap(unittest.TestCase):
         self.assertTrue(ng.gate_ok(st, "s", "resume", NOW + 150 * MIN))
 
     def test_batch_same_kind_only_still_blocked_by_the_cap(self):
-        # the batch path already counted every kind (it never excluded the
-        # deciding kind), so it was never holed — but lock that a lone
-        # queue-arrival delivery keeps a NEW batch closed for the full 3 h, not
-        # just the 60-min floor.
+        # a lone queue-arrival delivery keeps a NEW batch closed for the full day.
         st = {}
         ng.mark_sent(st, "s", "queue-arrival", NOW)
         self.assertEqual(ng.batch_eligible(st, "s", NOW + 150 * MIN), [])
-        self.assertGreater(len(ng.batch_eligible(st, "s", NOW + 181 * MIN)), 0)
+        self.assertEqual(ng.batch_eligible(st, "s", NOW + DAY - MIN), [])
+        self.assertGreater(len(ng.batch_eligible(st, "s", NOW + DAY + MIN)), 0)
 
 
 if __name__ == "__main__":
