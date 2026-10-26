@@ -797,8 +797,10 @@ def goal_queue_arrival_recheck(now, run, qrecs, sid, cwd, pid, tpath, loc,
     # is delivered under the `infra-priority` nudge kind (INFRA role only — the
     # review union has no id_map). B9 (owner 26.10.2026): it is bound by the
     # pane's daily cap like every kind, so when the day's batch is open it rides
-    # that ONE batch (the `queue-arrival` section); otherwise the direct path's
-    # `gate_ok("infra-priority")` holds it for the day.
+    # that ONE batch (the `queue-arrival` section, admitted only while the
+    # owner's `infra-priority` switch is on, its hub receipt posted by the batch
+    # delivery callback); otherwise the direct path's `gate_ok("infra-priority")`
+    # holds it for the day.
     priority = role == "infra" and _wave_has_priority(arrivals, id_map)
     nudge_kind = INFRA_PRIORITY_NUDGE if priority else "queue-arrival"
 
@@ -855,11 +857,11 @@ def goal_queue_arrival_recheck(now, run, qrecs, sid, cwd, pid, tpath, loc,
         logs.append("queue-arrival %s -> hold:%s (%d new, base kept; delivers "
                     "when the pane is idle and human-quiet)" % (loc, _held, len(arrivals)))
         return logs
+    if not watchdog.nudges_enabled(nudge_kind):   # #1023/#1109 switch, batch too
+        logs.append("queue-arrival %s -> skip:kind-off (%s, %d new)"
+                    % (loc, nudge_kind, len(arrivals)))
+        return logs
     if batch_collect is None:
-        if not watchdog.nudges_enabled(nudge_kind):   # #1023/#1109 per-kind switch
-            logs.append("queue-arrival %s -> skip:kind-off (%s, %d new)"
-                        % (loc, nudge_kind, len(arrivals)))
-            return logs
         from watchdog import compact as _compact
         if _compact.pending_compact_hold(sid, now):   # #848 bounded
             logs.append("queue-arrival %s -> hold:compact-pending (pending /compact; "
@@ -908,6 +910,10 @@ def goal_queue_arrival_recheck(now, run, qrecs, sid, cwd, pid, tpath, loc,
             _q[_s] = _nr
             if _h is not None:
                 _h.add(_s)
+            # #1109 req 3 -- the batch delivery is CONFIRMED here: the priority
+            # wave's hub receipts, journalled by `_deliver_batch`.
+            return (_post_receipts_for_wave(_st, _ar, id_map, _n, loc,
+                                            receipt_post_fn) if priority else [])
         batch_collect.append(("queue-arrival", text, _on_deliver))
         logs.append("queue-arrival %s -> batch-collected (%d new)"
                     % (loc, len(arrivals)))

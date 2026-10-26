@@ -4716,7 +4716,9 @@ def _deliver_batch(collect, pid, sid, loc, tpath, run, state, now, handled,
                 continue
             if _bc == "queue-arrival" and not _bok:
                 continue   # #1023 🔵6: non-terminal on unconfirmed
-            _bfn()
+            _blines = _bfn()          # a rider may journal its delivery (#1109)
+            if isinstance(_blines, list):
+                logs.extend(_blines)
         # #1023 timeout-race — WRITE-THROUGH: the batch floor mark + every advanced
         # baseline are durable before a later systemd kill can un-record them.
         _queue_arrival._persist(persist, logs)
