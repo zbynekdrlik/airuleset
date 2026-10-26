@@ -99,7 +99,7 @@ class ThreeBranchDocsPRs(unittest.TestCase):
             ("c", "feat: guide #902 (#952)")]})
         meta = {950: ("docs: spec for #900", ""),
                 951: ("fix: real #901", ""),
-                952: ("feat: guide #902", "[no-test: docs only]")}
+                952: ("feat: guide #902 [no-test: docs only]", "")}
         got = rs.merged_unreleased_issues(
             "/repo", git_fn=git, pr_meta_fn=lambda pr: meta.get(pr),
             cache_path=self.cache, slug="o/r")
