@@ -119,5 +119,72 @@ class AnUnreadableProcFailsClosed(_Procs):
             self.assertTrue(owner_stop._hosts_claude(sh))
 
 
+def _lane(testcase, goal_mod, cwd, before):
+    """A `goal_lane_sweep` stand-in that runs `before(now, kw)` (set up the
+    sessions, run `owner_stop.refresh`) ahead of each real sweep."""
+    orig = goal_mod.goal_lane_sweep
+
+    def sweep(now, **kw):
+        before(now, kw)
+        return orig(now, **kw)
+    testcase.addCleanup(owner_stop.reset)
+    return m.patch.object(goal_mod, "goal_lane_sweep", sweep)
+
+
+class StallEpisodesUnderTheLatch(unittest.TestCase):
+    """Review 5, finding 5: the paused-loop alert gate (review 4) froze the
+    stuck / gk-stall episodes instead of ending them — a stale streak could
+    alert at once on release and a leftover `soa` keeps the full sweep
+    cadence — and it also silenced the alerts of a pane held only by a
+    SIBLING session's latch (`via`), which the owner never stopped."""
+
+    def setUp(self):
+        import test_oauth_stuck_alert_662 as sa
+        self.sa = sa
+        self.h = sa.SweepStuckOwnerAlert("run")
+        self.h.setUp()
+        self.addCleanup(self.h.doCleanups)
+
+    def _dir(self, kw):
+        return Path(kw["projects_dir"]) / wd.encode_project_dir(self.h.CWD)
+
+    def test_an_own_pause_ends_the_stall_episodes(self):
+        def before(now, kw):
+            t = self._dir(kw) / "sess-662.jsonl"
+            if "pauza" not in t.read_text(encoding="utf-8"):
+                aged = os.path.getmtime(t)
+                with open(t, "a", encoding="utf-8") as fh:
+                    fh.write('{"type": "user", "timestamp": "2026-01-01T00:00:00Z",'
+                             ' "message": {"role": "user", "content": "pauza"}}\n')
+                os.utime(t, (aged, aged))
+            owner_stop.refresh(kw["state"], [("%9", self.h.CWD)],
+                               kw["projects_dir"], now)
+        state = {"goal_lane": {"sess-662": {"soa": 5, "soa_ts": 1, "gks_ts": 1}}}
+        with _lane(self, self.sa.goal, self.h.CWD, before):
+            sends, state, sid = self.h._run(self.h._stuck(2), state=state)
+        rec = state["goal_lane"][sid]
+        self.assertEqual([k for k in ("soa", "soa_ts", "gks_ts") if k in rec], [], rec)
+        self.assertEqual(self.h._alerts(sends), [])
+
+    def test_a_siblings_latch_never_silences_the_stuck_alert(self):
+        def before(now, kw):
+            sib = self._dir(kw) / "sess-sibling.jsonl"
+            if not sib.exists():
+                sib.write_text('{"type": "user", "timestamp": "2026-01-01T00:00:00Z",'
+                               ' "message": {"role": "user", "content": "pauza"}}\n')
+                os.utime(sib, (now - 7200, now - 7200))
+            with m.patch.object(wd, "_pane_claude_start_epoch",
+                                side_effect=lambda pid, run=None: None):
+                owner_stop.refresh(kw["state"], [("%9", self.h.CWD), ("%8", self.h.CWD)],
+                                   kw["projects_dir"], now,
+                                   run=lambda argv, timeout=8: "")
+            self.assertEqual((owner_stop.pane_latch("%9") or {}).get("via"),
+                             "sess-sibling")
+        with _lane(self, self.sa.goal, self.h.CWD, before):
+            sends, _s, _sid = self.h._run(
+                self.h._stuck(self.sa.goal.GOAL_LANE_STUCK_ALERT_STREAK + 3))
+        self.assertEqual(len(self.h._alerts(sends)), 1, sends)
+
+
 if __name__ == "__main__":
     unittest.main()
