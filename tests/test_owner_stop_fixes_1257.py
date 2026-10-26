@@ -8,7 +8,9 @@ when, after lowercasing, stripping punctuation and removing politeness/time
 fillers, what remains is EXACTLY one stop phrase. A prompt that merely
 CONTAINS a stop word is NEUTRAL: it neither sets nor clears the latch.
 """
+import os
 import sys
+import time
 import unittest
 from pathlib import Path
 
@@ -18,6 +20,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import test_nudge_daily_owner_stop_1257 as base  # noqa: E402
 
 T0, OWNER_WORK, FACTS, _u = base.T0, base.OWNER_WORK, base.FACTS, base._u
+NOW, DAY, _os, _sys = base.NOW, base.DAY, base._os, base._sys
+GOAL_SET = "<local-command-stdout>Goal set: work the backlog</local-command-stdout>"
+GOAL_CLEARED = ("<local-command-stdout>Goal cleared: work the backlog"
+                "</local-command-stdout>")
 LONG_TASK = ("oprav prosím ten stop button na webe, lebo po kliknutí sa nič "
              "nestane a formulár zostane visieť na obrazovke")
 
@@ -57,6 +63,24 @@ class ExactStopPhrase(unittest.TestCase):
         for text in ("pokračuj s ticketom 5", "sprav review PR 12", "ahoj"):
             self.assertIsNone(_latch(OWNER_WORK + FACTS["pause"]
                                      + [_u(text, T0 + 60)]), text)
+
+
+class MachineClearSameSweep(base._Pane):
+    """Review finding 3: the watchdog's own #522 disarm (`qrepoke` writes the
+    `goal_disarmed_q` veto, then types `/goal clear`) can land AFTER `refresh`
+    in the same sweep; the veto must be read live, not from refresh's copy."""
+
+    def test_a_veto_written_after_refresh_still_reads_machine(self):
+        self._append(*OWNER_WORK, _sys(GOAL_SET, T0 + 5))
+        state = {}
+        _os().refresh(state, [(self.PID, self.CWD)], self.proj, NOW)
+        self.assertIsNone(_os().pane_latch(self.PID))
+        clear_ts = time.time() - 30
+        state["goal_disarmed_q"] = {self.SID: {"disarmed_ts": clear_ts - 3}}
+        self._append(_sys(GOAL_CLEARED, clear_ts))
+        later = time.time() - 20
+        os.utime(self.tpath, (later, later))
+        self.assertIsNone(_os().pane_latch(self.PID))
 
 
 if __name__ == "__main__":
