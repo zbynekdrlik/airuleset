@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import test_goal_stranded_recovery_566 as stranded  # noqa: E402
 import test_infra_priority_arrival_1109 as prio  # noqa: E402
+import test_nudge_daily_owner_stop_1257 as b1257  # noqa: E402
 import test_send_verified_adoption as adopt  # noqa: E402
 import watchdog as wd  # noqa: E402
 from watchdog import goal  # noqa: E402
@@ -162,6 +163,57 @@ class WorkingStallIsADailyWorkNudge(unittest.TestCase):
         self.assertEqual(sent, [])
         self.assertTrue(any("working-held" in ln and "pane-budget" in ln
                             for ln in logs), logs)
+
+
+class OwnerActionsArePastTheCap(b1257._Pane):
+    """Review finding 14: a ❓-flag prompt and a card-reopen nudge answer a
+    VERIFIED owner action (the owner's own Discord reaction / reply), yet they
+    typed under the machine `card` identity: the bare route was held by the
+    daily cap (and the card switch), and a held card-reopen is fire-and-forget,
+    so it was lost. Both are owner-authored on every route, the stash route
+    included (which passed no `state` at all)."""
+    FLAG = b1257.wd.compose_flag_prompt("Release 0.1.561 je nasadená.")
+
+    def _spent(self):
+        return {"nudge_pane_attempts": {self.PID: [time.time() - 60]}}
+
+    def _deliver(self, fn, tmux, text, **kw):
+        logs = []
+        with m.patch.object(wd, "nudges_enabled", lambda kind: False):
+            ok = fn(tmux, text, logs, **kw)
+        return ok, logs
+
+    def test_the_flag_prompt_types_past_the_cap_and_the_card_switch(self):
+        tmux = self._tmux()
+        ok, logs = self._deliver(
+            lambda run, text, logs: wd._deliver_flag_prompt_to_exact_session(
+                self.PID, run, text, False, logs=logs, tpath=self.tpath,
+                state=self._spent(), now=time.time(), sleep_fn=lambda s: None),
+            tmux, self.FLAG)
+        self.assertTrue(ok, logs)
+        self.assertIn("Užívateľ označil", "".join(tmux.typed_texts()))
+
+    def test_a_card_reopen_types_past_the_cap(self):
+        tmux = self._tmux()
+        ok, logs = self._deliver(
+            lambda run, text, logs: wd._nudge_repo_pane(
+                self.PID, self.CWD, run, text, False, self.proj, logs=logs,
+                tpath=self.tpath, state=self._spent(), now=time.time(),
+                sleep_fn=lambda s: None),
+            tmux, wd.compose_card_reopen_nudge(7))
+        self.assertTrue(ok, logs)
+        self.assertIn("ticket #7", "".join(tmux.typed_texts()))
+
+    def test_the_stash_route_is_owner_authored_too(self):
+        tmux = self._tmux(b1257.GOAL_DRAFT_CAP)
+        _ok, logs = self._deliver(
+            lambda run, text, logs: wd._deliver_flag_prompt_to_exact_session(
+                self.PID, run, text, False, logs=logs, tpath=self.tpath,
+                state=self._spent(), now=time.time(), sleep_fn=lambda s: None),
+            tmux, self.FLAG)
+        self.assertTrue(any("C-s" in a for a in tmux.sent), (logs, tmux.sent))
+        self.assertFalse(any("suppressed" in ln or "pane-budget" in ln
+                             for ln in logs), logs)
 
 
 if __name__ == "__main__":
