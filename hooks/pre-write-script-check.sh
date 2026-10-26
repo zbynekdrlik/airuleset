@@ -52,6 +52,10 @@ set -euo pipefail
 #      sidesteps that entirely: it only ever looks at content being written
 #      NOW, so existing files are untouched.
 #
+# Exempt (issue 1137 B1): throwaway helpers under /tmp (the session
+# scratchpad lives in /tmp/claude-*) and ~/.claude/work-products/. Repo files
+# keep both checks. The path is resolved first, so /tmp/../<repo> is checked.
+#
 # Bypass (rare, logged): put '# airuleset:script-ok <reason>' anywhere in
 # the written content.
 #
@@ -83,6 +87,20 @@ except Exception:
 ti = payload.get("tool_input", {}) or {}
 file_path = ti.get("file_path", "") or ""
 if not file_path:
+    sys.exit(0)
+
+
+def _throwaway(path):
+    import os
+    if not os.path.isabs(path):
+        return False
+    real = os.path.realpath(path)
+    products = os.path.join(os.path.realpath(os.path.expanduser("~")),
+                            ".claude", "work-products")
+    return real.startswith("/tmp/") or real.startswith(products + os.sep)
+
+
+if _throwaway(file_path):
     sys.exit(0)
 
 # Which shape of content are we looking at?
