@@ -156,8 +156,10 @@ class TestShareAccessLane(_ShareHarness):
     def test_this_accounts_filedrop_on_the_route_prints_the_url(self):
         out, err = self.run_share(LANE, {"/s/": 302, "/healthz/s": (204, "8790")})
         self.assertIsNone(self.exit_code)
-        self.assertEqual(url_lines(out),
-                         ["https://%s/s/TOKTOKTOKTOKTOKTOK12/rec.wav" % HOST], out)
+        lines = url_lines(out)
+        self.assertEqual(len(lines), 1, out)
+        self.assertTrue(lines[0].startswith(
+            "https://%s/s/TOKTOKTOKTOKTOKTOK12/rec.wav " % HOST), lines)
         self.assertNotIn("NOT verified", err)
 
     def test_token_only_200_needs_no_route_probe(self):

@@ -248,7 +248,8 @@ class TestLocalSlashSAugmentation(unittest.TestCase):
         twice = dg.render_drop_ingress_augmentation(
             once, self.HOST, 8828, filedrop_port=8788)
         self.assertEqual(once, twice)
-        self.assertEqual(once.count("- hostname: %s" % self.HOST), 2)  # /s/ + drop
+        # #1238 deliberately extended contract: the share route probe + /s/ + drop
+        self.assertEqual(once.count("- hostname: %s" % self.HOST), 3)
 
     def test_drop_ingress_already_present_recognises_s_rule(self):
         once = dg.render_drop_ingress_augmentation(
