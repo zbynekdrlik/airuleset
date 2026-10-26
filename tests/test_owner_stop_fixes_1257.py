@@ -664,5 +664,51 @@ class AnNpmClaudeIsAClaude(_CwdSessions):
         self.assertIsNone(_os().pane_latch("%N"))
 
 
+class OnlyAPaneOwnSessionIsPersisted(_CwdSessions):
+    """Review 3, finding 2: an unresolved pane still INHERITED from the cwd's
+    previous session (one that ended before its own claude started), and an
+    unresolved pane or a dev-server pane wrote what it derived as the `fact`
+    of the cwd's newest session record — a session another pane resolved as
+    its own, which then read itself latched. Only a pane's OWN session is
+    persisted; anything else is a per-pane hold."""
+
+    def _sweeps(self, panes, starts, run=None, n=2):
+        state, logs = {}, []
+        for i in range(n):
+            with m.patch.object(base.wd, "_pane_claude_start_epoch",
+                                side_effect=lambda pid, run=None: starts.get(pid)):
+                logs += _os().refresh(state, panes, self.proj, NOW + 60 * i,
+                                      run=run or (lambda argv, timeout=8: ""))
+        return state, logs
+
+    def test_an_unresolved_pane_inherits_nothing_and_writes_no_record(self):
+        self._session("SOLD", [_u("sprav ticket", NOW - 2 * DAY),
+                               _u("<command-name>/exit</command-name>",
+                                  NOW - 2 * DAY + 60)], NOW - 2 * DAY + 60)
+        self._session("SN", [base._a("Ready.", NOW - 100)], NOW - 100)
+        state, logs = self._sweeps([("%A", self.CWD), ("%B", self.CWD)],
+                                   {"%A": NOW - 950, "%B": NOW - 120})
+        self.assertIsNone(_os().pane_latch("%A"))
+        self.assertIsNone(_os().pane_latch("%B"))
+        self.assertNotIn("SN", state.get(_os().STATE_KEY, {}))
+        self.assertFalse(any("SET" in ln for ln in logs), logs)
+
+    def test_a_dev_server_pane_never_writes_a_session_record(self):
+        self._session("SA", [base._a("Ready.", NOW - 100)], NOW - 100)  # fresh
+        self._session("SB", [_u("sprav ticket 6", NOW - 7000),
+                             _u("pauza", NOW - 600)], NOW - 600)
+        dev = _spawn(self, ["sleep", "60"])
+        inv = "\n".join(["%%A\tclaude\t%s\t111" % self.CWD,
+                          "%%B\tclaude\t%s\t112" % self.CWD,
+                          "%%N\tnode\t%s\t%s" % (self.CWD, dev)])
+        state, _logs = self._sweeps(
+            [("%A", self.CWD), ("%B", self.CWD)],
+            {"%A": NOW - 120, "%B": NOW - 620},
+            run=lambda argv, timeout=8: inv if "list-panes" in argv else "")
+        self.assertIsNone(_os().pane_latch("%A"))
+        self.assertEqual((_os().pane_latch("%B") or {}).get("fact"), "pause")
+        self.assertNotIn("fact", state.get(_os().STATE_KEY, {}).get("SA", {}))
+
+
 if __name__ == "__main__":
     unittest.main()
