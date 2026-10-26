@@ -1,0 +1,2 @@
+  // test.skip(true, "commented out, skips nothing")
+  it.skip("still a real skip", () => { expect(1).toBe(2); });
