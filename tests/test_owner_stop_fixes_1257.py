@@ -335,6 +335,16 @@ class LatchHoldIsNoSwallow(base._Latched):
                             for ln in logs), logs)
 
 
+def _spawn(testcase, argv):
+    """A REAL process (its pid stands in for a pane's pane_pid): /proc is
+    read for real, never mocked."""
+    import subprocess
+    proc = subprocess.Popen(argv)
+    testcase.addCleanup(proc.wait)
+    testcase.addCleanup(proc.kill)
+    return str(proc.pid)
+
+
 class OnlyClaudePanesShareACwd(_CwdSessions):
     """Review 2, finding 1: a node/bun pane that hosts no claude (a dev server)
     was counted as a second Claude in the cwd, so the one real claude pane went
@@ -343,7 +353,10 @@ class OnlyClaudePanesShareACwd(_CwdSessions):
     exit there was missed. An unresolved pane also failed closed on sessions
     that ended before its own claude started."""
     CWD = "/home/newlevel/devel/webapp"
-    DEV = "4194000"          # a pane_pid with no claude process under it
+
+    def setUp(self):
+        super().setUp()
+        self.DEV = _spawn(self, ["sleep", "60"])     # a dev server: no claude
 
     def _run(self, lines):
         inv = "\n".join(lines)
@@ -600,6 +613,55 @@ class RecoveryJobsHoldALatchedPane(unittest.TestCase):
         self.assertNotIn("attempts", sess)
         self.assertEqual(sent, [])
         self.assertTrue(any("held (owner-stop" in ln for ln in logs), logs)
+
+
+class AnNpmClaudeIsAClaude(_CwdSessions):
+    """Review 3, finding 1: a Claude launched the npm way (`node
+    …/claude-code/cli.js`, comm `node`) was read as a dev server, because
+    `_pane_claude_pid` only matches the process NAME: beside a comm-claude pane
+    it no longer shared the cwd (the latch failed OPEN for a paused pane), and
+    beside a bare shell its cwd no longer read live (its WORKING session was
+    latched as an exit). The command line decides (`_cmdline_is_claude_cli`,
+    issue 959)."""
+    CWD = "/home/newlevel/devel/npmbox"
+
+    def setUp(self):
+        super().setUp()
+        from tempfile import TemporaryDirectory
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        node = Path(d.name) / "node"
+        node.symlink_to(sys.executable)
+        self.NPM = _spawn(self, [str(node), "-c", "import time; time.sleep(60)",
+                                 "/usr/lib/node_modules/@anthropic-ai/claude-code/cli.js"])
+
+    def _run(self, lines):
+        inv = "\n".join(lines)
+        return lambda argv, timeout=8: inv if "list-panes" in argv else ""
+
+    def test_a_paused_claude_beside_an_npm_claude_stays_latched(self):
+        self._session("SA", [_u("sprav ticket 5", NOW - 900),
+                             _u("pauza", NOW - 300)], NOW - 300)
+        self._session("SN", [_u("sprav ticket 6", NOW - 600),
+                             base._a("robím", NOW - 5)], NOW - 5)
+        run = self._run(["%%A\tclaude\t%s\t111" % self.CWD,
+                         "%%N\tnode\t%s\t%s" % (self.CWD, self.NPM)])
+        with m.patch.object(base.wd, "_pane_claude_start_epoch",
+                            side_effect=lambda pid, run=None: {
+                                "%A": NOW - 950, "%N": NOW - 650}.get(pid)):
+            _os().refresh({}, [("%A", self.CWD)], self.proj, NOW, run=run)
+        self.assertEqual((_os().pane_latch("%A") or {}).get("fact"), "pause")
+        self.assertIsNone(_os().pane_latch("%N"))
+
+    def test_an_npm_claude_keeps_its_cwd_live_for_the_exit_scan(self):
+        self._session("SN", [_u("sprav ticket 6", NOW - 600),
+                             base._a("robím", NOW - 5)], NOW - 5)
+        run = self._run(["%%S\tbash\t%s\t333" % self.CWD,
+                         "%%N\tnode\t%s\t%s" % (self.CWD, self.NPM)])
+        state = {}
+        _os().refresh(state, [], self.proj, NOW, run=run)
+        self.assertNotIn("SN", state.get(_os().STATE_KEY, {}))
+        self.assertIsNone(_os().pane_latch("%N"))
 
 
 if __name__ == "__main__":
