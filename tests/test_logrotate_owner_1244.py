@@ -20,7 +20,6 @@ The behavioural tests run the real rendered bash (with the real `_install`)
 against a temp copy of gk's live logrotate tree; nothing touches /etc.
 """
 import importlib
-import os
 import subprocess
 import sys
 import tempfile

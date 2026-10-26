@@ -19,7 +19,8 @@ as its account, rotate + report only, no drain), mirroring #775:
   * ROTATE: btmp/wtmp logrotate config OVERWRITING the distro
     ``/etc/logrotate.d/btmp|wtmp`` in place (weekly + compress + rotate 4, the
     ``create`` mode preserved EXACTLY — btmp ``0660 root utmp``, since btmp
-    holds usernames/mistyped passwords), a journald ``SystemMaxUse`` cap
+    holds usernames/mistyped passwords; #1244: YIELDED when another logrotate
+    file already rotates that log), a journald ``SystemMaxUse`` cap
     drop-in (journald's OWN rotation), and a fail2ban ``jail.d`` hardening
     drop-in (bantime 1d + a ``recidive`` jail + a fleet ``ignoreip`` — reduces
     auth.log GROWTH at its source).
@@ -46,16 +47,18 @@ import shlex
 import subprocess
 import sys
 
+# #1244: the btmp/wtmp logrotate files, their renderers and the ownership step
+# that yields a log another logrotate file rotates live in the logrotate leaf;
+# re-exported here so this module stays the one import for the root leg.
+from cli_logrotate_owner import (  # noqa: F401
+    LOGROTATE_BTMP_PATH, LOGROTATE_LOGS, LOGROTATE_ROTATE, LOGROTATE_WTMP_PATH,
+    build_logrotate_step, render_logrotate_btmp, render_logrotate_wtmp)
+
 
 # ---------------------------------------------------------------------------
-# Managed drop-in / reporter / unit paths. The btmp/wtmp logrotate files
-# OVERWRITE the distro paths in place (NOT a second `50-airuleset-*` file — two
-# logrotate stanzas for the same log error "duplicate log entry" and silently
-# rotate NOTHING; the Fable-flagged fail-open). Everything else is
-# unmistakably airuleset-owned with a `50-airuleset-*` prefix.
+# Managed drop-in / reporter / unit paths: unmistakably airuleset-owned with a
+# `50-airuleset-*` prefix (the btmp/wtmp pair: cli_logrotate_owner).
 # ---------------------------------------------------------------------------
-LOGROTATE_BTMP_PATH = "/etc/logrotate.d/btmp"
-LOGROTATE_WTMP_PATH = "/etc/logrotate.d/wtmp"
 JOURNALD_CAP_PATH = "/etc/systemd/journald.conf.d/50-airuleset-journal-cap.conf"
 FAIL2BAN_JAIL_PATH = "/etc/fail2ban/jail.d/50-airuleset-hardening.conf"
 # #982: owner break-glass ignoreip — controller-only, separate from the
@@ -123,54 +126,11 @@ CACHE_MAX_AGE_DAYS = 7
 
 # The numeric/text policy. One source, shared by the renderers + the read-back.
 JOURNAL_MAX_USE = "200M"           # journald's own SystemMaxUse rotation cap
-LOGROTATE_ROTATE = 4               # weekly + rotate 4 (was monthly rotate 1)
 FAIL2BAN_BANTIME = "1d"            # was 600 s — reduces auth.log growth at source
 # loopback + tailscale (100.64.0.0/10) so a recidive misfire never locks out an
 # admin session on the fleet's own tailnet (Fable-flagged).
 FAIL2BAN_IGNOREIP = "127.0.0.1/8 ::1 100.64.0.0/10"
 REPORTER_TIMEOUT_S = 120           # the reporter is `du`-heavy; never hang the push
-
-
-def render_logrotate_btmp():
-    """btmp logrotate config OVERWRITING the distro ``/etc/logrotate.d/btmp``
-    (weekly + compress + rotate 4). ``create 0660 root utmp`` preserved EXACTLY
-    — btmp records failed-login usernames + mistyped passwords; a wrong mode is
-    an information leak, not a cosmetic bug."""
-    return (
-        "# Managed by airuleset (#841) — btmp weekly + compress + rotate 4\n"
-        "# (was monthly rotate 1 → up to ~450M of one file on disk at once).\n"
-        "# OVERWRITES the distro file in place: a second logrotate stanza for\n"
-        "# the same log errors 'duplicate log entry' and silently rotates\n"
-        "# NOTHING. create mode 0660 root utmp preserved EXACTLY (btmp holds\n"
-        "# failed-login usernames/mistyped passwords — a wrong mode leaks them).\n"
-        "/var/log/btmp {\n"
-        "    missingok\n"
-        "    weekly\n"
-        "    compress\n"
-        "    delaycompress\n"
-        "    notifempty\n"
-        "    rotate %d\n"
-        "    create 0660 root utmp\n"
-        "}\n" % LOGROTATE_ROTATE
-    )
-
-
-def render_logrotate_wtmp():
-    """wtmp logrotate config OVERWRITING the distro ``/etc/logrotate.d/wtmp``
-    (weekly + compress + rotate 4). ``create 0664 root utmp`` preserved."""
-    return (
-        "# Managed by airuleset (#841) — wtmp weekly + compress + rotate 4.\n"
-        "# OVERWRITES the distro file in place (duplicate-stanza fail-open).\n"
-        "/var/log/wtmp {\n"
-        "    missingok\n"
-        "    weekly\n"
-        "    compress\n"
-        "    delaycompress\n"
-        "    notifempty\n"
-        "    rotate %d\n"
-        "    create 0664 root utmp\n"
-        "}\n" % LOGROTATE_ROTATE
-    )
 
 
 def render_journald_cap(max_use=None):
@@ -545,7 +505,8 @@ def render_drain_timer():
 def guard_files(drain=True, journal_max=None):
     """The (path, content, mode) triples the apply script installs, in write
     order (reporter + drain script 0755, the rest 0644). fail2ban is installed
-    CONDITIONALLY by the apply script, so it is NOT in this list. `drain=False`
+    CONDITIONALLY by the apply script, so it is NOT in this list; the btmp/wtmp
+    pair is listed but goes through the #1244 ownership step. `drain=False`
     (#1223, a sudo workstation) leaves out the #895 cross-user drain trio."""
     files = [
         (LOGROTATE_BTMP_PATH, render_logrotate_btmp(), "0644"),
@@ -571,19 +532,12 @@ def guard_files(drain=True, journal_max=None):
 _HEREDOC_MARK = "AIRULESET_DGROOT_EOF"
 
 
-def build_apply_script(drain=True, journal_max=None):
-    """The ``bash -c`` apply script (root, or ``sudo -n`` on a #1223 host):
-    installs every drop-in atomically (identical content is left alone),
-    fail2ban hardening only where fail2ban exists, restarts journald only when
-    its cap changed, enables the timers, seeds a missing/stale report (niced,
-    bounded), then READS BACK (cap, logrotate, timers) → exit 4 on mismatch."""
-    cap = journal_max or JOURNAL_MAX_USE
-    parts = ["set -uo pipefail", 'JOURNALD_CHANGED=""', ""]
-    # Atomic idempotent installer: content on stdin (a quoted heredoc), written
-    # to a dotted mktemp in the destination dir and mv'd into place only once
-    # fully written + chmod'd — the same never-a-truncating-write discipline as
-    # #659/#775. Takes an explicit mode (the reporter is 0755).
-    parts.append(
+def render_install_fn():
+    """The apply script's atomic idempotent installer: content on stdin (a quoted
+    heredoc), written to a dotted mktemp in the destination dir and mv'd into
+    place only once fully written + chmod'd — the same never-a-truncating-write
+    discipline as #659/#775. Takes an explicit mode (the reporter is 0755)."""
+    return (
         '_install() {\n'
         '    dest="$1"; mode="$2"; dir=$(dirname "$dest")\n'
         '    mkdir -p "$dir"\n'
@@ -599,8 +553,25 @@ def build_apply_script(drain=True, journal_max=None):
         '    echo "  disk-guard-root: wrote $dest"\n'
         '}' % shlex.quote(JOURNALD_CAP_PATH)
     )
-    parts.append("")
-    for path, content, mode in guard_files(drain, journal_max):
+
+
+def build_apply_script(drain=True, journal_max=None):
+    """The ``bash -c`` apply script (root, or ``sudo -n`` on a #1223 host):
+    installs every drop-in atomically (identical content is left alone; btmp/
+    wtmp only where no other logrotate file rotates them, #1244), fail2ban
+    hardening only where fail2ban exists, restarts journald only when its cap
+    changed, enables the timers, seeds a missing/stale report (niced, bounded),
+    then READS BACK (cap, logrotate, timers) → exit 4 on mismatch."""
+    cap = journal_max or JOURNAL_MAX_USE
+    files = guard_files(drain, journal_max)
+    parts = ["set -uo pipefail", 'JOURNALD_CHANGED=""', 'LR_FAIL=""', "",
+             render_install_fn(), ""]
+    parts.append(build_logrotate_step(
+        [(LOGROTATE_LOGS[p], p, c, m) for p, c, m in files if p in LOGROTATE_LOGS],
+        heredoc_mark=_HEREDOC_MARK))
+    for path, content, mode in files:
+        if path in LOGROTATE_LOGS:
+            continue
         parts.append(
             "_install %s %s <<'%s'\n%s%s"
             % (shlex.quote(path), shlex.quote(mode), _HEREDOC_MARK,
@@ -667,6 +638,8 @@ def build_apply_script(drain=True, journal_max=None):
     parts.append("")
     # --- READ-BACK VERIFY (fail-loud) -------------------------------------- #
     parts.append("fail=0")
+    # 0. (#1244) the logrotate ownership step could not read the config.
+    parts.append('if [ -n "$LR_FAIL" ]; then fail=1; fi')
     # 1. journald cap file present + carries the cap.
     parts.append(
         'if ! grep -q "SystemMaxUse=%s" %s 2>/dev/null; then\n'
