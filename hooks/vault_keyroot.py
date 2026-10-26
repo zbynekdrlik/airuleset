@@ -551,8 +551,22 @@ def is_meta_source(segment):
     return bool(tk) and _cmd_start(tk) == 0 and tk[0] in META_SOURCES
 
 
+def is_repo_consumer_call(segment):
+    """A REPO_KEY_CONSUMERS call that accounts its `--key-file` (issue 1137 B1):
+    its output is the script's own report, so piped into text filters only
+    (`… 2>&1 | tail -20`) it keeps a plain term like a prose command."""
+    try:
+        tk = shlex.split(segment)
+    except ValueError:
+        return False
+    return (bool(tk) and _cmd_start(tk) == 0
+            and bool(_repo_key_args(tk, 0, tk[0].rsplit("/", 1)[-1].lower(),
+                                    "", segment)))
+
+
 def _is_inert_source(seg):
-    return is_secret_inspect(seg) or is_prose_command(seg) or is_meta_source(seg)
+    return (is_secret_inspect(seg) or is_prose_command(seg) or is_meta_source(seg)
+            or is_repo_consumer_call(seg))
 
 
 def pipeline_is_inert(segments):
@@ -565,8 +579,8 @@ def pipeline_is_inert(segments):
     here and is denied by its own `key_violation` pass, like every segment.
     """
     sources = [seg for seg, _t in segments if _is_inert_source(seg)]
-    if not sources:
-        return False
+    if not sources or any(is_repo_consumer_call(seg) for seg, _t in segments[1:]):
+        return False          # nothing may pipe INTO a key consumer (#1160)
     if len(sources) > 1 and any(is_meta_source(seg) for seg in sources):
         return False
     prev = None
@@ -853,6 +867,10 @@ COMPOUND_WORDS = {"if", "then", "else", "elif", "fi", "for", "while", "until",
 REBIND_HEADS = {"alias", "unalias", "hash", "enable", "source", ".", "eval",
                 "export", "declare", "typeset", "readonly", "local", "set",
                 "shopt", "exec", "trap"}
+# A bare assignment rebinds a later name only through these (issue 1137 B1:
+# `W=<dir>; ls <root>/ | grep x` is an ordinary listing).
+REBIND_VARS = {"PATH", "IFS", "ENV", "BASH_ENV", "CDPATH", "GLOBIGNORE", "BASHOPTS",
+               "SHELLOPTS", "PROMPT_COMMAND", "PS4", "LD_PRELOAD", "LD_LIBRARY_PATH"}
 _LEAD_WORDS = {"!", "time", "-p", "command", "builtin"}
 
 
@@ -875,8 +893,9 @@ def _whole_command_only(segments):
         if rest and rest[0] in COMPOUND_WORDS:
             return True
         words = [t for t in rest if not ASSIGN_RE.match(t)]
-        if rest and not words:
-            return True               # a bare assignment (`PATH=/x`)
+        if rest and not words and any(t.split("=", 1)[0] in REBIND_VARS
+                                      for t in rest):
+            return True               # a bare `PATH=/x` & co.
         if words and words[0].rsplit("/", 1)[-1] in REBIND_HEADS:
             return True
     return False

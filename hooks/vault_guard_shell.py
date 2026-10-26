@@ -238,7 +238,56 @@ def _subst_body(body, closer, depth):
     return sub
 
 
-def split_segments(text, _depth=0):
+def _heredoc_open(text, i):
+    """`(end, delimiter, quoted, strip_tabs)` for the `<<` at text[i], or None.
+
+    Bash's own rules: an optional `-` (strip leading tabs), optional blanks,
+    then one word whose quotes/backslashes are removed; any quoting makes the
+    body literal (no expansion)."""
+    j, n = i + 2, len(text)
+    strip = j < n and text[j] == "-"
+    j += strip
+    while j < n and text[j] in " \t":
+        j += 1
+    word, quoted = [], False
+    while j < n and text[j] not in " \t\n;&|()<>":
+        if text[j] in "'\"":
+            close = text.find(text[j], j + 1)
+            if close < 0:
+                return None
+            word.append(text[j + 1:close])
+            quoted, j = True, close + 1
+        elif text[j] == "\\" and j + 1 < n:
+            word.append(text[j + 1])
+            quoted, j = True, j + 2
+        else:
+            word.append(text[j])
+            j += 1
+    return (j, "".join(word), quoted, strip) if word else None
+
+
+def _heredoc_body(text, i, delim, strip):
+    """The body starting at text[i] and the index just past its delimiter line
+    (the rest of the text when the delimiter never comes, as in bash)."""
+    lines, n = [], len(text)
+    while i < n:
+        nl = text.find("\n", i)
+        nl = n if nl < 0 else nl
+        line = text[i:nl]
+        i = nl + 1
+        if (line.lstrip("\t") if strip else line) == delim:
+            return "\n".join(lines), i
+        lines.append(line)
+    return "\n".join(lines), n
+
+
+def _inert_sink(seg):
+    """A plain `cat`/`tee` that writes its literal stdin out, never into a pipe."""
+    words = seg[0].split() if seg else []
+    return bool(words) and words[0] in ("cat", "tee") and seg[1] != "|"
+
+
+def split_segments(text, _depth=0, heredocs=False):
     """Quote-aware split on shell separators -> [(segment, terminator), ...].
 
     A command substitution's BODY is emitted as its own segment(s) — headed by
@@ -256,10 +305,25 @@ def split_segments(text, _depth=0):
     The TERMINATOR is returned because it changes what an allowlisted head
     means: piped, `ls` is not a listing, it is a name source for whatever
     consumes it (review F5).
+
+    `heredocs=True` (issue 1137 B1, the read guard's own call): a heredoc
+    body is cut out of the command and judged on its own, so an apostrophe
+    in it can no longer open a quote that swallows the next command; a
+    QUOTED body (`<<'EOF'`) fed to a plain `cat`/`tee` that is not piped is
+    literal data written out, never a read, and is dropped. Any other body
+    (unquoted, so expanded; or fed to an interpreter) is still judged.
     """
-    segs, buf = [], []
+    segs, buf, pending = [], [], []
     i, n = 0, len(text)
     in_sq = in_dq = False
+
+    def flush(term):
+        seg = ("".join(buf), term)
+        for hd in pending:
+            hd[3] = hd[3] or seg          # the command the heredoc feeds
+        segs.append(seg)
+        buf.clear()
+
     while i < n:
         c = text[i]
         two = text[i:i + 2]
@@ -272,8 +336,7 @@ def split_segments(text, _depth=0):
         if two == "$(":
             close = -1 if _depth >= _SUBST_MAX_DEPTH else _match_cmdsubst(text, i)
             if close < 0:
-                segs.append(("".join(buf), "$("))   # unmatched: the old cut
-                buf = []
+                flush("$(")                         # unmatched: the old cut
                 i += 2
                 continue
             segs.extend(_subst_body(text[i + 2:close], ")", _depth))
@@ -283,8 +346,7 @@ def split_segments(text, _depth=0):
         if c == "`":
             close = -1 if _depth >= _SUBST_MAX_DEPTH else _match_backtick(text, i)
             if close < 0:
-                segs.append(("".join(buf), "`"))     # unmatched: the old cut
-                buf = []
+                flush("`")                          # unmatched: the old cut
                 i += 1
                 continue
             segs.extend(_subst_body(text[i + 1:close], "`", _depth))
@@ -319,17 +381,37 @@ def split_segments(text, _depth=0):
             buf.append(" ")
             i += 2
             continue
+        if heredocs and c == "\\" and i + 1 < n:
+            buf.append(two)       # `\"` / `\'` / `\;` are literal, as in bash
+            i += 2
+            continue
+        if heredocs and two == "<<" and text[i + 2:i + 3] != "<":
+            opened = _heredoc_open(text, i)
+            if opened:
+                end, delim, quoted, strip = opened
+                pending.append([delim, quoted, strip, None])
+                buf.append(text[i:end])
+                i = end
+                continue
+        if c == "\n" and pending:
+            flush(c)
+            i += 1
+            for delim, quoted, strip, seg in pending:
+                body, i = _heredoc_body(text, i, delim, strip)
+                if not (quoted and _inert_sink(seg)):
+                    segs.extend(split_segments(
+                        body, _depth + 1, _depth < _SUBST_MAX_DEPTH))
+            pending = []
+            continue
         if two in ("&&", "||"):
-            segs.append(("".join(buf), two))
-            buf = []
+            flush(two)
             i += 2
             continue
         if c in ";|&\n()":
-            segs.append(("".join(buf), c))
-            buf = []
+            flush(c)
             i += 1
             continue
         buf.append(c)
         i += 1
-    segs.append(("".join(buf), ""))
+    flush("")
     return segs

@@ -24,6 +24,7 @@ shadow a stdlib module this guard imports (the #1046 class).
 """
 import hashlib
 import json
+import os
 import re
 import shlex
 import sys
@@ -31,7 +32,7 @@ import sys
 # Invoked by path, so sys.path[0] is this directory: the two siblings below
 # resolve from here, never from the caller's cwd. An import failure exits
 # non-zero-non-2, which the wrapper turns into fail_closed.
-from vault_guard_shell import (ASSIGN_RE, TOKEN_RE, can_be,
+from vault_guard_shell import (ASSIGN_RE, GLOB_META, TOKEN_RE, can_be,
                                path_candidates,
                                split_segments)
 from vault_keyroot import (effective_terms, is_pub_path, is_secret_inspect,
@@ -342,7 +343,50 @@ def audit_refs(segment, cwd_hint=None):
     return out
 
 
-def sweeps_the_parent(segment, head):
+HOME = os.path.normpath(os.path.expanduser("~"))
+HOME_DIR_RE = re.compile(r"^/(?:home/[^/]+|root)$")
+GREP_HEADS = {"grep", "egrep", "fgrep", "rgrep", "zgrep", "ugrep"}
+
+
+def resolve_dir(tok, base):
+    """The absolute path a path token names, or None when an expansion this
+    hook cannot follow decides it (`~user`, a variable, a relative token and
+    no known cwd)."""
+    for pfx in ("~", "$HOME", "${HOME}"):
+        if tok == pfx or tok.startswith(pfx + "/"):
+            return os.path.normpath(HOME + tok[len(pfx):])
+    if tok.startswith(("~", "$", "`")):
+        return None
+    if tok.startswith("/"):
+        return os.path.normpath(tok)
+    return os.path.normpath(os.path.join(base, tok)) if base else None
+
+
+def grep_reads_the_parent(operands, base):
+    """Issue 1137 B1: a recursive GREP reads the store's parent only through
+    a `.claude` operand that resolves to an account's home `~/.claude` (or
+    cannot be resolved), an operand that IS `~/.claude`, or from a cwd inside
+    `~/.claude`'s top or the store. A repo's own `.claude/` is ordinary work
+    (19 of 48 sampled subdev blocks). grep has no chdir option, so a relative
+    operand resolves against the cwd; other heads keep the textual rule."""
+    claude = os.path.join(HOME, CLAUDE_DIR)
+    store = os.path.join(claude, STORE_DIR)
+    if base and (base == claude or base == store or base.startswith(store + "/")):
+        return True
+    for t, comps in path_candidates(operands):
+        if t.startswith("-"):
+            continue
+        p = resolve_dir(t, base)
+        if comps and can_be(comps[-1], CLAUDE_DIR):
+            d = os.path.dirname(p) if p else ""
+            if not p or d == HOME or HOME_DIR_RE.match(d) or set(d) & GLOB_META:
+                return True
+        elif p == claude:
+            return True
+    return False
+
+
+def sweeps_the_parent(segment, head, base=None):
     """The store's PARENT read wholesale, without ever naming the store.
 
     `grep -r password ~/.claude` and `tar czf /tmp/c.tgz ~/.claude` print or
@@ -353,6 +397,11 @@ def sweeps_the_parent(segment, head):
     if head in ALLOW_HEADS:
         return None          # `ls -R ~/.claude` lists names, never content
     operands = without_pattern_args(segment)
+    if head in GREP_HEADS:
+        if ((RECURSIVE_RE.search(segment) or head == "rgrep")
+                and grep_reads_the_parent(operands, base)):
+            return "recursive read/archive of the store's parent dir"
+        return None
     if not (CLAUDE_ROOT_RE.search(operands) or globbed_parent_ref(operands)):
         return None
     if (head in BULK_HEADS or RECURSIVE_RE.search(segment)
@@ -360,6 +409,13 @@ def sweeps_the_parent(segment, head):
                 and TREE_WALK_ACTION_RE.search(segment))):
         return "recursive read/archive of the store's parent dir"
     return None
+
+
+def env_name(fname):
+    """The `--env` variable a plain key file is handed over as."""
+    stem = fname[:-4] if fname.endswith(".env") else fname
+    var = re.sub(r"[^A-Za-z0-9]+", "_", stem).strip("_").upper()[:60]
+    return var if re.match(r"[A-Z_]", var or "0") else "KEY_" + var
 
 
 def excerpt(segment):
@@ -423,6 +479,10 @@ if not cmd:
     if bad or keyed:
         print("\n".join("  %s %s -> %s" % (tool or "tool", k, excerpt(v))
                         for k, _refs, v in bad + keyed))
+        kfs = [re.fullmatch(r"\.secrets/([A-Za-z0-9_.-]{1,64})", key_audit_ref(r))
+               for _k, r, _v in keyed]
+        print("#KEYS# %s" % ",".join("%s:%s" % (m.group(1), env_name(m.group(1)))
+                                     for m in kfs if m))
         print("#ROOTS# %s" % ",".join(
             r for r, hit in (("store", bad), ("keyfile", keyed)) if hit))
         # `fields` holds (key, value) PAIRS while `bad` holds triples — the
@@ -445,9 +505,14 @@ refs = []
 # why `cd` INTO the store is refused outright and stays a stated gap.
 cwd_hint = None
 roots = set()
-for seg, term in effective_terms(split_segments(cmd)):
+pcwd = payload.get("cwd")
+pcwd = os.path.normpath(pcwd) if isinstance(pcwd, str) and pcwd.startswith("/") else None
+keyfiles, names = [], []
+for seg, term in effective_terms(split_segments(cmd, heredocs=True)):
     head = head_of(seg)
-    sweep = sweeps_the_parent(seg, head)
+    base = (pcwd if not cwd_hint else None if cwd_hint == "-"
+            else resolve_dir(cwd_hint, pcwd))
+    sweep = sweeps_the_parent(seg, head, base)
     if sweep:
         hits.append("%s  ->  %s (%s)" % (head or "?", excerpt(seg), sweep))
         refs.append(globbed_parent_ref(seg) or ".claude")
@@ -459,6 +524,8 @@ for seg, term in effective_terms(split_segments(cmd)):
             head or "(redirection/substitution)", excerpt(seg), excerpt(stray)))
         refs.append(key_audit_ref(stray))
         roots.add("keyfile")
+        kf = re.fullmatch(r"\.secrets/([A-Za-z0-9_.-]{1,64})", key_audit_ref(stray))
+        keyfiles += [kf.group(1)] if kf else []
         # A segment can name BOTH roots; the store check below still runs so
         # its audit refs and guidance are not lost.
     seg_refs = store_refs(seg, cwd_hint)
@@ -473,9 +540,16 @@ for seg, term in effective_terms(split_segments(cmd)):
                                 excerpt(seg)))
     refs.extend(audit_refs(seg, cwd_hint))
     roots.add("store")
+    names += [r[:-7] for r in audit_refs(seg, cwd_hint)
+              if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}\.secret", r)]
 
 if hits:
     print("\n".join("  " + h for h in dict.fromkeys(hits)))
+    # The exact working command per refused file (issue 1137 B1), for the
+    # wrapper: names are a fixed charset, never a value.
+    print("#KEYS# %s" % ",".join("%s:%s" % (f, env_name(f))
+                                 for f in dict.fromkeys(keyfiles)))
+    print("#NAMES# %s" % ",".join(dict.fromkeys(names)))
     print("#ROOTS# %s" % ",".join(sorted(roots)))
     audit(tool, refs, cmd)
     sys.exit(2)
