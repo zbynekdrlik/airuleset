@@ -292,7 +292,9 @@ class TestCmdSharePublicFirst(unittest.TestCase):
              mock.patch.object(fw, "_filedrop_is_live", fake_live), \
              mock.patch.object(dg, "resolve_public_lane_full",
                                lambda *a, **k: lane_full), \
-             mock.patch.object(fw, "_public_share_status", lambda u, timeout=3: status):
+             mock.patch.object(fw, "_public_share_status", lambda u, timeout=3: status), \
+             mock.patch.object(fw, "_public_share_probe",   # #1238: this account's route
+                               lambda u, timeout=3: (204, "8790"), create=True):
             out, err = io.StringIO(), io.StringIO()
             self.exit_code = None
             with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):

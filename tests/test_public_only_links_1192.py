@@ -303,7 +303,9 @@ class TestShare(unittest.TestCase):
     PRIVATE = ("http://100.64.0.1:8790/TOKTOKTOKTOKTOKTOK12/rec.wav",
                "http://192.168.1.5:8790/TOKTOKTOKTOKTOKTOK12/rec.wav")
 
-    def run_share(self, lane_full, status, *, private=False):
+    def run_share(self, lane_full, status, *, private=False, route=(204, "8790")):
+        """`route` = the #1238 `/healthz/s` probe answer (status, filedrop port
+        header); the default is THIS account's filedrop (8790 = LOCAL_URL)."""
         self.resolved = []
 
         def resolve(*a, **k):
@@ -320,7 +322,9 @@ class TestShare(unittest.TestCase):
              mock.patch.object(dl, "delivery_channel",
                                lambda *a, **k: (None, dl.CHANNEL_NO_LANE)), \
              mock.patch.object(fw, "_public_share_status",
-                               lambda u, timeout=3: status):
+                               lambda u, timeout=3: status), \
+             mock.patch.object(fw, "_public_share_probe",
+                               lambda u, timeout=3: route, create=True):
             out, err = io.StringIO(), io.StringIO()
             self.exit_code = None
             with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
@@ -340,6 +344,13 @@ class TestShare(unittest.TestCase):
     def test_access_302_is_one_https_line(self):
         out, _err = self.run_share(self.LANE, 302)
         self.assertEqual(len(url_lines(out)), 1, out)
+
+    def test_access_302_without_a_share_route_is_no_url(self):
+        # #1238: the edge 302 alone proves nothing about the /s/ route
+        out, err = self.run_share(self.LANE, 302, route=(502, None))
+        self.assertEqual(self.exit_code, 1)
+        self.assertEqual(url_lines(out), [], out)
+        self.assertIn("--private", err)
 
     def test_dead_lane_exits_nonzero_with_no_url(self):
         out, err = self.run_share(self.LANE, 502)

@@ -3,9 +3,10 @@ public-only contract (owner ROZHODNUTÉ 30.9.2026: no tailscale/LAN link by
 default, a dead public link is never handed out).
 
   - `secret request --replace` must refuse BEFORE it cancels a pending request;
-  - `share` on an Access lane (edge 302) must probe the token-free `/healthz`
-    (bypassed by the new path-scoped Access app): 530/no answer = dead tunnel
-    -> no URL; 302 there = bypass not applied yet -> the URL + the note;
+  - `share` on an Access lane (edge 302) must probe the bypassed token-free
+    path — since #1238 `/healthz/s`, routed by the SAME rule pair as `/s/`:
+    only THIS account's filedrop answering 204 + its port prints the URL;
+    a 502 (the #1238 dead-URL case), 530, 302, 403 or no answer -> no URL;
   - `share` refuses before it copies anything, and never prints a private
     base URL in its diagnostics;
   - a `/healthz` bypass exception never un-lives the lane;
@@ -69,13 +70,18 @@ class _ShareHarness(unittest.TestCase):
     LOCAL_URL = "http://100.64.0.1:8790/TOKTOKTOKTOKTOKTOK12/rec.wav"
 
     def run_share(self, lane, codes, *, local_live=True):
-        """`codes` maps a URL suffix ("/healthz" or "/s/") to its status."""
+        """`codes` maps "/s/" to its status and "/healthz/s" (#1238, the /s/
+        route probe) to `(status, filedrop port header)`."""
         self.shared = []
         self.probed = []
 
         def status(url, timeout=3):
             self.probed.append(url)
-            return codes["/healthz" if url.endswith("/healthz") else "/s/"]
+            return codes["/s/"]
+
+        def probe(url, timeout=3):
+            self.probed.append(url)
+            return codes.get("/healthz/s", (None, None))
 
         def fake_share(path, base_dir=None):
             self.shared.append(path)
@@ -93,7 +99,8 @@ class _ShareHarness(unittest.TestCase):
                                lambda *a, **k: types.SimpleNamespace(access=True)), \
              mock.patch.object(dl, "delivery_channel",
                                lambda *a, **k: (None, dl.CHANNEL_NO_LANE)), \
-             mock.patch.object(fw, "_public_share_status", status):
+             mock.patch.object(fw, "_public_share_status", status), \
+             mock.patch.object(fw, "_public_share_probe", probe, create=True):
             out, err = io.StringIO(), io.StringIO()
             self.exit_code = None
             with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
@@ -106,43 +113,57 @@ class _ShareHarness(unittest.TestCase):
 
 
 class TestShareAccessLane(_ShareHarness):
-    def test_edge_302_with_dead_tunnel_prints_no_url(self):
-        out, err = self.run_share(LANE, {"/s/": 302, "/healthz": 530})
-        self.assertEqual(self.exit_code, 1)
+    """#1238 supersedes the #1192 `/healthz` verdict for `share`: `/healthz`
+    is served by the no-path rule's EPHEMERAL endpoint, never by the `/s/`
+    origin, so no code there proves the `/s/` route. Only the bypassed
+    `/healthz/s` (the same rule pair as `/s/`) answered 204 by THIS account's
+    filedrop (its port, 8790 = the shared file's local port) prints the URL."""
+    ROUTE = "https://%s/healthz/s" % HOST
+
+    def refused(self, route):
+        out, err = self.run_share(LANE, {"/s/": 302, "/healthz/s": route})
+        self.assertEqual(self.exit_code, 1, out)
         self.assertEqual(url_lines(out), [], out)
-        self.assertIn("1033", err)
         self.assertIn("--private", err)
-        self.assertIn("https://%s/healthz" % HOST, self.probed)
+        self.assertIn(self.ROUTE, self.probed)
+        self.assertNotIn("NOT verified", err)
+        return err
 
-    def test_edge_302_no_answer_on_healthz_prints_no_url(self):
-        out, _err = self.run_share(LANE, {"/s/": 302, "/healthz": None})
-        self.assertEqual(self.exit_code, 1)
-        self.assertEqual(url_lines(out), [])
+    def test_edge_302_with_dead_tunnel_prints_no_url(self):
+        self.assertIn("1033", self.refused((530, None)))
 
-    def test_bypassed_healthz_reaching_the_origin_side_prints_the_url(self):
-        # 502: the tunnel answered, nothing listens on the drop port right now
-        out, err = self.run_share(LANE, {"/s/": 302, "/healthz": 502})
+    def test_edge_302_no_answer_on_the_route_probe_prints_no_url(self):
+        self.refused((None, None))
+
+    def test_a_502_from_the_endpoint_rule_prints_no_url(self):
+        # the #1238 case: no /s/ rule yet, /healthz/s falls to the no-path rule
+        # (the ephemeral endpoint port, nothing listening) -> 502. It used to be
+        # read as "tunnel verified" and a dead URL was printed.
+        self.assertIn("/s/", self.refused((502, None)))
+
+    def test_route_probe_still_behind_access_prints_no_url(self):
+        self.refused((302, None))      # its /healthz bypass is not applied
+
+    def test_edge_only_403_on_the_route_probe_prints_no_url(self):
+        self.refused((403, None))      # a WAF answer is the edge, not the route
+
+    def test_a_sibling_accounts_filedrop_is_not_this_route(self):
+        self.assertIn("8796", self.refused((204, "8796")))
+
+    def test_a_204_without_the_port_header_is_not_a_filedrop(self):
+        self.refused((204, None))
+
+    def test_this_accounts_filedrop_on_the_route_prints_the_url(self):
+        out, err = self.run_share(LANE, {"/s/": 302, "/healthz/s": (204, "8790")})
         self.assertIsNone(self.exit_code)
-        self.assertEqual(len(url_lines(out)), 1, out)
+        self.assertEqual(url_lines(out),
+                         ["https://%s/s/TOKTOKTOKTOKTOKTOK12/rec.wav" % HOST], out)
         self.assertNotIn("NOT verified", err)
 
-    def test_healthz_not_bypassed_yet_prints_the_url_and_the_note(self):
-        out, err = self.run_share(LANE, {"/s/": 302, "/healthz": 302})
-        self.assertIsNone(self.exit_code)
+    def test_token_only_200_needs_no_route_probe(self):
+        out, _err = self.run_share(LANE, {"/s/": 200, "/healthz/s": (530, None)})
         self.assertEqual(len(url_lines(out)), 1, out)
-        self.assertIn("NOT verified", err)
-        self.assertIn("--private", err)
-
-    def test_edge_only_403_on_healthz_is_not_a_verified_tunnel(self):
-        # a WAF / browser-integrity 403 is the EDGE, not the tunnel: note it
-        out, err = self.run_share(LANE, {"/s/": 302, "/healthz": 403})
-        self.assertEqual(len(url_lines(out)), 1, out)
-        self.assertIn("NOT verified", err)
-
-    def test_token_only_200_needs_no_healthz_probe(self):
-        out, _err = self.run_share(LANE, {"/s/": 200, "/healthz": 530})
-        self.assertEqual(len(url_lines(out)), 1, out)
-        self.assertNotIn("https://%s/healthz" % HOST, self.probed)
+        self.assertNotIn(self.ROUTE, self.probed)
 
 
 class TestShareSideEffects(_ShareHarness):
