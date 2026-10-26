@@ -410,5 +410,66 @@ class SiblingHoldIsAPaneEpisode(_CwdSessions):
         self.assertNotIn("SA", state.get(_os().STATE_KEY, {}))
 
 
+class LatchedPaneRunsNoRider(unittest.TestCase):
+    """Review 2, finding 3: the goal-lane riders kept running on a latched
+    pane. Every sweep they collected and tried to send (the latch withheld
+    it), journalling `send-verified abort: owner-stop latch` each time, and a
+    direct rider booked the withheld send as a swallow: after MAX_SEND_FAILS a
+    release-blocking infra wave was ACCEPTED, never typed. A latched pane runs
+    no rider (baselines kept) and the hold is journalled once."""
+    CWD = "/home/gatekeeper/devel/odoo/odoo-erp-infra"
+
+    def setUp(self):
+        import test_infra_queue_arrival_1029 as infra
+        self.infra = infra
+        self.harness = infra.TestSweepInfraNonArmed("run")
+        self.harness.setUp()
+        self.addCleanup(self.harness.doCleanups)
+        self.addCleanup(lambda: _os().reset())
+
+    def test_a_latched_infra_pane_keeps_its_wave_and_journals_once(self):
+        h, infra = self.harness, self.infra
+        state = {"queue_arrival": {
+            "sess-1029-lane": {"base": [1], "first_seen": infra.NOW - DAY}}}
+        logs, typed = [], []
+        orig = infra.goal.goal_lane_sweep
+
+        def sweep(*a, **kw):     # the harness rewrites the transcript per sweep
+            tpath = (Path(kw["projects_dir"]) / base.wd.encode_project_dir(self.CWD)
+                     / "sess-1029-lane.jsonl")
+            aged = os.path.getmtime(tpath)
+            with open(tpath, "a", encoding="utf-8") as fh:
+                fh.write(base.json.dumps(_u("pauza", infra.NOW - 900)) + "\n")
+            os.utime(tpath, (aged, aged))
+            _os().refresh(kw["state"], [("%9", self.CWD)], kw["projects_dir"],
+                          infra.NOW)
+            out = orig(*a, **kw)
+            logs.extend(out)
+            return out
+        with m.patch.object(infra.goal, "goal_lane_sweep", sweep):
+            for _ in range(4):
+                _sid, tmux = h._sweep(state, infra_fetch=lambda cwd: [
+                    infra._rec(1), infra._rec(6883)])
+                typed += tmux.typed_texts()
+        self.assertEqual(typed, [])
+        self.assertEqual(state["queue_arrival"]["sess-1029-lane"]["base"], [1],
+                         "a latched pane's wave is never accepted untyped")
+        self.assertEqual(sum("owner-stop" in ln for ln in logs), 1, logs)
+
+
+class LatchedSendJournalsOnce(base._Latched):
+    """Review 2, finding 3: `send_verified` journalled its owner-stop abort on
+    every call; once per (pane) latch episode is enough."""
+
+    def test_a_latched_send_journals_once(self):
+        state, logs = {}, []
+        for _ in range(3):
+            ok, tmux, _out, lg = self._send("release-gap", state)
+            logs += lg
+            self.assertFalse(ok)
+            self.assertEqual(tmux.sent, [])
+        self.assertEqual(sum("owner-stop latch" in ln for ln in logs), 1, logs)
+
+
 if __name__ == "__main__":
     unittest.main()
