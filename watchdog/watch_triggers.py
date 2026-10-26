@@ -70,7 +70,7 @@ LOOKBACK_S = 24 * 3600        # a slot missed during an outage is still recorded
 KEEP_S = 9 * 24 * 3600        # slot history kept (> one weekly period)
 NEXT_HORIZON_S = 8 * 24 * 3600
 MIN_BUDGET_S = 30             # one verified keystroke delivery (polls ~20 s)
-MIN_SLOT_GAP_S = 3600         # == nudge_gate.NUDGE_MIN_INTERVAL_S (drift-locked)
+MIN_SLOT_GAP_S = 3600         # == nudge_gate.WATCH_TRIGGER_FLOOR_S (drift-locked)
 ARMED_FILE = "watch-armed.json"
 PROMPT_MAX_CHARS = 400
 TERMINAL = ("fired", "missed")

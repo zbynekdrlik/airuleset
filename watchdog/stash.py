@@ -1074,18 +1074,12 @@ def deliver_with_stash(pid, text, run, captured=None, logs=None, sleep_fn=None,
                        nudge=None):
     """Deliver `text` into an IDLE pane, parking whatever the input box holds.
 
-    #189 — STASH UNCONDITIONALLY. This helper used to require a NON-EMPTY
-    draft before it would act, and then required the box to go bare WITH the
-    `› stashed` marker before it would type. Both conditions are answers to
-    the same question — "is there really something in the prompt?" — and that
-    question is UNANSWERABLE from what we can see: `capture_pane` shells
-    `tmux capture-pane -p` with no `-e`, so Claude Code's dim (SGR 246) prompt
-    suggestion arrives stripped of its colour and is byte-identical to text
-    the user typed. Every classifier in this file therefore reported drafts
-    that did not exist; the stash then had nothing to park, no marker could
-    light, and the verify failed forever. Measured cost: `stash-delivered = 0`
-    across the whole fleet in 24h, with a 529 sitting unattended on gatekeeper
-    until the user typed `continue` by hand.
+    #189 — STASH UNCONDITIONALLY: "is there really something in the prompt?" is
+    UNANSWERABLE from a colourless `capture-pane -p` (CC's dim prompt suggestion
+    is byte-identical to typed text), so requiring a draft first left
+    `stash-delivered = 0` fleet-wide. B9 (owner 26.10.2026): a budgeted machine
+    kind (`nudge_gate.pane_budgeted`) spends the pane's ONE daily typing attempt
+    here too — refused before any keystroke, stamped once the Ctrl+S lands.
 
     So we stop computing the answer. Park first, look after, and let each
     OBSERVED outcome choose its own recovery:
@@ -1135,11 +1129,8 @@ def deliver_with_stash(pid, text, run, captured=None, logs=None, sleep_fn=None,
       8. Success = the box no longer shows our text. A parked draft
          auto-restores itself once the delivered turn completes.
 
-    `logs`, if a list, gets one reason string appended on every abort/success
-    path — callers that want visibility (or tests) pass one in; the default
-    (None) is silent, matching every other keystroke helper in this file.
-    `sleep_fn` backs step 4's settle poll (default `time.sleep`; tests inject
-    a no-op)."""
+    `logs` (a list) gets one reason per abort/success path (None = silent);
+    `sleep_fn` backs step 4's settle poll (default `time.sleep`)."""
     def _log(reason):
         if isinstance(logs, list):
             logs.append(reason)
@@ -1155,6 +1146,12 @@ def deliver_with_stash(pid, text, run, captured=None, logs=None, sleep_fn=None,
         return False
     if "esc to interrupt" in (cap or ""):
         _log("stash-abort: live turn")
+        return False
+    from watchdog import nudge_gate as _ng
+    _bnow = time.time()
+    _budgeted = state is not None and _ng.pane_budgeted(nudge, user_authored)
+    if _budgeted and not _ng.pane_budget_ok(state, pid, _bnow):
+        _log("stash-abort: " + _ng.pane_budget_hold_reason(state, pid, _bnow))
         return False
     # #271: from here on we are genuinely about to act on this box — persist
     # whatever it currently holds BEFORE the first keystroke of ours lands,
@@ -1181,6 +1178,8 @@ def deliver_with_stash(pid, text, run, captured=None, logs=None, sleep_fn=None,
     if not watchdog.keys(pid, "C-s", kind=nudge_kind, nudge=nudge,
                          user_authored=user_authored, run=run, logs=logs):
         return False
+    if _budgeted:
+        _ng.mark_pane_attempt(state, pid, _bnow)    # B9: a keystroke reached the pane
     cap, outcome, pre_text = watchdog._await_stash_settled(pid, run, sleep_fn)
     if outcome in (STASH_NO_BOUNDARY, STASH_UNRESOLVED):
         # #852 A -- NEVER type into a box that is not PROVABLY bare. After our

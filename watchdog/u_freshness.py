@@ -247,7 +247,7 @@ def goal_u_freshness_recheck(now, run, urecs, sid, cwd, pid, tpath, loc,
     submit), `_janitor_mark_watch`/`_janitor_clear_watch`, the per-sweep `handled`
     set (this rider runs LAST in the loop, after queue-arrival, so a pane an earlier
     keystroke job typed is deferred), `_pane_busy_waiting` (#714 busy-pane gate),
-    and — the #797 addition — the SHARED `nudge_gate` (the owner's 1×/hour U strop
+    and — the #797 addition — the SHARED `nudge_gate` (the owner's daily U strop
     AND the cross-category family-spacing floor). `captured` is the pane capture the
     caller already read (ZERO new capture); None skips the busy gate.
 

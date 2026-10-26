@@ -110,20 +110,13 @@ MACHINE_NUDGE_KINDS = frozenset({
     # default; NOT a nudge_gate GATED_CATEGORY — its cadence is decided by
     # gate_ok("task-hygiene") directly, like bounce/card/goal-sweep).
     "task-hygiene",
-    # #1109 — a RELEASE-BLOCKING infra hand-off (a STOP:/GATEKEEPER-ACTION (INFRA)
-    # comment, or an infra ticket carrying prio:*/release-block) delivered into
-    # the gk-infra window. A GATED priority kind (default OFF, the supervisor
-    # stages it on the gk box `nudges on --kind infra-priority`); the `nudges`
-    # CLI list derives from THIS set. It is EXEMPT from the #913/#1023 cross-kind
-    # total cap (so a release block never sits 3 h behind the owner's anti-spam
-    # cap) but KEEPS its own 15-min per-kind floor + every idle/busy/recent-human/
-    # transcript-liveness gate (nudge_gate.PRIORITY_CAP_EXEMPT_KINDS). NOT a
-    # RECOVERY kind (it IS a prompt interruption — staged + floored) and NOT a
-    # nudge_gate GATED_CATEGORY (its floor is 15 min, below the 60-min GATED floor
-    # lock) — its cadence is decided by gate_ok("infra-priority") directly.
+    # #1109 — a RELEASE-BLOCKING infra hand-off into the gk-infra window, staged
+    # like every priority kind; since 26.10.2026 bound by the daily cap like them
+    # (it joins the queue-arrival batch, nudge_gate.PRIORITY_CAP_EXEMPT_KINDS no
+    # longer lists it).
     "infra-priority",
-    # #1163 Job 52 — a DECLARED watch trigger slot (steer=watch window), staged
-    # like infra-priority and cap-exempt with it (nudge_gate), 60-min floor kept.
+    # #1163 Job 52 — a DECLARED watch trigger slot (steer=watch window), staged,
+    # exempt from the daily cap (the owner's schedule is its bound), 60-min floor.
     "watch-trigger", "checkout-lag",  # + #1176 Job 53 rule-lag notice (stream profile)
 })
 
@@ -356,7 +349,12 @@ def keys(pane_id, *keystrokes, kind, nudge=None, user_authored=False, run=None,
     `discord_replies`) BYPASSES the gate. `journal_text` overrides the
     suppression-journal snippet (a literal-type caller passes its full text so
     the journal reads the payload, not `-l -- ...`); default derives a snippet
-    from the non-flag keystrokes."""
+    from the non-flag keystrokes. #1257: a pane under the owner-stop latch gets
+    NO keystroke of any kind (recovery and cap-exempt included); only the
+    owner's own reply passes (`owner_stop.withhold`, ONE journal line/pane/sweep)."""
+    from watchdog import owner_stop
+    if not user_authored and owner_stop.withhold(pane_id, logs):
+        return False
     if watchdog._keystroke_suppressed(kind, user_authored, nudge):
         snippet = (journal_text if journal_text is not None
                    else " ".join(str(k) for k in keystrokes
@@ -391,8 +389,9 @@ def relaunch_pane(pane_id, run=None, launcher="claude-continue"):
     stopped-session check + a once-per-episode latch). Like `resurrect.relaunch`,
     the send is `delivered_unconfirmed`: the STRUCTURAL confirmation is the NEXT
     sweep (the session comes back live → its 401 episode clears). Never raises."""
+    from watchdog import owner_stop
     run = run or watchdog._default_run
-    if not pane_id or not launcher:
+    if not pane_id or not launcher or owner_stop.pane_latch(pane_id):   # #1257
         return False
     try:
         run(["tmux", "respawn-pane", "-k", "-t", str(pane_id), launcher])
@@ -1141,11 +1140,15 @@ def _nudge_dying_subagent(state, logs, send_fn, pid, run, captured, project, own
         else:
             logs.append("skip busy-pane (subagent-%s) %s [%s]" % (dedup_prefix, project, wid))
         return
-    # (#287) A worker whose own transcript is provably unsalvageable earns
-    # AT MOST ONE typed nudge, never the full retry cycle — see
-    # _subagent_transcript_unsalvageable's own docstring. (`wkey` and the
-    # resolution short-circuit are handled at the top, before the busy/idle
-    # branch, so a resolved worker never reaches here.)
+    # B9 (owner 26.10.2026) -- the pane's ONE daily nudge is spent: hold BEFORE
+    # decide_working, so a budget hold never counts as a nudge (no false give-up).
+    from watchdog import nudge_gate as _ng
+    if not _ng.pane_budget_ok(state, pid, now):
+        logs.append("subagent-%s-held %s [%s] %s" % (dedup_prefix, project, wid,
+                                                     _ng.pane_budget_hold_reason(state, pid, now)))
+        return
+    # (#287) An unsalvageable worker earns AT MOST ONE typed nudge
+    # (`_subagent_transcript_unsalvageable`).
     unsalvageable = _subagent_transcript_unsalvageable(sub_path)
     effective_max_nudges = 1 if unsalvageable else max_nudges
     action, entry = watchdog.decide_working(state, wkey, now, sub_idle,
@@ -1269,7 +1272,7 @@ def send_verified(pane_id, text, run=None, tpath=None, sleep_fn=None, logs=None,
     rescued and the send aborted. `user_authored` (#994): True ONLY for the
     owner's own Discord reply; it bypasses the nudge kill switch, which is
     enforced at the `keys` primitive (#1002)."""
-    from watchdog import send_outcome as _so, thrash as _thrash
+    from watchdog import send_outcome as _so, thrash as _thrash, owner_stop as _ostop
     run = run or watchdog._default_run
     sleep_fn = sleep_fn or time.sleep
 
@@ -1280,9 +1283,10 @@ def send_verified(pane_id, text, run=None, tpath=None, sleep_fn=None, logs=None,
     if not tpath or (not user_authored and _thrash.held(tpath)):   # #1260
         _log("send-verified abort: " + ("thrash-held session (#1260)" if tpath else "no transcript path"))
         return _so.OUT_NOT_TYPED
-    # A FRESH capture right before typing (the sibling helpers' own race
-    # guard): the caller proved the box bare a moment ago, but round-trips pass
-    # before the real keystroke lands.
+    if not user_authored and _ostop.pane_latch(pane_id):   # #1257 owner-stop latch
+        _log("send-verified abort: owner-stop latch (#1257), not typed")
+        return _so.OUT_NOT_TYPED
+    # A FRESH capture right before typing (the sibling helpers' own race guard).
     cap = watchdog.capture_pane(pane_id, run, lines=40)
     if watchdog._input_line_text(cap) != "":
         watchdog._draft_rescue_persist(pane_id, cap, logs=logs)
@@ -1292,39 +1296,24 @@ def send_verified(pane_id, text, run=None, tpath=None, sleep_fn=None, logs=None,
             pane_id, run, cap, sleep_fn, state, now, _log))
         return _so.OUT_NOT_TYPED
     _so.note_bare(state, pane_id)
-    # #1092 (c) -- the PER-PANE typing-attempt BUDGET, consulted BEFORE any
-    # keystroke. A GATED machine nudge (a threaded `nudge=` that is not a RECOVERY
-    # revival kind, with `state` to read/write, and NOT the owner's own reply) is
-    # refused when the pane has already had `PANE_ATTEMPT_BUDGET` typing attempts
-    # this rolling hour, across ALL kinds -- the belt on top of the per-kind floor
-    # + total cap that makes any future escape (the #1092 swallowed-batch storm was
-    # exactly that) harmless by construction. A REVIVAL of a dead session (resume/
-    # compact/wake-parked -> RECOVERY_NUDGE_KINDS) and the owner's OWN reply
-    # (`user_authored`) are NEVER gated here: "the owner's problem is typing INTO
-    # an active/human pane, not recovery itself" (#1092 addendum), and stranding a
-    # limit/401-dead session for an hour is the #520 harm. Placed AFTER the bare
-    # check so a box-busy abort (no keystroke) never burns the budget, and BEFORE
-    # the strip-Escape (the first keystroke). The goal RE-ARM family's own pane
-    # budget is enforced in `deliver_goal` (it delivers via `_send_goal_verified`,
-    # not this primitive) -- #1092 item (e).
-    # #1092 F1 fix — use the CALLER's sweep `now` when threaded, so the pane-budget
-    # stamp shares ONE clock with the end-of-sweep prune (`_prune_pane_attempts`,
-    # run at the sweep `now`) and with the re-arm path (`deliver_goal`, which stamps
-    # at `now`). A `time.time()` stamp (later than the sweep `now`) used to be
-    # reaped by that same-sweep prune as "future", so the budget never accumulated
-    # (Review 2 F1). Callers that thread no `now` (card/bounce) fall back to
-    # `time.time()`, and the prune's future-keep direction covers that skew.
+    # #1092 (c) / B9 (owner 26.10.2026) -- the PER-PANE daily typing budget,
+    # consulted BEFORE any keystroke for a budgeted kind (`nudge_gate.pane_budgeted`:
+    # not a RECOVERY revival, not the owner's watch-trigger schedule, not the
+    # owner's own reply) when `state` is threaded: ONE typing attempt per pane per
+    # day across ALL kinds. After the bare check (a busy abort never burns it),
+    # before the strip-Escape. The goal RE-ARM family checks it in `deliver_goal`.
+    # #1092 F1: stamp on the CALLER's sweep `now` (one clock with the end-of-sweep
+    # prune); a caller without `now` falls back to `time.time()`.
+    from watchdog import nudge_gate as _ng
     _pane_now = now if now is not None else time.time()
     _gated_nudge = (state is not None and nudge is not None
                     and nudge not in RECOVERY_NUDGE_KINDS and not user_authored)
-    if _gated_nudge:
-        from watchdog import nudge_gate as _ng
-        if not _ng.pane_budget_ok(state, pane_id, _pane_now):
-            _log("send-verified " + _ng.pane_budget_hold_reason(
-                state, pane_id, _pane_now))
-            if isinstance(out, dict):
-                out["pane_budget_held"] = True
-            return _so.OUT_NOT_TYPED
+    _budgeted = state is not None and _ng.pane_budgeted(nudge, user_authored)
+    if _budgeted and not _ng.pane_budget_ok(state, pane_id, _pane_now):
+        _log("send-verified " + _ng.pane_budget_hold_reason(state, pane_id, _pane_now))
+        if isinstance(out, dict):
+            out["pane_budget_held"] = True
+        return _so.OUT_NOT_TYPED
     # #1157 slice 3 -- a MACHINE nudge goes to a file; ONE pointer row is typed.
     # Decided before the first keystroke: a failed write sends none at all.
     ptr = _so.machine_pointer(pane_id, run, text, nudge, user_authored, _log)
@@ -1388,8 +1377,7 @@ def send_verified(pane_id, text, run=None, tpath=None, sleep_fn=None, logs=None,
     # or not: stamp the per-pane budget (only for a gated machine nudge) so a pane
     # whose verify keeps failing is not re-typed every sweep. A no-keystroke abort
     # above never burns the budget.
-    if _gated_nudge and (typed_ok or tv.get("typed")):
-        from watchdog import nudge_gate as _ng
+    if _budgeted and (typed_ok or tv.get("typed")):
         _ng.mark_pane_attempt(state, pane_id, _pane_now)
         if isinstance(out, dict):
             out["attempted"] = True
@@ -1448,7 +1436,6 @@ def send_verified(pane_id, text, run=None, tpath=None, sleep_fn=None, logs=None,
             if isinstance(out, dict):
                 out["swallowed"] = True
             if _gated_nudge:
-                from watchdog import nudge_gate as _ng
                 _sid = os.path.splitext(os.path.basename(str(tpath)))[0] or None
                 if _sid:
                     _ng.mark_sent(state, _sid, nudge, _pane_now)

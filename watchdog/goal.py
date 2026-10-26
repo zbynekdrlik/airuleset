@@ -207,6 +207,7 @@ from watchdog import stream_migrate as _stream_migrate        # #1143 (dark stre
 from watchdog import send_outcome as _send_outcome            # #1157 (delivery outcome)
 from watchdog import goal_arm_failure as _arm_failure         # #1181 (visible failed arm)
 from watchdog import watch_triggers as _wt                    # #1163 (steer=watch windows)
+from watchdog import owner_stop as _owner_stop                # #1257 (owner-stop latch)
 from watchdog.send_outcome import (  # noqa: E402 -- #1157: moved, ONE shared undo
     janitor_undo_if_own_stranded as _janitor_undo_if_own_stranded)
 
@@ -1627,6 +1628,7 @@ _GOAL_TERMINAL_WORDS = frozenset((
                                  # sweep. (The #623 `drop:already-current` word is
                                  # removed with the stale-rearm REPLACE path.)
     "drop:declared-virgin-retired",  # #1260 -- the same for a leftover #1038 request
+    "drop:owner-stop",    # #1257 -- the owner stopped/paused/left this session
 ))
 
 
@@ -1751,13 +1753,8 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
     projects_dir = projects_dir or watchdog.PROJECTS_DIR
     sleep_fn = sleep_fn or time.sleep
 
-    # #1113 -- the stale-rearm typing path is REMOVED: a machine /goal keystroke
-    # NEVER reaches an ACTIVE, armed loop (the >10x david1-3 regression). A
-    # leftover on-disk `stale-rearm` request (recorded before the retire) is
-    # dropped TERMINALLY here, before any pane resolution / keystroke, so
-    # goal_sweep clears it and it is never typed. `goal_dark_watch` no longer
-    # records this origin, so on a settled fleet this is only ever a one-sweep
-    # cleanup of a pre-#1113 request.
+    # #1113 -- a leftover on-disk `stale-rearm` request (the typing path is
+    # REMOVED) is dropped TERMINALLY before any pane work, never typed.
     if origin == _GOAL_STALE_REARM_ORIGIN:
         _log_goal_sync("DROP stale-rearm-retired sid=%s cwd=%s" % (sid, cwd))
         return "drop:stale-rearm-retired"
@@ -1766,6 +1763,12 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
     if origin == _GOAL_DECLARED_VIRGIN_ORIGIN:
         _log_goal_sync("DROP declared-virgin-retired sid=%s cwd=%s" % (sid, cwd))
         return "drop:declared-virgin-retired"
+    # #1257 -- a session the owner stopped/paused/left is NEVER armed, any origin.
+    _ostop = _owner_stop.cwd_latch(projects_dir, cwd, state)
+    if _ostop:
+        _log_goal_sync("DROP owner-stop sid=%s cwd=%s origin=%s fact=%s"
+                       % (sid, cwd, origin, _ostop.get("fact")))
+        return "drop:owner-stop"
 
     # #1113 RECURRENCE -- STRUCTURED-armed refusal, before ANY pane work or
     # keystroke. The >10x david1-3 regression (23.9): a `dark-rearm` typed a
@@ -1985,23 +1988,19 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
         if _cskip:
             return _cskip
 
-    # #1092 (e) -- a watchdog RE-ARM types into an ACTIVE (idle) stream pane, so it
-    # goes through the SAME per-pane typing budget as a nudge: at most
-    # PANE_ATTEMPT_BUDGET typing attempts into this pane per rolling hour, across
-    # ALL kinds. deliver_goal delivers via _send_goal_verified / deliver_with_stash
-    # (not send_verified), so the budget is enforced HERE, right before the
-    # keystroke and after the human-active guards above. Refused BEFORE any
-    # keystroke -> a zero-keystroke, non-terminal defer (retry next sweep once the
-    # rolling hour frees a slot, or the 30-min age cap expires it silently). The
-    # user's OWN `self-callback` arm is NOT a watchdog re-arm and is never gated
-    # here (the owner at the keyboard). This is the second writer the addendum
-    # names: a template change can no longer storm a pane's prompt via re-arms.
-    if origin in _GOAL_WATCHDOG_REARM_ORIGINS:
-        if not _nudge_gate.pane_budget_ok(state, pid, now):
-            _log_goal_sync("SKIP pane-budget(%s) sid=%s cwd=%s" % (origin, sid, cwd))
-            if out is not None:
-                out["detail"] = _nudge_gate.pane_budget_hold_reason(state, pid, now)
-            return "skip:pane-budget"
+    # #1092 (e) / B9 -- a watchdog WORK re-arm spends the pane's ONE daily typing
+    # attempt (shared with every nudge), checked here before any keystroke: a
+    # zero-keystroke, non-terminal defer. The owner's self-callback, a recovery
+    # origin (auth-rearm = the API-error resume of a loop, answer-rearm) and a
+    # recovery identity (stream-migrate's goal-arm) never count.
+    _rearm_budgeted = (origin in _GOAL_WATCHDOG_REARM_ORIGINS
+                       and origin not in _GOAL_RECOVERY_ORIGINS
+                       and _nudge_gate.pane_budgeted(_nudge))
+    if _rearm_budgeted and not _nudge_gate.pane_budget_ok(state, pid, now):
+        _log_goal_sync("SKIP pane-budget(%s) sid=%s cwd=%s" % (origin, sid, cwd))
+        if out is not None:
+            out["detail"] = _nudge_gate.pane_budget_hold_reason(state, pid, now)
+        return "skip:pane-budget"
 
     # #1110 -- TRANSCRIPT-LIVENESS gate, evaluated BEFORE the render gate. A
     # live turn renders a bare `❯` box between tool rounds, byte-identical to a
@@ -2134,18 +2133,10 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
     ok = _send_goal_verified(pid, text, run, captured=captured,
                              sleep_fn=sleep_fn, logs=logs,
                              nudge=_nudge, out=_send_out)   # #1038 declared-window -> goal-arm
-    # #1092 (e) -- the type keystroke into the (empty) box was a typing attempt
-    # into an active pane; count it against the per-pane budget for a watchdog
-    # re-arm -- but ONLY when a keystroke was ACTUALLY sent (#1104). A swallowed
-    # re-arm (typed, submit unconfirmed) DID keystroke and still counts (`typed`
-    # set); an OFF-suppressed re-arm (`_send_goal_verified` bailed keystroke-free
-    # through the #1002 kill switch) OR a raced-abort (box no longer bare) typed
-    # NOTHING (`typed` unset) and must NOT consume the pane budget -- else
-    # switching the kind ON later inherits a spent budget with zero real
-    # keystrokes (the montalu1 16:04 `hold:pane-budget` with no keystrokes).
-    # `out["typed"]` is the real "a keystroke was emitted" signal, not the
-    # kill-switch proxy (#1104-review: the proxy over-books on a raced abort).
-    if origin in _GOAL_WATCHDOG_REARM_ORIGINS and _send_out.get("typed"):
+    # #1092 (e) -- count a budgeted re-arm ONLY when a keystroke was ACTUALLY
+    # sent (`out["typed"]`, #1104): an OFF-suppressed or raced-abort re-arm typed
+    # nothing and must not spend the budget (the montalu1 16:04 phantom hold).
+    if _rearm_budgeted and _send_out.get("typed"):
         _nudge_gate.mark_pane_attempt(state, pid, now)
 
     if ok:
@@ -3181,10 +3172,9 @@ _GOAL_GUARD_TEXT = (
 
 def _goal_guard_deliver(sid, pid, captured, cwd, state, now, loc, run,
                         sleep_fn, dry_run, projects_dir, batch_collect=None):
-    """#878 — delivery half of the goal-guard rider. Called when
-    `_goal_guard_decide` returned a truthy decision. Handles nudge_gate,
-    recent-human, boundary classification, keystroke delivery, and mark_sent.
-    Returns a list of decision-log lines (may be empty)."""
+    """#878 — delivery half of the goal-guard rider (after a truthy decide):
+    nudge_gate + the pane's daily budget, recent-human, boundary, keystroke,
+    mark_sent. Returns the decision-log lines."""
     logs = []
     # #923 BATCH MODE: gate_ok is handled once by the caller.
     if batch_collect is None:
@@ -3196,6 +3186,10 @@ def _goal_guard_deliver(sid, pid, captured, cwd, state, now, loc, run,
             logs.append("goal-guard %s sid=%s -> %s"
                         % (loc, sid,
                            _nudge_gate.floor_hold_reason(state, sid, "goal-guard", now)))
+            return logs
+        if not _nudge_gate.pane_budget_ok(state, pid, now):   # B9: one per pane/day
+            logs.append("goal-guard %s sid=%s -> %s" % (
+                loc, sid, _nudge_gate.pane_budget_hold_reason(state, pid, now)))
             return logs
     if dry_run:
         logs.append("goal-guard %s sid=%s -> would-send (dry-run)"
@@ -3232,9 +3226,12 @@ def _goal_guard_deliver(sid, pid, captured, cwd, state, now, loc, run,
         batch_collect.append(("goal-guard", _GOAL_GUARD_TEXT, None))
         logs.append("goal-guard %s sid=%s -> batch-collected" % (loc, sid))
         return logs
+    _gout = {}
     ok = _send_goal_verified(pid, _GOAL_GUARD_TEXT, run,
                              captured=captured, sleep_fn=sleep_fn,
-                             verify_armed=False, nudge="goal-guard")
+                             verify_armed=False, nudge="goal-guard", out=_gout)
+    if _gout.get("typed"):
+        _nudge_gate.mark_pane_attempt(state, pid, now)
     if ok:
         _nudge_gate.mark_sent(state, sid, "goal-guard", now)
         logs.append("goal-guard %s sid=%s -> sent" % (loc, sid))
@@ -4412,6 +4409,11 @@ def _resurrect_dead_entry(dcwd, dentry, dloc, now, run, projects_dir, dry_run):
     rdue, _ = _resurrect.due(dentry, now)
     if not rdue:
         return [], False
+    _ostop = _owner_stop.cwd_latch(projects_dir, dcwd)
+    if _ostop:   # #1257: an exit/pause the owner made is never undone by a relaunch
+        dentry["rgts"] = now
+        return ["resurrect %s -> hold:owner-stop (%s): never relaunched"
+                % (dloc, _ostop.get("fact"))], True
     logs = []
     # #805 interface -- a relaunch that fired last due-cycle (`ratt`) yet the
     # stream is STILL dead now is a FAILED attempt; count it so launch_cmd
@@ -4450,11 +4452,9 @@ def _resurrect_dead_entry(dcwd, dentry, dloc, now, run, projects_dir, dry_run):
     return logs, True
 
 
-# #531 -- orphan-reap TTL for state["goal_lane"] per-sid records. Same 24h
-# magnitude as GOAL_MARK_ORPHAN_TTL_S, deliberately well above the 1h nudge
-# interval, so a live armed pane -- whose rec is re-stamped (`lts`) on every ~60s
-# sweep it is visited-and-armed -- is never reaped by the SECONDARY age gate; only
-# a genuinely gone session's aged, not-visited entry is.
+# #531 -- orphan-reap TTL for state["goal_lane"] per-sid records (24h, like
+# GOAL_MARK_ORPHAN_TTL_S): a live armed pane re-stamps `lts` every sweep, so only
+# a genuinely gone session's aged, not-visited entry is reaped.
 GOAL_LANE_ORPHAN_TTL_S = 24 * 3600
 
 

@@ -1072,23 +1072,12 @@ def report_reconcile(now, run, state, cwd_by_sid, panes_by_sid,
                 _save()
                 continue
 
-            # #1092 fix-forward: the `card` nudge kind being OFF (#1023 per-kind
-            # staging) is NOT a pane swallow — `send_verified(..., nudge="card")`
-            # would return False because `keys()` suppresses the keystroke and
-            # types NOTHING. Distinguish it as a WITHHELD decision (the #486
-            # decision-log contract): ONE journal line, `swallows`/`last_try`
-            # left EXACTLY as they were, the send primitive never called, and no
-            # owner escalation from a kind-off state (the false-ping class:
-            # `report-owed ESCALATE … -> sent` on gk 08:17 for a ticket never
-            # typed). The kind checked here MUST match the kind the default
-            # `verified_send` closure passes (`nudge="card"`, ~L951) — this veto
-            # is a faithful pre-check of exactly what the send primitive would
-            # have suppressed. The ticket stays owed (`nudged` unwritten) so the
-            # normal nudge path resumes the moment the owner re-enables `card`.
-            # (The SEPARATE question of a stale ticket NUMBER being derived as
-            # owed — e.g. gk's long-closed #4 re-mentioned in a recent commit —
-            # is a `merged_closes` regex Finding tracked on #1092, NOT fixed
-            # here: this branch stops the false ESCALATION, not the false owed.)
+            # #1092 fix-forward: the `card` kind OFF (#1023 staging) is NOT a pane
+            # swallow — `send_verified(nudge="card")` would type NOTHING. A
+            # WITHHELD decision: ONE journal line, `swallows`/`last_try` untouched,
+            # no send, no owner escalation (the gk 08:17 false ping). The kind MUST
+            # match the `verified_send` closure's `nudge="card"`; the ticket stays
+            # owed so delivery resumes when the owner re-enables `card`.
             if not nudges_enabled("card"):
                 logs.append("report-owed withheld (kind card off) %s issues=%s"
                             % (root, ", ".join("#%d" % n
@@ -1096,6 +1085,14 @@ def report_reconcile(now, run, state, cwd_by_sid, panes_by_sid,
                 _save()
                 continue
 
+            # B9 (owner 26.10.2026): the pane's ONE daily nudge is spent — a
+            # held send is no swallow, never counted, never escalated.
+            from watchdog import nudge_gate as _ng
+            if pane_id is not None and not _ng.pane_budget_ok(state, pane_id, now):
+                logs.append("report-owed held (%s) %s"
+                            % (_ng.pane_budget_hold_reason(state, pane_id, now), root))
+                _save()
+                continue
             # #511: after a swallow, RE-PROBE on a bounded interval (never a
             # permanent stop). The FIRST attempt (swallows==0) is immediate.
             if swallows > 0 and (now - last_try) < reprobe:

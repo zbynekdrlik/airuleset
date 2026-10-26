@@ -28,7 +28,7 @@ one nudge, while an unchanged verdict tracks silently. Delivery reuses the share
 `stuck-check: ` machine-nudge prefix, `watchdog.send_verified` (transcript-proof
 submit), the `_janitor_mark_watch`/`_janitor_clear_watch` reclaim path, the
 per-sweep `handled` set (at most ONE keystroke per pane per sweep), and the
-shared per-pane-per-KIND 60-min floor `nudge_gate.gate_ok(state, sid,
+shared per-pane daily floor + cap `nudge_gate.gate_ok(state, sid,
 "bounce-verdict", now)` (a delta inside the floor is HELD and its members
 ACCUMULATE into the next post-floor nudge). `dry_run` mutates nothing.
 """

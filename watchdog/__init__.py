@@ -3610,10 +3610,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
     # basenames; a box without them is identity. Still ONE list_claude_panes call
     # (job 41 reuses this reordered list).
     panes = limit_dialog.prioritize_panes(panes)
-    # #1060 L3b item 8 — dual-agent IMPLEMENTER window presence, marker-gated,
-    # folded into the sweep body (NOT a new numbered job). See
-    # `impl_window_presence` / `_impl_marker` for the full rationale; a non-marker
-    # box is a single cheap file read (None) with no tmux call.
+    # #1060 L3b item 8 — dual-agent IMPLEMENTER window presence, marker-gated
+    # (`impl_window_presence` / `_impl_marker`; a non-marker box reads one file).
     _impl_mk = _impl_marker()
     if _impl_mk:
         impl_window_presence(_impl_mk, run=run, logs=logs, dry_run=dry_run)
@@ -3627,6 +3625,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
             continue
         tpath, tmtime = tinfo
         by_transcript.setdefault(str(tpath), []).append((pid, cwd, tmtime, tpath))
+    from watchdog import owner_stop     # #1257: map the latch BEFORE any keystroke job
+    logs.extend(owner_stop.refresh(state, panes, projects_dir, now, dry_run=dry_run))
 
     for idx, (tkey, owners) in enumerate(by_transcript.items()):
         if time_fn() >= sweep_deadline:
@@ -5721,8 +5721,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
             return _th.compute_hygiene(client.call, c)
 
         def _deliver(pid, tpath, text):
-            return send_verified(pid, text, run, tpath, sleep_fn=sleep_fn,
-                                 logs=None, nudge=task_hygiene.NUDGE_KIND)
+            return send_verified(pid, text, run, tpath, sleep_fn=sleep_fn, logs=None,
+                                 nudge=task_hygiene.NUDGE_KIND, state=state, now=now)
 
         def _recent_human(sid, cwd, tpath, pid):
             from watchdog import goal as _goal_mod   # deferred: avoid import cycle
