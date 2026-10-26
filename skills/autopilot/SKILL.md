@@ -573,7 +573,6 @@ merge→gates→push at a time per repo across all sessions).
      owner never first learns of the debt by seeing `W 34` in the footer himself. This lane is the
      `W`-side parallel of the `prio:bounce` seeding below — it runs at the same batch-start moment
      and takes precedence over seeding a NEW I lane while the strop is breached.
-     Record the pass with `python3 ~/devel/airuleset/airuleset.py wdrain-pass --record --verdicts-file F` — `block-dispatch-over-wdrain.sh` mechanically enforces it (#868); `WDRAIN-BYPASS: <reason>` in the dispatch prompt is the logged escape for a release-blocking gk order.
    - **Seed — PRIORITY LANE first (`prio:bounce`).** Open non-skip issues labeled `prio:bounce`
      (a reviewer/gatekeeper-INJECTED priority ticket — the bounce lane from odoo-erp #1599, but the
      label is a GENERIC cross-repo convention every repo/stream honors, never an odoo-specific
@@ -664,10 +663,8 @@ merge→gates→push at a time per repo across all sessions).
    it with **`python3 ~/devel/airuleset/airuleset.py design-record --repo <owner/name> --issue <N>
    --body-file <design.md>`** — it stamps `Design-by: main <model>` read from YOUR OWN transcript
    (the main's own id, never a self-declared string), validates the design shape before posting, and
-   writes the local design marker the worker's commit gate needs. The dispatch precondition
-   (`gates.designdispatch`) then REFUSES to dispatch a worker for any member whose newest design
-   comment is not `Design-by: main <main id>` — so a member without your design comment simply
-   cannot be dispatched (bypass `airuleset:design-by-ok <reason>` in the prompt, logged). Embed a
+   writes the local design marker the worker's commit gate needs (`block-commit-without-design.sh`
+   refuses a commit for a ticket with no design comment). Embed a
    tight summary of the design in that member's worker dispatch prompt as grounding. The worker's
    CYCLE step 2 (`agents/autopilot-worker.md`) then READS your `Design-by: main` comment, confirms
    the code anchors, and IMPLEMENTS it — it NEVER authors the design, and `gates.designbypost`

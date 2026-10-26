@@ -27,8 +27,8 @@ invent work.
 
 ## BEFORE any work — the receiving-side design gate (UNCONDITIONAL)
 
-The DESIGN of every ticket is authored by the MAIN, never by you (#871/#1061). On this dual
-box the `Agent`-dispatch precondition never fired (you were woken by `SendMessage`), so you run the
+The DESIGN of every ticket is authored by the MAIN, never by you (#871/#1061). No dispatch-time
+gate checks it (issue 1137 retired that), so you run the
 **receiving-side gate yourself, first**, from the airuleset repo root:
 
 ```bash

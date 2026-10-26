@@ -453,9 +453,8 @@ that cycle's push has landed. You never call
    model!!" is a hard violation). Before you were dispatched, the main posted the ticket's design
    comment — **root cause** traced in the code + **the chosen approach** + **the rejected
    alternative** + a `Triage:` line + an `Architektúra:` section + a `Shared-benefit:` line —
-   stamped `Design-by: main <model>`; the dispatch precondition (`gates.designdispatch`) already
-   REFUSED to dispatch you without it, so it EXISTS. Your first act for each member, before the
-   first line of code:
+   stamped `Design-by: main <model>` (your commit gate refuses a commit without a design comment).
+   Your first act for each member, before the first line of code:
    - **`gh issue view <N>` and READ the `Design-by: main` comment.** That is the DECIDED design.
      You IMPLEMENT it faithfully — you do NOT re-open, re-decide, or quietly substitute a different
      approach (silently picking your own is the EXACT violation #1061 fixes).

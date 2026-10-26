@@ -7,9 +7,8 @@ stamp is written by `airuleset.py design-record` (which reads the model from the
 session's OWN transcript and, from a worktree cwd, stamps `Design-by: worker`).
 This gate BLOCKS a RAW `gh issue comment` whose body carries `Design-by: main`
 when the author is a lane worker (worktree cwd) OR the implementer
-(`AIRULESET_ROLE=implementer`) -- the exact spoof the dispatch precondition
-(gates.designdispatch, which trusts a `Design-by: main` comment) must not be
-fooled by. FAIL-CLOSED for the spoof (a lane author + `Design-by: main` ->
+(`AIRULESET_ROLE=implementer`) -- the stamp the implementer's design check
+(gates.designdispatch) trusts. FAIL-CLOSED for the spoof (a lane author + `Design-by: main` ->
 block); everything else (a non-comment command, a main cwd, a `Design-by:
 worker` comment, design-record's own stdin post) is ALLOWED. Bypass:
 `# airuleset:design-by-ok <reason>` in the command (logged to

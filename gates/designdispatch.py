@@ -1,8 +1,9 @@
-"""gates.designdispatch -- the MAIN-authored-design dispatch precondition
-(#1061, owner escalation 2026-09-17). Entry for
-hooks/block-dispatch-without-main-design.sh.
+"""gates.designdispatch -- the MAIN-authored-design check (#1061, owner
+escalation 2026-09-17). Its dispatch-time hook was retired by issue 1137 B1
+(the commit-time block-commit-without-design.sh keeps design-first); the
+implementer runs `python3 -m gates.designdispatch --issue N` itself.
 
-Active ONLY for an `autopilot-worker` Agent/Task dispatch. REFUSES the dispatch
+`evaluate` judges an `autopilot-worker` Agent/Task payload. It REFUSES
 unless the NEWEST `Design-by:` comment on every issue named in the prompt is
 `Design-by: main <managed-main id>` -- a managed MAIN-tier id (Opus 5.5 since
 #1119, or Fable 5.1 through the transition; see `_accepted_main_ids`), i.e. the
