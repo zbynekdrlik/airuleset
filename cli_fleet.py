@@ -348,7 +348,7 @@ REMOTE_HOSTS = [
         # #679: pinned PUBLIC ssh host keys for this public-DNS target. Same
         # public-internet threat class as spinbike-vps (#669) and WORSE: this
         # entry carries no `identity`, so the deploy loop takes the no-identity
-        # `sshpass -p newlevel` branch -- under StrictHostKeyChecking=no a MITM
+        # `sshpass -f <password file>` branch -- under StrictHostKeyChecking=no a MITM
         # on the path to forestshop-dev.newlevel.media (or a DNS hijack) would
         # get ANY host key accepted AND receive the fleet-shared password. The
         # pin verifies the host key STRICTLY (cli_remote.host_key_check_opts),

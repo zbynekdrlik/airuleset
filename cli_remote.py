@@ -38,6 +38,8 @@ import shutil
 import sys
 from pathlib import Path
 
+import cli_ssh_password  # #1236: the sshpass password FILE (stdlib-only leaf)
+
 REPO_DIR = Path(__file__).resolve().parent
 
 
@@ -441,7 +443,9 @@ def _ssh_prefix(remote, require_identity):
     loop AND the read-only live-process report (report_live_claude_processes)
     build the ssh invocation identically — the #669 host-key pin, the #341
     BatchMode / one-password-prompt hardening. Behaviour is byte-identical to the
-    former inline builder in _deliver_secret_to_hosts."""
+    former inline builder in _deliver_secret_to_hosts. #1236: the identity-less
+    branch is `sshpass -f <password file>` and RAISES SshPasswordFileError when
+    that file is unusable (cli_ssh_password)."""
     identity = remote.get("identity")
     # #669: pin the host key on a raw-public-IP owner_vps target; every other
     # host keeps its unchanged StrictHostKeyChecking=no posture.
@@ -461,7 +465,7 @@ def _ssh_prefix(remote, require_identity):
     # attempt to ONE try (openssh's own default is 3, and sshpass happily
     # re-supplies the same password for every re-prompt), so a single sshpass
     # call can burn at most one fail2ban-countable strike instead of up to three.
-    return (["sshpass", "-p", "newlevel", "ssh", *hostkey_opts,
+    return ([*cli_ssh_password.sshpass_argv(), "ssh", *hostkey_opts,
              "-o", "NumberOfPasswordPrompts=1"], None)
 
 
@@ -568,7 +572,7 @@ def _deliver_secret_to_hosts(targets, value, remote_write_cmd, noun, run,
         if exc is not None:
             # #826 adversarial-review: NEVER str()/repr() the exception here — a
             # subprocess.TimeoutExpired/CalledProcessError embeds the full argv
-            # (incl. `sshpass -p <shared-password>`) in BOTH, and this `failed`
+            # (pre-#1236 the shared password too) in BOTH, and this `failed`
             # entry now flows up into the deploy-phase `DEPLOY FAILED` summary.
             # Report the exception CLASS only — a redacted, non-leaking signal.
             exc_name = type(exc).__name__
@@ -958,20 +962,6 @@ def host_key_check_opts(remote):
             "-o", "StrictHostKeyChecking=yes"]
 
 
-def _redacted_ssh_cmd(cmd):
-    """The same argv `ssh_cmd`/`ssh_prefix` list built for a deploy or
-    soniox-key call, with any `sshpass -p <password>` password argument
-    replaced -- this is printed into the push LOG as a manual single-
-    target retry hint once retries are exhausted (#358), and the shared
-    subdev password must never land in a log file (security-basics.md).
-    Never mutates the input list."""
-    out = list(cmd)
-    for i, tok in enumerate(out):
-        if tok == "-p" and i > 0 and out[i - 1] == "sshpass" and i + 1 < len(out):
-            out[i + 1] = "<REDACTED>"
-    return out
-
-
 # --- #347: push-time guard against a newly-activated subdev stream account
 # silently never gaining its own REMOTE_HOSTS registration -------------------
 # Root cause of the incident this guards against: david2/david3/david4 were
@@ -1128,22 +1118,17 @@ def _print_deploy_leg_diagnostics(remote, identity, hostkey_opts,
     import subprocess
     diag_cmd = (f"cd {remote['repo_path']} && "
                 f"git status --porcelain 2>/dev/null | head -5")
-    if identity:
-        ssh_cmd = [
-            "ssh", "-i", os.path.expanduser(identity),
-            *hostkey_opts, "-o", "BatchMode=yes",
-        ] + control_opts + [
-            f"{remote['user']}@{remote['host']}", diag_cmd,
-        ]
-    else:
-        ssh_cmd = [
-            "sshpass", "-p", "newlevel",
-            "ssh", *hostkey_opts,
-            "-o", "NumberOfPasswordPrompts=1",
-        ] + control_opts + [
-            f"{remote['user']}@{remote['host']}", diag_cmd,
-        ]
-    try:
+    try:  # #1236: the prefix build too (an unusable password file is a WARN)
+        if identity:
+            ssh_cmd = [
+                "ssh", "-i", os.path.expanduser(identity),
+                *hostkey_opts, "-o", "BatchMode=yes",
+            ] + control_opts + [f"{remote['user']}@{remote['host']}", diag_cmd]
+        else:
+            ssh_cmd = [
+                *cli_ssh_password.sshpass_argv(), "ssh", *hostkey_opts,
+                "-o", "NumberOfPasswordPrompts=1",
+            ] + control_opts + [f"{remote['user']}@{remote['host']}", diag_cmd]
         diag = subprocess.run(ssh_cmd, capture_output=True, text=True,
                               timeout=30)
         dirty = diag.stdout.strip()
@@ -1321,6 +1306,20 @@ def _compact_hardoff_postcheck():
     return 'echo "compact: hard-off (code)"'
 
 
+def _password_argv_or_fail(remote, failed, auth_failed):
+    """#1236: `sshpass -f <password file>` for an identity-less deploy target,
+    or None after failing THIS target loudly when the file is unusable: the
+    key-based targets still deploy, the push still exits non-zero, and the
+    soniox phase skips the target exactly like an auth failure."""
+    try:
+        return cli_ssh_password.sshpass_argv()
+    except cli_ssh_password.SshPasswordFileError as exc:
+        print(f"  FAILED: {exc}", file=sys.stderr)
+        failed.append((remote["name"], "no-password-file"))
+        auth_failed.add(remote["name"])
+        return None
+
+
 def _deploy_to_all_remotes(failed, auth_failed):
     """Deploy this push to every managed remote (step 3 + 3b of cmd_push).
 
@@ -1470,14 +1469,12 @@ def _deploy_to_all_remotes(failed, auth_failed):
                 # sshpass happily re-supplies the same password on every
                 # re-prompt), so one sshpass call burns at most one
                 # fail2ban-countable strike instead of up to three.
-                ssh_cmd = [
-                    "sshpass", "-p", "newlevel",
-                    "ssh", *hostkey_opts,
-                    "-o", "NumberOfPasswordPrompts=1",
-                ] + control_opts + [
-                    f"{remote['user']}@{remote['host']}",
-                    remote_cmd,
-                ]
+                pw_argv = _password_argv_or_fail(remote, failed, auth_failed)
+                if pw_argv is None:
+                    continue
+                ssh_cmd = [*pw_argv, "ssh", *hostkey_opts,
+                           "-o", "NumberOfPasswordPrompts=1", *control_opts,
+                           f"{remote['user']}@{remote['host']}", remote_cmd]
             # #263: never let ONE slow/hanging remote (a first-time claude-CLI
             # curl install, ensure_playwright_browsers()'s npx install) abort
             # deployment to every REMAINING host — the loop used to have no
@@ -1559,12 +1556,10 @@ def _deploy_to_all_remotes(failed, auth_failed):
                 # failure names the exact single-target command to retry
                 # manually once the target is reachable again -- never the
                 # whole push (which would re-run the full-suite gate for
-                # nothing), and never the shared subdev PASSWORD (a
-                # redacted placeholder stands in for it, security-basics.md).
+                # nothing). #1236: argv names only the password FILE.
                 if _is_ssh_transient_failure(ssh_result.returncode,
                                               ssh_result.stderr):
-                    hint = " ".join(shlex.quote(c)
-                                     for c in _redacted_ssh_cmd(ssh_cmd))
+                    hint = " ".join(shlex.quote(c) for c in ssh_cmd)
                     print(f"  Manual retry once reachable: {hint}")
             else:
                 print(f"  {ssh_result.stdout.strip()}")
@@ -1994,10 +1989,10 @@ def cmd_push(args):
         # WHOLE subprocess at a per-run TMPDIR removed on context exit.
         test_env["TMPDIR"] = str(_suite_tmp)
         test_env["AIRULESET_TMUX_SOCK"] = str(Path(_suite_tmp) / "tmux-none" / "default")  # #1256
-        # #629: bracket the suite subprocess with a tracked-tree content
-        # fingerprint (as tightly as possible around subprocess.run) so a
-        # concurrent integration mutating the shared checkout MID-RUN is
-        # reported as its own cause, not as a masquerading test failure.
+        test_env[cli_ssh_password.ENV_OVERRIDE] = cli_ssh_password.fake_file_for_suite(_lock_tmp)  # #1236
+        # #629: bracket the suite subprocess (as tightly as possible) with a tracked-
+        # tree content fingerprint so a concurrent integration mutating the shared
+        # checkout MID-RUN is reported as its own cause, not as a test failure.
         _fp_before = _tracked_tree_fingerprint(REPO_DIR)
         test_result = subprocess.run(
             [sys.executable, "-m", "unittest", "discover", "-s", "tests"],
