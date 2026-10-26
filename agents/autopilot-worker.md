@@ -678,7 +678,7 @@ them all):
 
 ```
 issues: #<A> <title>, #<B> <title>, … (one PR closes all)
-plan: <per issue, N/N acceptance-criteria items from the issue body fulfilled — your own self-audit in plain words vs what the ticket asked for. This is what the `plan N/N` token of the supervisor's `✅ Overené:` line relays — it is NOT independently re-run by the supervisor, so an honest self-audit here is the only thing backing that line.>
+plan: <per issue, N/N acceptance-criteria items from the issue body fulfilled — your own self-audit in plain words vs what the ticket asked for. This is what the `plan N/N` token (the plan-check result) of the supervisor's `✅ Overené:` line relays — it is NOT independently re-run by the supervisor, so an honest self-audit here is the only thing backing that line.>
 validated: <per issue: how you proved each is still real: repro/test/MCP/curl, ALSO posted as its own `gh issue comment <N>` per STEP 0 above — a durable artifact, checked by the extended #136/#213 gate | "OBSOLETE — closed: <what>">
 approach: <per issue, the MAIN's decided design you implemented: the `Design-by: main` comment URL/id (root cause + chosen approach + rejected alternative + Triage: + Architektúra:, authored by the main), AND your own `Anchors-confirmed:` comment URL/id confirming the code anchors before your first commit. NEVER "n/a" — you read + confirm the main's design, you never author it (CYCLE step 2, #1061).>
 review: <per issue: `/review` + `/requesting-code-review` result (0 🔴 0 🟡 0 🔵 or N findings fixed in <sha>), ALSO posted as its own `gh issue comment <N>` per CYCLE step 6 — checked by the SAME extended #214 gate.>
