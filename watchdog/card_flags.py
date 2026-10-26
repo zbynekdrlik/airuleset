@@ -104,14 +104,16 @@ def _nudge_repo_pane(pid, cwd, run, text, dry_run, projects_dir, logs=None,
     `user_authored` (granted by `discord_replies` for a verified owner action —
     a ❓-flag, a card reopen) is forwarded on BOTH routes (B9 fix). The pane
     here is picked by the MACHINE, so the grant never passes the #1257
-    owner-stop latch: a paused session gets nothing (journalled)."""
-    from watchdog import owner_stop
-    latch = owner_stop.pane_latch(pid)
-    if latch:
-        if isinstance(logs, list):
-            logs.append("repo-pane %s -> hold:owner-stop (%s): not typed"
-                        % (pid, latch.get("fact")))
-        return False
+    owner-stop latch: a paused session gets nothing and the call returns
+    None (held, not busy), journalled once per latch episode."""
+    import time
+    from watchdog import nudge_gate
+    hold = nudge_gate.pre_send_hold(state, pid, "repo-pane", now if now is not None
+                                    else time.time(), budget=False)
+    if hold:
+        if hold[1] and isinstance(logs, list):
+            logs.append("repo-pane %s -> hold:%s: not typed" % (pid, hold[0]))
+        return None
     captured = watchdog.capture_pane(pid, run)
     if watchdog.pane_in_mode(pid, run):
         return False

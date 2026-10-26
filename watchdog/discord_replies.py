@@ -639,6 +639,8 @@ def deliver_discord_replies(now, run, state, panes_by_sid, dry_run=False,
                                 logs.append("flag-react (dry-run)→%s [%s]"
                                             % (watchdog.project_label(d_cwd),
                                                d_sid[:12] if d_sid else "-"))
+                            elif ok is None:
+                                pass   # #1257 latch: journalled once by the helper
                             else:
                                 logs.append("flag-react pending (busy) %s"
                                             % mid[-8:])
