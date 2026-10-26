@@ -102,6 +102,18 @@ class TestArchitectureLineRequired(_HookCase):
             "%s Architektúra: watchdog — REWORK #1001 (watchdog state rework)\n"
             % ARCH)))
 
+    def test_rework_fixed_verdict_passes(self):
+        self.assertClean(self._run(_report(
+            "%s Architektúra: watchdog — REWORK fixed\n" % ARCH)))
+
+    def test_violation_names_the_three_verdicts(self):
+        # #1137 review round: a REWORK is fixed in the change (`REWORK fixed`),
+        # else ONE separate `architecture-rework` ticket (`REWORK #N`).
+        r = self._run(_report(arch_line=None))
+        self.assertIn("Architektúra: <oblasť> — REWORK fixed", r.stderr)
+        self.assertTrue(any("REWORK fixed" in v for v in self._violations(r)),
+                        self._violations(r))
+
     def test_vs16_emoji_presentation_glyph_is_accepted(self):
         # #993-review 🟡: 🏛️ (U+1F3DB U+FE0F) is the common emoji-presentation
         # form models emit — it must not false-block a correct report.

@@ -20,6 +20,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
@@ -370,10 +371,36 @@ class TestResourceGuardVerify(unittest.TestCase):
 
 
 class TestRunOnceWiring(unittest.TestCase):
-    """The job is registered in run_once behind `resource_guard_enabled`."""
+    """Job 39 runs from run_once behind `resource_guard_enabled`, on the small
+    local-read reserve: it reads one cgroup file and calls no gh (#1137)."""
 
-    def test_job_is_registered(self):
-        self.assertTrue(hasattr(wd, "resource_guard_verify"))
+    def _drive(self, enabled, remaining_s):
+        seen = []
+        elapsed = float(wd.SWEEP_SOFT_CAP_S - remaining_s)
+        ticks = {"n": 0}
+
+        def time_fn():
+            ticks["n"] += 1
+            return 0.0 if ticks["n"] == 1 else elapsed
+
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.object(wd, "list_claude_panes", lambda *a, **k: []), \
+                mock.patch.object(wd, "_owner_disabled", lambda kind: False), \
+                mock.patch.object(wd, "resource_guard_verify",
+                                  lambda **k: seen.append(k) or []):
+            logs = wd.run_once(now=1000.0, dry_run=False, run=lambda *a, **k: "",
+                               send_fn=lambda *a, **k: None,
+                               projects_dir=Path(d) / "proj",
+                               state_path=str(Path(d) / "state.json"),
+                               resource_guard_enabled=enabled, time_fn=time_fn)
+        return seen, [ln for ln in logs if "resource_guard" in ln]
+
+    def test_gate_off_never_runs(self):
+        self.assertEqual(self._drive(False, 15)[0], [])
+
+    def test_runs_on_the_local_read_reserve(self):
+        seen, logs = self._drive(True, 15)
+        self.assertEqual(len(seen), 1, logs)
 
 
 class TestRsyslogQuiet925C(unittest.TestCase):

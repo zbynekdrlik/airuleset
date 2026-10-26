@@ -123,7 +123,7 @@ class TestProjectAccountBlocks(unittest.TestCase):
         for cmd in BLOCKED:
             r = run_hook(cmd)
             self.assertEqual(r.returncode, 2, "expected BLOCK: %r\n%s" % (cmd, r.stderr))
-            self.assertIn('SERVICE_ACCOUNTS["fohmixer"]["tools"]', r.stderr)
+            self.assertIn("gh issue create -R zbynekdrlik/airuleset", r.stderr)
             self.assertIn("nástroj pridá airuleset", r.stderr)
 
     def test_allows_the_non_install_shapes_and_repo_venvs(self):

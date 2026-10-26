@@ -5,7 +5,6 @@ piece of machinery that filed one by itself stops; its signal moves to a
 surface that already exists — a journal line, the footer, or the CURRENT
 ticket (the #1259 rule: one owner request = one ticket).
 """
-import importlib.util
 import inspect
 import json
 import re
@@ -44,8 +43,24 @@ def _norm(text):
     return re.sub(r"\s+", " ", text)
 
 
+def _is_filer(toks):
+    """A gh-issue / gk-request call, or a `gh api …issues…` write (an explicit
+    POST, or a field flag, which makes gh api default to POST)."""
+    if "gk-request" in toks or toks[:2] == ["gh", "issue"]:
+        return True
+    if toks[:2] != ["gh", "api"] or not any("issues" in t for t in toks):
+        return False
+    up = [t.upper() for t in toks]
+    for i, t in enumerate(up):
+        if t in ("-XPOST", "--METHOD=POST"):
+            return True
+        if t in ("-X", "--METHOD") and up[i + 1:i + 2] == ["POST"]:
+            return True
+    return any(t in ("-f", "-F", "--field", "--raw-field", "--input") for t in toks)
+
+
 class _FilerSpy:
-    """Records every gh-issue / gk-request subprocess and refuses it."""
+    """Records every filing subprocess (`_is_filer`) and refuses it."""
 
     def __init__(self):
         self.calls = []
@@ -53,10 +68,29 @@ class _FilerSpy:
 
     def __call__(self, argv, *a, **kw):
         toks = [str(x) for x in argv] if isinstance(argv, (list, tuple)) else [str(argv)]
-        if "gk-request" in toks or toks[:2] == ["gh", "issue"]:
+        if _is_filer(toks):
             self.calls.append(toks)
             return subprocess.CompletedProcess(argv, 1, "", "blocked by test")
         return self._real(argv, *a, **kw)
+
+
+class FilerSpyApiPost(unittest.TestCase):
+
+    def test_api_issue_writes_are_filings(self):
+        for argv in (["gh", "api", "repos/o/r/issues", "-X", "POST"],
+                     ["gh", "api", "--method", "POST", "repos/o/r/issues"],
+                     ["gh", "api", "--method=post", "repos/o/r/issues"],
+                     ["gh", "api", "-XPOST", "repos/o/r/issues"],
+                     ["gh", "api", "repos/o/r/issues", "-f", "title=x"]):
+            self.assertTrue(_is_filer(argv), argv)
+        spy = _FilerSpy()
+        r = spy(["gh", "api", "repos/o/r/issues", "-X", "POST", "-f", "title=x"])
+        self.assertEqual(r.returncode, 1)
+        self.assertEqual(len(spy.calls), 1)
+
+    def test_reads_are_not_filings(self):
+        self.assertFalse(_is_filer(["gh", "api", "repos/o/r/issues/5"]))
+        self.assertFalse(_is_filer(["gh", "api", "repos/o/r/pulls", "-X", "POST"]))
 
 
 def _statvfs(used_pct):
@@ -123,6 +157,49 @@ class DiskGuardSevere(unittest.TestCase):
                                  box_class="shared-stream"), [])
             self.assertEqual(sev({"worst_pct": 89, "dim": "bytes", "drain_exhausted": True}), [])
             self.assertFalse((Path(home) / ".claude").exists(), "dry-run writes nothing")
+
+    # Review round: the poll runs every 60 s, so the SEVERE line is written
+    # once per day per box, or again when the band / drain_exhausted changes.
+    def test_repeated_polls_journal_once(self):
+        lines = []
+        with tempfile.TemporaryDirectory() as home:
+            for i in range(5):
+                lines += dg.severe_journal({"worst_pct": 96, "dim": "bytes"}, home,
+                                           5000.0 + 60 * i, [], box_class="workstation",
+                                           critical_pct=90)
+            log = (Path(home) / ".claude" / dg.DISK_GUARD_DIRNAME / dg.LOG_NAME).read_text()
+        self.assertEqual(len(lines), 1, lines)
+        self.assertEqual(log.count(" SEVERE "), 1, log)
+
+    def test_band_change_journals_again(self):
+        with tempfile.TemporaryDirectory() as home:
+            def sev(pct, now, exhausted=False):
+                st = {"worst_pct": pct, "dim": "bytes"}
+                if exhausted:
+                    st["drain_exhausted"] = True
+                return len(dg.severe_journal(st, home, now, [], box_class="workstation",
+                                             critical_pct=90))
+            self.assertEqual(sev(96, 5000.0), 1)
+            self.assertEqual(sev(97, 5060.0), 0, "same band, same day")
+            self.assertEqual(sev(91, 5120.0, exhausted=True), 1, "band 95+ -> exhausted")
+            self.assertEqual(sev(96, 5180.0, exhausted=True), 1, "band back up")
+            self.assertEqual(sev(96, 5240.0, exhausted=True), 0)
+            self.assertEqual(sev(96, 5240.0 + 86400, exhausted=True), 1, "next day")
+
+    def test_second_poll_same_day_is_silent(self):
+        def poll(home, now):
+            return dg.run_disk_guard(
+                now=now, home=home, dry_run=False, statvfs_fn=_statvfs(96),
+                dev_fn=lambda _p: 1, geteuid_fn=lambda: 1000, mounts=("/",),
+                planners_fn=lambda _h, _n: [("noop", lambda: [])],
+                scratch_discover_fn=lambda _now, _home: [],
+                top_consumers_fn=lambda *a, **k: [])
+        with tempfile.TemporaryDirectory() as home, \
+                mock.patch.object(subprocess, "run", _FilerSpy()):
+            first = poll(home, 5000.0)
+            second = poll(home, 5600.0)
+        self.assertEqual(len([ln for ln in first if " SEVERE " in ln]), 1, first)
+        self.assertEqual([ln for ln in second if " SEVERE " in ln], [], second)
 
 
 # --------------------------------------------------------------------------- #
@@ -200,13 +277,16 @@ class ModelRestoreNoTicket(unittest.TestCase):
 # --------------------------------------------------------------------------- #
 class MdreviewNoCreate(unittest.TestCase):
 
-    def _job(self, state, view):
+    def _job(self, state, view, view_rc=0, listing="[]", listing_rc=0):
         calls = []
 
         def gh(argv):
-            calls.append([str(x) for x in argv])
+            argv = [str(x) for x in argv]
+            calls.append(argv)
             if "view" in argv:
-                return json.dumps(view), 0
+                return json.dumps(view), view_rc
+            if "list" in argv:
+                return listing, listing_rc
             if "create" in argv:
                 return "https://github.com/zbynekdrlik/airuleset/issues/900\n", 0
             return "", 0
@@ -233,13 +313,61 @@ class MdreviewNoCreate(unittest.TestCase):
         self.assertFalse(any("create" in c for c in calls), calls)
         self.assertNotIn("ticket", after)
         self.assertTrue(any("no tracking ticket" in ln for ln in logs), logs)
+        self.assertGreater(after.get("last_eval_ts", 0), 0, "a definite miss waits a day")
 
     def test_closed_ticket_is_never_reopened(self):
-        logs, calls, _after = self._job(
+        logs, calls, after = self._job(
             {"ticket": 999, "last_eval_ts": 0},
             {"state": "CLOSED", "closedAt": "2026-01-01T00:00:00Z"})
         self.assertFalse(any("reopen" in c or "comment" in c for c in calls), calls)
         self.assertTrue(any("#999" in ln and "CLOSED" in ln for ln in logs), logs)
+        self.assertGreater(after["last_eval_ts"], 0, "a definite CLOSED waits a day")
+
+    # Review round A2: a gh error is not an answer -- retry on the next sweep.
+    def test_unreadable_ticket_retries_next_sweep(self):
+        logs, calls, after = self._job({"ticket": 999, "last_eval_ts": 0}, {}, view_rc=1)
+        self.assertTrue(any("unreadable" in ln for ln in logs), logs)
+        self.assertEqual(after.get("last_eval_ts", 0), 0, after)
+        self.assertFalse(any("comment" in c or "reopen" in c for c in calls), calls)
+
+    # Review round A3: the open tracking ticket is adopted by its title, read-only.
+    def test_adopts_the_open_ticket_by_title(self):
+        listing = json.dumps([{"number": 874, "title": mc.TRACKING_TITLE}])
+        logs, calls, after = self._job(None, {"state": "OPEN"}, listing=listing)
+        self.assertEqual(after.get("ticket"), 874, logs)
+        lists = [c for c in calls if "list" in c]
+        self.assertTrue(lists and "open" in lists[0], calls)
+        self.assertFalse(any("create" in c or "reopen" in c for c in calls), calls)
+        self.assertTrue(any("target-governance" in ln for ln in logs), logs)
+
+    def test_a_title_mismatch_is_not_adopted(self):
+        listing = json.dumps([{"number": 5, "title": "mdreview: something else"}])
+        _logs, _calls, after = self._job(None, {"state": "OPEN"}, listing=listing)
+        self.assertNotIn("ticket", after)
+
+    def test_lookup_error_retries_next_sweep(self):
+        _logs, calls, after = self._job(None, {}, listing="", listing_rc=1)
+        self.assertNotIn("ticket", after)
+        self.assertEqual(after.get("last_eval_ts", 0), 0, after)
+        self.assertFalse(any("create" in c for c in calls), calls)
+
+    # Review round A4: a MODEL_TIERS change is ONE journal line (mdreview Step 5c).
+    def test_model_generation_change_is_one_line(self):
+        logs, _calls, after = self._job(
+            {"ticket": 999, "last_eval_ts": 0, "model_tiers_hash": "stale"},
+            {"state": "OPEN"})
+        gen = [ln for ln in logs if "model-generation" in ln]
+        self.assertEqual(len(gen), 1, logs)
+        self.assertEqual(after["model_tiers_hash"], mc._model_tiers_hash())
+        after["last_eval_ts"] = 0
+        logs2, _c, _a = self._job(after, {"state": "OPEN"})
+        self.assertFalse(any("model-generation" in ln for ln in logs2), logs2)
+
+    def test_first_hash_is_recorded_silently(self):
+        logs, _calls, after = self._job({"ticket": 999, "last_eval_ts": 0},
+                                        {"state": "OPEN"})
+        self.assertFalse(any("model-generation" in ln for ln in logs), logs)
+        self.assertEqual(after["model_tiers_hash"], mc._model_tiers_hash())
 
     def test_open_ticket_keeps_the_daily_delta(self):
         logs, calls, after = self._job({"ticket": 999, "last_eval_ts": 0}, {"state": "OPEN"})
@@ -277,10 +405,24 @@ class ResourceGuardJournal(unittest.TestCase):
 class LegacyNewlevel(unittest.TestCase):
 
     def test_recipe_files_nothing(self):
-        text = _read("skills/onboard-project/legacy-newlevel.md")
+        text = _norm(_read("skills/onboard-project/legacy-newlevel.md"))
         self.assertNotIn("airuleset ticket", text)
         self.assertNotIn("gh issue create", text)
         self.assertIn("accounts transfer-session", text)
+        # Review round D3: airuleset migrates them from its one tracking ticket.
+        self.assertIn("#1187", text)
+        self.assertIn("never files its own ticket", text)
+        self.assertNotIn("owner decides", text)
+        self.assertNotIn("owner decides", _read("skills/onboard-project/SKILL.md"))
+
+    def test_status_points_at_the_recipe(self):
+        import io
+        from contextlib import redirect_stdout
+        import cli_accounts
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            cli_accounts.cmd_accounts(mock.Mock(action="status", json=False, registry=None))
+        self.assertIn("skills/onboard-project/legacy-newlevel.md", buf.getvalue())
 
     def test_no_injected_migration_notice(self):
         conf = _read("hooks/situational-triggers.conf")
@@ -315,37 +457,34 @@ class OnboardingNoNotice(unittest.TestCase):
         self.assertIn("foundation-gap tickets", text)
 
 
+# 7. architecture REWORK: fixed in the change, else ONE normal-gate ticket
 # --------------------------------------------------------------------------- #
-# 7. install guard: ask the owner / declare the tool, never file a ticket
-# --------------------------------------------------------------------------- #
-class InstallGuardMessage(unittest.TestCase):
+class ReworkFixedOrOneTicket(unittest.TestCase):
 
-    def test_message_never_says_file_a_ticket(self):
-        spec = importlib.util.spec_from_file_location(
-            "pa_guard_1137", ROOT / "hooks" / "project_account_install_guard.py")
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        self.assertNotIn("gh issue create", mod.MESSAGE)
-        self.assertNotIn("tiket", mod.MESSAGE)
-        self.assertIn('SERVICE_ACCOUNTS["{user}"]["tools"]', mod.MESSAGE)
-        self.assertIn("owner", mod.MESSAGE)
-
-
-# --------------------------------------------------------------------------- #
-# 8. architecture REWORK: recorded on the current ticket, no cap exemption
-# --------------------------------------------------------------------------- #
-class ReworkOnCurrentTicket(unittest.TestCase):
-
-    def test_doctrine_never_auto_files(self):
-        arch = _read("modules/quality/architecture-first.md")
-        self.assertNotIn("architecture-rework", arch)
+    # Review round D1 reverses the first cut ("record the REWORK on the current
+    # ticket"): a REWORK is fixed in the same change; one it cannot fix becomes
+    # ONE `architecture-rework` ticket under the normal filing gate.
+    def test_doctrine_fixes_or_files_one(self):
+        arch = _norm(_read("modules/quality/architecture-first.md"))
         self.assertIn("No patchwork — area-reviewed at integration", arch)
-        self.assertIn("current ticket", arch)
+        self.assertIn("fixed in the same change", arch)
+        self.assertIn("ONE `architecture-rework` ticket", arch)
+        self.assertNotIn("current ticket", arch)
         auto = _norm(_read("skills/autopilot/SKILL.md"))
+        self.assertIn("OK|REWORK fixed|REWORK #N", auto)
+        self.assertNotIn("records it on the CURRENT ticket", auto)
         self.assertNotIn("Scope-gate: architecture-rework", auto)
-        self.assertNotIn("files an `architecture-rework` ticket", auto)
+        self.assertIn("open `architecture-rework` ticket does NOT integrate", auto)
         deep = _norm(_read("skills/completion-report-deep/DEEP.md"))
-        self.assertNotIn("files the `architecture-rework` ticket", deep)
+        self.assertIn("— REWORK fixed", deep)
+        self.assertNotIn("records the finding on the current ticket", deep)
+        self.assertIn("REWORK fixed", _read("modules/core/completion-report.md"))
+
+    def test_label_ordering_is_kept(self):
+        import cli_quals_cmd
+        import cli_work_class
+        self.assertEqual(cli_quals_cmd.ARCHITECTURE_REWORK_LABEL, "architecture-rework")
+        self.assertEqual(cli_work_class.ARCHITECTURE_REWORK_LABEL, "architecture-rework")
 
     def test_no_cap_exemption_left(self):
         from gates.filing import caps, parse, render
@@ -363,6 +502,47 @@ class ReworkOnCurrentTicket(unittest.TestCase):
                             home=home, cwd=cwd)
         self.assertEqual(r.returncode, 2, r.stderr)
         self.assertIn("-> architecture-rework-retired", r.stderr)
+        line = next(ln for ln in r.stderr.splitlines() if "architecture-rework-retired" in ln)
+        self.assertIn("same change", line)
+        self.assertNotIn("CURRENT ticket", line)
+
+
+# --------------------------------------------------------------------------- #
+# 8. review round: version label, stale text, architecture-check
+# --------------------------------------------------------------------------- #
+class ReviewRoundText(unittest.TestCase):
+
+    def test_version_label_is_fixed_in_the_work(self):
+        vod = _norm(_read("skills/version-on-dashboard/SKILL.md"))
+        self.assertNotIn("never files another one", vod)
+        self.assertIn("add it in that same work", vod)
+        self.assertIn("add it in that web work", _norm(_read("skills/autopilot/SKILL.md")))
+        ip = _norm(_read("skills/issue-planner/SKILL.md"))
+        self.assertNotIn("per `version-on-dashboard.md` template", ip)
+        self.assertIn("the issue body template below", ip)
+
+    def test_hook_cites_a_real_heading(self):
+        hook = _read("hooks/stop-check-prose-violations.sh")
+        m = re.search(r"See (\S+) → '(CRITICAL — deferral[^']+)'", hook)
+        self.assertIsNotNone(m)
+        self.assertTrue((ROOT / m.group(1)).is_file(), m.group(1))
+        self.assertIn(m.group(2), _read(m.group(1)))
+
+    def test_no_stale_reopen_notification_or_mandate_text(self):
+        line = next(ln for ln in _read("watchdog/__init__.py").splitlines()
+                    if ln.startswith("_BUDGET_MIN_MDREVIEW_S"))
+        self.assertNotIn("reopen", line)
+        self.assertNotIn("foundation+notification", _read("airuleset.py"))
+        ndw = _norm(_read("skills/no-dropped-work-deep/DEEP.md"))
+        self.assertNotIn("filing mandate", ndw)
+        self.assertNotIn("pre-answered YES", ndw)
+        cpw = _read("modules/core/complete-planned-work.md")
+        self.assertIn("a ticket closes only when its items are done or moved", cpw)
+
+    def test_architecture_check_files_one_ticket(self):
+        ac = _norm(_read("skills/architecture-check/SKILL.md"))
+        self.assertNotIn("one issue per dimension", ac.lower())
+        self.assertIn("ONE issue for the whole run", ac)
 
 
 # --------------------------------------------------------------------------- #
