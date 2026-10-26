@@ -71,7 +71,7 @@ def parse_discord_reply(msg, allowed_ids, qmap, bot_id=""):
             "session": str(q.get("session") or ""), "cwd": str(q.get("cwd") or ""),
             "channel": str(q.get("channel") or ""), "text": text,
             "question": " ".join(str(q.get("question") or "").split()),
-            "asked_ts": q.get("ts") or 0}
+            "asked_ts": q.get("ts") or 0, "tracked": q.get("tracked")}
 
 
 def _snowflake_ts(sid):

@@ -50,35 +50,41 @@ def footer(rows, root, slug, merged, own_stream=None, *, handed=None,
 
 
 def question_cover(rows, own_stream=None):
-    """#1218: the numbers in `rows` that are U members BY THEIR OWN LABELS on
-    this box (`classify` with no asked refs). It is rule 2 of
-    `question_attribution`: a ❓ entry naming one of them is covered by it and
-    adds nothing to U. Take it over the rows BEFORE any role filter, so a ping
-    naming another window's labelled ticket never counts twice (#1065)."""
+    """#1218: the `question_attribution.QuestionCover` of `rows`: the numbers
+    that are U members BY THEIR OWN LABELS on this box (`classify` with no
+    asked refs; rule 2 — a ❓ entry naming one is covered by it and adds
+    nothing to U) plus every row number (`.rows`; rule 3 — a sole ref is that
+    ticket's only when this box counts it). Take it over the rows BEFORE any
+    role filter, so a ping naming another window's labelled ticket never
+    counts twice (#1065)."""
+    import question_attribution
     box = ts.Box(own_stream=own_stream)
-    out = set()
+    label_u, numbers = set(), set()
     for number, row in (rows or {}).items():
         try:
             n = int(number)
         except (TypeError, ValueError):
             continue
+        numbers.add(n)
         if ts.classify(row, None, box)[0] == "U":
-            out.add(n)
-    return frozenset(out)
+            label_u.add(n)
+    return question_attribution.QuestionCover(label_u, rows=numbers)
 
 
 def record_cover(entry, rows, own_stream=None):
-    """#1218: the footer cache field `question_cover_numbers` — the label-U
-    cover (`question_cover`) of the UNFILTERED rows (+ the slice box's #948
+    """#1218: the footer cache fields `question_cover_numbers` (label-U) and
+    `question_cover_rows` of the UNFILTERED rows (+ the slice box's #948
     supplement), so the render attributes the live ❓ pings exactly as the
     quals `--waiting` listing does (ONE derivation, #367)."""
-    entry["question_cover_numbers"] = sorted(question_cover(rows, own_stream))
+    cover = question_cover(rows, own_stream)
+    entry["question_cover_numbers"] = sorted(cover)
+    entry["question_cover_rows"] = sorted(cover.rows)
 
 
 def asked_refs(root, cover=None):
     """#1213: the tickets this box's own unanswered ❓ pings are attributed to
-    (#1218: a tracked entry's ticket, a covered entry's label-U tickets,
-    never a context ref; `cover` = `question_cover`), scoped to `root`'s
+    (#1218: a tracked entry's ticket, a covered entry's label-U tickets, a
+    sole counted ref; `cover` = `question_cover`), scoped to `root`'s
     project (`statusbar.question_map_ticket_refs`, the #539/#948 reader). Any
     read problem is an empty set: today's routing."""
     try:

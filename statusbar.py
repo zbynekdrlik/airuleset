@@ -241,7 +241,8 @@ def sweep_stale_cache(home=None, now=None, max_age_s=STALE_CACHE_MAX_AGE_S):
 _CARRY_FORWARD_KEYS = (
     "open", "gk", "bounce", "merged_unreleased", "user_waiting", "ops_wait",
     "skipped", "wdrain_over", "created_today", "closed_today", "name",
-    "pipeline", "done", "question_cover_numbers",   # #1141 slice 3, #1218
+    "pipeline", "done",       # #1141 slice 3
+    "question_cover_numbers", "question_cover_rows",   # #1218
 )
 
 _ERROR_LOG_MAX_BYTES = 64 * 1024   # truncate refresh-errors.log beyond this
@@ -902,9 +903,10 @@ def ticketless_question_pings(cwd, home=None, cover=None):
     """The ❓ pings scoped to `cwd` that count in `U N` ON THEIR OWN (#512: the
     standalone `Q` badge folded into U) — the entries `question_attribution`
     attributes to NO ticket (#1218: no tracking marker, no referenced ticket in
-    `cover` — the label-U set of this box — and not exactly one `#N`). `cover=None` (rows unknown) keeps
-    the #512 dedup: any `#N` reference excludes the entry. A list of the map
-    ENTRIES, so the footer count and `--waiting`'s ping rows share it."""
+    the label-U `cover`, and not exactly one `#N` this box counts). `cover=None`
+    (rows unknown) keeps the #512 dedup: any `#N` excludes the entry. A list
+    of the map ENTRIES, so the footer count and `--waiting`'s ping rows share
+    it."""
     return [v for v in _question_entries(cwd, home) or []
             if question_attribution.attribute(v, cover)[0]
             == question_attribution.TICKETLESS]
@@ -920,7 +922,7 @@ def question_map_ticket_refs(cwd, home=None, cover=None):
     """The SET of issue numbers (int) the ❓ pings scoped to `cwd` are
     ATTRIBUTED to (`question_attribution.attribute`, #1218): a tracked entry's
     ticket, a covered entry's label-U tickets (`cover`), a single-ref entry's
-    ticket — never a context ref.
+    counted ticket (rule 3).
     It is the DELIVERED-question signal of the #539/#622 display flags, the
     #1213 asked refs and the #948 supplement. `cover=None` (rows unknown)
     collects every referenced `#N` of an unmarked entry (the pre-#1218 set).
@@ -936,13 +938,15 @@ def question_map_ticket_refs(cwd, home=None, cover=None):
 
 
 def _cached_cover(cache):
-    """#1218: the label-U numbers the last footer refresh attributed the ❓
-    pings against (`question_cover_numbers`), or None (a legacy / failed cache:
-    the #512 dedup)."""
-    raw = cache.get("question_cover_numbers") if isinstance(cache, dict) else None
-    if not isinstance(raw, list):
-        return None
-    return frozenset(n for n in raw if isinstance(n, int))
+    """#1218: the `QuestionCover` the last footer refresh attributed the ❓
+    pings against (`question_cover_numbers` + `question_cover_rows`), or None
+    (a legacy / failed cache: the #512 dedup)."""
+    def ints(key):
+        raw = cache.get(key) if isinstance(cache, dict) else None
+        return [n for n in raw if isinstance(n, int)] if isinstance(raw, list) else None
+    label_u = ints("question_cover_numbers")
+    return None if label_u is None else question_attribution.QuestionCover(
+        label_u, rows=ints("question_cover_rows"))
 
 
 # --------------------------------------------------------------------------- #

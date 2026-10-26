@@ -979,7 +979,7 @@ def _question_map_u_supplement(rows, root, runner):
     tracked entry's ticket, every ref of an unmarked one), so a label-U ticket a
     tracked question names only as CONTEXT is never fetched; a fetched ticket
     joins U by its own labels. Every fetched label-U ticket is then also the
-    attribution's rule-2 ticket of the entry naming it."""
+    ticket the attribution attaches its entry to (rule 1 or 2)."""
     import airuleset
     import cli_ticket_route
     import statusbar as _sb

@@ -561,8 +561,8 @@ def deliver_discord_replies(now, run, state, panes_by_sid, dry_run=False,
             deadline = (DREPLY_NOPANE_FALLBACK_S if why == "no pane"
                         else DREPLY_TICKET_FALLBACK_S)
             if now - blocked[r["reply_id"]] >= deadline:
-                t = __import__("question_attribution").tracked_ticket(
-                    r.get("question"))   # #1218: a marker beats the 1st #N
+                t = __import__("question_attribution").entry_tracked(
+                    r, r.get("question"))   # #1218: a marker beats the 1st #N
                 m = _TICKET_NUM_RX.search("#%s" % t if t else (r.get("question") or ""))
                 if m:
                     fu = q_owner.get(r["referenced"])
