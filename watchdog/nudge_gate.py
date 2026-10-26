@@ -400,7 +400,8 @@ def pane_budget_hold_reason(state, pid, now):
 
 # B9 fix (review 15): a HELD nudge is journalled ONCE per (pane|sid, kind)
 # episode — the stamp that blocks it — never on every 60-s sweep (~2.9k lines
-# per pane per day). `{"<key>|<kind>": [since, logged_at]}`, aged by `prune`.
+# per pane per day). `{"<key>|<kind>": [since, logged_at]}`, settled at the end
+# of EVERY sweep by `end_hold_log` (aged out live, untouched by a dry run).
 HOLD_LOG_KEY = "nudge_hold_logged"
 HOLD_LOG_TTL_S = 7 * DAY_S
 
@@ -421,6 +422,28 @@ def first_hold(state, key, kind, since, now):
         return False
     rec[k] = [since, now]
     return True
+
+
+def end_hold_log(state, now, before, dry_run):
+    """End of a sweep (run_once): a DRY run leaves the hold journal exactly as
+    the sweep found it (`before`, a copy) — its holds never use up the live
+    sweep's one line of an episode; a live sweep ages entries out after
+    HOLD_LOG_TTL_S on every box, goal jobs or not."""
+    if not isinstance(state, dict):
+        return
+    if dry_run:
+        if before is None:
+            state.pop(HOLD_LOG_KEY, None)
+        else:
+            state[HOLD_LOG_KEY] = before
+        return
+    held = state.get(HOLD_LOG_KEY)
+    if isinstance(held, dict):
+        for k in [k for k, v in held.items() if not isinstance(v, list)
+                  or len(v) < 2 or _ts(v[1]) is None or now - v[1] > HOLD_LOG_TTL_S]:
+            held.pop(k, None)
+    if not held:
+        state.pop(HOLD_LOG_KEY, None)
 
 
 def first_pane_hold(state, pid, kind, now):
@@ -528,13 +551,6 @@ def prune(state, visited_sids, now, ttl_s=NUDGE_CADENCE_ORPHAN_TTL_S):
     if not isinstance(state, dict):
         return
     _prune_pane_attempts(state, now)   # #1092 — pid-keyed pane-budget namespace
-    held = state.get(HOLD_LOG_KEY)
-    if isinstance(held, dict):        # B9 fix: aged hold-journal episodes
-        for k in [k for k, v in held.items() if not isinstance(v, list)
-                  or len(v) < 2 or _ts(v[1]) is None or now - v[1] > HOLD_LOG_TTL_S]:
-            held.pop(k, None)
-        if not held:
-            state.pop(HOLD_LOG_KEY, None)
     cad = state.get("nudge_cadence")
     if not isinstance(cad, dict):
         return

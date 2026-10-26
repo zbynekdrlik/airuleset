@@ -162,6 +162,7 @@ This module is PURE logic + thin tmux shims. The I/O (`run` = tmux exec, `send_f
 no network.
 """
 
+import copy
 import hashlib
 import os
 import re
@@ -3578,6 +3579,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
         from notify import send as send_fn
 
     state = load_state(state_path)
+    from watchdog import nudge_gate as _ng_hold   # B9: the hold journal's sweep copy
+    _hold_before = copy.deepcopy(state.get(_ng_hold.HOLD_LOG_KEY))
     # #1055 P3 (a) — snapshot the urgency-relevant state entries BEFORE the pane
     # loop mutates `state`. `sweep_urgent` reads this snapshot so a stall/park/
     # goal-lane entry a PRIOR sweep left forces a full sweep, while a FRESH stall
@@ -6026,5 +6029,6 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
                 % (_sp["n"], _sp["wall"], _top))
     end_sweep_memo()
 
+    _ng_hold.end_hold_log(state, now, _hold_before, dry_run)
     save_state(state_path, state)
     return logs
