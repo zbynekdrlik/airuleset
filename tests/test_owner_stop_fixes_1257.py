@@ -19,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import test_nudge_daily_owner_stop_1257 as base  # noqa: E402
+import test_send_verified_adoption as adopt  # noqa: E402
 
 T0, OWNER_WORK, FACTS, _u = base.T0, base.OWNER_WORK, base.FACTS, base._u
 NOW, DAY, _os, _sys = base.NOW, base.DAY, base._os, base._sys
@@ -560,6 +561,45 @@ class ANeutralPromptIsAnOwnerAct(base._Pane):
             h.write(base.json.dumps(_u("oprav stop button na webe", T0 + 400))
                     + "\n")
         self.assertIsNone(_os().cwd_latch(self.proj, self.CWD))
+
+
+class RecoveryJobsHoldALatchedPane(unittest.TestCase):
+    """Review 3, finding 4: a recovery job typed nothing into a latched pane
+    (the latch withholds it) but booked the attempt — job 1 counted a nudge
+    and escalated, job 6 counted a swallow and pinged the owner "obnov ju
+    prosím ručne" about a session the owner had stopped, job 4a counted a
+    stuck-check. A latched pane is held before any booking: no send, no
+    count, no ping, one journal line."""
+
+    def _pause(self, now):
+        return {"type": "user", "timestamp": base._iso(now - 600),
+                "message": {"role": "user", "content": "pauza"}}
+
+    def test_job1_api_error_resume_holds(self):
+        now = time.time()
+        h = adopt._RunOnceAdoptHarness(
+            self, [self._pause(now), adopt._apierror_row()], mtime_age=3600,
+            capture=adopt.NO_BANNER_IDLE, seed_state=None, now=now)
+        logs, sent, _keys, state, rec = h.run(sv_result=False)
+        self.assertEqual(rec.calls, [], logs)
+        self.assertFalse((state.get(h.SID) or {}).get("nudges"), state.get(h.SID))
+        self.assertTrue(any("held (owner-stop" in ln for ln in logs), logs)
+
+    def test_job6_session_limit_resume_holds(self):
+        sl = adopt.SessionLimitResumeAdoption("run")
+        sl.setUp()
+        self.addCleanup(sl.doCleanups)
+        h = sl._harness()
+        rows = [self._pause(h.now), adopt._assistant_row("pracujem…")]
+        adopt._write_jsonl_rows(h.tpath, rows)
+        os.utime(h.tpath, (h.now - 60, h.now - 60))
+        logs, sent, _keys, state, rec = h.run(sv_result=False)
+        self.assertEqual(rec.calls, [], logs)
+        sess = sl._sess(state)
+        self.assertNotIn("swallow_fails", sess)
+        self.assertNotIn("attempts", sess)
+        self.assertEqual(sent, [])
+        self.assertTrue(any("held (owner-stop" in ln for ln in logs), logs)
 
 
 if __name__ == "__main__":
