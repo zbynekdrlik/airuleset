@@ -581,7 +581,7 @@ def refresh(state, panes, projects_dir, now, dry_run=False, run=None):
                                                      tpath.stem))
         if not dry_run:
             recs[tpath.stem] = dict(rec, seen=now)
-    seen, shared = set(), {}
+    seen, shared, unclaimed = set(), {}, {}
     for _p, cwd in panes or ():
         shared[cwd] = shared.get(cwd, 0) + 1
     for pid, cwd in list(panes or ()) + others:
@@ -610,6 +610,14 @@ def refresh(state, panes, projects_dir, now, dry_run=False, run=None):
             seen.add(sid)
             logs += _note_session(recs, sid, cwd, None if derived else latch, found,
                                   now, dry_run)
+            ctx["rec"] = recs.get(sid)
+        else:   # what its OWN transcript says is still that session's fact
+            unclaimed.setdefault(sid, (cwd, None if latch and (
+                latch.get("via") or latch.get("inherited")) else latch, found, ctx))
+    for sid, (cwd, fact, found, ctx) in unclaimed.items():
+        if sid not in seen:              # no pane owns it this sweep
+            seen.add(sid)
+            logs += _note_session(recs, sid, cwd, fact, found, now, dry_run)
             ctx["rec"] = recs.get(sid)
     if not dry_run:
         for sid in [k for k, v in recs.items() if k not in seen and (
