@@ -2604,11 +2604,11 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
              bounceflip_fetch=None, cred_mtime_fn=None, proc_start_fn=None,
              erp_heartbeat_enabled=False, watch_triggers_enabled=False, checkout_freshness_enabled=False,
              model_restore_enabled=False):
-    """Scan every `claude` pane once. 54 numbered jobs per poll — 47 LIVE and 7
-    RETIRED (12, 18, 23 removed in #132; 15, 17 in #102; 26 in #402; 14 in
-    #1084 — the slot stays registered as a journal-only tombstone), whose
-    numbers are kept addressable so historical log lines and code comments
-    still resolve.
+    """Scan every `claude` pane once. 54 numbered jobs per poll — 46 LIVE and 8
+    RETIRED (12, 18, 23 removed in #132; 15, 17 in #102; 26 in #402; 46 in
+    #1137; 14 in #1084 — the slot stays registered as a journal-only
+    tombstone), whose numbers are kept addressable so historical log lines
+    and code comments still resolve.
     The (4a) sub-entry belongs to job 4 and is not separately numbered:
       (1) a session STALLED ON AN API ERROR → auto-resume it (`continue`).
           NOTE (#546): every ORDINARY Discord "ping" jobs 1/1b/3/6 describe
@@ -3342,14 +3342,11 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
           Conservative: never kills a loop with a live Claude ancestor.
           Max 3 gh API calls/cycle. Never Discord (#546).
           `watchdog/priority_policy.py`'s docstring is the SSOT.
-      (46) SESSION-HEALTH-OBSERVATION (#947, REVERSED 2026-09-10) — passive
-          journal-only health observation of claude processes. Reads RSS+Swap
-          from /proc and uptime; logs ``session-health: <pane> degraded|healthy
-          rss_swap=<kb> uptime=<s>`` when thresholds are breached (RSS+Swap
-          > 700 MB or uptime > 24 h). NEVER types into a pane, never sends
-          keystrokes, never Discord. The original #947 action path (two-phase
-          /exit + claude --continue) was DELETED by owner directive 2026-09-10.
-          `watchdog/session_health_observe.py`'s docstring is the SSOT.
+      (46) SESSION-HEALTH-OBSERVATION — REMOVED (#1137, 2026-10-26). Journaled
+          RSS+Swap / uptime of every claude process; nothing read the line
+          once the #947 /exit + `claude --continue` action path was deleted
+          (owner, 2026-09-10). Number retained (not reused) for historical
+          addressability.
       (47) PRESENTER /healthz.ai EXTERNAL HEALTH-CHECK (#1005) — gated on a
           FLEET DECLARATION: only a box that declares `health_probes` on its
           `cli_fleet.REMOTE_HOSTS` entry (read via `box_health_probes`, handed
@@ -5631,32 +5628,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
              dry_run=dry_run),
          "orphan-poll-reaper error", min_budget=_BUDGET_MIN_PS_REAPER_S)
 
-    # Job 46 (#947, REVERSED 2026-09-10) — SESSION-HEALTH-OBSERVATION.
-    # Passive journal-only health measurement. NEVER types into a pane.
-    # `watchdog/session_health_observe.py`'s docstring is the SSOT.
-    def _job_session_health_observe():
-        from watchdog import session_health_observe as _sho
-        # B1: pop stale session_restart state from prior versions.
-        state.pop("session_restart", None)
-        sho_logs = []
-        for sid, (pid, captured) in panes_by_sid.items():
-            ppid = (run(["tmux", "display-message", "-p", "-t", pid,
-                         "#{pane_pid}"]) or "").strip()
-            if not ppid or not ppid.isdigit():
-                continue
-            cpid = _pane_claude_pid(ppid)
-            if cpid is None:
-                continue
-            rss_swap = _sho.read_health(cpid, _proc_read)
-            start = _proc_start_epoch(cpid)
-            uptime = (now - start) if start else None
-            line = _sho.observe(pid, rss_swap, uptime)
-            if line is not None:
-                sho_logs.append(line)
-        return sho_logs
-    _add("session_health_observe", lambda: True,
-         _job_session_health_observe, "session-health-observe error",
-         min_budget=_BUDGET_MIN_PS_REAPER_S)
+    # Job 46 — SESSION-HEALTH-OBSERVATION — REMOVED (#1137, 2026-10-26): its
+    # journal line had no reader (see the run_once docstring paragraph (46)).
 
     # Job 47 (#1005) — presenter /healthz.ai EXTERNAL health-check. Gated on a
     # FLEET DECLARATION: `health_probes` non-empty (the box declared probes via
