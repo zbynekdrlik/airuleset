@@ -95,7 +95,7 @@ fi
 
 - **Web UI + version display present + Playwright assertion present** → silent pass. No action.
 - **Web UI + version display missing** → AskUserQuestion BEFORE Step 2:
-  - **"Yes, file foundation issue first"** — Create the issue per `version-on-dashboard.md` template, plan that as the next PR before feature work
+  - **"Yes, file foundation issue first"** — Create the issue with the issue body template below, plan that as the next PR before feature work
   - **"Skip for now, show issues"** — Proceed without fixing (user explicitly chose to skip)
 - **Web UI + version display present but NO Playwright test** → propose adding the test as part of the next PR's work (does not block; just a note in Step 4 presentation).
 

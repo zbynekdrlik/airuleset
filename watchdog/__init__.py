@@ -2048,7 +2048,7 @@ _BUDGET_MIN_SSH_FLEET_S = 65      # ssh fanout across fleet hosts (per-host ~60)
 _BUDGET_MIN_HTTP_PROBE_S = 15     # a single HTTP GET (usage timeout 12 / healthz 8) + margin
 _BUDGET_MIN_PS_REAPER_S = 10      # a ps read + targeted kill / a per-pane tmux round-trip (fast subprocess)
 _BUDGET_MIN_DISK_DRAIN_S = 30     # the du-heavy disk-guard drain ladder, cadence-gated (10 min)
-_BUDGET_MIN_MDREVIEW_S = 30       # the mdreview-audit subprocess + gh reopen, daily
+_BUDGET_MIN_MDREVIEW_S = 30       # the daily mdreview fleet audit + gh view/comment
 _BUDGET_MIN_LOCAL_SEND_S = 15     # a local fleet.jsonl read + a bounded Discord send (conformance heartbeat)
 _BUDGET_MIN_ERP_HEARTBEAT_S = 30  # #959 the erp-test heartbeat wrapper call (bash → ssh, ERP_HEARTBEAT_TIMEOUT_S=25) + 5; NOT the ssh-fleet class (65 > soft cap - earlier jobs → always held on a busy account)
 
@@ -3324,9 +3324,9 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
           mdreview-audit --fleet and posts the DAILY target-governance delta
           (#874: what each target adds to its OWN .claude/ — commands/skills/
           hooks/rules/imports with provenance + a name classifier) on the
-          tracking ticket while it is OPEN, journal-only when nothing changed.
-          A missing or closed ticket is a journal line: it never creates or
-          reopens one (#1137). Imports NO notify.
+          OPEN tracking ticket (adopted read-only by title). Missing/closed = a
+          journal line, never created/reopened (#1137); a gh error retries; a
+          MODEL_TIERS change is one journal line. Imports NO notify.
           `watchdog/mdreview_cadence.py`'s docstring is the SSOT.
       (44) PRIORITY POLICY ENFORCER (#885), gated on
           `priority_policy_enabled` (True in cmd_watchdog, left False in
@@ -5544,7 +5544,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
     # (#539); machine-channel only, never a Discord ping (#546).
     _add("resource_guard_verify", lambda: resource_guard_enabled,
          lambda: resource_guard_verify(dry_run=dry_run),
-         "resource-guard-verify error", min_budget=_BUDGET_MIN_GH_FETCH_S)
+         "resource-guard-verify error", min_budget=_BUDGET_MIN_PS_REAPER_S)
 
     # Job 40 (#834) — PER-BOX DISK-PRESSURE GUARD. Gated on `disk_guard_enabled`
     # (cmd_watchdog passes True → it runs EVERY real poll on every box; left

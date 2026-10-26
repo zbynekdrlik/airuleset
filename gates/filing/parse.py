@@ -28,8 +28,8 @@ ALLOWED = {
     "cross-cutting", "needs-user-decision", "user-request",
     # #1259 (owner 24.10.2026): `planned-work` is GONE -- one owner request =
     # one ticket; a plan step is a `- [ ]` checklist item in that ticket.
-    # #1137: `architecture-rework` is gone too -- a REWORK finding goes on the
-    # current ticket, never an automatic cap-exempt filing.
+    # #1137: `architecture-rework` is gone too -- a REWORK is fixed in the same
+    # change; a separate defect is a normal-criterion ticket with that LABEL.
 }
 
 

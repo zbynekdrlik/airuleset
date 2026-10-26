@@ -46,7 +46,7 @@ The completion-report `✅ Výstup:` line must include the version that's visibl
 
 #### Foundation gate — a missing version display comes first
 
-If you start work on a web project and the dashboard does NOT have a version display, this is a foundation gap that comes before any feature work. Onboarding files its ticket (`airuleset.py onboard-project`: `foundation: version label na dashboarde`); a session never files another one (#1137) — it adds the label (v<semver> in footer or navbar, build-time injected from git describe, plus the Playwright test below) or records the gap on the current ticket. The owner-run `/issue-planner` checks it too (Step 1d).
+If you start work on a web project and the dashboard does NOT have a version display, add it in that same work, before the feature — it is small: v<semver> in footer or navbar, build-time injected from git describe, plus the Playwright test below. A new project gets it from onboarding's foundation-gap ticket (`airuleset.py onboard-project`: `foundation: version label na dashboarde`). The owner-run `/issue-planner` checks it too (Step 1d).
 
 #### E2E test required
 

@@ -201,9 +201,9 @@ def _invalid_criterion_reason(body, body_err, crit):
                   "edit), never a new issue")
     elif crit.lower() == "architecture-rework":
         # #1137: a REWORK verdict is no longer an automatic, cap-exempt filing.
-        reason = ("architecture-rework-retired -- record the REWORK finding on the "
-                  "CURRENT ticket (a `- [ ]` item or comment); a separate ticket only "
-                  "for a defect outside the request, under its own criterion")
+        reason = ("architecture-rework-retired -- fix the REWORK in the same change; "
+                  "a separate, larger defect is ONE `-l architecture-rework` ticket "
+                  "under its own criterion (>300-loc / cross-cutting / ...)")
     else:
         # crit present but not one of ALLOWED -- name the bad (attacker-
         # written) value, decoy-neutralised.

@@ -48,7 +48,7 @@ python3 ~/devel/airuleset/airuleset.py onboard-project <path> --audit   # one pr
   3. Add its `<acct>@<box>` `REMOTE_HOSTS` entry (the claudy precedent).
   4. Run `onboard-project <path> --host <acct>@<box>`.
 
-  `airuleset.py accounts status` lists the frozen legacy inventory (a count that only goes down); moving one, when the owner decides, follows `legacy-newlevel.md` in this skill's directory.
+  `airuleset.py accounts status` lists the frozen legacy inventory (a count that only goes down); airuleset moves them from #1187 with `legacy-newlevel.md` in this skill's directory.
 - Never re-implement onboarding steps in this skill body — the CLI owns all logic.
 - Never overwrite an existing file, never auto-generate CI, never mass-fix in audit mode.
 - Deploying the tooling: `python3 airuleset.py push` (never bare `git push`).

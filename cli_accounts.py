@@ -307,8 +307,9 @@ def cmd_accounts(args):
             import cli_project_ci_sync as ci_sync   # #1199: the CI secret relay
             print("      %s" % ci_sync.status_line(name))
     print("legacy projects (no declared project account): %d (ceiling %d, "
-          "down-only — migrate on touch)" % (data["legacy_count"],
-                                             data["legacy_ceiling"]))
+          "down-only — migrate on touch, airuleset #1187; recipe "
+          "skills/onboard-project/legacy-newlevel.md)" % (data["legacy_count"],
+                                                          data["legacy_ceiling"]))
     for r in data["legacy"]:
         print("  %-24s %-5s %-10s %s" % (r["name"], r["host"], r["account"],
                                          r["path"]))

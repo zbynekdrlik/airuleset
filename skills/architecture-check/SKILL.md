@@ -7,9 +7,9 @@ disable-model-invocation: true
 
 # Architecture Check
 
-Deep, full-project architecture and code-quality review. Produces a **tiered set of
-GitHub issues** = the next rounds of improvement work. **Read-only on code** — this
-skill files issues, it does NOT edit source, branch, or open PRs. Fixes happen later
+Deep, full-project architecture and code-quality review. Produces ONE **GitHub issue**
+with a tiered checklist = the next rounds of improvement work. **Read-only on code** —
+this skill files that issue, it does NOT edit source, branch, or open PRs. Fixes happen later
 via `/issue-planner` → dev → PR.
 
 Run it yourself (manual), typically when a new Claude model ships and you want a full
@@ -46,7 +46,7 @@ Pass a compact context bundle (stack, hotspots, entry points, existing-issue tit
 into every dimension agent so findings are stack-aware and pre-deduplicated.
 
 If the directory is not a git repo or has no `gh` remote, STOP and tell the user —
-the deliverable is GitHub issues and requires both.
+the deliverable is a GitHub issue and requires both.
 
 ## Phase 1 — Fan-out: 4 dimension agents (parallel)
 
@@ -114,11 +114,11 @@ them, never drop silently.
 
 - **Milestone:** `arch-review: <model> <YYYY-MM-DD>` — model name from THIS session's
   environment (e.g. `opus-4.8`), date from the system clock at run time.
-- **ONE issue per dimension** that has surviving findings — it summarizes the theme and
-  lists each concrete fix as a `- [ ]` item in its body (#1259, owner 24.10.2026: one
-  request = one ticket, never a child issue per fix).
+- **ONE issue for the whole run** — one section per dimension that has surviving findings,
+  each concrete fix a `- [ ]` item under it (#1259, owner 24.10.2026: one request = one
+  ticket, never an issue per dimension or per fix).
 
-## Phase 5 — Auto-create issues (no confirm gate)
+## Phase 5 — Auto-create the issue (no confirm gate)
 
 1. Ensure labels exist (create if missing):
    `gh label create architecture-review --color BFD4F2 2>/dev/null || true`
@@ -128,9 +128,9 @@ them, never drop silently.
 2. Create the milestone:
    `gh api repos/{owner}/{repo}/milestones -f title='arch-review: <model> <date>' 2>/dev/null || true`
    (resolve owner/repo via `gh repo view --json owner,name`).
-3. `gh issue create` one issue per dimension (body lines `Scope-gate: user-request` —
-   the owner invoked this review — and `Dedup-checked: <what you searched>`). Labels: `architecture-review` + `dimension:<d>` +
-   the highest `severity:<s>` of its fixes. Assign all to the milestone.
+3. `gh issue create` ONE issue for the run (body lines `Scope-gate: user-request` —
+   the owner invoked this review — and `Dedup-checked: <what you searched>`). Labels: `architecture-review` + every `dimension:<d>` with findings +
+   the highest `severity:<s>` of its fixes. Assign it to the milestone.
 
 Do NOT ask for confirmation before creating — auto-create is the chosen behavior.
 
@@ -145,7 +145,7 @@ finding text, which would expose a command-injection vector.
 Completion summary (concise):
 
 - Milestone URL
-- Epic list with child counts
+- The issue URL with its fix count per dimension
 - Counts per severity (🔴 / 🟡 / 🔵)
 - Duplicates suppressed (N)
 - Next step: "Run `/issue-planner` to start working the `arch-review: <model> <date>` milestone."

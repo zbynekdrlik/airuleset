@@ -10339,7 +10339,7 @@ def main():
     p_onboard = sub.add_parser(
         "onboard-project",
         help="Idempotent onboarding of a project under airuleset management "
-             "(git/remote/branches/.gitignore/CLAUDE.md/foundation+notification "
+             "(git/remote/branches/.gitignore/CLAUDE.md/foundation "
              "tickets/registry) + --audit drift mode (#569)")
     p_onboard.add_argument("path", nargs="?",
                            help="Path to the project to onboard (or audit); "

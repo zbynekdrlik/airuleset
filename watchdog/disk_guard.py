@@ -3225,6 +3225,17 @@ def escalate(status, home, now, dry_run, top_consumers_fn=None):
     return [line]
 
 
+SEVERE_STAMP_NAME = "severe-journal.json"
+
+
+def _severe_key(status, now):
+    """The dedup key of a SEVERE line: the UTC day, the band (>= SEVERE_PCT or
+    the exhausted-only band below it) and ``drain_exhausted``."""
+    band = "severe" if status.get("worst_pct", 0) >= SEVERE_PCT else "exhausted"
+    return [time.strftime("%Y%m%d", time.gmtime(now)), band,
+            status.get("drain_exhausted") is True]
+
+
 def severe_journal(status, home, now, top, dry_run=False, box_class=None,
                    critical_pct=None):
     """#895/#1136: the owner-actionable disk state -- >= SEVERE_PCT, or
@@ -3232,8 +3243,10 @@ def severe_journal(status, home, now, top, dry_run=False, box_class=None,
     drain-critical level, #925; not on a shared-stream box) -- is ONE
     ``SEVERE`` journal line naming what the drain could not free
     (``disk_guard_escalation.severe_detail``). #1137: no ticket is filed and
-    nothing pings; the footer ``disk NN%`` is the owner's surface. A dry run
-    returns the line and writes nothing."""
+    nothing pings; the footer ``disk NN%`` is the owner's surface. The poll
+    runs every 60 s, so the line is written once per UTC day, or again when
+    the band or ``drain_exhausted`` changes (``_severe_key``, stamped in the
+    guard dir). A dry run returns the line and writes nothing."""
     from watchdog import disk_guard_escalation as _esc
     if status.get("worst_pct", 0) < SEVERE_PCT:
         if box_class is None:
@@ -3242,10 +3255,21 @@ def severe_journal(status, home, now, top, dry_run=False, box_class=None,
             critical_pct = _esc.default_critical_pct()
     if not _esc.is_severe(status, SEVERE_PCT, critical_pct, box_class):
         return []
+    stamp = _guard_dir(home) / SEVERE_STAMP_NAME
+    key = _severe_key(status, now)
+    try:
+        if json.loads(stamp.read_text(encoding="utf-8")).get("key") == key:
+            return []
+    except (OSError, ValueError, AttributeError):
+        pass          # airuleset:script-ok no/unreadable stamp = not yet written today
     line = _log_line(now, "SEVERE", socket.gethostname(), status["worst_pct"],
                      _esc.severe_detail(status, top, _human, TARGET_PCT))
     if not dry_run:
         _append_log(_log_path(home), [line])
+        try:
+            stamp.write_text(json.dumps({"key": key}), encoding="utf-8")
+        except OSError as e:
+            _dbg("severe journal stamp write failed: %r" % e)
     return [line]
 
 

@@ -93,7 +93,7 @@ If `/skill-doctor` is unavailable (CC < v2.1.252), skip this step with a logged 
 
 ## Step 5c — SLIMMING PASS (mandatory, #908)
 
-**This step is MANDATORY on every /mdreview run. A model-generation change (MODEL_TIERS changed since the last pass) makes it NON-SKIPPABLE; any other run also runs it but may produce zero candidates if the set is already minimal.**
+**This step is MANDATORY on every /mdreview run. A model-generation change (Job 43 journals `model-generation change` when MODEL_TIERS differs from its last recorded hash) makes it NON-SKIPPABLE; any other run also runs it but may produce zero candidates if the set is already minimal.**
 
 Read the artifact's per-box `slimming` section (`boxes[].slimming`, added by `mdreview-audit` since #908). It carries:
 - **`candidates`** — modules/rules flagged as slimming-eligible, each with `category`, `reason`, and `verdict_hint`

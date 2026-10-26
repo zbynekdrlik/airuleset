@@ -1718,9 +1718,10 @@ if [ "$IS_COMPLETION" = "1" ]; then
         echo "VIOLATION: Work Complete report missing the '🏛 Architektúra:' area-review verdict line — required on EVERY report (#993). Each integrated change passes a main-session (Fable) review of the whole AREA the change lands in (not just the diff), with a binary verdict; the verdict is visible in the report. Add one of:" >&2
         echo "  Required line (one of):" >&2
         echo "    🏛 Architektúra: <oblasť> — OK" >&2
+        echo "    🏛 Architektúra: <oblasť> — REWORK fixed" >&2
         echo "    🏛 Architektúra: <oblasť> — REWORK #N (<názov>)" >&2
         echo "  See completion-report.md and skills/autopilot/SKILL.md (Main review gate, bod f)." >&2
-        add_hard "Missing 🏛 Architektúra: line — state the area-review verdict (OK, or REWORK #N with the rework ticket)"
+        add_hard "Missing 🏛 Architektúra: line — state the area-review verdict (OK, REWORK fixed in this change, or REWORK #N with the separate rework ticket)"
     fi
     VYSTUP_RX='✅[[:space:]]*\**[[:space:]]*(v[ýy]stup|output)[[:space:]]*\**[[:space:]]*:'
     HAS_VYSTUP=$(LC_ALL=C.UTF-8 msg_has "$MSG" -qiE "$VYSTUP_RX" && echo 1 || echo 0)
@@ -1872,7 +1873,7 @@ if [ "$IS_COMPLETION" = "1" ]; then
             echo "    1. Record it on the CURRENT ticket (a '- [ ]' item via gh issue edit, or a comment) and cite 'Recorded on #<N>', OR" >&2
             echo "    2. only for a separate defect outside the request: gh issue create, then 'Filed as #<returned-N>: <title>'" >&2
             echo "" >&2
-            echo "  See complete-planned-work.md → 'CRITICAL — deferral phrases MUST cite the issue number'." >&2
+            echo "  See skills/complete-planned-work-deep/DEEP.md → 'CRITICAL — deferral phrases MUST cite the ticket number'." >&2
             add_hard "Deferral phrase in completion report without explicit 'Filed as #N' / 'Tracked as #N' reference"
         fi
     fi
