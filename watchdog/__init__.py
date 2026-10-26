@@ -1909,6 +1909,26 @@ def _apierr_escalation_ping(send_fn, project, pid, run, key, err_hash, fs,
     return logs
 
 
+WORKING_STALL_NUDGE = "working-stall"
+
+
+def _working_stall_hold(state, pid, now):
+    """Why job 4's working-stall stuck-check must NOT type now, or None (B9 fix,
+    owner 26.10.2026: nudges once a day, only recovery immediate). A liveness
+    question is a capped work nudge: held under the #1257 owner-stop latch, its
+    kind switch or the pane's spent day, BEFORE `decide_working`, so a hold is
+    never counted toward the give-up escalation."""
+    from watchdog import nudge_gate as _ng, owner_stop as _ostop
+    latch = _ostop.pane_latch(pid)
+    if latch:
+        return "owner-stop latch: %s" % latch.get("fact")
+    if not nudges_enabled(WORKING_STALL_NUDGE):
+        return "kind %s off" % WORKING_STALL_NUDGE
+    if not _ng.pane_budget_ok(state, pid, now):
+        return _ng.pane_budget_hold_reason(state, pid, now)
+    return None
+
+
 def _send_stuckcheck_verified(state, pid, text, run, tpath, now, sleep_fn, logs,
                               nudge="resume"):
     """#497 batch 3 — the shared janitor-marked transcript-proof send for the
@@ -1928,7 +1948,7 @@ def _send_stuckcheck_verified(state, pid, text, run, tpath, now, sleep_fn, logs,
     swallow), it only logs the delivery result honestly."""
     _janitor_mark_watch(state, pid, now)
     if send_verified(pid, text, run, tpath, sleep_fn=sleep_fn, logs=logs,
-                     nudge=nudge):
+                     nudge=nudge, state=state):
         _janitor_clear_watch(state, pid)
         return True
     return False
@@ -4608,6 +4628,10 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
                     else:
                         logs.append("skip busy-pane (working-stall) %s" % (project or pid))
                     continue
+                _whold = _working_stall_hold(state, pid, now)
+                if _whold:
+                    logs.append("working-held %s [%s] (%s)" % (project, key, _whold))
+                    continue
                 wkey = "working:" + key
                 # responded = the transcript advanced AFTER the last nudge (the
                 # session answered the check and is merely waiting again) —
@@ -4628,7 +4652,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
                     if not dry_run:
                         ok = _send_stuckcheck_verified(
                             state, pid, WORKING_NUDGE_TEXT, run, tpath, now,
-                            sleep_fn, logs)
+                            sleep_fn, logs, nudge=WORKING_STALL_NUDGE)
                     logs.append("working-nudge#%d %s [%s] idle=%dm%s"
                                 % (n, project, key, int(idle // 60),
                                    "" if ok else " (submit-unverified)"))

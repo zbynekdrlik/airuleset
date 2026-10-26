@@ -102,8 +102,9 @@ MACHINE_NUDGE_KINDS = frozenset({
     # armed /goal loop. A GATED priority kind (default OFF, owner stages it);
     # the `nudges` CLI kind list derives from THIS set.
     "bounce-verdict",
-    # goal auto-arm / dying-subagent stuck-check
-    "goal-sweep", "subagent-stuck",
+    # goal auto-arm / dying-subagent stuck-check / job 4's working-stall
+    # stuck-check (B9 fix: a liveness question, not a revival — gk + stream)
+    "goal-sweep", "subagent-stuck", "working-stall",
     # idle-pane backstops + report-owed card (jobs 8/11 + cards)
     "bounce", "gk-request", "card",
     # #1036 Job 49 — Odoo task-hygiene overseer nudge (per-kind staged, OFF by
