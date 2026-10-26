@@ -1136,9 +1136,11 @@ def _nudge_dying_subagent(state, logs, send_fn, pid, run, captured, project, own
     # #1257 -- the owner stopped this pane: held, never a nudge, never a ping.
     from watchdog import owner_stop as _ostop
     _latch = _ostop.pane_latch(pid)
+    from watchdog import nudge_gate as _ng
     if _latch:
-        logs.append("subagent-%s-held %s [%s] owner-stop latch (%s)"
-                    % (dedup_prefix, project, wid, _latch.get("fact")))
+        if _ng.first_hold(state, pid, wkey, _latch.get("ts"), now):
+            logs.append("subagent-%s-held %s [%s] owner-stop latch (%s)"
+                        % (dedup_prefix, project, wid, _latch.get("fact")))
         return
     if not watchdog.pane_at_idle_prompt(captured):
         bkey = "subagent-busypane:%s:%s" % (dedup_prefix, wid)
@@ -1158,10 +1160,10 @@ def _nudge_dying_subagent(state, logs, send_fn, pid, run, captured, project, own
         return
     # B9 (owner 26.10.2026) -- the pane's ONE daily nudge is spent: hold BEFORE
     # decide_working, so a budget hold never counts as a nudge (no false give-up).
-    from watchdog import nudge_gate as _ng
     if not _ng.pane_budget_ok(state, pid, now):
-        logs.append("subagent-%s-held %s [%s] %s" % (dedup_prefix, project, wid,
-                                                     _ng.pane_budget_hold_reason(state, pid, now)))
+        if _ng.first_pane_hold(state, pid, wkey, now):
+            logs.append("subagent-%s-held %s [%s] %s" % (
+                dedup_prefix, project, wid, _ng.pane_budget_hold_reason(state, pid, now)))
         return
     # (#287) An unsalvageable worker earns AT MOST ONE typed nudge
     # (`_subagent_transcript_unsalvageable`).
@@ -1326,9 +1328,11 @@ def send_verified(pane_id, text, run=None, tpath=None, sleep_fn=None, logs=None,
                     and nudge not in RECOVERY_NUDGE_KINDS and not user_authored)
     _budgeted = state is not None and _ng.pane_budgeted(nudge, user_authored)
     if _budgeted and not _ng.pane_budget_ok(state, pane_id, _pane_now):
-        _log("send-verified " + _ng.pane_budget_hold_reason(state, pane_id, _pane_now))
+        quiet = not _ng.first_pane_hold(state, pane_id, nudge, _pane_now)
+        if not quiet:      # once per (pane, kind) day episode (B9 fix)
+            _log("send-verified " + _ng.pane_budget_hold_reason(state, pane_id, _pane_now))
         if isinstance(out, dict):
-            out["pane_budget_held"] = True
+            out.update(pane_budget_held=True, hold_quiet=quiet)
         return _so.OUT_NOT_TYPED
     # #1157 slice 3 -- a MACHINE nudge goes to a file; ONE pointer row is typed.
     # Decided before the first keystroke: a failed write sends none at all.

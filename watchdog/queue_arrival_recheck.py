@@ -884,9 +884,10 @@ def goal_queue_arrival_recheck(now, run, qrecs, sid, cwd, pid, tpath, loc,
                         % (loc, len(arrivals)))
             return logs
         if not _nudge_gate.gate_ok(state, sid, nudge_kind, now):
-            logs.append("queue-arrival %s -> %s; retry next sweep, "
-                        "%d new" % (loc, _nudge_gate.floor_hold_reason(
-                            state, sid, nudge_kind, now), len(arrivals)))
+            if _nudge_gate.first_gate_hold(state, sid, nudge_kind, now):
+                logs.append("queue-arrival %s -> %s; retry next sweep, %d new" % (
+                    loc, _nudge_gate.floor_hold_reason(state, sid, nudge_kind, now),
+                    len(arrivals)))
             return logs
     if dry_run:
         logs.append("queue-arrival %s -> WOULD-NUDGE (%d new: %s)"
@@ -959,8 +960,9 @@ def goal_queue_arrival_recheck(now, run, qrecs, sid, cwd, pid, tpath, loc,
         # #1092 (c) F6 — a per-pane budget REFUSAL typed nothing: not a swallow,
         # never book a give-up; retry once the budget frees.
         if send_out.get("pane_budget_held"):
-            logs.append("queue-arrival %s -> held (pane-budget, not typed; retry "
-                        "next sweep, %d new)" % (loc, len(arrivals)))
+            if not send_out.get("hold_quiet"):
+                logs.append("queue-arrival %s -> held (pane-budget, not typed; "
+                            "retry next sweep, %d new)" % (loc, len(arrivals)))
             return logs
         # A genuine swallow leaves base unadvanced -> retries next sweep; bounded
         # so a persistently-swallowing NON-busy pane backs off after

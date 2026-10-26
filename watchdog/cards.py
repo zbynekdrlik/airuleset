@@ -1091,13 +1091,15 @@ def report_reconcile(now, run, state, cwd_by_sid, panes_by_sid,
             from watchdog import nudge_gate as _ng, owner_stop as _ostop
             _latch = _ostop.pane_latch(pane_id) if pane_id is not None else None
             if _latch:
-                logs.append("report-owed held (owner-stop latch: %s) %s"
-                            % (_latch.get("fact"), root))
+                if _ng.first_hold(state, pane_id, "card", _latch.get("ts"), now):
+                    logs.append("report-owed held (owner-stop latch: %s) %s"
+                                % (_latch.get("fact"), root))
                 _save()
                 continue
             if pane_id is not None and not _ng.pane_budget_ok(state, pane_id, now):
-                logs.append("report-owed held (%s) %s"
-                            % (_ng.pane_budget_hold_reason(state, pane_id, now), root))
+                if _ng.first_pane_hold(state, pane_id, "card", now):
+                    logs.append("report-owed held (%s) %s" % (
+                        _ng.pane_budget_hold_reason(state, pane_id, now), root))
                 _save()
                 continue
             # #511: after a swallow, RE-PROBE on a bounded interval (never a

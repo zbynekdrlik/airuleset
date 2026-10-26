@@ -781,9 +781,9 @@ def goal_release_gap_recheck(now, run, rrecs, sid, cwd, pid, tpath, loc,
                         "agents — deferred to next idle tick)" % loc)
             return logs
         if not _nudge_gate.gate_ok(state, sid, "release-gap", now):
-            logs.append("release-gap %s -> %s; retry next sweep"
-                        % (loc, _nudge_gate.floor_hold_reason(
-                            state, sid, "release-gap", now)))
+            if _nudge_gate.first_gate_hold(state, sid, "release-gap", now):
+                logs.append("release-gap %s -> %s; retry next sweep" % (
+                    loc, _nudge_gate.floor_hold_reason(state, sid, "release-gap", now)))
             return logs
     if dry_run:
         logs.append("release-gap %s -> WOULD-NUDGE (ahead=%d, reason=%s)"
@@ -827,8 +827,9 @@ def goal_release_gap_recheck(now, run, rrecs, sid, cwd, pid, tpath, loc,
         # #1092 (c) F6 — a per-pane budget REFUSAL typed nothing: not a swallow,
         # never book a give-up; retry once the budget frees.
         if send_out.get("pane_budget_held"):
-            logs.append("release-gap %s -> held (pane-budget, not typed; retry "
-                        "next sweep)" % loc)
+            if not send_out.get("hold_quiet"):
+                logs.append("release-gap %s -> held (pane-budget, not typed; "
+                            "retry next sweep)" % loc)
             return logs
         # #749 BOUNDED RETRY: a persistently-swallowing pane must not be re-typed
         # every sweep forever (`last_nudge` never advances on a failed send). Book

@@ -265,9 +265,10 @@ def goal_bounce_verdict_recheck(now, run, brecs, sid, cwd, pid, tpath, loc,
                     % (loc, len(arrivals)))
         return logs
     if not _nudge_gate.gate_ok(state, sid, "bounce-verdict", now):
-        logs.append("bounce-verdict %s -> %s; retry next sweep, %d new"
-                    % (loc, _nudge_gate.floor_hold_reason(
-                        state, sid, "bounce-verdict", now), len(arrivals)))
+        if _nudge_gate.first_gate_hold(state, sid, "bounce-verdict", now):
+            logs.append("bounce-verdict %s -> %s; retry next sweep, %d new" % (
+                loc, _nudge_gate.floor_hold_reason(state, sid, "bounce-verdict", now),
+                len(arrivals)))
         return logs
     if dry_run:
         logs.append("bounce-verdict %s -> WOULD-NUDGE (%d new: %s)"
@@ -297,8 +298,9 @@ def goal_bounce_verdict_recheck(now, run, brecs, sid, cwd, pid, tpath, loc,
                         % (loc, len(arrivals)))
             return logs
         if send_out.get("pane_budget_held"):
-            logs.append("bounce-verdict %s -> held (pane-budget, not typed; "
-                        "retry next sweep, %d new)" % (loc, len(arrivals)))
+            if not send_out.get("hold_quiet"):
+                logs.append("bounce-verdict %s -> held (pane-budget, not typed; "
+                            "retry next sweep, %d new)" % (loc, len(arrivals)))
             return logs
         logs.append(_book_unverified_bounce_send(rec, new_rec, cur_sorted, loc,
                                                  len(arrivals)))

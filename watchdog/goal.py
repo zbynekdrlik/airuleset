@@ -3183,13 +3183,14 @@ def _goal_guard_deliver(sid, pid, captured, cwd, state, now, loc, run,
                         % (loc, sid))
             return logs
         if not _nudge_gate.gate_ok(state, sid, "goal-guard", now):
-            logs.append("goal-guard %s sid=%s -> %s"
-                        % (loc, sid,
-                           _nudge_gate.floor_hold_reason(state, sid, "goal-guard", now)))
+            if _nudge_gate.first_gate_hold(state, sid, "goal-guard", now):
+                logs.append("goal-guard %s sid=%s -> %s" % (loc, sid, (
+                    _nudge_gate.floor_hold_reason(state, sid, "goal-guard", now))))
             return logs
         if not _nudge_gate.pane_budget_ok(state, pid, now):   # B9: one per pane/day
-            logs.append("goal-guard %s sid=%s -> %s" % (
-                loc, sid, _nudge_gate.pane_budget_hold_reason(state, pid, now)))
+            if _nudge_gate.first_pane_hold(state, pid, "goal-guard", now):
+                logs.append("goal-guard %s sid=%s -> %s" % (
+                    loc, sid, _nudge_gate.pane_budget_hold_reason(state, pid, now)))
             return logs
     if dry_run:
         logs.append("goal-guard %s sid=%s -> would-send (dry-run)"
@@ -4731,8 +4732,10 @@ def _deliver_batch(collect, pid, sid, loc, tpath, run, state, now, handled,
                                           state=state)
     elif send_out.get("pane_budget_held"):
         # #1092 (c) -- the per-pane budget refused this BEFORE any keystroke: never
-        # stamp the floor or run the undo (the storm brake).
-        logs.append("batch-nudge %s -> held (pane-budget, not typed)" % loc)
+        # stamp the floor or run the undo (the storm brake); journalled once per
+        # day episode, like send_verified's own hold line (B9 fix).
+        if not send_out.get("hold_quiet"):
+            logs.append("batch-nudge %s -> held (pane-budget, not typed)" % loc)
     elif _kind in _send_outcome.TYPED_NOT_DELIVERED:
         # #1092 (a)+(b) / #1157 -- a TYPED attempt that was not delivered (a swallow,
         # or a verify-failed type send_verified already undid / reported stranded)

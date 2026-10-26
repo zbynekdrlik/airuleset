@@ -1913,19 +1913,24 @@ WORKING_STALL_NUDGE = "working-stall"
 
 
 def _working_stall_hold(state, pid, now):
-    """Why job 4's working-stall stuck-check must NOT type now, or None (B9 fix,
-    owner 26.10.2026: nudges once a day, only recovery immediate). A liveness
-    question is a capped work nudge: held under the #1257 owner-stop latch, its
-    kind switch or the pane's spent day, BEFORE `decide_working`, so a hold is
-    never counted toward the give-up escalation."""
+    """`(why, journal)` when job 4's working-stall stuck-check must NOT type now,
+    else None (B9 fix, owner 26.10.2026: nudges once a day, only recovery
+    immediate). A liveness question is a capped work nudge: held under the
+    #1257 owner-stop latch, its kind switch or the pane's spent day, BEFORE
+    `decide_working`, so a hold is never counted toward the give-up escalation;
+    `journal` is True once per (pane, episode)."""
     from watchdog import nudge_gate as _ng, owner_stop as _ostop
     latch = _ostop.pane_latch(pid)
     if latch:
-        return "owner-stop latch: %s" % latch.get("fact")
+        return ("owner-stop latch: %s" % latch.get("fact"),
+                _ng.first_hold(state, pid, WORKING_STALL_NUDGE, latch.get("ts"), now))
     if not nudges_enabled(WORKING_STALL_NUDGE):
-        return "kind %s off" % WORKING_STALL_NUDGE
+        return ("kind %s off" % WORKING_STALL_NUDGE,
+                _ng.first_hold(state, pid, WORKING_STALL_NUDGE,
+                               int(now // _ng.DAY_S), now))
     if not _ng.pane_budget_ok(state, pid, now):
-        return _ng.pane_budget_hold_reason(state, pid, now)
+        return (_ng.pane_budget_hold_reason(state, pid, now),
+                _ng.first_pane_hold(state, pid, WORKING_STALL_NUDGE, now))
     return None
 
 
@@ -4630,7 +4635,9 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
                     continue
                 _whold = _working_stall_hold(state, pid, now)
                 if _whold:
-                    logs.append("working-held %s [%s] (%s)" % (project, key, _whold))
+                    if _whold[1]:
+                        logs.append("working-held %s [%s] (%s)"
+                                    % (project, key, _whold[0]))
                     continue
                 wkey = "working:" + key
                 # responded = the transcript advanced AFTER the last nudge (the

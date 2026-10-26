@@ -388,6 +388,49 @@ def pane_budget_hold_reason(state, pid, now):
     return "hold:pane-budget (%d attempts since %s)" % (len(attempts), hhmm)
 
 
+# B9 fix (review 15): a HELD nudge is journalled ONCE per (pane|sid, kind)
+# episode — the stamp that blocks it — never on every 60-s sweep (~2.9k lines
+# per pane per day). `{"<key>|<kind>": [since, logged_at]}`, aged by `prune`.
+HOLD_LOG_KEY = "nudge_hold_logged"
+HOLD_LOG_TTL_S = 7 * DAY_S
+
+
+def first_hold(state, key, kind, since, now):
+    """True the first time a hold of `kind` at `key` (a pane id or a sid) is seen
+    for the blocking stamp `since` — the caller journals then — and False for the
+    rest of that episode. No `since` / no `state` always journals (a hold is
+    never silent by accident)."""
+    if not isinstance(state, dict) or since is None:
+        return True
+    rec = state.get(HOLD_LOG_KEY)
+    if not isinstance(rec, dict):
+        rec = state[HOLD_LOG_KEY] = {}
+    k = "%s|%s" % (key, kind)
+    prev = rec.get(k)
+    if isinstance(prev, list) and prev[:1] == [since]:
+        return False
+    rec[k] = [since, now]
+    return True
+
+
+def first_pane_hold(state, pid, kind, now):
+    """`first_hold` for a per-pane budget hold: the episode is the day's oldest
+    typing attempt into the pane."""
+    attempts = sorted(_pane_attempts(state, pid, now))
+    return first_hold(state, pid, kind, attempts[0] if attempts else None, now)
+
+
+def first_gate_hold(state, sid, category, now):
+    """`first_hold` for a `gate_ok` hold: the episode is the stamp that blocks
+    it (this kind's own floor first, else the total cap's)."""
+    sess = _session(state, sid)
+    last = _gate_ts(sess.get(category), now)
+    if last is None or now - last >= _category_floor(category):
+        blocker = _total_cap_block(sess, now)
+        last = blocker[1] if blocker else None
+    return first_hold(state, sid, category, last, now)
+
+
 def mark_pane_attempt(state, pid, now):
     """Record a typing attempt into `pid` at `now`. Called AFTER any keystroke
     delivery attempt regardless of outcome (delivered, delivered-unconfirmed, OR
@@ -475,6 +518,13 @@ def prune(state, visited_sids, now, ttl_s=NUDGE_CADENCE_ORPHAN_TTL_S):
     if not isinstance(state, dict):
         return
     _prune_pane_attempts(state, now)   # #1092 — pid-keyed pane-budget namespace
+    held = state.get(HOLD_LOG_KEY)
+    if isinstance(held, dict):        # B9 fix: aged hold-journal episodes
+        for k in [k for k, v in held.items() if not isinstance(v, list)
+                  or len(v) < 2 or _ts(v[1]) is None or now - v[1] > HOLD_LOG_TTL_S]:
+            held.pop(k, None)
+        if not held:
+            state.pop(HOLD_LOG_KEY, None)
     cad = state.get("nudge_cadence")
     if not isinstance(cad, dict):
         return

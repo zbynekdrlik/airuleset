@@ -1151,7 +1151,8 @@ def deliver_with_stash(pid, text, run, captured=None, logs=None, sleep_fn=None,
     _bnow = time.time()
     _budgeted = state is not None and _ng.pane_budgeted(nudge, user_authored)
     if _budgeted and not _ng.pane_budget_ok(state, pid, _bnow):
-        _log("stash-abort: " + _ng.pane_budget_hold_reason(state, pid, _bnow))
+        if _ng.first_pane_hold(state, pid, nudge, _bnow):   # once per episode
+            _log("stash-abort: " + _ng.pane_budget_hold_reason(state, pid, _bnow))
         return False
     # #271: from here on we are genuinely about to act on this box — persist
     # whatever it currently holds BEFORE the first keystroke of ours lands,

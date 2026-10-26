@@ -322,9 +322,9 @@ def goal_u_freshness_recheck(now, run, urecs, sid, cwd, pid, tpath, loc,
                         "agents — deferred to next idle tick)" % loc)
             return logs
         if not _nudge_gate.gate_ok(state, sid, CATEGORY, now):
-            logs.append("u-freshness %s -> %s; retry next sweep"
-                        % (loc, _nudge_gate.floor_hold_reason(
-                            state, sid, CATEGORY, now)))
+            if _nudge_gate.first_gate_hold(state, sid, CATEGORY, now):
+                logs.append("u-freshness %s -> %s; retry next sweep" % (
+                    loc, _nudge_gate.floor_hold_reason(state, sid, CATEGORY, now)))
             return logs
     if dry_run:
         logs.append("u-freshness %s -> WOULD-NUDGE (U=%d)" % (loc, u_count))
@@ -360,8 +360,9 @@ def goal_u_freshness_recheck(now, run, urecs, sid, cwd, pid, tpath, loc,
         # saturated by OTHER kinds make u-freshness "give up" + advance without
         # delivering). Just log the hold and retry once the budget frees.
         if send_out.get("pane_budget_held"):
-            logs.append("u-freshness %s -> held (pane-budget, not typed; retry "
-                        "next sweep)" % loc)
+            if not send_out.get("hold_quiet"):
+                logs.append("u-freshness %s -> held (pane-budget, not typed; "
+                            "retry next sweep)" % loc)
             return logs
         # A genuine swallow leaves last_nudge unadvanced -> retries next sweep;
         # bounded so a persistently-swallowing NON-busy pane backs off after
