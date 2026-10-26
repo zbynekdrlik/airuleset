@@ -947,5 +947,42 @@ class APausedArmedLoopRaisesNoStuckAlert(unittest.TestCase):
                              for ln in logs), 1, logs)
 
 
+class TheRemainingHoldsAreLocked(unittest.TestCase):
+    """Review 4, finding 4: two latch holds had no test — deleting job 4a's
+    hold or the goal-lane armed-branch rider hold left every suite green."""
+
+    def test_job4a_textcall_stall_holds_a_latched_pane(self):
+        now = time.time()
+        pause = {"type": "user", "timestamp": base._iso(now - 900),
+                 "message": {"role": "user", "content": "pauza"}}
+        h = adopt._RunOnceAdoptHarness(
+            self, [pause, adopt._assistant_row("Skorší turn."),
+                   adopt._textcall_row()], mtime_age=300,
+            capture=adopt.NO_BANNER_IDLE, seed_state=None, now=now)
+        logs, _sent, _keys, state, rec = h.run(sv_result=False)
+        self.assertEqual(rec.calls, [], logs)
+        self.assertNotIn("textcall:" + h.SID, state)
+        self.assertTrue(any("textcall-stall" in ln and "held (owner-stop" in ln
+                            for ln in logs), logs)
+
+    def test_an_armed_latched_pane_runs_no_rider(self):
+        import test_u_freshness as uf
+        h = uf.TestLaneSweepWiring("run")
+        h.setUp()
+        self.addCleanup(h.doCleanups)
+        state = {"u_freshness": {"sess-797-lane": {"first_seen": uf.NOW - uf.DAY,
+                                                   "last_nudge": None}}}
+        logs = []
+        with _paused_lane(self, uf.goal, h.CWD, "sess-797-lane", logs):
+            sid, tmux = h._armed_sweep(state, u_fetch=lambda cwd: (3, uf.FRESH_TS))
+        self.assertEqual(tmux.typed_texts(), [])
+        self.assertIsNone(state["u_freshness"][sid].get("last_nudge"))
+        self.assertFalse(state["u_freshness"][sid].get("send_fails"), state)
+        self.assertFalse(any("send-verified" in ln or "u-freshness" in ln
+                             for ln in logs), logs)      # the rider never ran
+        self.assertEqual(sum("lane-sweep" in ln and "owner-stop" in ln
+                             for ln in logs), 1, logs)
+
+
 if __name__ == "__main__":
     unittest.main()
