@@ -692,70 +692,16 @@ if [ -z "$VIOLATION" ]; then
 fi
 
 # Shared constant — an Odoo project.task deep URL (/odoo/project/<pid>/tasks/<tid>).
-# Defined ONCE here so Check 7 (task-URL-required) and Check 9
-# (attachments-required) read the SAME regex, never a divergent second copy
-# (#1098 Review 1).
+# Check 9 (attachments-required) reads it. The former Check 7 (a task URL or a
+# forced no-task line on every odoo-erp question) is gone: owner 26.10.2026
+# (#1137) — a question with no board task carries no task line at all.
 TASK_URL_RX='/odoo/project/[0-9]+/tasks/[0-9]+'
 # #1258: a client WITHOUT an Odoo board (slovnormal, david1-4 — owner 24.10.2026)
-# never looks up a task, so Checks 7 and 9 do not apply there. install writes the
-# marker from cli_odoo_board.NO_BOARD_USERS; any other value keeps both checks.
+# never looks up a task, so Check 9 does not apply there. install writes the
+# marker from cli_odoo_board.NO_BOARD_USERS; any other value keeps the check.
 CLIENT_BOARD_OFF=""
 if [ "$(head -1 "${HOME:-/nonexistent}/.claude/airuleset-client-board" 2>/dev/null | tr -d '[:space:]')" = "off" ]; then
     CLIENT_BOARD_OFF=1
-fi
-
-# Check 7 — an Odoo-context question must carry an Odoo task URL (#907).
-# Owner directive (montalu 2026-09-06): every question about Odoo work must
-# reference the Odoo project.task with its deep URL — the primary client
-# tracking. An Odoo-context block = the BLOCK mentions an Odoo stream or
-# ERP-related token. A satisfying task URL = /odoo/project/<pid>/tasks/<tid>
-# or /odoo/action- shape. An explicit no-task statement also passes.
-# Same fail-safe as Check 6: fires only on away-user question turns past
-# Checks 1-6, narrow detection, over-block is safe (model re-adds the URL).
-if [ -z "$VIOLATION" ] && [ -z "$CLIENT_BOARD_OFF" ]; then
-    # Odoo-context detector: the BRIEFING LINE names odoo-erp as the project
-    # (the `**Otazka — projekt odoo-erp` shape), or the block carries an ERP
-    # domain, or "odoo" adjacent to a task/module/ERP token. A bare stream
-    # name (montalu/david) does NOT trigger — it is too broad (a camera-box
-    # question mentioning montalu as client, a Discuss-thread approval that
-    # Check 6 handles). The discriminator is the PROJECT identity or an
-    # explicit Odoo task/module context.
-    # Primary: briefing names "odoo-erp" / "odoo erp" as the PROJECT (the word
-    # immediately after "projekt " starts with "odoo", anchored by the [-_ ]
-    # char after "odoo" so "montalu (Odoo ERP...)" does NOT match — "montalu"
-    # stands between "projekt" and "odoo", and ".{0,10}" limits the gap to keep
-    # it tight). Secondary: an ERP domain in the block. Deliberately narrow:
-    # a "projekt montalu (Odoo ERP...)" is NOT matched by the project detector
-    # (accepted residual — the doctrine catches it, the hook only catches the
-    # common "projekt odoo-erp" shape; over-block risk of stream names is the
-    # reason Check 6's sibling tests broke on the first broad cut).
-    ODOO_PROJECT_RX='projekt[[:space:]]+odoo[-_ ]'
-    # ERP domain detector DROPPED (an erp.*.cloud domain in a Discuss URL
-    # like erp.montalu.cloud/odoo/discuss false-positived on Check 6's thread
-    # fixtures; a task URL in the same domain is already caught by the task
-    # URL satisfying-evidence check below). Accepted residual: a question
-    # naming "erp.montalu.cloud" without a project name or task-word is NOT
-    # caught — the doctrine handles it, this hook doesn't.
-    # Tertiary: explicit "Odoo task" or "Odoo úloha" adjacent (a WORK context,
-    # not a project description like "Odoo ERP pre klienta"). Narrow: "task"
-    # and "úloha" only, never bare "erp"/"modul"/"projekt" (those collide with
-    # project descriptions in non-odoo-erp briefings).
-    ODOO_WORK_RX='odoo[[:space:]]+(task|[úu]loh)'
-    odoo_ctx=""
-    if LC_ALL=C.UTF-8 grep -qiE "$ODOO_PROJECT_RX" <<<"$BLOCK"; then odoo_ctx=1; fi
-    # (domain detector removed — see comment above)
-    if [ -z "$odoo_ctx" ] && LC_ALL=C.UTF-8 grep -qiE "$ODOO_WORK_RX" <<<"$BLOCK"; then odoo_ctx=1; fi
-    if [ -n "$odoo_ctx" ]; then
-        # Satisfying evidence: an Odoo task deep URL (shared $TASK_URL_RX,
-        # defined above Check 7), an action URL, or an explicit no-task statement.
-        ACTION_URL_RX='/odoo/action-[A-Za-z0-9_.]+/[0-9]+'
-        NO_TASK_RX='task[[:space:]]+(neexistuje|nexist)|bez[[:space:]]+tasku|no[[:space:]]+(matching[[:space:]]+)?task|[čc]isto[[:space:]]+technick'
-        if ! LC_ALL=C.UTF-8 grep -qiE "$TASK_URL_RX" <<<"$BLOCK" \
-            && ! LC_ALL=C.UTF-8 grep -qiE "$ACTION_URL_RX" <<<"$BLOCK" \
-            && ! LC_ALL=C.UTF-8 grep -qiE "$NO_TASK_RX" <<<"$BLOCK"; then
-            VIOLATION="task"
-        fi
-    fi
 fi
 
 # Check 8 — an APPROVAL question must carry the proposed client message body
@@ -767,7 +713,7 @@ fi
 #   (a) APPROVAL INTENT — approval/send keywords present
 #   (b) POINTER indicator — a filesystem path or redirect phrase
 #   (c) NO inline body — no fenced code block or blockquote >= 40 chars
-# Same fail-safe as Checks 6-7: away-user turns past Checks 1-7, narrow scope,
+# Same fail-safe as Check 6: away-user turns past Checks 1-6, narrow scope,
 # over-block is safe (model re-adds the body). LC_ALL=C.UTF-8 per #319.
 # Accepted residuals (#936 Fable review): (1) any >= 40-char blockquote
 # satisfies (c), even a quoted CLIENT message that is NOT the proposed reply
@@ -846,22 +792,20 @@ fi
 # 21.9.2026 verbatim: „preco tuto ulohu vobec neriesis tam v popise je
 # screenshot", „aj ostatne ulohy skontroluj popis fotky".
 # ROZHODNUTÉ #1098 (supervisor, 2026-09-21): Option A — UNIVERSAL. The trigger is
-# a project.task deep URL ($TASK_URL_RX, the shared constant above Check 7) ALONE
-# — NOT gated on Check 7's $odoo_ctx (Review 1): the incident's OWN shape is
-# headed „projekt montalu (Odoo ERP…)" which Check 7's ODOO_PROJECT_RX /
-# ODOO_WORK_RX do NOT match, so odoo_ctx is EMPTY there and the old precondition
-# let the #555 shape through. Any /odoo/project/N/tasks/M block MUST carry a
+# a project.task deep URL ($TASK_URL_RX, the shared constant above) ALONE, never
+# a project-name detector: the incident's OWN shape is headed
+# „projekt montalu (Odoo ERP…)", which a name detector missed (Review 1). Any /odoo/project/N/tasks/M block MUST carry a
 # `Prílohy:` line whose VALUE is one of: `žiadne`/`ziadne`/`none`, OR `att`
 # followed by an id digit, OR a read-evidence word (prečítané/screenshot/…) — a
 # vague „pozriem neskôr" or a bare „att" do NOT discharge (Review 1 🔵 / Review 2
-# 🔵). An action URL or an explicit no-task statement references no board task
+# 🔵). An action URL references no board task
 # (nothing to read), so is exempt. The line MAY sit BELOW the option bullets
 # (Check 3 exempts it from the brief count). Anti-cheat: a `Prílohy:` line inside
 # a ``` fence does NOT discharge — the block is fence-stripped first (same awk as
 # Check 8). `Pr(í|i)lohy` is an ALTERNATION, never a `Pr[ií]lohy` multibyte
 # bracket class (#735 convention; Review 1); the markdown-tolerant anchor mirrors
 # Check 6's THREAD_VLAKNO_RX so `**Prílohy:**` / `- Prílohy:` pass. Same fail-safe
-# as Checks 6-8: away-user turns past Checks 1-8, over-block is safe.
+# as Checks 6 and 8: away-user turns past Checks 1-8, over-block is safe.
 # Accepted residuals (#1098 review, informational — this is a TEXT heuristic, not
 # a security boundary; the fail direction is UNDER-block by design, "model re-adds
 # the values"): (1) the read-evidence branch discharges on a Prílohy line that only
@@ -899,8 +843,6 @@ if [ -n "$VIOLATION" ] && [ "$RETRIES" -lt "$MAX_RETRIES" ]; then
             REASON="Your ❓ block references an OLD question by allusion (\"pýtal som sa skôr\" / \"ako som spomínal\" / \"jediné otvorené rozhodnutie je X\") instead of restating it. If a conversation happened since it was last asked, this is a NEW ask — write the FULL self-contained block again (briefing + options + decision); the away user cannot see your history. Your last delivered block: \`python3 ~/devel/airuleset/airuleset.py question-block\` (never read your own transcript, #1224). A byte-identical VERBATIM repeat of the SAME still-blocked question is fine and does not hit this check.${TEMPLATE}" ;;
         thread)
             REASON="Your ❓ block asks to SEND/APPROVE a client Discuss message (or a closing/handover message) but does NOT name the exact target thread — the away owner sees only a generic description on their phone. Name the thread on its OWN line: Vlákno: „<presný názov vlákna vrátane čísla streamu>\" — a per #657 pridaj aj deep URL …/odoo/discuss?active_id=discuss.channel_<N> (samotný deep URL tiež stačí) — aj pri EXISTUJÚCOM vlákne, nie len druhový opis ako „výrobné vlákno\". See skills/odoo-client-messaging/handover-compose.md (#632/#650/#697)." ;;
-        task)
-            REASON="Your ❓ block is about Odoo work but does NOT carry an Odoo task reference URL. Per #907 (owner directive montalu 2026-09-06): EVERY Odoo-context question MUST carry the project.task deep URL — napr. https://erp.montalu.cloud/odoo/project/4/tasks/503 — a meno tasku + stage. Odoo task je primárny klientsky tracking; GitHub issue je len developerský. Ak task neexistuje, napíš to explicitne ('Odoo task neexistuje — čisto technická úloha'); klient bez tabule úloh (slovnormal, #1258) = vždy 'Odoo task neexistuje', úlohu NEHĽADAJ. NIKDY nepoužívaj model-form URL (/odoo/project.task/503) — ten otvorí natívny formulár bez custom záložiek. See issue-reference-context.md." ;;
         approvebody)
             REASON="Your ❓ block asks to APPROVE/SEND a client message but the message body is NOT inline — it points at a file path, ticket comment, or share/file-drop URL instead. The owner reads the ping on their phone/webterm and has NO access to your filesystem, terminal scrollback, or external URLs. INLINE the FULL proposed text as a blockquote (> ...) right in the ❓ block (>= 2 quoted lines for a share URL, >= 40 chars for a path pointer). NEVER 'text je v súbore ~/…' / 'pozri draft na tikete' / 'Návrh textu: http://…:8795/…'. A share URL may ACCOMPANY the inline text (e.g. for an attachment), never REPLACE it. See skills/odoo-client-messaging/handover-compose.md (#936/#977)." ;;
         attachments)
