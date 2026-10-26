@@ -133,5 +133,36 @@ class RefreshSeedsTheMemo(base._Pane):
             self.assertEqual(spy.call_count, reads)
 
 
+class EveryKeystrokePaneIsMapped(base._Pane):
+    """Review finding 4: job-20 riders iterate `_reconcile_candidate_panes`
+    (claude/node/bun), `refresh` mapped only `list_claude_panes` (claude), so a
+    paused session in a `node` pane was typed into; and an unmapped pane read
+    "no latch" (fail OPEN) instead of its cwd's latch."""
+
+    def _inventory(self, cmd, pid="%7"):
+        line = "%s\t%s\t%s\t999" % (pid, cmd, self.CWD)
+        return lambda argv, timeout=8: line if "list-panes" in argv else ""
+
+    def test_a_node_pane_of_a_paused_session_is_latched(self):
+        self._append(*(OWNER_WORK + FACTS["pause"]))
+        run = self._inventory("node")
+        state = {}
+        _os().refresh(state, base.wd.list_claude_panes(run), self.proj, NOW,
+                      run=run)
+        self.assertEqual((_os().pane_latch("%7") or {}).get("fact"), "pause")
+        sent = []
+        self.assertFalse(base.wd.keys(
+            "%7", "-l", "--", "goal-guard: x", kind="goal", nudge="goal-guard",
+            run=lambda argv, timeout=8: sent.append(argv) or ""))
+        self.assertEqual(sent, [])
+
+    def test_an_unmapped_pane_fails_closed_on_its_cwd(self):
+        self._append(*(OWNER_WORK + FACTS["pause"]))
+        run = self._inventory("python3", pid="%6")
+        _os().refresh({}, [], self.proj, NOW, run=run)
+        self.assertEqual((_os().pane_latch("%6") or {}).get("fact"), "pause")
+        self.assertIsNone(_os().pane_latch("%99"))   # not in the inventory
+
+
 if __name__ == "__main__":
     unittest.main()
