@@ -35,7 +35,8 @@ import cli_webterm              # noqa: E402
 # TEST-NET-1 addresses (RFC 5737, never routed) and every subprocess.run
 # patched: no test here may open a real ssh (a fail2ban strike on a real box).
 FAKE_VALUE = "fake-1236-test-value"
-CREATE_HINT = "install -m 600 /dev/stdin ~/.secrets/newlevel-ssh-password"
+CREATE_HINT = ("secret request NEWLEVEL_SSH_PASSWORD --persist "
+               "~/.secrets/newlevel-ssh-password")
 NOKEY = {"name": "nokey-1236", "host": "192.0.2.10", "user": "u", "id": "nk",
          "repo_path": "~/devel/airuleset"}
 KEYED = {"name": "keyed-1236", "host": "192.0.2.11", "user": "g",
@@ -100,6 +101,32 @@ class TestPasswordFile(_FakeHome):
             cli_ssh_password.password_file()
         self.assertIn("chmod 600", str(cm.exception))
         self.assertNotIn(FAKE_VALUE, str(cm.exception))
+
+    # review round: a file sshpass cannot use must fail loudly, never send a
+    # wrong password (a fail2ban strike per host) or hang on an unreadable file
+    def test_empty_file_is_refused(self):
+        self.make_file()
+        self.pw.write_text("")
+        with self.assertRaises(cli_ssh_password.SshPasswordFileError) as cm:
+            cli_ssh_password.password_file()
+        self.assertIn("empty", str(cm.exception))
+
+    def test_crlf_or_trailing_space_is_refused(self):
+        for bad in (FAKE_VALUE + "\r\n", FAKE_VALUE + " \n"):
+            self.make_file()
+            self.pw.write_text(bad)
+            with self.assertRaises(cli_ssh_password.SshPasswordFileError) as cm:
+                cli_ssh_password.password_file()
+            self.assertNotIn(FAKE_VALUE, str(cm.exception))
+
+    def test_unreadable_file_is_refused(self):
+        self.make_file(mode=0o200)
+        with self.assertRaises(cli_ssh_password.SshPasswordFileError):
+            cli_ssh_password.password_file()
+
+    def test_create_hint_is_the_credential_channel(self):
+        self.assertIn("secret request", cli_ssh_password.CREATE_CMD)
+        self.assertIn("--persist", cli_ssh_password.CREATE_CMD)
 
     def test_symlinked_file_is_refused(self):
         real = self.home / "elsewhere"
