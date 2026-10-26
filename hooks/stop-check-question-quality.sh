@@ -794,18 +794,17 @@ fi
 # ROZHODNUTÉ #1098 (supervisor, 2026-09-21): Option A — UNIVERSAL. The trigger is
 # a project.task deep URL ($TASK_URL_RX, the shared constant above) ALONE, never
 # a project-name detector: the incident's OWN shape is headed
-# „projekt montalu (Odoo ERP…)", which a name detector missed (Review 1). Any /odoo/project/N/tasks/M block MUST carry a
-# `Prílohy:` line whose VALUE is one of: `žiadne`/`ziadne`/`none`, OR `att`
+# „projekt montalu (Odoo ERP…)", which a name detector missed (Review 1).
+# Any /odoo/project/N/tasks/M block MUST carry a `Prílohy:` line whose VALUE is one of: `žiadne`/`ziadne`/`none`, OR `att`
 # followed by an id digit, OR a read-evidence word (prečítané/screenshot/…) — a
 # vague „pozriem neskôr" or a bare „att" do NOT discharge (Review 1 🔵 / Review 2
-# 🔵). An action URL references no board task
-# (nothing to read), so is exempt. The line MAY sit BELOW the option bullets
+# 🔵). An action URL references no board task (nothing to read), so is exempt. The line MAY sit BELOW the option bullets
 # (Check 3 exempts it from the brief count). Anti-cheat: a `Prílohy:` line inside
 # a ``` fence does NOT discharge — the block is fence-stripped first (same awk as
 # Check 8). `Pr(í|i)lohy` is an ALTERNATION, never a `Pr[ií]lohy` multibyte
 # bracket class (#735 convention; Review 1); the markdown-tolerant anchor mirrors
 # Check 6's THREAD_VLAKNO_RX so `**Prílohy:**` / `- Prílohy:` pass. Same fail-safe
-# as Checks 6 and 8: away-user turns past Checks 1-8, over-block is safe.
+# as Checks 6 and 8: away-user turns past the earlier checks, over-block is safe.
 # Accepted residuals (#1098 review, informational — this is a TEXT heuristic, not
 # a security boundary; the fail direction is UNDER-block by design, "model re-adds
 # the values"): (1) the read-evidence branch discharges on a Prílohy line that only

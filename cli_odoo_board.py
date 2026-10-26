@@ -61,7 +61,7 @@ _WAIT_KEYS = ("reminder_days", "close_days", "after_reminder_days")
 
 # #1258 (owner 24.10.2026): the slovnormal client does not use Odoo projects or
 # tasks, so its streams have NO client board. install writes BOARD_MARKER = "off"
-# for these accounts; the question gate (Checks 7/9) and the task-config loader
+# for these accounts; the question gate (Check 9) and the task-config loader
 # read the marker, because a bash hook cannot query this table.
 NO_BOARD_USERS = frozenset({"david1", "david2", "david3", "david4"})
 BOARD_MARKER = "airuleset-client-board"

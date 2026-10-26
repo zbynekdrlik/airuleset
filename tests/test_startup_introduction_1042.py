@@ -69,7 +69,7 @@ def _blocked(p):
 
 # --------------------------------------------------------------------------- #
 # GATE fixtures. Each BLOCK fixture satisfies every OTHER prose-gate check
-# (Check 6 thread deep URL, Check 7 Odoo task URL, Check 8 inlined > quote) so
+# (Check 6 thread deep URL, Check 8 inlined > quote) so
 # it is blocked ONLY by the #1042 intro-link check — verified against the base
 # tree (probe_fixtures baseline: all unblocked).
 # --------------------------------------------------------------------------- #

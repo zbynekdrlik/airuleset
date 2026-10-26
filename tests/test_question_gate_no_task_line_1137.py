@@ -102,6 +102,14 @@ class TestNoSurfaceAsksForTheLine(unittest.TestCase):
             self.assertNotIn("task neexistuje", text, path.name)
             self.assertNotIn("no matching task → say so", text, path.name)
 
+    def test_a_cited_task_still_uses_the_action_url(self):
+        # The #907 model-form ban outlives Check 7: only the doctrine carries it.
+        for path in (MODULE, SKILL):
+            text = path.read_text(encoding="utf-8")
+            self.assertIn("/odoo/project/<pid>/tasks/<tid>", text, path.name)
+            self.assertIn("model-form", text, path.name)
+            self.assertIn("/odoo/project.task/", text, path.name)
+
 
 if __name__ == "__main__":
     unittest.main()
