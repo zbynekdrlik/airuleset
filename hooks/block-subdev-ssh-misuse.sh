@@ -505,7 +505,7 @@ if [ "$RC" -eq 2 ]; then
     echo "" >&2
     echo "  Allowed identities (per airuleset.py REMOTE_HOSTS — the single" >&2
     echo "  source of truth, read it before any ad-hoc subdev ssh):" >&2
-    echo "    montalu[12345678]@subdev — default key OR sshpass -p" >&2
+    echo "    montalu[12345678]@subdev — default key OR sshpass -f" >&2
     echo "    marek@subdev  -i ~/.secrets/gatekeeper_access_ed25519" >&2
     echo "    david[1234]@subdev  -i ~/.secrets/gatekeeper_access_ed25519" >&2
     echo "    simap1@subdev  -i ~/.secrets/gatekeeper_access_ed25519" >&2

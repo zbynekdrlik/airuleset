@@ -345,7 +345,7 @@ PRIVILEGES: List[Privilege] = [
         rotation="#1236: moved out of the public source into this file, value "
                  "unchanged (owner 14.10.2026: no rotation); history purge open.",
         must_move=True,
-        used_by=("cli_ssh_password.py:40 (password_file, sshpass -f)",
+        used_by=("cli_ssh_password.py (password_file, sshpass -f)",
                  "cli_remote.py:468 (_ssh_prefix)"),
     ),
     Privilege(

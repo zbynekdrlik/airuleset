@@ -12,8 +12,9 @@ password, no sshd setting and no host.
 
 The file is resolved against the CALLING account's home at call time, under
 the same `~/.secrets` root rule the vault key-file loader uses
-(`cli_vault_keyfile.key_root`: a symlinked root is no root). It is never read
-here; sshpass reads it. (A test points ENV_OVERRIDE at a fake file instead.)
+(`cli_vault_keyfile.key_root`: a symlinked root is no root). Only its first
+line's shape is checked here (never printed); sshpass reads it. (A test points
+ENV_OVERRIDE at a fake file instead.)
 
 A missing file, a non-regular one (a symlink included) or one that group/other
 can read raises `SshPasswordFileError`, whose message names the file and how to
@@ -28,9 +29,10 @@ import stat
 from pathlib import Path
 
 FILE_NAME = "newlevel-ssh-password"
-#: How the owner/supervisor creates the file on a box: the value arrives on
-#: stdin, so it never lands in argv or in the shell history.
-CREATE_CMD = "install -m 600 /dev/stdin ~/.secrets/" + FILE_NAME
+#: How the file is created on a box: the credential channel (a one-shot URL the
+#: owner pastes the value into; written 0600 with one trailing newline).
+CREATE_CMD = ("python3 ~/devel/airuleset/airuleset.py secret request "
+              "NEWLEVEL_SSH_PASSWORD --persist ~/.secrets/" + FILE_NAME)
 #: Test seam (the AIRULESET_* override convention): an absolute path that
 #: replaces the default file. tests/conftest.py and the push gate's Pass B
 #: point it at a FAKE file so no test ever builds argv from the real one.
@@ -78,7 +80,31 @@ def password_file():
             "newlevel ssh password file %s grants group/other access (mode "
             "0%o): restrict it with `chmod 600 %s` (#1236)"
             % (path, stat.S_IMODE(st.st_mode), path))
+    _check_content(path, st)
     return str(path)
+
+
+def _check_content(path, st):
+    """A file sshpass would misuse fails here, loudly and without the value:
+    unreadable (sshpass then hangs until killed), empty, or a first line with a
+    CR or trailing whitespace (sent verbatim: a wrong password, one fail2ban
+    strike per host per run)."""
+    if st.st_uid != os.getuid() or not os.access(path, os.R_OK):
+        raise SshPasswordFileError(
+            "newlevel ssh password file %s is not readable by this account "
+            "(owner uid %d): recreate it: %s (#1236)" % (path, st.st_uid, CREATE_CMD))
+    with open(path, "rb") as fh:
+        first = fh.readline()
+    line = first.rstrip(b"\n")
+    if not line:
+        raise SshPasswordFileError(
+            "newlevel ssh password file %s is empty: recreate it: %s (#1236)"
+            % (path, CREATE_CMD))
+    if b"\r" in line or line != line.rstrip():
+        raise SshPasswordFileError(
+            "newlevel ssh password file %s has a CR or trailing whitespace on its "
+            "first line (sshpass would send it as-is): recreate it: %s (#1236)"
+            % (path, CREATE_CMD))
 
 
 def sshpass_argv():
