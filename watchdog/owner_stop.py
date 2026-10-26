@@ -428,6 +428,33 @@ def _all_panes(panes, run):
     return claude, other, cwds
 
 
+def _note_sibling(recs, pid, cwd, latch, now, dry_run, seen):
+    """An unresolved pane of a shared cwd held by a SIBLING session's latch
+    (`latch["via"]`): ONE journal line per pane episode, kept under
+    `pane:<pid>` — never on a session record another pane may have resolved
+    as its own."""
+    key = "pane:%s" % pid
+    old = recs.get(key) if isinstance(recs.get(key), dict) else {}
+    held = [latch["via"], latch["fact"], latch.get("ts")] \
+        if latch and latch.get("via") else None
+    where = "%s pane %s" % (os.path.basename(str(cwd)) or cwd, pid)
+    logs = []
+    if held and old.get("held") != held:
+        logs.append("owner-stop latch %s -> SET (%s of sid %s, pane unresolved, "
+                    "%s): no machine keystroke until the owner types there"
+                    % (where, held[1], held[0], _clock(held[2])))
+    elif not held and old.get("held"):
+        logs.append("owner-stop latch %s -> cleared (sid %s no longer holds it)"
+                    % (where, old["held"][0]))
+    if held:
+        seen.add(key)
+    if not dry_run and held:
+        recs[key] = {"held": held, "seen": now}
+    elif not dry_run:
+        recs.pop(key, None)
+    return logs
+
+
 def refresh(state, panes, projects_dir, now, dry_run=False, run=None):
     """Once per sweep, BEFORE any keystroke job: latch every session whose
     claude left its pane (`_exits`, needs `run`), map every claude/node/bun pane
@@ -486,30 +513,24 @@ def refresh(state, panes, projects_dir, now, dry_run=False, run=None):
         old = recs.get(sid) if isinstance(recs.get(sid), dict) else {}
         where = "%s sid=%s" % (os.path.basename(str(cwd)) or cwd, sid)
         mcl = sorted(set(old.get("mclears") or ()) | set(found))[-MAX_MCLEARS:]
-        held = [latch["via"], latch["fact"], latch.get("ts")] if latch and \
-            latch.get("via") else None    # a shared-cwd sibling's, not persisted
-        if latch:
-            same = old.get("held") == held if held else (
-                old.get("fact"), old.get("ts")) == (latch["fact"], latch.get("ts"))
-            if not same:
+        logs += _note_sibling(recs, pid, cwd, latch, now, dry_run, seen)
+        own = None if latch and latch.get("via") else latch   # this session's
+        if own:
+            if (old.get("fact"), old.get("ts")) != (own["fact"], own.get("ts")):
                 logs.append("owner-stop latch %s -> SET (%s%s, %s): no machine "
                             "keystroke and no /goal arm until the owner types a "
-                            "new prompt" % (where, latch["fact"],
+                            "new prompt" % (where, own["fact"],
                                             " in the previous session"
-                                            if latch.get("inherited") else
-                                            " of sid %s, pane unresolved" % held[0]
-                                            if held else "",
-                                            _clock(latch.get("ts"))))
-        elif old.get("fact") or old.get("held"):
+                                            if own.get("inherited") else "",
+                                            _clock(own.get("ts"))))
+        elif old.get("fact"):
             logs.append("owner-stop latch %s -> cleared (the owner typed a new "
                         "prompt)" % where)
         if not dry_run:
             new = dict({"seen": now}, **({"mclears": mcl} if mcl else {}))
-            if held:
-                new["held"] = held
-            elif latch:
-                new.update(fact=latch["fact"], ts=latch.get("ts") or 0)
-            if latch or mcl:
+            if own:
+                new.update(fact=own["fact"], ts=own.get("ts") or 0)
+            if own or mcl:
                 recs[sid] = new
             else:
                 recs.pop(sid, None)
