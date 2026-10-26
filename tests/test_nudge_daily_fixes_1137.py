@@ -5,6 +5,7 @@ nudge waits for the pane's one daily batch, and a held send is journalled once
 per (pane, kind, day) episode.
 """
 import sys
+import time
 import unittest
 import unittest.mock as m
 from pathlib import Path
@@ -14,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import test_goal_stranded_recovery_566 as stranded  # noqa: E402
 import test_infra_priority_arrival_1109 as prio  # noqa: E402
+import test_send_verified_adoption as adopt  # noqa: E402
 import watchdog as wd  # noqa: E402
 from watchdog import goal  # noqa: E402
 from watchdog import nudge_gate as ng  # noqa: E402
@@ -130,6 +132,36 @@ class EveryDueKindFitsTheDailyBatch(prio._RiderBase):
                             for ln in logs), logs)
         self.assertEqual(set(ng._session(state, self.sid)), set(cats))
         self.assertEqual(sorted(ran), sorted(cats))
+
+
+class WorkingStallIsADailyWorkNudge(unittest.TestCase):
+    """Review finding 13: job 4's working-stall stuck-check (⏳ WORKING, long
+    silence, no subagent) asked a liveness question under the `resume`
+    RECOVERY identity, so it skipped the daily cap. It is a work nudge: its own
+    capped kind, held (never counted) while the pane's day is spent."""
+
+    def _harness(self, seed_state=None):
+        return adopt._RunOnceAdoptHarness(
+            self, [adopt._working_row()], mtime_age=2000,
+            capture=adopt.NO_BANNER_IDLE, seed_state=seed_state, now=time.time())
+
+    def test_the_stuck_check_types_under_a_capped_kind(self):
+        logs, _s, _k, _st, rec = self._harness().run(sv_result=True)
+        self.assertEqual([c["nudge"] for c in rec.calls], ["working-stall"], logs)
+        self.assertIn("working-stall", wd.MACHINE_NUDGE_KINDS)
+        self.assertTrue(ng.pane_budgeted("working-stall"))
+        import cli_fleet
+        for profile in ("gk", "stream"):     # it keeps firing where loops run
+            self.assertIn("working-stall", cli_fleet.NUDGE_PROFILES[profile])
+
+    def test_a_spent_day_holds_it_without_counting_a_nudge(self):
+        h = self._harness({"nudge_pane_attempts": {"%9": [time.time() - 60]}})
+        logs, sent, _k, state, rec = h.run(sv_result=False)
+        self.assertEqual(rec.calls, [], logs)
+        self.assertNotIn("working:" + h.SID, state)
+        self.assertEqual(sent, [])
+        self.assertTrue(any("working-held" in ln and "pane-budget" in ln
+                            for ln in logs), logs)
 
 
 if __name__ == "__main__":
