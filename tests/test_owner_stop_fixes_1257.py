@@ -164,5 +164,67 @@ class EveryKeystrokePaneIsMapped(base._Pane):
         self.assertIsNone(_os().pane_latch("%99"))   # not in the inventory
 
 
+class TwoPanesOneCwd(unittest.TestCase):
+    """Review finding 5: with two claude panes in one cwd the latch was keyed
+    on the cwd's NEWEST transcript, so the paused pane was typed into and the
+    working one held. Each pane resolves its OWN session by the claude
+    process's resume boundary (#645, `_transcript_resume_boundary_at`);
+    `deliver_goal` checks the session it arms by `sid`."""
+    CWD = "/home/newlevel/devel/twopanes"
+
+    def setUp(self):
+        from tempfile import TemporaryDirectory
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        self.addCleanup(lambda: _os().reset())
+        self.proj = Path(d.name)
+        self.dir = self.proj / base.wd.encode_project_dir(self.CWD)
+        self.dir.mkdir(parents=True)
+
+    def _session(self, sid, entries, mtime):
+        p = self.dir / (sid + ".jsonl")
+        p.write_text("".join(base.json.dumps(e) + "\n" for e in entries))
+        os.utime(p, (mtime, mtime))
+        return p
+
+    def _sweep(self, starts):
+        run = lambda argv, timeout=8: ""   # noqa: E731
+        with m.patch.object(base.wd, "_pane_claude_start_epoch",
+                            side_effect=lambda pid, run=None: starts.get(pid)):
+            return _os().refresh({}, [("%A", self.CWD), ("%B", self.CWD)],
+                                 self.proj, NOW, run=run)
+
+    def _working_and_paused(self, paused_newest=False):
+        work = [_u("sprav ticket 5", NOW - 900), base._a("robím", NOW - 5)]
+        pause = [_u("pauza", NOW - 600)]
+        self._session("SA", work, NOW - (700 if paused_newest else 5))
+        self._session("SB", pause, NOW - (5 if paused_newest else 600))
+
+    def test_each_pane_reads_its_own_session(self):
+        self._working_and_paused()
+        self._sweep({"%A": NOW - 950, "%B": NOW - 620})
+        self.assertIsNone(_os().pane_latch("%A"))
+        self.assertEqual((_os().pane_latch("%B") or {}).get("fact"), "pause")
+
+    def test_an_unresolved_pane_fails_closed(self):
+        self._working_and_paused()
+        self._sweep({})
+        self.assertEqual((_os().pane_latch("%A") or {}).get("fact"), "pause")
+        self.assertEqual((_os().pane_latch("%B") or {}).get("fact"), "pause")
+
+    def test_deliver_goal_checks_the_session_it_arms(self):
+        from watchdog import goal
+        base._isolate_goal_state(self)
+        for paused_newest in (False, True):
+            self._working_and_paused(paused_newest)
+            kw = dict(run=lambda argv, timeout=8: "", projects_dir=self.proj,
+                      now=NOW, state={}, sleep_fn=lambda s: None)
+            self.assertEqual(goal.deliver_goal("SB", self.CWD, "/goal x", "full",
+                                               **kw), "drop:owner-stop")
+            self.assertNotEqual(goal.deliver_goal("SA", self.CWD, "/goal x",
+                                                  "full", **kw),
+                                "drop:owner-stop", paused_newest)
+
+
 if __name__ == "__main__":
     unittest.main()
