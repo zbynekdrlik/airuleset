@@ -16,9 +16,12 @@ for a literal `/exit` payload lives in tests/test_no_session_kill.py.
 Uses `unittest.TestCase` so the `unittest discover` push gate runs it too.
 """
 
+import contextlib
 import inspect
+import io
 import re
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -26,6 +29,7 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
 import watchdog as wd            # noqa: E402
+from cli_filedrop_watchdog import cleanup_session_restart_dropins  # noqa: E402
 
 _GONE_MODULES = ("session_restart.py", "session_health_observe.py")
 
@@ -52,6 +56,41 @@ class TestNoDropinProvisioningInInstall(unittest.TestCase):
         for fn in ("def render_session_restart_dropin",
                    "def setup_session_restart_dropin"):
             self.assertNotIn(fn, src, "%s still exists (#947)" % fn)
+
+
+class TestDropinCleanup(unittest.TestCase):
+    """install removes the stale #947 drop-ins (moved from the retired
+    tests/test_session_health_observe.py, #1137)."""
+
+    def _paths(self):
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        return (Path(d.name) / "50-airuleset-session-restart.conf",
+                Path(d.name) / "50-session-restart-947.conf")
+
+    def _clean(self, paths):
+        reloads, err = [], io.StringIO()
+        with contextlib.redirect_stderr(err), contextlib.redirect_stdout(
+                io.StringIO()):
+            cleanup_session_restart_dropins(
+                paths=list(paths), daemon_reload_fn=lambda: reloads.append(1))
+        return reloads, err.getvalue()
+
+    def test_removes_present_files_and_reloads(self):
+        paths = self._paths()
+        for f in paths:
+            f.write_text("[Service]\n")
+        reloads, _err = self._clean(paths)
+        self.assertEqual([f.exists() for f in paths], [False, False])
+        self.assertEqual(reloads, [1])
+
+    def test_nothing_present_no_reload(self):
+        self.assertEqual(self._clean(self._paths())[0], [])
+
+    def test_oserror_logged_not_raised(self):
+        d = self._paths()[0]
+        d.mkdir()       # a directory cannot be unlinked
+        self.assertIn("failed to remove", self._clean([d])[1])
 
 
 class TestRunOnceRegistersNoSuchJob(unittest.TestCase):
