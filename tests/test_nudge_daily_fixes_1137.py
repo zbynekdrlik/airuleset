@@ -171,7 +171,10 @@ class OwnerActionsArePastTheCap(b1257._Pane):
     typed under the machine `card` identity: the bare route was held by the
     daily cap (and the card switch), and a held card-reopen is fire-and-forget,
     so it was lost. Both are owner-authored on every route, the stash route
-    included (which passed no `state` at all)."""
+    included (which passed no `state` at all). The grant is made where the
+    owner's action is verified — `discord_replies` (the issue 994 security
+    lock allows a `user_authored=True` literal there only); `card_flags`
+    forwards it."""
     FLAG = b1257.wd.compose_flag_prompt("Release 0.1.561 je nasadená.")
 
     def _spent(self):
@@ -188,7 +191,8 @@ class OwnerActionsArePastTheCap(b1257._Pane):
         ok, logs = self._deliver(
             lambda run, text, logs: wd._deliver_flag_prompt_to_exact_session(
                 self.PID, run, text, False, logs=logs, tpath=self.tpath,
-                state=self._spent(), now=time.time(), sleep_fn=lambda s: None),
+                state=self._spent(), now=time.time(), sleep_fn=lambda s: None,
+                user_authored=True),
             tmux, self.FLAG)
         self.assertTrue(ok, logs)
         self.assertIn("Užívateľ označil", "".join(tmux.typed_texts()))
@@ -199,7 +203,7 @@ class OwnerActionsArePastTheCap(b1257._Pane):
             lambda run, text, logs: wd._nudge_repo_pane(
                 self.PID, self.CWD, run, text, False, self.proj, logs=logs,
                 tpath=self.tpath, state=self._spent(), now=time.time(),
-                sleep_fn=lambda s: None),
+                sleep_fn=lambda s: None, user_authored=True),
             tmux, wd.compose_card_reopen_nudge(7))
         self.assertTrue(ok, logs)
         self.assertIn("ticket #7", "".join(tmux.typed_texts()))
@@ -209,11 +213,26 @@ class OwnerActionsArePastTheCap(b1257._Pane):
         _ok, logs = self._deliver(
             lambda run, text, logs: wd._deliver_flag_prompt_to_exact_session(
                 self.PID, run, text, False, logs=logs, tpath=self.tpath,
-                state=self._spent(), now=time.time(), sleep_fn=lambda s: None),
+                state=self._spent(), now=time.time(), sleep_fn=lambda s: None,
+                user_authored=True),
             tmux, self.FLAG)
         self.assertTrue(any("C-s" in a for a in tmux.sent), (logs, tmux.sent))
         self.assertFalse(any("suppressed" in ln or "pane-budget" in ln
                              for ln in logs), logs)
+
+    def test_discord_replies_grants_both_owner_deliveries(self):
+        import ast
+        src = (Path(__file__).resolve().parent.parent / "watchdog"
+               / "discord_replies.py").read_text(encoding="utf-8")
+        calls = [n for n in ast.walk(ast.parse(src)) if isinstance(n, ast.Call)
+                 and isinstance(n.func, ast.Attribute) and n.func.attr in (
+                     "_deliver_flag_prompt_to_exact_session", "_nudge_repo_pane")]
+        self.assertEqual(len(calls), 3)    # flag exact / flag repo / card-reopen
+        for c in calls:
+            grant = [k for k in c.keywords if k.arg == "user_authored"]
+            self.assertTrue(grant and isinstance(grant[0].value, ast.Constant)
+                            and grant[0].value.value is True,
+                            "%s line %d" % (c.func.attr, c.lineno))
 
 
 if __name__ == "__main__":
