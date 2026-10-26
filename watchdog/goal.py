@@ -5007,11 +5007,8 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
         # conflicts with a `handled` keystroke and is authority-agnostic; `rec`'s
         # `soa` streak persists via `recs`. `stuck_seen` guards the #645
         # two-panes-one-cwd double-advance (same sid twice per sweep).
-        # #1257: a loop the owner paused HERSELF is no stall -- its stuck /
-        # gk-stall episodes END, they never alert. `sid` is the cwd's newest
-        # session: only the pane that runs it ends its episodes or drops its
-        # batch (a paused sibling pane of the cwd, or a pane held by a
-        # sibling's `via` latch, touches neither).
+        # #1257: an own pause (this pane runs `sid`, the cwd's newest) ENDS the
+        # stuck / gk-stall episodes; a paused or `via`-held sibling touches none.
         _mine = _owner_stop.pane_sid(pid) == sid
         _own_stop = bool(_hold) and _mine
         if _own_stop and not dry_run:
