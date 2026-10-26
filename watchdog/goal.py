@@ -4888,13 +4888,12 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
             continue
         if _one_glance.is_informative(glance):
             logs.append(gline)
+        # #1257: the owner stopped this pane -- its RIDERS neither collect nor
+        # type (every baseline kept); the bookkeeping below still runs.
         _hold = _nudge_gate.pre_send_hold(state, pid, "lane-sweep", now, budget=False)
-        if _hold:   # #1257: the owner stopped it -- no rider collects or types
-            if _hold[1]:
-                logs.append("lane-sweep %s -> hold:%s: no rider runs, every "
-                            "baseline kept" % (loc, _hold[0]))
-            state.get("nudge_batch", {}).pop(sid, None)
-            continue
+        if _hold and _hold[1]:
+            logs.append("lane-sweep %s -> hold:%s: no rider runs, every baseline "
+                        "kept" % (loc, _hold[0]))
         if glance.goal_armed is not True:
             # #662 -- a DEFINITE goal-clear (armed is False, not the transient
             # `None` can't-tell) ENDS any stuck episode, so a later re-arm starts
@@ -4936,7 +4935,7 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
                     _pane_role = resolve_role_fn(cwd)
                 except Exception:  # noqa: BLE001 — resolver fault => skip (safe)
                     _pane_role = "unresolved"
-                if _pane_role == "infra":
+                if _pane_role == "infra" and not _hold:
                     logs += _queue_arrival.goal_queue_arrival_recheck(
                         now, run, qrecs, sid, cwd, pid, tpath, loc, dry_run,
                         handled, queue_fetch=queue_fetch,
@@ -4948,7 +4947,7 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
             # #1178 (b) — a supervisor whose /goal ENDED (cleared, last turn ✅)
             # learns of new tickets in its own I; delivery held unless idle +
             # human-quiet. A resolver fault never guesses (skip).
-            if _pane_role != "infra":   # role re-checked in ended_pane_recheck
+            if _pane_role != "infra" and not _hold:   # role re-checked in ended_pane_recheck
                 logs += _queue_own.ended_pane_recheck(
                     glance, now, run, qrecs, sid, cwd, pid, tpath, loc, dry_run,
                     handled, queue_fetch, state, captured=captured,
@@ -5020,6 +5019,9 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
             logs += _gk_stall_notice.gk_stall_notice(
                 now, rec, glance, captured, cwd, sid, pid, loc, send_fn, dry_run,
                 run=run)
+        if _hold:      # #1257: the riders below hold; the pane's batch entry goes
+            state.get("nudge_batch", {}).pop(sid, None)
+            continue
         # #547 W→I + #552 I→W/U -- partition-audit re-check for this armed pane.
         if ops_wait_fetch is not None:
             logs += _ops_wait_recheck.goal_ops_wait_recheck(
