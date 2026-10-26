@@ -485,12 +485,14 @@ def _all_panes(panes, run):
     return claude, other, cwds
 
 
-def _note_pane(recs, pid, cwd, held, now, dry_run, seen):
+def _note_pane(recs, pid, cwd, held, now, dry_run, seen, owns=False):
     """A pane latched by what it DERIVES from another session — a shared-cwd
     sibling's latch (`via`), or anything a pane not resolved to its own
     session sees (an unresolved pane, a dev-server pane). `held` = [source
     sid, fact, ts] or None. ONE journal line per pane episode, kept under
-    `pane:<pid>`; never on a session record another pane may own."""
+    `pane:<pid>`; never on a session record another pane may own. `owns` =
+    the pane now runs its own latched session: its hold moves to that
+    session's record (which journals it), so no `cleared` line."""
     key = "pane:%s" % pid
     old = recs.get(key) if isinstance(recs.get(key), dict) else {}
     where = "%s pane %s" % (os.path.basename(str(cwd)) or cwd, pid)
@@ -499,7 +501,7 @@ def _note_pane(recs, pid, cwd, held, now, dry_run, seen):
         logs.append("owner-stop latch %s -> SET (%s of sid %s, pane not resolved "
                     "to its own session, %s): no machine keystroke until the "
                     "owner types there" % (where, held[1], held[0], _clock(held[2])))
-    elif not held and old.get("held"):
+    elif not held and old.get("held") and not owns:
         logs.append("owner-stop latch %s -> cleared (sid %s no longer holds it)"
                     % (where, old["held"][0]))
     if held:
@@ -512,27 +514,33 @@ def _note_pane(recs, pid, cwd, held, now, dry_run, seen):
 
 
 def _note_session(recs, sid, cwd, own, found, now, dry_run, quiet=False):
-    """A pane's OWN session: persist its fact (`own`) and the clears matched
-    to the watchdog's own disarm (`found`); journal SET / cleared once
-    (`quiet` for a session no pane owns: its pane hold is the one line)."""
+    """A session's record: persist its fact (`own`) and the clears matched to
+    the watchdog's own disarm (`found`); journal SET / cleared once per
+    episode. `quiet` = no pane owns the session this sweep: the unresolved
+    pane's hold line carries the episode and the record is marked `q`. A
+    pane that later owns a `q` record journals its SET then; a `q` record's
+    clear is the pane's line; a record this session journalled journals its
+    clear even when quiet."""
     old = recs.get(sid) if isinstance(recs.get(sid), dict) else {}
     where = "%s sid=%s" % (os.path.basename(str(cwd)) or cwd, sid)
     mcl = sorted(set(old.get("mclears") or ()) | set(found))[-MAX_MCLEARS:]
+    by_pane = bool(old.get("q"))
     logs = []
-    if quiet:
-        pass
-    elif own and (old.get("fact"), old.get("ts")) != (own["fact"], own.get("ts")):
+    if own and not quiet and (by_pane or (old.get("fact"), old.get("ts"))
+                              != (own["fact"], own.get("ts"))):
         logs.append("owner-stop latch %s -> SET (%s%s, %s): no machine keystroke "
                     "and no /goal arm until the owner types a new prompt"
                     % (where, own["fact"], " in the previous session"
                        if own.get("inherited") else "", _clock(own.get("ts"))))
-    elif not own and old.get("fact"):
-        logs.append("owner-stop latch %s -> cleared (the owner typed a new "
-                    "prompt)" % where)
+    elif not own and old.get("fact") and not by_pane:
+        logs.append("owner-stop latch %s -> cleared (%s)" % (
+            where, "its transcript no longer holds a stop" if quiet
+            else "the owner typed a new prompt"))
     if not dry_run:
         new = dict({"seen": now}, **({"mclears": mcl} if mcl else {}))
         if own:
-            new.update(fact=own["fact"], ts=own.get("ts") or 0)
+            new.update(fact=own["fact"], ts=own.get("ts") or 0,
+                       **({"q": 1} if quiet else {}))
         if own or mcl:
             recs[sid] = new
         else:
@@ -602,7 +610,8 @@ def refresh(state, panes, projects_dir, now, dry_run=False, run=None):
         src = derived and (derived.get("via") or (
             ctx["prev"].stem if derived.get("inherited") and ctx.get("prev") else sid))
         logs += _note_pane(recs, pid, cwd, [src, derived["fact"], derived.get("ts")]
-                           if derived else None, now, dry_run, seen)
+                           if derived else None, now, dry_run, seen,
+                           owns=bool(mine and latch and not derived))
         if mine:                            # only a pane's OWN session is persisted
             seen.add(sid)
             logs += _note_session(recs, sid, cwd, None if derived else latch, found,
