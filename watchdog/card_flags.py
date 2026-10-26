@@ -44,7 +44,8 @@ def _repo_live_pane(repo_name, cwd_by_sid, panes_by_sid, run=None):
     return None
 
 
-def _send_flag_verified(state, pid, text, run, tpath, now, sleep_fn, logs):
+def _send_flag_verified(state, pid, text, run, tpath, now, sleep_fn, logs,
+                        user_authored=False):
     """#505 — the shared BARE-box transcript-proof send for the two #297/#298
     flag-cluster sites (the exact-session flag prompt + the repo-pane fallback /
     card-reopen nudge). The sibling of batch-1's `_send_bare_nudge_verified` and
@@ -72,17 +73,21 @@ def _send_flag_verified(state, pid, text, run, tpath, now, sleep_fn, logs):
     session id, so (unlike batch-1's cwd-keyed `find_active_transcript`) two
     sessions sharing a cwd cannot resolve the wrong transcript. A falsy `tpath`
     makes `send_verified` refuse (never types blind); `state`/`now` are no-op
-    marks when absent (a direct caller/test that does not thread them)."""
+    marks when absent (a direct caller/test that does not thread them).
+    `user_authored` is the owner grant `discord_replies` makes for a verified
+    owner action (B9 fix): immediate, past the daily cap and the card switch."""
     watchdog._janitor_mark_watch(state, pid, now)
     if watchdog.send_verified(pid, text, run, tpath, sleep_fn=sleep_fn, logs=logs,
-                              nudge="card", state=state):  # #1022: record for the wedge
+                              nudge="card", state=state,  # #1022: record for the wedge
+                              user_authored=user_authored):
         watchdog._janitor_clear_watch(state, pid)
         return True
     return False
 
 
 def _nudge_repo_pane(pid, cwd, run, text, dry_run, projects_dir, logs=None,
-                     tpath=None, state=None, now=None, sleep_fn=None):
+                     tpath=None, state=None, now=None, sleep_fn=None,
+                     user_authored=False):
     """Best-effort: type `text` into a live pane at TRUE REST — job 8's own
     at-rest discipline (`_safe_to_bounce_nudge`), reused verbatim so a
     genuinely mid-work pane is NEVER interrupted (never a new mechanism, the
@@ -95,16 +100,21 @@ def _nudge_repo_pane(pid, cwd, run, text, dry_run, projects_dir, logs=None,
     `send_verified`), NOT a raw `send_continue`, so a swallowed Enter is no
     longer booked delivered — it returns False and the caller re-fires next
     sweep. `tpath` is threaded IN by the caller (the exact-sid transcript of
-    the pane); a falsy `tpath` refuses to send rather than type blind."""
+    the pane); a falsy `tpath` refuses to send rather than type blind.
+    `user_authored` (granted by `discord_replies` for a verified owner action —
+    a ❓-flag, a card reopen) is forwarded on BOTH routes (B9 fix)."""
     captured = watchdog.capture_pane(pid, run)
     if watchdog.pane_in_mode(pid, run):
         return False
     if not watchdog._safe_to_bounce_nudge(captured, cwd, projects_dir):
         return False
     if not watchdog.pane_at_idle_prompt(captured):
-        return watchdog._try_stash_nudge(pid, captured, text, run, dry_run, logs=logs, nudge="card")
+        return watchdog._try_stash_nudge(pid, captured, text, run, dry_run, logs=logs,
+                                         nudge="card", state=state,
+                                         user_authored=user_authored)
     if not dry_run:
-        return _send_flag_verified(state, pid, text, run, tpath, now, sleep_fn, logs)
+        return _send_flag_verified(state, pid, text, run, tpath, now, sleep_fn, logs,
+                                   user_authored=user_authored)
     return True
 
 
@@ -258,7 +268,7 @@ def _flag_delivery_target(target, panes_by_sid, cwd_by_sid, run=None):
 
 def _deliver_flag_prompt_to_exact_session(pid, run, text, dry_run, logs=None,
                                           tpath=None, state=None, now=None,
-                                          sleep_fn=None):
+                                          sleep_fn=None, user_authored=False):
     """Deliver a #297 flag-prompt into the EXACT session that is (or was)
     asking the flagged question — job 7's OWN idle/draft delivery gate
     (`pane_at_idle_prompt`/`deliver_with_stash` via `_try_stash_nudge`),
@@ -279,14 +289,17 @@ def _deliver_flag_prompt_to_exact_session(pid, run, text, dry_run, logs=None,
     False and the caller re-fires the flag react next sweep instead of booking
     a napísané-≠-odoslané delivery. `tpath` (the asking session's sid-resolved
     transcript) is threaded IN by the caller — this function has no cwd/sid/
-    projects_dir in scope of its own."""
+    projects_dir in scope of its own. `user_authored`: as `_nudge_repo_pane`."""
     captured = watchdog.capture_pane(pid, run)
     if watchdog.pane_in_mode(pid, run):
         return False
     if not watchdog.pane_at_idle_prompt(captured):
-        return watchdog._try_stash_nudge(pid, captured, text, run, dry_run, logs=logs, nudge="card")
+        return watchdog._try_stash_nudge(pid, captured, text, run, dry_run, logs=logs,
+                                         nudge="card", state=state,
+                                         user_authored=user_authored)
     if not dry_run:
-        return _send_flag_verified(state, pid, text, run, tpath, now, sleep_fn, logs)
+        return _send_flag_verified(state, pid, text, run, tpath, now, sleep_fn, logs,
+                                   user_authored=user_authored)
     return True
 
 

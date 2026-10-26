@@ -618,13 +618,15 @@ def deliver_discord_replies(now, run, state, panes_by_sid, dry_run=False,
                                 ok = watchdog._deliver_flag_prompt_to_exact_session(
                                     d_pid, run, prompt, dry_run, logs=logs,
                                     tpath=d_tpath, state=state, now=now,
-                                    sleep_fn=sleep_fn)
+                                    sleep_fn=sleep_fn,
+                                    user_authored=True)   # the owner's ❓ flag (B9)
                             else:
                                 ok = watchdog._nudge_repo_pane(d_pid, d_cwd, run, prompt,
                                                       dry_run, projects_dir,
                                                       logs=logs, tpath=d_tpath,
                                                       state=state, now=now,
-                                                      sleep_fn=sleep_fn)
+                                                      sleep_fn=sleep_fn,
+                                                      user_authored=True)
                             if ok and not dry_run:
                                 react_done_set.add(mid)
                                 react_done.append(mid)
@@ -687,7 +689,8 @@ def deliver_discord_replies(now, run, state, panes_by_sid, dry_run=False,
                             c_pid, c_cwd, run,
                             watchdog.compose_card_reopen_nudge(cr["issue"]),
                             dry_run, projects_dir, logs=logs, tpath=c_tpath,
-                            state=state, now=now, sleep_fn=sleep_fn)
+                            state=state, now=now, sleep_fn=sleep_fn,
+                            user_authored=True)   # the owner's card reply (B9)
                 elif reopened:
                     logs.append("card-reopen (dry-run) #%s (%s)"
                                 % (cr["issue"], cr["repo"]))
