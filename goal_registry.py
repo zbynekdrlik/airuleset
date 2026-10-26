@@ -168,8 +168,8 @@ CLAUSES = [
     }),
     Clause("compact-boundary", PROFILES, {
         "full": "After EVERY integration END the turn with the full `## ✅ Work Complete` report (`completion-report.md`) terminating in `✅ DONE:` — CONTINUE, NEVER satisfies (B). Machine compacts are REMOVED (#1084) — native autocompact only; never a compact command, never a compact HOLD.",
-        "branch-merge": "After EVERY integration END the turn with the full `## ✅ Work Complete` report (the branch-merge variant, `completion-report.md`) terminating in `✅ DONE:` — CONTINUE, never a stop. Machine compacts are REMOVED (#1084) — native autocompact only; never a compact command, never a compact HOLD.",
-        "fork-no-merge": "After EVERY hand-off END the turn with the full `## ✅ Work Complete` report (the fork-no-merge variant, `completion-report.md`) terminating in `✅ DONE:` — CONTINUE, never a stop. Machine compacts are REMOVED (#1084) — native autocompact only; never a compact command, never a compact HOLD.",
+        "branch-merge": "After EVERY integration END the turn with the full `## ✅ Work Complete` report (the branch-merge variant, `skills/completion-report-deep/DEEP.md`) terminating in `✅ DONE:` — CONTINUE, never a stop. Machine compacts are REMOVED (#1084) — native autocompact only; never a compact command, never a compact HOLD.",
+        "fork-no-merge": "After EVERY hand-off END the turn with the full `## ✅ Work Complete` report (the fork-no-merge variant, `skills/completion-report-deep/DEEP.md`) terminating in `✅ DONE:` — CONTINUE, never a stop. Machine compacts are REMOVED (#1084) — native autocompact only; never a compact command, never a compact HOLD.",
     }),
 ]
 

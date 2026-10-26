@@ -75,7 +75,8 @@ class TestGoalTemplatesEndTurnBeforeNextTicket(TestCase):
 
     def test_branch_merge_references_its_reduced_authority_variant(self):
         branch_merge = goal_lines()[1]
-        self.assertIn("completion-report.md", branch_merge)
+        # #1137: the stream variants live in the DEEP companion now
+        self.assertIn("skills/completion-report-deep/DEEP.md", branch_merge)
         # #621 tightened "branch-merge reduced-authority variant" -> the shorter
         # "the branch-merge variant"; the completion-report.md reference (which
         # variant to use) is preserved.
@@ -84,7 +85,7 @@ class TestGoalTemplatesEndTurnBeforeNextTicket(TestCase):
 
     def test_fork_no_merge_references_its_hand_off_variant(self):
         fork = goal_lines()[2]
-        self.assertIn("completion-report.md", fork)
+        self.assertIn("skills/completion-report-deep/DEEP.md", fork)
         self.assertIn("the fork-no-merge variant", fork)
         self.assertIn("READY-FOR-REVIEW", fork)
         self.assertIn("After EVERY hand-off", fork)

@@ -57,8 +57,9 @@ NEW_SKILLS = {
         [
             "**Verification has THREE mandatory layers — liveness, version "
             "match, AND functional.**",
-            "The completion-report `✅ Výstup:` line MUST include the "
-            "version read from the DOM",
+            # #1137: Výstup moved into the report's ONE `✅ Overené:` line
+            "token of the completion report's `✅ Overené:` line MUST "
+            "include the version read from the DOM",
             "Curl proves the server is running. Playwright proves the "
             "feature works.",
         ],

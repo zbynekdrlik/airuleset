@@ -7,11 +7,11 @@
 
 <!-- History: .claude/rules-reference/milestone-notifications-history.md -->
 
-**The device (Discord / phone) is notified like the mobile Claude app: a ping arrives ONLY when Claude genuinely ASKS the user something (`❓ NEEDS YOU`) or has FULLY completed the work (`✅ DONE`) — never on `⏳ WORKING`, never on routine per-phase progress.**
+**The device (Discord / phone) is notified like the mobile Claude app: a ping arrives ONLY when Claude genuinely ASKS the user something (`❓ NEEDS YOU`) or has FULLY completed the work (`✅ DONE`) — never on `⏳ WORKING`, never on routine per-phase progress.** That is owner david's model; for owner zbynek the owner policy (#1137, `notify.OWNER_PING_ALLOW`) suppresses and logs every ❓, ✅ and run-card too — only the needs-a-human alarms (account blocked, dead credential, healthz down/recovery, the job-35 dead-fleet heartbeat) reach his Discord; he reads the footer `U`.
 
 #### The mechanism is AUTOMATIC — do NOT hand-fire per-phase pings
 
-Three airuleset hooks implement this from the status marker, with no action from you: `notify-discord-pending.sh` (Stop) delivers a **question** to the phone IMMEDIATELY (one ping per DISTINCT question — a verbatim repeat while still unanswered is deduped, a REWORD edits the existing card instead of re-posting), `notify-discord.sh` (idle_prompt) delivers a pending **`✅`** only once you are genuinely idle/away, and `notify-discord-send.sh` is the single send path both use. Nothing is ever sent on `⏳`. Consequence for YOU: re-poked while still blocked on the SAME question → repeat the bare `❓ NEEDS YOU` line ONLY, VERBATIM; a `❓ ASKED` question is NEVER re-emitted later (footer `U N` carries it, hook exit 2, #740); a reworded repeat reads as a new question. Byte-level detail of all three scripts lives in the `notification-mechanics` skill.
+Three airuleset hooks implement this from the status marker, with no action from you: `notify-discord-pending.sh` (Stop) delivers a **question** to the phone IMMEDIATELY (one ping per DISTINCT question — a verbatim repeat while still unanswered is deduped, a REWORD edits the existing card instead of re-posting), `notify-discord.sh` (idle_prompt) delivers a pending **`✅`** only once you are genuinely idle/away, and `notify-discord-send.sh` is the single send path both use, applying the owner policy per target. Nothing is ever sent on `⏳`. Consequence for YOU: re-poked while still blocked on the SAME question → repeat the bare `❓ NEEDS YOU` line ONLY, VERBATIM; a `❓ ASKED` question is NEVER re-emitted later (footer `U N` carries it, hook exit 2, #740); a reworded repeat reads as a new question. Byte-level detail of all three scripts lives in the `notification-mechanics` skill.
 
 So you do NOT call the discord `reply` tool or `PushNotification` to announce a merge, a deploy, a green CI, or a finished issue. Just write the honest status marker; the hook decides whether the device pings. The ONE thing you control is the marker content (below).
 
@@ -29,15 +29,15 @@ A completed ticket/batch inside a `/goal` / `/autopilot` loop ends its own repor
 
 #### API-error / limit / token-burn alerts are RETIRED from Discord (#546, 2026-08-18 owner directive)
 
-**The api-error / limit / token-burn alert classes NO LONGER ping the device** (#546). Preserved: `❓`/`✅`/run-cards/bounce/gk-req and the one-shot `acctblock:` alarm. Full mechanics in the `notification-mechanics` skill.
+**The api-error / limit / token-burn alert classes NO LONGER ping the device** (#546). Preserved for david: `❓`/`✅`/run-cards/bounce/gk-req and the one-shot `acctblock:` alarm; for zbynek the owner policy keeps only the alarms (#1137). Full mechanics in the `notification-mechanics` skill.
 
 #### Per-phase progress is NOT pinged
 
-During long / autonomous runs (`/autopilot`, `/goal` loops, batch work), routine per-phase progress (merged, deployed, CI green) does NOT ping the device — the device stays quiet until a worker raises a real `❓` question, fires the per-ticket merge card (the EXCEPTION below), or the whole run ends `✅`. Do NOT hand-fire a per-phase ping.
+During long / autonomous runs (`/autopilot`, `/goal` loops, batch work), routine per-phase progress (merged, deployed, CI green) does NOT ping the device — the device stays quiet until a worker raises a real `❓` question, fires the per-ticket merge card (the EXCEPTION below), or the whole run ends `✅` — for david; for zbynek those are suppressed by the owner policy (#1137). Do NOT hand-fire a per-phase ping.
 
 #### Every device message goes to the owner's OWN thread AND @mentions them (zbynek)
 
-Each project runs in a tmux session grouped by owner. EVERY Discord message (the idle `❓`/`✅` ping AND the autopilot card below) is automatically POSTED to that owner's **own thread** (`claude-zbynek` / `claude-david`, never shared) and prefixed with their `<@id>` — including session-personas PARALLEL-mirrored to a real human via `DISCORD_MIRROR_<OWNER>` (e.g. `david`'s pings also reach `zbynek`'s thread; marek decommissioned #882). **Exception (#296): a `❓` question ping routes to a separate per-owner questions thread, `claude-<owner>-q`** — `✅` and the autopilot card stay in the normal `claude-<owner>` thread (the api-error/limit/burn alert pings that used to share it are retired, #546). You do nothing; never strip the mention. Full thread + mirror + questions-thread routing lives in the `notification-mechanics` skill.
+Each project runs in a tmux session grouped by owner. EVERY Discord message (the idle `❓`/`✅` ping AND the autopilot card below) is automatically POSTED to that owner's **own thread** (`claude-zbynek` / `claude-david`, never shared) and prefixed with their `<@id>` — including session-personas PARALLEL-mirrored to a real human via `DISCORD_MIRROR_<OWNER>`; each mirror target is filtered by ITS owner's policy, so a `david` ❓/✅ never reaches `zbynek`'s thread (#1137; marek decommissioned #882). **Exception (#296): a `❓` question ping routes to a separate per-owner questions thread, `claude-<owner>-q`** — `✅` and the autopilot card stay in the normal `claude-<owner>` thread (the api-error/limit/burn alert pings that used to share it are retired, #546). You do nothing; never strip the mention. Full thread + mirror + questions-thread routing lives in the `notification-mechanics` skill.
 
 #### EXCEPTION — `/autopilot` per-ticket completion card (the ONE sanctioned per-ticket hand-fire)
 

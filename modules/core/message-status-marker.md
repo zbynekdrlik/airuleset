@@ -13,7 +13,7 @@ Hooks: `stop-check-status-marker.sh` (missing or contradicting marker), `stop-ch
 **Questions:**
 
 - A question is ASKED THE MOMENT it arises, 24/7 — no night gating; blocked = ask, never idle-park. A genuine question ALWAYS pings the phone, owner-scoped (#710): david = Discord ping; zbynek = footer `U N` + webterm (the suppression is logged, never silent). The session discipline is the same for every owner.
-- Two honest forms: BLOCK with `❓ NEEDS YOU` as the last line, or ask-and-continue — a `❓ ASKED: <q>` body line + `⏳ WORKING` last line, the question tracked on its ticket (`needs-answer` label + comment), then other answer-independent work. Never a buried question (moving on without asking and tracking it), never `❓ NEEDS YOU` while moving on.
+- Two honest forms: BLOCK with `❓ NEEDS YOU` as the last line, or ask-and-continue — a `❓ ASKED: <q>` body line + `⏳ WORKING` last line, the question tracked on its ticket (`needs-answer` label + comment), then other answer-independent work; give the owner ~10 min before bulldozing a ticket that hinges on their taste. Never a buried question (moving on without asking and tracking it), never `❓ NEEDS YOU` while moving on.
 - The question is a self-contained Slovak block (`user-questions-slovak.md`).
 - It is emitted exactly ONCE. Re-poked while STILL blocked on the SAME unanswered question, with no user input since: ONLY the bare `❓ NEEDS YOU: <same text>` line, byte-identical (the `/goal` stop condition keys on it); every other re-emission is hook-blocked. Any OTHER conversation happened since the question was last asked: ask it NANOVO A CELÁ — the full block again.
 - Never rely on an `AskUserQuestion` dialog for an away user (it auto-continues after ~60 s); the `❓` marker waits UNLIMITED.

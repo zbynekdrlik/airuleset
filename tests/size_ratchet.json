@@ -513,7 +513,7 @@
     "tests/test_role_slice_993.py": 94,
     "tests/test_roster.py": 134,
     "tests/test_rules_ab_experiment.py": 866,
-    "tests/test_ruleset_conversion_wave2.py": 296,
+    "tests/test_ruleset_conversion_wave2.py": 297,
     "tests/test_run_card_content_validation.py": 474,
     "tests/test_run_card_enforcement.py": 2268,
     "tests/test_run_card_missing_repo_590.py": 229,

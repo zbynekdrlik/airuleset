@@ -52,7 +52,7 @@ NEVER use `[no-test: …]` to skip a bug fix whose logic CAN be unit-tested. If 
 
 #### Completion report
 
-The report no longer carries a regression-test line (#1137): the RED→GREEN commit order is enforced at push time by `hooks/pre-push-test-check.sh`.
+The report no longer carries a regression-test line (#1137) and no Stop hook checks one: the commit order (a test commit before each fix commit) is enforced at push time by `hooks/pre-push-test-check.sh`.
 
 #### Anti-patterns (all rewordings apply)
 
@@ -60,7 +60,7 @@ The report no longer carries a regression-test line (#1137): the RED→GREEN com
 - "Wrote both in one commit" — **WRONG.** Order must be visible in git history. Two commits.
 - "The existing test now exercises the fixed code path" — **WRONG.** That test passed before AND after the fix → it doesn't prove anything about the bug.
 - "Test was too hard to write, just shipped the fix with `[no-test]`" — **WRONG.** A bug fix without a test is a guess. If the test is hard, ask for help.
-- "Closes #N" with NO test changes in the diff — **WRONG.** The pre-push hook will block it. The stop hook will block the completion report.
+- "Closes #N" with NO test changes in the diff — **WRONG.** The pre-push hook will block it.
 - "We have integration coverage, no unit test needed" — **WRONG.** Write the most direct test that fails on the bug condition. Integration coverage that didn't catch the bug originally won't catch it next time either.
 
 #### The principle
