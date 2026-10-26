@@ -744,5 +744,43 @@ class ImplWindowRemembersOnlyAResolvedSession(_CwdSessions):
         self.assertEqual(rc, "owner-stop", logs)
 
 
+class LatchedLaneKeepsItsBookkeeping(unittest.TestCase):
+    """Review 3, finding 5: the goal-lane latch hold `continue`d before the
+    non-keystroke bookkeeping: the definite-goal-clear roster drop (a `/goal
+    clear` IS a latch fact, so it never ran) — the cleared stream then read as
+    an expected-armed DEAD session forever — the stuck reset and the
+    account-block ping. Only the riders are held."""
+    CWD = "/home/newlevel/devel/lanelatch"
+
+    def test_a_latched_cleared_stream_still_leaves_the_roster(self):
+        from tempfile import TemporaryDirectory
+        from watchdog import goal, roster
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        self.addCleanup(lambda: _os().reset())
+        now, proj = 1_000_000, Path(d.name) / "projects"
+        with m.patch.dict(os.environ, {"AIRULESET_GOAL_ROSTER_PATH":
+                                       str(Path(d.name) / "roster.json")}):
+            tpath = base._write_marker_transcript(proj, self.CWD, "sess-cleared")
+            with open(tpath, "a", encoding="utf-8") as fh:
+                fh.write(base.json.dumps(_u("pauza", now - 600)) + "\n")
+            os.utime(tpath, (now - 300, now - 300))
+            sid = tpath.stem
+            r = {}
+            roster.upsert(r, self.CWD, sid, "full", now - 500)
+            roster.save_roster(r)
+            state = {"goal_mark": {sid: {"off": 0, "mark": {"state": "cleared",
+                                                             "ts": now}}}}
+            _os().refresh(state, [("%9", self.CWD)], proj, now)
+            self.assertIsNotNone(_os().pane_latch("%9"))
+            tmux = base.DeliverGoalFakeTmux([("%9", "claude", self.CWD, "111")],
+                                            base.GOAL_IDLE_CAP)
+            with m.patch("airuleset.resolve_authority", return_value="full"), \
+                    m.patch.object(base.wd, "_owner_disabled", return_value=False):
+                goal.goal_lane_sweep(now, run=tmux, projects_dir=proj, state=state,
+                                     backlog_fetch=lambda cwd: 5)
+            self.assertNotIn(self.CWD, roster.load_roster())
+
+
 if __name__ == "__main__":
     unittest.main()
