@@ -9,7 +9,9 @@ SET from STRUCTURED facts, never pane prose (`classify`, `_exits`):
                 probed 26.10.2026; a `/exit`/`/quit` record still counts);
   goal-none     the owner's `/goal clear` / `/goal` answered `No goal set`;
   goal-cleared  a `Goal cleared:` that is not the watchdog's own #522 disarm
-                (`state["goal_disarmed_q"]`, MACHINE_CLEAR_WINDOW_S);
+                (`state["goal_disarmed_q"]`, MACHINE_CLEAR_WINDOW_S, read live);
+                a clear `refresh` once matched is kept in the session's record
+                (`mclears`) and stays machine after the veto is reaped;
   interrupt     `[Request interrupted by user…]`;
   pause         a genuine owner prompt that is EXACTLY one `STOP_PHRASES` entry
                 once lowercased, de-accented, stripped of punctuation and of
@@ -40,6 +42,7 @@ TAIL_BYTES = 1024 * 1024
 TAIL_ENTRIES = 400
 RECORD_TTL_S = 7 * 24 * 3600
 MACHINE_CLEAR_WINDOW_S = 600
+MAX_MCLEARS = 20        # matched #522 disarm clears kept per session record
 STOP_PHRASES = frozenset((   # de-accented: "skonči" reads "skonci"
     "stop", "stop here", "stop now", "pause", "halt", "pauza", "pauzni",
     "pauzni sa", "zastav", "zastav sa", "stoj", "skonci", "koniec",
@@ -102,8 +105,10 @@ def _is_stop_phrase(text):
     return " ".join(t.split()) in STOP_PHRASES
 
 
-def classify(entry, machine_clears=()):
-    """("stop", fact) | ("clear", why) | None for ONE transcript entry."""
+def classify(entry, machine_clears=(), known=()):
+    """("stop", fact) | ("clear", why) | ("machine", ts) | None for ONE
+    transcript entry. `machine_clears` are live #522 disarm times; `known` are
+    the exact times of clears an earlier `refresh` matched to one."""
     if not isinstance(entry, dict) or entry.get("type") not in ("user", "system"):
         return None
     text = _text(entry).strip()
@@ -128,10 +133,10 @@ def classify(entry, machine_clears=()):
             return ("clear", "goal-set")
         if mark and mark.get("clear_kind") == "user":
             ts = _ts(entry)
-            if ts is not None and any(
+            if ts is not None and (ts in known or any(
                     isinstance(c, (int, float)) and 0 <= ts - c <= MACHINE_CLEAR_WINDOW_S
-                    for c in machine_clears):
-                return None                      # the watchdog's own #522 disarm
+                    for c in machine_clears)):
+                return ("machine", ts)           # the watchdog's own #522 disarm
             return ("stop", "goal-cleared")
         return None
     from watchdog import questions
@@ -143,23 +148,27 @@ def classify(entry, machine_clears=()):
 
 
 def scan(entries, rec=None, machine_clears=()):
-    """(latch, saw): replay `entries` (oldest → newest) on top of the persisted
-    `rec`; an entry at or before `rec["ts"]` is already accounted for. `latch`
-    is {"fact", "ts"} or None; `saw` is True when a fact, an owner act or a
-    persisted latch was seen."""
-    latch = dict(rec) if isinstance(rec, dict) and rec.get("fact") else None
+    """(latch, saw, found): replay `entries` (oldest → newest) on top of the
+    persisted `rec`; an entry at or before `rec["ts"]` is already accounted
+    for. `latch` is {"fact", "ts"} or None; `saw` is True when a fact, an owner
+    act or a persisted latch was seen; `found` lists the clears matched to the
+    watchdog's own disarm (`rec["mclears"]` keeps them machine for good)."""
+    rec = rec if isinstance(rec, dict) else {}
+    latch = dict(rec) if rec.get("fact") else None
     floor = latch.get("ts") if latch else None
-    saw = latch is not None
+    known = set(c for c in rec.get("mclears") or () if isinstance(c, (int, float)))
+    saw, found = latch is not None, []
     for e in entries or ():
         ts = _ts(e) if isinstance(e, dict) else None
         if isinstance(floor, (int, float)) and (ts is None or ts <= floor):
             continue
-        c = classify(e, machine_clears)
-        if c is None:
+        c = classify(e, machine_clears, known)
+        if c is None or c[0] == "machine":
+            found += [c[1]] if c else []
             continue
         saw = True
         latch = {"fact": c[1], "ts": ts or 0} if c[0] == "stop" else None
-    return latch, saw
+    return latch, saw, found
 
 
 def _tail(path):
@@ -185,19 +194,25 @@ def _machine_clears(state, sid):
         m.get("disarmed_ts"), (int, float)) else []
 
 
-def _latch_of(ctx):
-    """The latch for one pane context {tpath, prev, rec, prev_rec, state}."""
+def _evaluate(ctx):
+    """(latch, found) for one pane context {tpath, prev, rec, prev_rec, state}:
+    `found` = the session's clears matched to the watchdog's own disarm."""
     tpath = ctx.get("tpath")
     if not tpath:
-        return None
+        return None, []
     state, prev = ctx.get("state"), ctx.get("prev")
     entries = _tail(tpath)
-    latch, saw = scan(entries, ctx.get("rec"), _machine_clears(state, tpath.stem))
+    latch, saw, found = scan(entries, ctx.get("rec"),
+                             _machine_clears(state, tpath.stem))
     if saw or not prev or not _whole(tpath, entries):
-        return latch
-    inherited, _ = scan(_tail(prev), ctx.get("prev_rec"),
-                        _machine_clears(state, prev.stem))
-    return dict(inherited, inherited=True) if inherited else None
+        return latch, found
+    inherited = scan(_tail(prev), ctx.get("prev_rec"),
+                     _machine_clears(state, prev.stem))[0]
+    return (dict(inherited, inherited=True) if inherited else None), found
+
+
+def _latch_of(ctx):
+    return _evaluate(ctx)[0]
 
 
 def _two_newest(projects_dir, cwd):
@@ -316,10 +331,10 @@ def refresh(state, panes, projects_dir, now, dry_run=False, run=None):
         logs.append("owner-stop latch: exit scan failed (%r), no exit latched" % (e,))
     for cwd, tpath in exits:
         rec = recs.get(tpath.stem)
-        if not isinstance(rec, dict):
+        if not isinstance(rec, dict) or not rec.get("fact"):
             try:   # the session's END: nothing in it happened after the exit
-                rec = {"fact": "exit", "ts": max([os.path.getmtime(tpath)] + [
-                    t for t in (_ts(e) for e in _tail(tpath)) if t])}
+                rec = dict(rec or {}, fact="exit", ts=max([os.path.getmtime(tpath)] + [
+                    t for t in (_ts(e) for e in _tail(tpath)) if t]))
             except OSError:
                 continue
             logs.append("owner-stop latch %s sid=%s -> SET (exit: no claude in the "
@@ -332,7 +347,7 @@ def refresh(state, panes, projects_dir, now, dry_run=False, run=None):
     for pid, cwd in panes or ():
         try:
             ctx = _context(projects_dir, cwd, state, recs)
-            latch = _latch_of(ctx) if ctx["sid"] else None
+            latch, found = _evaluate(ctx) if ctx["sid"] else (None, [])
         except Exception as e:     # noqa: BLE001 -- one bad pane never stops the sweep
             logs.append("owner-stop latch %s -> unreadable (%r), not latched" % (pid, e))
             continue
@@ -341,11 +356,12 @@ def refresh(state, panes, projects_dir, now, dry_run=False, run=None):
             continue
         _PANES[pid] = ctx
         seen.add(sid)
-        old = recs.get(sid)
+        old = recs.get(sid) if isinstance(recs.get(sid), dict) else {}
         where = "%s sid=%s" % (os.path.basename(str(cwd)) or cwd, sid)
+        mcl = sorted(set(old.get("mclears") or ()) | set(found))[-MAX_MCLEARS:]
         if latch:
-            same = isinstance(old, dict) and (old.get("fact"), old.get("ts")) == (
-                latch.get("fact"), latch.get("ts"))
+            same = (old.get("fact"), old.get("ts")) == (latch.get("fact"),
+                                                        latch.get("ts"))
             if not same:
                 logs.append("owner-stop latch %s -> SET (%s%s, %s): no machine "
                             "keystroke and no /goal arm until the owner types a "
@@ -353,16 +369,18 @@ def refresh(state, panes, projects_dir, now, dry_run=False, run=None):
                                             " in the previous session"
                                             if latch.get("inherited") else "",
                                             _clock(latch.get("ts"))))
-            if not dry_run:
-                recs[sid] = {"fact": latch["fact"], "ts": latch.get("ts") or 0,
-                             "seen": now}
-                ctx["rec"] = recs[sid]
-        elif isinstance(old, dict):
+        elif old.get("fact"):
             logs.append("owner-stop latch %s -> cleared (the owner typed a new "
                         "prompt)" % where)
-            if not dry_run:
+        if not dry_run:
+            new = dict({"seen": now}, **({"mclears": mcl} if mcl else {}))
+            if latch:
+                new.update(fact=latch["fact"], ts=latch.get("ts") or 0)
+            if latch or mcl:
+                recs[sid] = new
+            else:
                 recs.pop(sid, None)
-                ctx["rec"] = None
+            ctx["rec"] = recs.get(sid)
     if not dry_run:
         for sid in [k for k, v in recs.items() if k not in seen and (
                 not isinstance(v, dict) or not isinstance(v.get("seen"), (int, float))
