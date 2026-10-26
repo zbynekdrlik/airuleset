@@ -65,14 +65,14 @@ def _remote_ssh_prefix(remote):
     succeeds or fails, since `fleet_burn_job` claims the hour unconditionally
     once its `fetch()` returns — spreading any retries comfortably inside a
     typical fail2ban findtime window without new state."""
-    # #680: route the inline StrictHostKeyChecking=no through the #669 pin
-    # helper (the ONE source) -- a raw-public-IP target carrying a committed
-    # host_keys pin (spinbike-vps) is verified STRICTLY; every tailscale/subdev
-    # host keeps the unchanged =no. Deferred import (call-time, not module-init)
-    # so cli_burn's leaf-with-no-top-level-airuleset invariant is preserved --
-    # cli_remote is fully imported by the time any burn ssh runs. Spliced BEFORE
-    # BatchMode/NumberOfPasswordPrompts (distinct options, but keeps the pin
-    # first per #669's first-value-wins guidance).
+    # #680: route the inline StrictHostKeyChecking=no through the #669 pin helper
+    # (the ONE source): a raw-public-IP target with a committed host_keys pin
+    # (spinbike-vps) is verified STRICTLY, every tailscale/subdev host keeps =no;
+    # spliced BEFORE BatchMode/NumberOfPasswordPrompts (#669 first-value-wins).
+    # Deferred imports keep cli_burn's no-top-level-airuleset leaf invariant.
+    # #1236: the identity-less branch reads the password FILE (`sshpass -f`,
+    # cli_ssh_password), which raises loudly when the file is unusable.
+    import cli_ssh_password
     from cli_remote import host_key_check_opts
     hostkey_opts = host_key_check_opts(remote)
     identity = remote.get("identity")
@@ -81,7 +81,7 @@ def _remote_ssh_prefix(remote):
                 + hostkey_opts
                 + ["-o", "BatchMode=yes",
                    f"{remote['user']}@{remote['host']}"])
-    return (["sshpass", "-p", "newlevel", "ssh"]
+    return (cli_ssh_password.sshpass_argv() + ["ssh"]
             + hostkey_opts
             + ["-o", "NumberOfPasswordPrompts=1",
                f"{remote['user']}@{remote['host']}"])
@@ -92,9 +92,9 @@ def _burn_remote(remote, days):
     error, non-zero exit, or unparsable stdout prints a WARN to stderr and
     returns None — one unreachable box never aborts the whole report."""
     import subprocess
-    cmd = _burn_remote_cmd(remote, days)
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    try:  # #1236: the build too (an unusable password file is this host's WARN)
+        result = subprocess.run(_burn_remote_cmd(remote, days), capture_output=True,
+                                text=True, timeout=30)
     except Exception as e:
         print(f"  WARN: burn collection failed for {remote['name']}: {e}", file=sys.stderr)
         return None
@@ -236,9 +236,9 @@ def _fleet_remote_row(remote, want_hour_bucket, timeout=15):
     could otherwise win over a fresher, correct sample from another box on
     the same account); `weekly_ts` is what lets it gate on that."""
     import subprocess
-    cmd = _fleet_remote_cmd(remote)
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    try:  # #1236: the build too (an unusable password file is this host's error)
+        result = subprocess.run(_fleet_remote_cmd(remote), capture_output=True,
+                                text=True, timeout=timeout)
     except Exception as e:
         return {"error": "%s: %s" % (type(e).__name__, e)}
     if result.returncode != 0:
@@ -406,9 +406,9 @@ def _delegation_remote(remote, hours):
     any ssh error, non-zero exit or unparsable stdout WARNs and returns None,
     so one unreachable box never aborts the fleet report."""
     import subprocess
-    cmd = _delegation_remote_cmd(remote, hours)
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    try:  # #1236: the build too (an unusable password file is this host's WARN)
+        result = subprocess.run(_delegation_remote_cmd(remote, hours),
+                                capture_output=True, text=True, timeout=120)
     except Exception as e:
         print(f"  WARN: delegation collection failed for {remote['name']}: {e}",
               file=sys.stderr)

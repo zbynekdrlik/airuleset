@@ -6595,7 +6595,6 @@ from cli_remote import (  # noqa: E402, F401
     _ssh_multiplex_opts as _ssh_multiplex_opts,
     host_key_check_opts as host_key_check_opts,
     _materialize_pinned_known_hosts as _materialize_pinned_known_hosts,
-    _redacted_ssh_cmd as _redacted_ssh_cmd,
     _HOME_AUDIT_MARKER as _HOME_AUDIT_MARKER,
     _shared_remote_host_ips as _shared_remote_host_ips,
     _remote_cmd_with_home_audit as _remote_cmd_with_home_audit,

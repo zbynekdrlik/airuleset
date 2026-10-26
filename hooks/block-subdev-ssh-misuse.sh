@@ -25,7 +25,7 @@ set -euo pipefail
 # from ITS OWN box as root, via a locally-deployed ~/.ssh/config `Host
 # subdev` stanza — not something dev1 ever pushes to.
 #   - montalu[12345678]@<subdev> — no identity requirement (default key AND
-#                          the sshpass -p path are both legitimate per
+#                          the sshpass -f path are both legitimate per
 #                          REMOTE_HOSTS — the montalu family has no
 #                          `identity` entry; montalu1 is the renamed base
 #                          (#537, was `montalu`), montalu2/3/4 are three MORE

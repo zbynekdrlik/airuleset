@@ -697,7 +697,7 @@ ZBYNEK_CLAUDY_HOST = "100.101.214.103"
 def zbynek_inventory():
     """Owner's DECLARATIVE session set (#870 F4a D4, marek shape) — NEVER
     derived from ``_deployable_hosts()``. On the controller, an entry with
-    ``identity=None`` would trigger the ``sshpass -p newlevel`` branch in
+    ``identity=None`` would trigger the ``sshpass -f <password file>`` branch in
     ``_ssh_interactive_prefix`` → fail2ban ban → push outage (the design's
     RED-2). Every non-local entry carries an explicit ``identity``.
 

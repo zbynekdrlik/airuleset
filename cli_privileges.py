@@ -339,15 +339,14 @@ PRIVILEGES: List[Privilege] = [
     Privilege(
         name="fleet_shared_password",
         kind=KIND_PASSWORD,
-        local_path="",  # HARDCODED literal in cli_remote.py source, not a file
-        reach="fleet shared ssh password (sshpass -p, hardcoded in "
-              "cli_remote.py source + git history) — dev2, montalu1-8, "
-              "forestshop admin/stepan (the no-identity hosts)",
-        rotation="DEBT: hardcoded literal in git-tracked source + history; "
-                 "pin identities per #659/#679 to phase out (ongoing).",
+        local_path="~/.secrets/newlevel-ssh-password",  # #1236 (was a literal)
+        reach="fleet shared ssh password (`sshpass -f` this 0600 file) — dev2, "
+              "montalu1-8, forestshop admin/stepan (the no-identity hosts)",
+        rotation="#1236: moved out of the public source into this file, value "
+                 "unchanged (owner 14.10.2026: no rotation); history purge open.",
         must_move=True,
-        used_by=("cli_remote.py:306 (sshpass -p, hardcoded literal)",
-                 "cli_remote.py:983"),
+        used_by=("cli_ssh_password.py:40 (password_file, sshpass -f)",
+                 "cli_remote.py:468 (_ssh_prefix)"),
     ),
     Privilege(
         name="cloudflared_tunnel_creds",
@@ -637,7 +636,7 @@ def probe_entry(priv: Privilege, home: Path,
                         if (fleet_buckets is not None and priv.identity_of)
                         else []),
     }
-    if priv.kind in (KIND_HOP, KIND_PASSWORD, KIND_SUDO) or not priv.local_path:
+    if priv.kind in (KIND_HOP, KIND_SUDO) or not priv.local_path:
         rec["detail"] = "derived reach (no local file)"
         rec["present"] = True
         if priv.kind == KIND_SUDO:
@@ -861,10 +860,10 @@ def build_report(home: Optional[Path] = None, *,
 
     # Post-cutover gate (#870 F1): absent must_move credentials are findings.
     # The ``local_path`` guard is a defensive double-check: entries without a
-    # local_path (HOP, PASSWORD, SUDO) are always ``present=True`` via
-    # ``probe_entry`` (line ~600), so the filter is a no-op for them — kept
-    # explicitly so the gate never fires on a derived-reach entry that has
-    # no file to be "absent".
+    # local_path (HOP, SUDO) are always ``present=True`` via ``probe_entry``,
+    # so the filter is a no-op for them — kept explicitly so the gate never
+    # fires on a derived-reach entry that has no file to be "absent". #1236:
+    # the PASSWORD entry now HAS a file, so an absent one IS a finding here.
     absent_must_move: List[dict] = []
     if post_cutover:
         absent_must_move = [
