@@ -1923,19 +1923,13 @@ def _working_stall_hold(state, pid, now):
     #1257 owner-stop latch, its kind switch or the pane's spent day, BEFORE
     `decide_working`, so a hold is never counted toward the give-up escalation;
     `journal` is True once per (pane, episode)."""
-    from watchdog import nudge_gate as _ng, owner_stop as _ostop
-    latch = _ostop.pane_latch(pid)
-    if latch:
-        return ("owner-stop latch: %s" % latch.get("fact"),
-                _ng.first_hold(state, pid, WORKING_STALL_NUDGE, latch.get("ts"), now))
-    if not nudges_enabled(WORKING_STALL_NUDGE):
-        return ("kind %s off" % WORKING_STALL_NUDGE,
-                _ng.first_hold(state, pid, WORKING_STALL_NUDGE,
+    from watchdog import nudge_gate as _ng
+    hold = _ng.pre_send_hold(state, pid, WORKING_STALL_NUDGE, now, budget=False)
+    if hold is None and not nudges_enabled(WORKING_STALL_NUDGE):
+        hold = ("kind %s off" % WORKING_STALL_NUDGE,
+                _ng.first_hold(state, pid, WORKING_STALL_NUDGE + "@off",
                                int(now // _ng.DAY_S), now))
-    if not _ng.pane_budget_ok(state, pid, now):
-        return (_ng.pane_budget_hold_reason(state, pid, now),
-                _ng.first_pane_hold(state, pid, WORKING_STALL_NUDGE, now))
-    return None
+    return hold or _ng.pre_send_hold(state, pid, WORKING_STALL_NUDGE, now)
 
 
 def _send_stuckcheck_verified(state, pid, text, run, tpath, now, sleep_fn, logs,

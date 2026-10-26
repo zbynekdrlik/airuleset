@@ -446,6 +446,24 @@ def end_hold_log(state, now, before, dry_run):
         state.pop(HOLD_LOG_KEY, None)
 
 
+def pre_send_hold(state, pid, kind, now, budget=True):
+    """`(why, journal)` when a machine delivery of `kind` into `pid` must not
+    type now — the #1257 owner-stop latch, else (`budget`) the pane's spent
+    day — or None; `journal` is True once per (pane, kind) episode. A caller
+    that would book a withheld send as a swallow or a nudge (report-owed,
+    dying-subagent, job 4, the goal-lane riders) asks THIS first, so a hold
+    is never counted, escalated or pinged."""
+    from watchdog import owner_stop    # lazy: this module stays an import leaf
+    latch = owner_stop.pane_latch(pid) if pid else None
+    if latch:
+        return ("owner-stop latch: %s" % latch.get("fact"),
+                first_hold(state, pid, "%s@latch" % kind, latch.get("ts"), now))
+    if budget and pid and not pane_budget_ok(state, pid, now):
+        return (pane_budget_hold_reason(state, pid, now),
+                first_pane_hold(state, pid, kind, now))
+    return None
+
+
 def first_pane_hold(state, pid, kind, now):
     """`first_hold` for a per-pane budget hold: the episode is the day's oldest
     typing attempt into the pane."""

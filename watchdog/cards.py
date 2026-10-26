@@ -1088,18 +1088,11 @@ def report_reconcile(now, run, state, cwd_by_sid, panes_by_sid,
             # B9 (owner 26.10.2026): the owner stopped the pane (#1257 latch) or
             # its ONE daily nudge is spent — a held send is no swallow, never
             # counted, never escalated.
-            from watchdog import nudge_gate as _ng, owner_stop as _ostop
-            _latch = _ostop.pane_latch(pane_id) if pane_id is not None else None
-            if _latch:
-                if _ng.first_hold(state, pane_id, "card", _latch.get("ts"), now):
-                    logs.append("report-owed held (owner-stop latch: %s) %s"
-                                % (_latch.get("fact"), root))
-                _save()
-                continue
-            if pane_id is not None and not _ng.pane_budget_ok(state, pane_id, now):
-                if _ng.first_pane_hold(state, pane_id, "card", now):
-                    logs.append("report-owed held (%s) %s" % (
-                        _ng.pane_budget_hold_reason(state, pane_id, now), root))
+            from watchdog import nudge_gate as _ng
+            _hold = _ng.pre_send_hold(state, pane_id, "card", now)
+            if _hold:
+                if _hold[1]:
+                    logs.append("report-owed held (%s) %s" % (_hold[0], root))
                 _save()
                 continue
             # #511: after a swallow, RE-PROBE on a bounded interval (never a

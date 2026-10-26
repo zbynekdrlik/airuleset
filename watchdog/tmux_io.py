@@ -1139,13 +1139,12 @@ def _nudge_dying_subagent(state, logs, send_fn, pid, run, captured, project, own
                     % (dedup_prefix, project, wid))
         return
     # #1257 -- the owner stopped this pane: held, never a nudge, never a ping.
-    from watchdog import owner_stop as _ostop
-    _latch = _ostop.pane_latch(pid)
     from watchdog import nudge_gate as _ng
-    if _latch:
-        if _ng.first_hold(state, pid, wkey, _latch.get("ts"), now):
-            logs.append("subagent-%s-held %s [%s] owner-stop latch (%s)"
-                        % (dedup_prefix, project, wid, _latch.get("fact")))
+    _hold = _ng.pre_send_hold(state, pid, wkey, now, budget=False)
+    if _hold:
+        if _hold[1]:
+            logs.append("subagent-%s-held %s [%s] %s" % (dedup_prefix, project,
+                                                         wid, _hold[0]))
         return
     if not watchdog.pane_at_idle_prompt(captured):
         bkey = "subagent-busypane:%s:%s" % (dedup_prefix, wid)
@@ -1165,10 +1164,11 @@ def _nudge_dying_subagent(state, logs, send_fn, pid, run, captured, project, own
         return
     # B9 (owner 26.10.2026) -- the pane's ONE daily nudge is spent: hold BEFORE
     # decide_working, so a budget hold never counts as a nudge (no false give-up).
-    if not _ng.pane_budget_ok(state, pid, now):
-        if _ng.first_pane_hold(state, pid, wkey, now):
-            logs.append("subagent-%s-held %s [%s] %s" % (
-                dedup_prefix, project, wid, _ng.pane_budget_hold_reason(state, pid, now)))
+    _hold = _ng.pre_send_hold(state, pid, wkey, now)
+    if _hold:
+        if _hold[1]:
+            logs.append("subagent-%s-held %s [%s] %s" % (dedup_prefix, project,
+                                                         wid, _hold[0]))
         return
     # (#287) An unsalvageable worker earns AT MOST ONE typed nudge
     # (`_subagent_transcript_unsalvageable`).
