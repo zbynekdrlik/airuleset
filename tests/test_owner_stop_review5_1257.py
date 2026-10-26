@@ -9,6 +9,7 @@ import subprocess
 import sys
 import time
 import unittest
+import unittest.mock as m
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -98,6 +99,24 @@ class ABadlyNamedProcessAnywhere(_Procs):
             self.assertLess(time.time(), end, "the child never renamed itself")
             time.sleep(0.05)
         self.assertIsNotNone(wd._pane_claude_pid(self._npm_under_shell()))
+
+
+class AnUnreadableProcFailsClosed(_Procs):
+    """Review 5, finding 3: `_hosts_claude` promised "an unreadable /proc reads
+    as a Claude", but the shared walk turns a listing fault (e.g. EMFILE) into
+    "no Claude", so an npm Claude next to a bare shell read as a dev server
+    and its working session could be latched as an exit."""
+
+    def test_a_proc_listing_fault_reads_as_a_claude(self):
+        sh = self._shell("sleep", "60")
+        real = os.listdir
+
+        def listdir(path="."):
+            if str(path) == "/proc":
+                raise OSError(24, "Too many open files")
+            return real(path)
+        with m.patch("os.listdir", side_effect=listdir):
+            self.assertTrue(owner_stop._hosts_claude(sh))
 
 
 if __name__ == "__main__":
