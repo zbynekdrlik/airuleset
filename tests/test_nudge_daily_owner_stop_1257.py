@@ -270,7 +270,8 @@ class LatchFacts(unittest.TestCase):
     def test_stop_words_inside_other_words_never_latch(self):
         for text in ("zastavenie servera oprav prosím", "pozri stopky",
                      "nonstop beh", "oprav stop-hook v kóde", "pauzovanie",
-                     "skončí to dnes?"):
+                     "skončí to dnes?", "oprav stop hook", "Stop hooks padajú",
+                     "stop condition je zlá"):
             self.assertIsNone(_latch(OWNER_WORK + [_u(text, T0 + 10)]), text)
 
     def test_machine_prompts_never_latch(self):
