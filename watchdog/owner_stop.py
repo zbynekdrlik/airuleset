@@ -441,31 +441,14 @@ def _exits(panes, projects_dir, run):
 
 def _hosts_claude(pane_pid):
     """True when the pane's process tree runs the Claude CLI in either launch
-    shape (issue 959: comm `claude`, or `node …/claude-code/cli.js` —
-    `erp_heartbeat._cmdline_is_claude_cli`). A pane_pid that is not a pid, or
-    an unreadable /proc, reads True: fail CLOSED, a real Claude is never taken
-    for a dev server."""
-    from watchdog.erp_heartbeat import _cmdline_is_claude_cli
-    from watchdog.tmux_io import _proc_read
+    shape (`tmux_io._pane_claude_pid`, issue 959 aware). A pane_pid that is
+    not a pid, or an unreadable /proc, reads True: fail CLOSED, a real Claude
+    is never taken for a dev server."""
+    import watchdog
     root = str(pane_pid or "").strip()
-    if not root.isdigit():
+    if not root.isdigit() or not os.access("/proc", os.R_OK):
         return True
-    try:
-        children = {}
-        for p in os.listdir("/proc"):
-            stat = _proc_read("/proc/%s/stat" % p) if p.isdigit() else ""
-            if stat:
-                children.setdefault(stat.rsplit(") ", 1)[-1].split()[1], []).append(p)
-    except (OSError, IndexError):
-        return True
-    todo = [root]
-    while todo:
-        cur = todo.pop()
-        if "claude" in _proc_read("/proc/%s/comm" % cur) or _cmdline_is_claude_cli(
-                _proc_read("/proc/%s/cmdline" % cur).replace("\x00", " ")):
-            return True
-        todo.extend(children.get(cur, []))
-    return False
+    return watchdog._pane_claude_pid(root) is not None
 
 
 def _all_panes(panes, run):

@@ -541,11 +541,20 @@ def _default_run(argv, timeout=8):
 
 
 def _proc_read(path):
-    try:
-        with open(path) as h:
+    try:   # a process name may be any bytes: never let one abort a /proc walk
+        with open(path, encoding="utf-8", errors="replace") as h:
             return h.read()
     except OSError:
         return ""                # process exited mid-walk — expected race
+
+
+def _proc_is_claude(pid):
+    """True when process `pid` IS the Claude CLI in either fleet launch shape
+    (issue 959): its name is `claude`, or its command line is the npm `node
+    …/claude-code/cli.js` (`erp_heartbeat._cmdline_is_claude_cli`)."""
+    from watchdog.erp_heartbeat import _cmdline_is_claude_cli
+    return "claude" in _proc_read("/proc/%s/comm" % pid) or _cmdline_is_claude_cli(
+        _proc_read("/proc/%s/cmdline" % pid).replace("\x00", " "))
 
 
 def _pane_hosted_claude_pid(pane_pid):
@@ -564,11 +573,14 @@ def _pane_hosted_claude_pid(pane_pid):
                 continue
             ppid = stat.rsplit(") ", 1)[-1].split()[1]
             children.setdefault(ppid, []).append(p)
-        frontier = [str(int(pane_pid))]
+        frontier, seen = [str(int(pane_pid))], set()
         while frontier:
             cur = frontier.pop()
             for ch in children.get(cur, []):
-                if "claude" in _proc_read("/proc/%s/comm" % ch):
+                if ch in seen:            # a pid reused mid-walk never loops
+                    continue
+                seen.add(ch)
+                if _proc_is_claude(ch):
                     return ch
                 frontier.append(ch)
     except Exception:
@@ -641,11 +653,13 @@ def _pane_claude_pid(pane_pid):
     """The `claude` PID for a pane: `pane_pid` itself when it IS claude (an
     `exec claude` launch), else the claude descendant in its process tree (the
     normal shell-forks-claude launch — reuses `_pane_hosted_claude_pid`). None if
-    neither. Fail-safe None on a bad pane_pid."""
+    neither. Fail-safe None on a bad pane_pid. Both launch shapes count
+    (`_proc_is_claude`: the name `claude`, or the npm `node …/claude-code/cli.js`
+    command line — B9 fix, so `_pane_claude_start_epoch` resolves an npm pane)."""
     p = str(pane_pid).strip()
     if not p.isdigit():
         return None
-    if "claude" in _proc_read("/proc/%s/comm" % p):
+    if _proc_is_claude(p):
         return p
     return watchdog._pane_hosted_claude_pid(p)
 
