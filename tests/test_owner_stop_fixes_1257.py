@@ -471,5 +471,35 @@ class LatchedSendJournalsOnce(base._Latched):
         self.assertEqual(sum("owner-stop latch" in ln for ln in logs), 1, logs)
 
 
+class OwnerGrantOnAMachinePickedPane(base._Latched):
+    """Review 2, finding 4: the owner grant (`user_authored`) also bypassed the
+    latch on panes the MACHINE picked — the ❓-flag repo fallback and the
+    card-reopen nudge type into "any live pane of the repo", which may be a
+    session the owner paused. There the grant passes only the daily cap and
+    the kind switch; the exact asking session keeps the full grant."""
+
+    def _deliver(self, fn):
+        tmux, logs = self._tmux(), []
+        ok = fn(tmux, logs)
+        return ok, tmux, logs
+
+    def test_a_card_reopen_never_types_into_a_paused_pane(self):
+        ok, tmux, logs = self._deliver(lambda run, logs: base.wd._nudge_repo_pane(
+            self.PID, self.CWD, run, base.wd.compose_card_reopen_nudge(7), False,
+            self.proj, logs=logs, tpath=self.tpath, state={}, now=time.time(),
+            sleep_fn=lambda s: None, user_authored=True))
+        self.assertFalse(ok)
+        self.assertEqual(tmux.sent, [])
+        self.assertTrue(any("owner-stop" in ln for ln in logs), logs)
+
+    def test_the_exact_asking_session_still_gets_the_flag(self):
+        ok, tmux, logs = self._deliver(
+            lambda run, logs: base.wd._deliver_flag_prompt_to_exact_session(
+                self.PID, run, base.wd.compose_flag_prompt("x"), False,
+                logs=logs, tpath=self.tpath, state={}, now=time.time(),
+                sleep_fn=lambda s: None, user_authored=True))
+        self.assertTrue(ok, logs)
+
+
 if __name__ == "__main__":
     unittest.main()
