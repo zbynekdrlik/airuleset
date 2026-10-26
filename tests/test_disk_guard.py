@@ -23,15 +23,12 @@ import cli_scratch_sweep as cs
 import statusbar
 
 
-# #896-899 / #1136 — negative lock: NOTHING in this file may reach the REAL
-# filer (`gk-request`, or `gh issue ...` for an infra-window box). A leaked call
-# is RECORDED and fails at TEARDOWN: a raise inside the call is swallowed by the
-# filer's own `except` (how #1144-#1151 were filed). Every other real subprocess
-# (pgrep, git, docker, journalctl fakes) passes. `own_windows` is pinned to []
-# so no test depends on which box runs it (gk would take the gh path).
+# #896-899 / #1137 — negative lock: NOTHING in this file may reach a ticket
+# filer (`gk-request` or `gh issue ...`); the guard files no ticket since #1137.
+# A leaked call is RECORDED and fails at TEARDOWN (a raise inside the call can
+# be swallowed by the caller's own `except`, how #1144-#1151 were filed).
 @pytest.fixture(autouse=True)
 def _block_real_gh_severe_ticket_filing(monkeypatch):
-    import watchdog.disk_guard_escalation as esc
     real_run, leaked = subprocess.run, []
 
     def _guarded_run(argv, *a, **kw):
@@ -42,10 +39,8 @@ def _block_real_gh_severe_ticket_filing(monkeypatch):
         return real_run(argv, *a, **kw)
 
     monkeypatch.setattr(subprocess, "run", _guarded_run)
-    monkeypatch.setattr(esc, "own_windows", lambda: [])
     yield
-    assert not leaked, ("reached the REAL filer (inject severe_run_fn/run_fn;"
-                        " the #896-899 / #1144-1151 incidents): %r" % (leaked,))
+    assert not leaked, "reached a ticket filer (#1137 forbids it): %r" % (leaked,)
 
 
 def _mkfakeproc(root, entries):
@@ -768,7 +763,6 @@ def test_shared_stream_growth_boost(tmp_path):
 def test_drain_exhausted_flag_set(tmp_path):
     """#925: drain_exhausted is True when drain at >=90 % freed nothing."""
     _seed_last_drain(tmp_path, 0.0)
-    severe_calls = []
     # 96 % → drain runs (every-poll at >=95 %). The noop planner frees nothing,
     # so worst stays at 96 % → drain_exhausted should be True.
     dg.run_disk_guard(
@@ -779,7 +773,6 @@ def test_drain_exhausted_flag_set(tmp_path):
         dev_fn=lambda _p: 1,
         geteuid_fn=lambda: 1000,
         planners_fn=lambda _h, _n: [("noop", lambda: [])],
-        severe_run_fn=lambda *a, **kw: severe_calls.append(a),
         top_consumers_fn=lambda *a, **kw: [],
     )
     cache = json.loads((tmp_path / ".claude" / "disk-guard" / "status.json").read_text())
@@ -898,22 +891,11 @@ def test_run_disk_guard_critical_bypasses_cadence(tmp_path):
             return []
         return [("noop", _p)]
 
-    # #896-899: 96% + dry_run=False also crosses SEVERE_PCT, so the severe-
-    # ticket filer WILL fire this poll -- inject a recorder, never let it
-    # reach the real `gh` default (the negative lock above would abort loudly
-    # if this were forgotten).
-    severe_calls = []
-
-    def _fake_severe_run(argv, **kw):
-        severe_calls.append(argv)
-        return types.SimpleNamespace(returncode=0, stdout="filed", stderr="")
-
     logs = dg.run_disk_guard(
         now=1005.0, home=str(tmp_path), dry_run=False,
         statvfs_fn=statvfs_map({"/": (96, 20)}), dev_fn=dev_map({"/": 1}),
         geteuid_fn=lambda: 1000, mounts=("/",), planners_fn=_noop,
-        top_consumers_fn=lambda *a, **k: [("/tmp/big", 500_000_000)],
-        severe_run_fn=_fake_severe_run)
+        top_consumers_fn=lambda *a, **k: [("/tmp/big", 500_000_000)])
     assert not any("cadence-gated" in ln for ln in logs)
     assert ran["drained"] is True
 
@@ -1782,23 +1764,12 @@ def test_status_records_largest_live_scratch(tmp_path):
     def _noop_planners(_home, _now):
         return [("noop", lambda: [])]
 
-    # #896-899: 96% + dry_run=False also crosses SEVERE_PCT -- inject a
-    # recorder for the severe-ticket filer so this test can never fall
-    # through to the real `gh` default (the negative lock above would abort
-    # loudly if this were forgotten).
-    severe_calls = []
-
-    def _fake_severe_run(argv, **kw):
-        severe_calls.append(argv)
-        return types.SimpleNamespace(returncode=0, stdout="filed", stderr="")
-
     dg.run_disk_guard(
         now=_NOW, home=str(tmp_path), dry_run=False,
         statvfs_fn=statvfs_map({"/": (96, 20)}), dev_fn=dev_map({"/": 1}),
         geteuid_fn=lambda: uid or 1000, mounts=("/",),
         planners_fn=_noop_planners, scratch_discover_fn=_discover,
-        top_consumers_fn=lambda *a, **k: [("/tmp/big", 500_000_000)],
-        severe_run_fn=_fake_severe_run)
+        top_consumers_fn=lambda *a, **k: [("/tmp/big", 500_000_000)])
     status = json.loads((tmp_path / ".claude" / "disk-guard" / "status.json").read_text())
     lls = status.get("largest_live_scratch")
     assert lls is not None, "status.json must record the largest live scratch"
@@ -2141,8 +2112,7 @@ def test_critical_band_90_94_runs_with_shorter_cadence(tmp_path):
     logs = dg.run_disk_guard(
         now=_NOW_892, home=str(tmp_path), dry_run=False,
         statvfs_fn=statvfs_map({"/": (92, 20)}), dev_fn=dev_map({"/": 1}),
-        geteuid_fn=lambda: 1000, mounts=("/",), planners_fn=_noop,
-        severe_run_fn=lambda *a, **kw: types.SimpleNamespace(returncode=0))
+        geteuid_fn=lambda: 1000, mounts=("/",), planners_fn=_noop)
     assert ran["drained"] is True, (
         "#892: at 92%% with drain 150s ago, the shorter critical-band "
         "cadence (120s) should allow the drain to run")

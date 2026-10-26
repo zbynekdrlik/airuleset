@@ -426,7 +426,7 @@ class TestDrainScript895(unittest.TestCase):
 
 
 class TestSevereEscalation895(unittest.TestCase):
-    """#895: >=95% machine-side escalation — file a gk-request ticket."""
+    """#895: the >=95% SEVERE threshold (a journal line, no ticket since #1137)."""
 
     def setUp(self):
         # #896-899 negative lock: this class exercises the REAL `gh`-backed
@@ -449,6 +449,7 @@ class TestSevereEscalation895(unittest.TestCase):
     def test_severe_pct_constant_exists(self):
         import watchdog.disk_guard as dg
         self.assertEqual(dg.SEVERE_PCT, 95)
+
 
 class TestNotifyImportForbidden(unittest.TestCase):
     """The watchdog side NEVER pings — notify must not be importable from it."""

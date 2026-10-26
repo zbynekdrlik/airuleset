@@ -77,7 +77,7 @@ PREVENTION_PCT = 70        # #920: cheapest age-out rungs fire from here (preven
 DRAIN_PCT = 80             # AUTO-DRAIN at/above this
 CRITICAL_PCT = 90          # machine-channel escalation at/above this (red footer)
 DISK_CRITICAL_PCT = 95     # #854: at/above this the drain runs EVERY poll (cadence gate bypassed)
-SEVERE_PCT = 95            # #895: at/above this file the disk ticket (#1136: also drain_exhausted >= 90)
+SEVERE_PCT = 95            # #895: at/above this the SEVERE journal line (#1136: also drain_exhausted)
 TARGET_PCT = 75            # drain stops once the worst mount is back below this
 MOUNTS = ("/", "/home", "/tmp")
 
@@ -3225,153 +3225,28 @@ def escalate(status, home, now, dry_run, top_consumers_fn=None):
     return [line]
 
 
-SEVERE_TICKET_STATE_NAME = "severe-ticket-state.json"
-# #896-899 incident (2026-09-05): the OLD dedup was a WORLD-WRITABLE, date-
-# keyed `/tmp` marker written ONLY on a successful `gh` call. On the exact
-# disk-full box this code exists for, that marker WRITE can itself fail
-# (ENOSPC) -- silently swallowed -- so the NEXT poll (or the next fresh /tmp,
-# e.g. a container/worktree with no prior marker) saw "not filed yet" and
-# refiled for real. FOUR real duplicate tickets were filed this way within an
-# 8-minute window. Fixed by moving the dedup state to a DURABLE per-box file
-# under the guard's own state dir (derived from `home`, never `~/.claude`
-# resolved directly -- #861) recording the last-filed timestamp, PLUS an
-# IN-MEMORY within-run guard that survives even when THAT write itself fails
-# (the retired #545 bypass recorder's "disk write can fail" lesson, reused here).
-SEVERE_TICKET_REFILE_S = 24 * 3600     # re-file only after this cooldown
-
-_SEVERE_TICKET_FILED_THIS_PROCESS = {}     # {state_path_str: last_filed_ts}
-
-
-def _severe_ticket_state_path(home):
-    return _guard_dir(home) / SEVERE_TICKET_STATE_NAME
-
-
-def _severe_ticket_recently_filed(state_path, now, refile_s=None):
-    """True iff a severe ticket was already filed within `refile_s` --
-    checked BOTH via the in-memory within-run guard (set the instant a filing
-    succeeds, so it holds even when the durable write below fails) and the
-    durable per-box state file (across-run / across-process). A future-dated
-    stamp never wedges the gate open forever (mirrors the retired #545
-    bypass recorder's dedup shape)."""
-    refile_s = SEVERE_TICKET_REFILE_S if refile_s is None else refile_s
-    key = str(state_path)
-    mem_ts = _SEVERE_TICKET_FILED_THIS_PROCESS.get(key)
-    if isinstance(mem_ts, (int, float)) and 0 <= now - mem_ts < refile_s:
-        return True
-    try:
-        st = json.loads(Path(state_path).read_text())
-    except (OSError, ValueError, TypeError, json.JSONDecodeError):
-        st = None
-    # No durable record at all (first-ever filing, or an unreadable/missing
-    # file) is NEVER "recently filed" -- only a GENUINE prior timestamp is
-    # checked against the cooldown (a bare `ts=0` default would otherwise
-    # misread "never filed" as "filed at epoch 0" for any small `now`).
-    if isinstance(st, dict) and "last_filed_ts" in st:
-        try:
-            ts = float(st["last_filed_ts"])
-        except (TypeError, ValueError):
-            return False
-        if 0 <= now - ts < refile_s:
-            return True
-    return False
-
-
-def _mark_severe_ticket_filed(state_path, now, issue=None):
-    """Record a successful filing BOTH in-memory FIRST (so it holds even if
-    the durable write immediately below fails on a genuinely full disk, #545)
-    and durably on disk (best-effort -- a write failure here is logged, never
-    raised, and the in-memory guard has already made this call safe for the
-    rest of THIS process's lifetime)."""
-    _SEVERE_TICKET_FILED_THIS_PROCESS[str(state_path)] = now
-    try:
-        Path(state_path).parent.mkdir(parents=True, exist_ok=True)
-        Path(state_path).write_text(json.dumps({"last_filed_ts": now, "issue": issue}))
-    except OSError as e:
-        _dbg("severe ticket state write failed: %r" % e)
-
-
-def file_severe_ticket(status, home, now, top, dry_run=False, run_fn=None,
-                       windows=None, box_class=None, critical_pct=None):
-    """#895/#1136: file the owner-actionable disk ticket -- at >= SEVERE_PCT,
-    or on ``drain_exhausted`` at >= ``critical_pct`` (the box's effective
-    drain-critical level, #925; not on a shared-stream box)
-    -- with what the drain could not free. The target comes from this box's
-    fleet windows (``windows``; ``None`` = own declaration): an ``infra``
-    window with a repo gets it there with label ``infra``
-    (``disk_guard_escalation``), else ``gk-request`` to airuleset. Deduped
-    via `_severe_ticket_recently_filed` (durable per-box state + in-memory
-    within-run guard -- #896-899) and, past that window, against the stored
-    ticket while it is still OPEN; NEVER a Discord ping. ``run_fn`` is
-    injectable for testing (default: subprocess.run) -- a test MUST inject a
-    recorder; under pytest the default is refused (#896-899, #1144-1151)."""
+def severe_journal(status, home, now, top, dry_run=False, box_class=None,
+                   critical_pct=None):
+    """#895/#1136: the owner-actionable disk state -- >= SEVERE_PCT, or
+    ``drain_exhausted`` at >= ``critical_pct`` (the box's effective
+    drain-critical level, #925; not on a shared-stream box) -- is ONE
+    ``SEVERE`` journal line naming what the drain could not free
+    (``disk_guard_escalation.severe_detail``). #1137: no ticket is filed and
+    nothing pings; the footer ``disk NN%`` is the owner's surface. A dry run
+    returns the line and writes nothing."""
     from watchdog import disk_guard_escalation as _esc
     if status.get("worst_pct", 0) < SEVERE_PCT:
         if box_class is None:
             box_class = _default_box_class()
         if critical_pct is None:
             critical_pct = _esc.default_critical_pct()
-    if not _esc.should_file(status, SEVERE_PCT, critical_pct, box_class):
+    if not _esc.is_severe(status, SEVERE_PCT, critical_pct, box_class):
         return []
-    state_path = _severe_ticket_state_path(home)
-    if _severe_ticket_recently_filed(state_path, now):
-        return []
-    hostname = socket.gethostname()
-    if not dry_run and run_fn is None and _esc.default_filer_refused():
-        return [_log_line(now, "SEVERE-TICKET-FAIL", hostname, status["worst_pct"],
-                          "refused: default filer under pytest, inject run_fn")]
-    run_fn = run_fn or subprocess.run
+    line = _log_line(now, "SEVERE", socket.gethostname(), status["worst_pct"],
+                     _esc.severe_detail(status, top, _human, TARGET_PCT))
     if not dry_run:
-        ref = _esc.stored_issue(state_path)
-        if _esc.still_open(run_fn, ref):   # owner plan A: one open ticket
-            _mark_severe_ticket_filed(state_path, now, ref)
-            return [_log_line(now, "SEVERE-TICKET", hostname, status["worst_pct"],
-                              "not re-filed, still open: %s" % ref)]
-    windows = _esc.own_windows() if windows is None else windows
-    repo, label = _esc.resolve_target(windows)
-    title, body = _esc.compose(status, hostname, top, _human, TARGET_PCT,
-                               window=_esc.infra_window(windows))
-    import airuleset as _ars
-    argv = None if label is not None else _esc.airuleset_filer_argv(
-        repo, title, body, os.path.dirname(os.path.abspath(_ars.__file__)),
-        sys.executable)   # gk-request, or (#1199) native `gh` on a project account
-    via = "gk-request" if argv is None or "gk-request" in argv else "gh issue create"
-    how = via if label is None else "%s [%s]" % (repo, label)
-    logs = []
-    line = _log_line(now, "SEVERE-TICKET", hostname, status["worst_pct"],
-                     "filing %s: %s" % (how, title))
-    logs.append(line)
-    _append_log(_log_path(home), [line])
-    if dry_run:
-        return logs
-    try:
-        if label is not None:
-            created, ref, errs = _esc.file_infra(run_fn, repo, label, title, body)
-            logs += [_log_line(now, "SEVERE-TICKET-FAIL", hostname,
-                               status["worst_pct"], e) for e in errs]
-            if created:   # the issue exists: a re-file would duplicate it
-                _mark_severe_ticket_filed(state_path, now, ref)
-            return logs
-        r = run_fn(argv, capture_output=True, text=True, timeout=60)
-        if getattr(r, "returncode", 1) != 0:
-            _dbg("severe ticket %s failed rc=%s: %s"
-                 % (via, getattr(r, "returncode", None),
-                    (getattr(r, "stderr", "") or "").strip()[:200]))
-            logs.append(_log_line(now, "SEVERE-TICKET-FAIL", hostname,
-                                 status["worst_pct"],
-                                 "%s failed: %s" % (
-                                     via, getattr(r, "stderr", "") or "")[:200]))
-        else:
-            # #895 F5 / #896-899: mark filed ONLY on success — a transient
-            # failure must not suppress the retry. In-memory FIRST (holds
-            # for the rest of this process even if the durable write below
-            # fails on a full disk), durable state second (best-effort).
-            _mark_severe_ticket_filed(
-                state_path, now, (getattr(r, "stdout", "") or "").strip() or None)
-    except Exception as e:
-        _dbg("severe ticket error: %r" % e)
-        logs.append(_log_line(now, "SEVERE-TICKET-FAIL", hostname,
-                             status["worst_pct"], "error: %r" % e))
-    return logs
+        _append_log(_log_path(home), [line])
+    return [line]
 
 
 # --------------------------------------------------------------------------- #
@@ -3660,7 +3535,7 @@ def root_guard_status_row(provisioned_fn=None):
 def run_disk_guard(now=None, home=None, dry_run=False, statvfs_fn=None, dev_fn=None,
                    geteuid_fn=None, mounts=None, min_drain_interval_s=None,
                    planners_fn=None, sudo_probe_fn=None, scratch_discover_fn=None,
-                   top_consumers_fn=None, severe_run_fn=None, box_class_fn=None,
+                   top_consumers_fn=None, box_class_fn=None,
                    quota_usage_fn=None, du_fn=None, clock_fn=None, budget_s=None):
     """Watchdog Job 40. Every poll: compute pressure + write the footer cache.
     Only at ≥80 % (and not as root, cadence-gated, single-instance): run the
@@ -3676,15 +3551,8 @@ def run_disk_guard(now=None, home=None, dry_run=False, statvfs_fn=None, dev_fn=N
     lines for the sweep's own log.
 
     ``top_consumers_fn`` (injectable, #896-899) feeds BOTH the escalation log
-    AND the severe-ticket body from the SAME computed list — the prior code
-    read `post.get("top_consumers")`, populated ONLY on the real
-    (``planners_fn is None``) path, so any test/caller injecting its own
-    ``planners_fn`` (every disk_guard test forcing ≥95 %) silently filed a
-    ticket body with "Top consumers:\\n(none)". ``severe_run_fn`` is the
-    injectable filer seam forwarded to :func:`file_severe_ticket` — a caller
-    (a test in particular) exercising the ≥95 % path MUST inject a recorder
-    here; leaving it unset reaches the REAL ``subprocess.run`` default, which
-    is exactly how the #896-899 duplicate tickets were filed. #1140: shared-
+    AND the SEVERE journal line from the SAME computed list (the real status
+    cache key is populated only on the ``planners_fn is None`` path). #1140: shared-
     stream QUOTA pressure is a second drain source — see ``disk_guard_quota``.
     #1067: every step is timed and the ladder honours a wall budget capped by
     the sweep's ``budget_s`` (``disk_guard_timing``; ``clock_fn`` injectable)."""
@@ -3901,7 +3769,7 @@ def run_disk_guard(now=None, home=None, dry_run=False, statvfs_fn=None, dev_fn=N
                 logs.append("disk-guard: empty-cwd-key rmdir error: %r" % e)
         # #925/#968 exhausted streak, #892 top consumers, #849/#895 escalation
         logs += _dgp.after_drain(status, home, now, dry_run, timer, planners_fn, scratch_rows,
-                                 statvfs_fn, dev_fn, mounts, top_consumers_fn, severe_run_fn)
+                                 statvfs_fn, dev_fn, mounts, top_consumers_fn)
         # #968: swap warning — report when /swapfile > 2x MemTotal
         if not dry_run:
             try:

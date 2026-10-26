@@ -70,8 +70,7 @@ def _run(tmp_path, *, box, fs, quota, planners, dry_run=False, now=10_000.0,
         geteuid_fn=lambda: euid, planners_fn=planners,
         box_class_fn=lambda: box, quota_usage_fn=quota,
         du_fn=du_fn or (lambda _paths: None),
-        sudo_probe_fn=lambda: False, scratch_discover_fn=lambda _n, _h: [],
-        severe_run_fn=lambda *a, **k: None)
+        sudo_probe_fn=lambda: False, scratch_discover_fn=lambda _n, _h: [])
 
 
 def _drift_now(base):

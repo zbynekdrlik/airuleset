@@ -429,8 +429,7 @@ def test_dry_run_poll_never_uses_the_cache(tmp_path, monkeypatch, dry_run):
         dev_fn=lambda _p: 1, geteuid_fn=lambda: 1000, planners_fn=None,
         box_class_fn=lambda: "shared-stream",
         quota_usage_fn=lambda: (9200, 10000), du_fn=lambda _paths: None,
-        sudo_probe_fn=lambda: False, scratch_discover_fn=lambda _n, _h: [],
-        severe_run_fn=lambda *a, **k: None)
+        sudo_probe_fn=lambda: False, scratch_discover_fn=lambda _n, _h: [])
     assert len(kws) == 2, kws
     assert all(kw.get("wt_cache") is (not dry_run) for kw in kws), kws
 

@@ -579,6 +579,7 @@ class TestMarkerPersistedBeforeRepoRoots_172(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="airuleset-f4-172-"))
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.addCleanup(wd.end_sweep_memo)   # a killed run_once leaves it active
         self.state_path = self.tmp / "state.json"
 
     def send(self, msg, owner=None, dedup_key=None, dry_run=False):
@@ -628,6 +629,7 @@ class TestDedupPersistedBeforeThePing_172(_RepoHealthStoreIsolated):
         super().setUp()
         self.tmp = Path(tempfile.mkdtemp(prefix="airuleset-f3-172-"))
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.addCleanup(wd.end_sweep_memo)   # a killed run_once leaves it active
         self.state_path = self.tmp / "state.json"
         self.sent = []
 
@@ -843,6 +845,7 @@ class TestIncrementalLogFlush172(_RepoHealthStoreIsolated):
         super().setUp()
         self.tmp = Path(tempfile.mkdtemp(prefix="airuleset-flush172-"))
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.addCleanup(wd.end_sweep_memo)   # a killed run_once leaves it active
         self.state_path = self.tmp / "state.json"
 
     def send(self, msg, owner=None, dedup_key=None, dry_run=False):

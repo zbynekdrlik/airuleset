@@ -28,27 +28,17 @@ ALLOWED = {
     "cross-cutting", "needs-user-decision", "user-request",
     # #1259 (owner 24.10.2026): `planned-work` is GONE -- one owner request =
     # one ticket; a plan step is a `- [ ]` checklist item in that ticket.
-    # #993 -- a REWORK verdict from the integration-time area-review gate files
-    # an architecture-rework ticket AUTONOMOUSLY (the supervisor, same turn); it
-    # must be able to file even on a non-draining repo, and it requires an
-    # `Area:` line (one open rework ticket per area) rather than an owner quote.
-    "architecture-rework",
+    # #1137: `architecture-rework` is gone too -- a REWORK finding goes on the
+    # current ticket, never an automatic cap-exempt filing.
 }
 
 
 # #329 -- these criteria skip the daily filing cap AND (#842) the net-drain
 # ratchet: an owner directive must always be able to file; a discovered
-# review-finding/cleanup must not. #993 -- architecture-rework joins them (a
-# mandated area-review verdict). #1259 -- user-request is still width-capped when
-# it names a parent and daily-capped when unattended (caps.cap_verdict); only
-# architecture-rework escapes every cap.
-EXEMPT_FROM_CAP = {"user-request", "architecture-rework"}
-
-
-# #993 -- the `Area:` line every architecture-rework body must carry (the
-# dedup-by-area discipline: one open rework ticket per area). A newline-anchored
-# match, same shape as CRITERION_RE / DEDUP_RE.
-AREA_RE = re.compile(r'(?m)^\s*Area:\s*(\S.*)$')
+# review-finding/cleanup must not. #1259 -- user-request is still width-capped
+# when it names a parent and daily-capped when unattended (caps.cap_verdict);
+# #1137 -- nothing escapes every cap any more.
+EXEMPT_FROM_CAP = {"user-request"}
 
 
 # #1027/#1033 -- a `Scope-gate: user-request` ticket filed FROM a client Odoo

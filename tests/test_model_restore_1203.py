@@ -1,8 +1,9 @@
 """#1203 — watchdog Job 54 `model_restore`: a pane whose transcript shows a Claude
 Code model FALLBACK gets `/model <MANAGED_MODEL>` typed through verified
 delivery (always-on `model-restore` recovery kind), one resume line once the
-switch is recorded, and ONE re-review ticket after the next reply is confirmed on
-the managed model. Every dependency is injected: no real pane, no real gh.
+switch is recorded, and ONE RESTORED journal line once the next reply is
+confirmed on the managed model (#1137: no ticket). Every dependency is
+injected: no real pane, no real gh.
 """
 import json
 import os
@@ -50,9 +51,7 @@ class Harness:
         self.ready_ok = True
         self.ready_calls = []
         self.typed = []
-        self.filed = []
         self.outcome = SendOutcome("submitted")
-        self.file_result = (True, "https://github.com/o/r/issues/7", "")
 
     def write(self, entries):
         with open(self.tpath, "w", encoding="utf-8") as fh:
@@ -72,16 +71,12 @@ class Harness:
         self.typed.append(text)
         return self.outcome
 
-    def file_ticket(self, rec, managed, now):
-        self.filed.append(dict(rec))
-        return self.file_result
-
     def sweep(self, state, now, dry_run=False, panes=None):
         return mr.restore_job(
             now, state, panes if panes is not None else [("%1", self.cwd)],
             managed=MANAGED, find_transcript=lambda cwd, ex=None: self.tpath,
             read_state=mf.tail_state, verdict=mf.verdict, short_name=mf.short_name,
-            ready=self.ready, deliver=self.deliver, file_ticket=self.file_ticket,
+            ready=self.ready, deliver=self.deliver,
             outcome_kind=idle_pane.outcome_kind, delivered=idle_pane.DELIVERED,
             typed_not_delivered=idle_pane.TYPED_NOT_DELIVERED, dry_run=dry_run,
             handled=set())
@@ -216,7 +211,7 @@ class ResumeConfirmAndTicket(unittest.TestCase):
 
 
 class ProofAndImplementer(unittest.TestCase):
-    """#1203 review: a ticket (and the word "fallback") needs a marker; the
+    """#1203 review: the word "fallback" needs a marker; the
     #1060 implementer window is never typed into; a not-typed resume keeps its
     slot."""
 
@@ -228,7 +223,7 @@ class ProofAndImplementer(unittest.TestCase):
             now, state, [("%1", self.h.cwd)], managed=MANAGED,
             find_transcript=lambda cwd, ex=None: self.h.tpath, read_state=mf.tail_state,
             verdict=mf.verdict, short_name=mf.short_name, ready=self.h.ready,
-            deliver=self.h.deliver, file_ticket=self.h.file_ticket,
+            deliver=self.h.deliver,
             outcome_kind=idle_pane.outcome_kind, delivered=idle_pane.DELIVERED,
             typed_not_delivered=idle_pane.TYPED_NOT_DELIVERED, handled=set(), **kw)
 
@@ -242,7 +237,6 @@ class ProofAndImplementer(unittest.TestCase):
         self.h.append([_model_cmd(), _assistant("claude-opus-5-5", uuid="n")])
         logs = self._sweep(state, NOW + 300)
         self.assertTrue(any("off-lineup" in ln for ln in logs), logs)
-        self.assertEqual(self.h.filed, [])
 
     def test_deep_marker_proves_an_old_fallback(self):
         self.h.write([_assistant("claude-opus-4-8", uuid="late")])
@@ -252,7 +246,6 @@ class ProofAndImplementer(unittest.TestCase):
         self._sweep(state, NOW, find_marker=lambda t, m=None: deep)
         rec = state["model_restore"]["sid1"]
         self.assertTrue(rec["proven"])
-        self.assertEqual(rec["episode"], "marker:old")
         self.assertEqual(rec["since"], "2026-09-28T14:51:50Z")
 
     def test_implementer_session_and_pane_are_never_touched(self):
@@ -285,6 +278,7 @@ class ProofAndImplementer(unittest.TestCase):
         self._sweep(state, NOW + 60 + 2 * mr.RESUME_GRACE_S)
         self.assertIsNotNone(state["model_restore"]["sid1"]["resumed_at"])
 
+
 class RoundTwo(unittest.TestCase):
     """#1203 review round 2."""
 
@@ -296,7 +290,7 @@ class RoundTwo(unittest.TestCase):
             now, state, panes or [("%1", self.h.cwd)], managed=MANAGED,
             find_transcript=lambda cwd, ex=None: self.h.tpath, read_state=mf.tail_state,
             verdict=mf.verdict, short_name=mf.short_name, ready=self.h.ready,
-            deliver=self.h.deliver, file_ticket=self.h.file_ticket,
+            deliver=self.h.deliver,
             outcome_kind=idle_pane.outcome_kind, delivered=idle_pane.DELIVERED,
             typed_not_delivered=idle_pane.TYPED_NOT_DELIVERED, handled=set(), **kw)
 
@@ -321,7 +315,6 @@ class RoundTwo(unittest.TestCase):
         self.h.write([{"type": "user", "message": {"content": "hi"}}])  # no reply in the tail
         logs = self._sweep(state, NOW + 300)
         self.assertIsNone(state["model_restore"]["sid1"]["restored_at"])
-        self.assertEqual(self.h.filed, [])
         self.assertFalse(any("RESTORED" in ln for ln in logs), logs)
 
     def test_a_restored_off_lineup_episode_is_done(self):

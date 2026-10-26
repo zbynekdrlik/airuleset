@@ -12,7 +12,7 @@ Covers the three surfaces of the Layer-3 subdev-OOM fix:
     unlimited→alert+dedup / limit→silence / unreadable→silence branches, and
     the dry_run no-write property.
 
-Every test injects fakes (cgroup_read / box_class_fn / gk_request_fn / a run
+Every test injects fakes (cgroup_read / box_class_fn / a run
 recorder) — no real ssh, no real cgroup, no real process is ever touched.
 """
 import os
@@ -288,8 +288,8 @@ class TestProvisionShared(unittest.TestCase):
 
 class TestResourceGuardVerify(unittest.TestCase):
     """The VERIFY-ONLY watchdog job: box-class gate, the unlimited→alert+dedup
-    / limit→silence / unreadable→silence branches, dry_run no-write, and the
-    deduped gk-request."""
+    / limit→silence / unreadable→silence branches, dry_run no-write (#1137: a
+    journal line only, no ticket)."""
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
@@ -303,7 +303,6 @@ class TestResourceGuardVerify(unittest.TestCase):
         logs = resource_guard_verify(
             uid=1234, cgroup_read=lambda uid: called.append(uid) or "max",
             box_class_fn=lambda: "workstation",
-            gk_request_fn=lambda uid: called.append(("gk", uid)),
             marker_path=self.marker, now=1000)
         self.assertEqual(logs, [])
         # never even read the cgroup off a shared-stream box.
@@ -314,87 +313,68 @@ class TestResourceGuardVerify(unittest.TestCase):
         logs = resource_guard_verify(
             uid=1234, cgroup_read=lambda uid: "max",
             box_class_fn=lambda: None,
-            gk_request_fn=lambda uid: None,
             marker_path=self.marker, now=1000)
         self.assertEqual(logs, [])
 
-    def test_unlimited_alerts_and_files_gk_request_once(self):
-        gk = []
+    def test_unlimited_alerts_once(self):
         logs = resource_guard_verify(
             uid=1234, cgroup_read=lambda uid: "max",
             box_class_fn=self._shared(),
-            gk_request_fn=lambda uid: gk.append(uid),
             marker_path=self.marker, now=1000)
         self.assertTrue(logs)
         self.assertIn("UNLIMITED", logs[0])
-        self.assertEqual(gk, [1234])            # gk-request filed exactly once
         self.assertTrue(os.path.exists(self.marker))  # dedup marker written
 
     def test_dedup_marker_suppresses_a_second_alert(self):
-        gk = []
         common = dict(uid=1234, cgroup_read=lambda uid: "max",
                       box_class_fn=self._shared(),
-                      gk_request_fn=lambda uid: gk.append(uid),
                       marker_path=self.marker)
         resource_guard_verify(now=1000, **common)
-        # a second call within the dedup window is silent + files nothing more.
+        # a second call within the dedup window is silent.
         logs2 = resource_guard_verify(now=1000 + DEDUP_INTERVAL_S - 10, **common)
         self.assertEqual(logs2, [])
-        self.assertEqual(gk, [1234])            # still only one gk-request
         # past the window it re-alerts.
         logs3 = resource_guard_verify(now=1000 + DEDUP_INTERVAL_S + 10, **common)
         self.assertTrue(logs3)
-        self.assertEqual(gk, [1234, 1234])
 
     def test_finite_limit_is_silence(self):
-        gk = []
         logs = resource_guard_verify(
             uid=1234, cgroup_read=lambda uid: "2800000000",
             box_class_fn=self._shared(),
-            gk_request_fn=lambda uid: gk.append(uid),
             marker_path=self.marker, now=1000)
         self.assertEqual(logs, [])
-        self.assertEqual(gk, [])
         self.assertFalse(os.path.exists(self.marker))
 
     def test_unreadable_cgroup_is_silence(self):
-        gk = []
         logs = resource_guard_verify(
             uid=1234, cgroup_read=lambda uid: None,
             box_class_fn=self._shared(),
-            gk_request_fn=lambda uid: gk.append(uid),
             marker_path=self.marker, now=1000)
         self.assertEqual(logs, [])
-        self.assertEqual(gk, [])
 
     def test_cgroup_read_raising_is_silence(self):
         def boom(uid):
             raise OSError("no such file")
         logs = resource_guard_verify(
             uid=1234, cgroup_read=boom, box_class_fn=self._shared(),
-            gk_request_fn=lambda uid: None, marker_path=self.marker, now=1000)
+            marker_path=self.marker, now=1000)
         self.assertEqual(logs, [])
 
-    def test_dry_run_writes_and_files_nothing(self):
-        gk = []
+    def test_dry_run_writes_nothing(self):
         logs = resource_guard_verify(
             uid=1234, cgroup_read=lambda uid: "max",
             box_class_fn=self._shared(),
-            gk_request_fn=lambda uid: gk.append(uid),
             marker_path=self.marker, now=1000, dry_run=True)
         self.assertTrue(logs)                   # reports what it WOULD do
-        self.assertEqual(gk, [])                # but files nothing
         self.assertFalse(os.path.exists(self.marker))   # and writes no marker
 
-class TestRunOnceWiring(unittest.TestCase):
-    """The job is registered in run_once and gated on its wired seam."""
 
-    def test_job_runs_only_when_seam_wired(self):
-        # A run_once with NO resource_guard_gk_request seam must not run the
-        # job (the "wired = on" convention). We force a marker-less HOME so the
-        # box-class gate would fail-open anyway, and assert no crash + the job
-        # is absent from the label set when unwired.
+class TestRunOnceWiring(unittest.TestCase):
+    """The job is registered in run_once behind `resource_guard_enabled`."""
+
+    def test_job_is_registered(self):
         self.assertTrue(hasattr(wd, "resource_guard_verify"))
+
 
 class TestRsyslogQuiet925C(unittest.TestCase):
     """#925-C: rsyslog quiet rule renders correctly and is in the guard set."""

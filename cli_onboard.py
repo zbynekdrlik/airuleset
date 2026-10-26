@@ -51,13 +51,12 @@ GITIGNORE_BY_STACK = {
     "python": [],
 }
 
-ONBOARD_TICKET_TITLE = "onboarding: projekt pod správou airuleset"
 FOUNDATION_CI_TITLE = "foundation: pridať CI pipeline"
 FOUNDATION_VERSION_TITLE = "foundation: version label na dashboarde"
 
 STEP_ORDER = [
     "git_init", "gitignore", "claude_md", "remote", "branches",
-    "foundation_tickets", "notification_ticket", "git_identity", "registry",
+    "foundation_tickets", "git_identity", "registry",
 ]
 
 
@@ -408,21 +407,6 @@ def _file_issue(name, title, body, run=None):
                 "--body", body], run=run)
 
 
-def _onboard_ticket_body(name):
-    return (
-        "Projekt **%s** je odteraz pod správou airuleset (jednotný "
-        "onboarding, `airuleset.py onboard-project`).\n\n"
-        "Čo to znamená: platia globálne pravidlá (two-branch/three-branch "
-        "workflow, auto-merge default alebo `airuleset:merge=manual` marker, "
-        "TDD/regresné testy, post-deploy verifikácia, Playbook router). "
-        ".gitignore hygiena a CLAUDE.md skeleton boli doplnené len ak "
-        "chýbali; existujúce súbory sa neprepisovali.\n\n"
-        "Zápis v machine-readable registry: `projects-registry.json` v repe "
-        "airuleset.\n\n"
-        "Scope-gate: user-request"
-    ) % name
-
-
 def _foundation_ci_body(name):
     return (
         "Projekt **%s** nemá CI pipeline (`.github/workflows/`). Doplniť "
@@ -638,18 +622,6 @@ def _has_ci(path, host=None, run=None):
     return bool((r.stdout or "").strip())
 
 
-def step_notification_ticket(path, name, host=None, run=None, dry_run=False):
-    if _issue_exists(name, ONBOARD_TICKET_TITLE, run=run):
-        return _step("notification_ticket", "satisfied",
-                     "onboarding ticket already present")
-    if dry_run:
-        return _step("notification_ticket", "would-apply",
-                     "would file onboarding notification ticket")
-    _file_issue(name, ONBOARD_TICKET_TITLE, _onboard_ticket_body(name), run=run)
-    return _step("notification_ticket", "applied",
-                 "filed onboarding notification ticket")
-
-
 def _registry_is_tracked(registry_path):
     """#946 fix-forward: the drift incident is a GIT-TRACKED registry mutated
     on a deploy target. Only a tracked file can drift against the SoT push, so
@@ -838,7 +810,6 @@ def onboard_project(path, host=None, name=None, overrides=None,
         step_branches(target_path, eff_overrides, host, run, dry_run),
         step_foundation_tickets(target_path, name, host, run, dry_run,
                                 stack=stack),
-        step_notification_ticket(target_path, name, host, run, dry_run),
         cli_git_identity.onboard_step(target_path, host, run, dry_run),
     ]
     entry = build_registry_entry(orig_path, target_path, host, name,

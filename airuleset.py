@@ -6786,36 +6786,6 @@ def _watchdog_reaper_kill_fn(pid):
     return default_kill_fn(pid)
 
 
-def _watchdog_resource_guard_gk_request(uid):
-    """Job 39's real gk-request side-effect (#775) — file (deduped by the job's
-    own marker) a `needs-gatekeeper` hand-off onto this feature's tracking
-    ticket saying subdev still runs WITHOUT resource guardrails. Wired here (not
-    inside run_once) so every OTHER job's run_once unit test stays network-free,
-    exactly like the reaper/u-reconcile seams. Best-effort: any error is
-    swallowed (the job logs its own gk-request-error line if this raises)."""
-    import subprocess
-    from watchdog.resource_guard import TRACKING_ISSUE, TRACKING_REPO
-    body = (
-        "GATEKEEPER-ACTION: subdev beží BEZ #775 resource guardrails — "
-        "user-%s.slice memory.max=max (UNLIMITED). Watchdog Job 39 "
-        "(resource_guard_verify) to zistil z vlastného cgroupu. Treba "
-        "autorizovať operátorský root@subdev key a spustiť `airuleset.py push` "
-        "(guard krok ich aplikuje). Self-service-checked: watchdog číta VLASTNÝ "
-        "cgroup memory.max bez rootu; aplikácia guardov vyžaduje root@subdev, "
-        "čo stream nemá — preto gk." % uid)
-    r = subprocess.run(
-        [sys.executable, os.path.join(str(REPO_DIR), "airuleset.py"),
-         "gk-request", "--issue", str(TRACKING_ISSUE), "--repo", TRACKING_REPO,
-         "--comment", body],
-        capture_output=True, text=True, timeout=60)
-    # #775 review F2: a non-zero gk-request (gh auth/network error on the
-    # sub-dev stream account — the likely state) is otherwise invisible; RAISE
-    # so resource_guard_verify logs its own "gk-request error" journal line.
-    if r.returncode != 0:
-        raise RuntimeError("gk-request rc=%s: %s"
-                           % (r.returncode, (r.stderr or "").strip()[:200]))
-
-
 def _watchdog_u_reconcile_clear(cwd, num):
     """Job 32's real gh side-effect (#515) — remove needs-answer/needs-decision
     from open ticket #`num` in the repo at `cwd`. Wired here (not inside
@@ -8266,11 +8236,9 @@ def cmd_watchdog(args):
                     reaper_ps_fetch=_watchdog_reaper_ps_fetch,
                     reaper_kill_fn=_watchdog_reaper_kill_fn,
                     # Job 39 (#775) — VERIFY-ONLY shared-stream resource-guard
-                    # check. The gk-request is a wired seam so a run_once unit
-                    # test injects a recorder, never a real gh side-effect; the
-                    # box-class + cgroup gates live INSIDE the job (off a
-                    # shared-stream box it reads nothing, alarms nothing).
-                    resource_guard_gk_request=_watchdog_resource_guard_gk_request,
+                    # check, a journal line only (#1137); the box-class + cgroup
+                    # gates live INSIDE the job.
+                    resource_guard_enabled=True,
                     # Job 40 (#834) — PER-BOX DISK-PRESSURE GUARD. Enabled on
                     # EVERY real poll (it reads `statvfs` itself + acts only on
                     # this user's own home); left False in run_once unit tests so

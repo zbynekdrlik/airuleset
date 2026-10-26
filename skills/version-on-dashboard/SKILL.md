@@ -44,17 +44,9 @@ After every deploy, the agent MUST:
 
 The completion-report `✅ Výstup:` line must include the version that's visible on the dashboard, e.g. `✅ Výstup: dev frontend shows v1.0.97-dev.9 (matches backend)` — deploy evidence merges into Výstup (#940).
 
-#### Foundation gate — file an issue if the project has no version display
+#### Foundation gate — a missing version display comes first
 
-If you start work on a web project and the dashboard does NOT have a version display, this is a foundation gap. **File it as the FIRST issue, before any feature work**:
-
-```bash
-gh issue create \
-  --title "Add version display to dashboard (per version-on-dashboard.md)" \
-  --body "The dashboard has no visible version label. Without it, post-deploy verification cannot confirm new code is live, frontend/backend drift becomes invisible, and production debugging loses an essential signal. Add v<semver> to footer or navbar, build-time injected from git describe, matching the deployed binary. Add a Playwright test asserting the label format. See ~/devel/airuleset/modules/quality/version-on-dashboard.md."
-```
-
-The `/issue-planner` skill checks for this on every web project — if missing, it blocks issue selection until the foundation issue is filed. See `issue-planner` skill, Step 1d.
+If you start work on a web project and the dashboard does NOT have a version display, this is a foundation gap that comes before any feature work. Onboarding files its ticket (`airuleset.py onboard-project`: `foundation: version label na dashboarde`); a session never files another one (#1137) — it adds the label (v<semver> in footer or navbar, build-time injected from git describe, plus the Playwright test below) or records the gap on the current ticket. The owner-run `/issue-planner` checks it too (Step 1d).
 
 #### E2E test required
 
@@ -75,7 +67,7 @@ If the version label moves, gets broken, or stops matching the backend, this tes
 
 #### Anti-patterns
 
-- "We'll add the version label after this feature ships" → **WRONG.** It's a foundation, not a feature. File the foundation issue first.
+- "We'll add the version label after this feature ships" → **WRONG.** It's a foundation, not a feature. Add it first.
 - Hardcoded `0.1.0` placeholder shipped to prod → **WRONG.** Build-time injection only.
 - Version label only on `/about` page → **WRONG.** Every route, no scrolling needed.
 - Frontend version label sourced separately from backend version → **WRONG.** Single git-tag source.

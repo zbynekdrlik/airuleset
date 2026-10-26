@@ -93,7 +93,7 @@ If `/skill-doctor` is unavailable (CC < v2.1.252), skip this step with a logged 
 
 ## Step 5c — SLIMMING PASS (mandatory, #908)
 
-**This step is MANDATORY on every /mdreview run. A model-generation trigger (Job 43 `reason=model-generation`) makes it NON-SKIPPABLE; a 30d cadence run also runs it but may produce zero candidates if the set is already minimal.**
+**This step is MANDATORY on every /mdreview run. A model-generation change (MODEL_TIERS changed since the last pass) makes it NON-SKIPPABLE; any other run also runs it but may produce zero candidates if the set is already minimal.**
 
 Read the artifact's per-box `slimming` section (`boxes[].slimming`, added by `mdreview-audit` since #908). It carries:
 - **`candidates`** — modules/rules flagged as slimming-eligible, each with `category`, `reason`, and `verdict_hint`
@@ -142,7 +142,7 @@ Read the delta lines (and the full snapshot for context). Decide per item, and R
 | **fold** | `MANAGED-DUPLICATE` — the airuleset module/skill owns it; the project drops its copy |
 | **remove** | A contradiction of a managed module |
 
-**The pinned mdreview ticket is kept OPEN permanently (owner escalation 2026-09-18) — never close it after this pass.** The cadence reopen stays as the safety net.
+**The mdreview tracking ticket is kept OPEN permanently (owner escalation 2026-09-18) — never close it after this pass.** Job 43 posts its daily delta only while it is open and never reopens it (#1137).
 
 ## Step 6 — Live web research (AXIS 1–3, extends the artifact)
 
@@ -168,6 +168,6 @@ Every proposed change carries a source URL; no URL = no change.
 - Model generation is read from Environment ONCE — never hardcoded.
 - MCP/connector changes are for the OWNING project to apply.
 - Never apply silently; always validate before push.
-- **Re-audit trigger:** after every Claude Code release + the watchdog's 30d/model-generation cadence.
-- **Slimming pass is MANDATORY** (#908, owner directive): every run produces the slimming output (Step 5c). A model-generation trigger (Job 43) makes the pass non-skippable. A run that slimmed nothing must say WHY with evidence.
+- **Re-audit trigger:** after every Claude Code release and every model-generation change.
+- **Slimming pass is MANDATORY** (#908, owner directive): every run produces the slimming output (Step 5c). A model-generation change makes the pass non-skippable. A run that slimmed nothing must say WHY with evidence.
 - **Measurability:** context-baseline bytes BEFORE/AFTER in every audit log. The #857 down-only ceiling is the target; a run that raises it is a finding.

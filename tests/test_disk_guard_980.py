@@ -216,7 +216,6 @@ class TestDrainExhaustedReasons:
             return [{"cls": "runner-superseded", "path": "/fake", "bytes": 500_000_000,
                      "kind": "skip", "reason": "SKIP-UNPRIVILEGED runner-superseded"}]
 
-        severe_calls = []
         dg.run_disk_guard(
             now=1000.0, home=str(tmp_path), dry_run=False,
             statvfs_fn=lambda _m: types.SimpleNamespace(
@@ -227,7 +226,6 @@ class TestDrainExhaustedReasons:
             planners_fn=lambda _h, _n: [
                 ("runner-superseded", _skipping_planner),
             ],
-            severe_run_fn=lambda *a, **kw: severe_calls.append(a),
             top_consumers_fn=lambda *a, **kw: [],
         )
         cache = json.loads((tmp_path / ".claude" / "disk-guard" / "status.json").read_text())

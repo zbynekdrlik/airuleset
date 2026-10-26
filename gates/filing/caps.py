@@ -35,10 +35,6 @@ DAILY_CAP = 2
 
 # #1259: 2 -> 1 -- a 2nd finding off one ticket goes ON that ticket.
 CHAIN_WIDTH_CAP = 1
-# #1259 review: only a mechanical area-review verdict escapes the width cap and an
-# unattended session's daily cap; `user-request` naming a parent, or filed while the
-# owner is away, is counted and capped like any other filing.
-UNCAPPED_ALWAYS = frozenset({"architecture-rework"})
 
 
 def _gh_view_text(parent, cwd, repo=None):
@@ -171,8 +167,8 @@ def _log_pass_count(path, repo, today, parent=None, exempt=None):
     "parents=999" could shift the extracted value).
 
     `exempt` (#1259): the criteria NOT counted; default EXEMPT_FROM_CAP. The
-    width count and an unattended session's daily count pass the narrower
-    UNCAPPED_ALWAYS, so `user-request` children / away filings count too."""
+    width count and an unattended session's daily count pass an empty set, so
+    `user-request` children / away filings count too."""
     count = 0
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as fh:
@@ -203,23 +199,22 @@ def cap_verdict(log_path, repo, today, crit_l, parents, unattended,
                 local_day, local_parent):
     """#329/#1259: `(reason, width_capped, daily_capped)`; reason is
     "chain-width-cap", "daily-cap" or None. A child naming a parent is
-    width-capped whatever its criterion (only UNCAPPED_ALWAYS escapes), and an
+    width-capped whatever its criterion (#1137: nothing escapes), and an
     unattended `user-request` is daily-capped -- else it is the new split door.
     The two flags tell the caller which in-batch counters a PASS bumps."""
-    width_capped = crit_l not in UNCAPPED_ALWAYS
+    width_capped = True
     daily_capped = (crit_l not in EXEMPT_FROM_CAP
                     or (unattended and crit_l == "user-request"))
-    if width_capped:
-        for p in parents:
-            n = (_log_pass_count(log_path, repo, today, parent=p, exempt=UNCAPPED_ALWAYS)
-                 + local_parent.get((repo, p), 0))
-            if n >= CHAIN_WIDTH_CAP:
-                return "chain-width-cap", width_capped, daily_capped
+    for p in parents:
+        n = (_log_pass_count(log_path, repo, today, parent=p, exempt=frozenset())
+             + local_parent.get((repo, p), 0))
+        if n >= CHAIN_WIDTH_CAP:
+            return "chain-width-cap", width_capped, daily_capped
     if daily_capped:
         # only an away user-request counts the day's user-request filings too
         away_ask = unattended and crit_l == "user-request"
         n = (_log_pass_count(log_path, repo, today,
-                             exempt=UNCAPPED_ALWAYS if away_ask else None)
+                             exempt=frozenset() if away_ask else None)
              + local_day.get(repo, 0))
         if n >= DAILY_CAP:
             return "daily-cap", width_capped, daily_capped

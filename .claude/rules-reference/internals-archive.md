@@ -2551,3 +2551,23 @@ Lessons reusable for any future per-box aggregation over these caches:
 - **#1107 -- extracting a leaf that KEEPS a shared seam in the parent = BOTTOM-placed cross-imports on BOTH sides (mutual cli<->cli cycle-break).** Leaf `classify_lanes` calls `_lane_files`/`_run_default` (kept in `cli_lane_overlap`) by BARE name; overlap re-exports the leaf's 4 public names. A TOP-level mutual import deadlocks either order -- put BOTH `from ... import` at MODULE BOTTOM (after every def); lock with a two-order fresh-`subprocess` import test. Verbatim proof (#482): PIN the pre-move SHA (`merge-base HEAD main` drifts post-merge) for the `git show`-vs-`inspect.getsource(fn).splitlines()` reconstruction assert.
 <!-- Moved from internals-watchdog.md at the #1261 cap, 2026-10-25 -->
 - **#1067 slice 1 — a subprocess the watchdog wraps in a timeout must be CHEAPER than that timeout, and a timeout must never be cached as a short-lived failure.** The job-20 ops-wait fetch (`_watchdog_ops_wait_fetch`, `timeout=35`) shelled out to `slice-quals --ops-wait`, which ran one `gh issue view <n> --json comments` per W member: 74 members on the montalu stream took 102 s. It ALWAYS timed out, the None was cached for only 60 s, and every sweep of all 8 montalu accounts burned 35 s (the dominant part of ~300 CPU-s/h per account, and the cause of Job 51's `hold:budget`). Job 20 silently logged `skip:undetermined` for weeks. Fix: (a) ONE batched `gh issue list --search <member qual> --json number,comments` prefetch feeds the existing `ages_fn` seam, with the per-issue view as the fallback; (b) a TIMEOUT sentinel backs the cache off geometrically up to the full TTL. **gh gotcha:** `gh issue list --json comments` TRUNCATES each issue's nested comments at 100, while `gh issue view --json comments` paginates fully (airuleset #870: list=100, view=136). Any batched read that feeds a newest-comment/freshness computation must exclude rows with >=100 comments and fall back to the per-issue view, or it computes a wrong anchor (a false `stale!`). Diagnose a slow sweep with `cProfile` over `watchdog --once --dry-run` on the live account: the `job start … at Ns` deltas name the job, and cumulative time in `subprocess.run` separates a child wait from in-process CPU.
+
+### Moved from internals-accounts.md at the #1137 self-filing removal (2026-10-26)
+
+- From the #1199 bullet: Job 40's severe-ticket filer uses `disk_guard_escalation.airuleset_filer_argv`, which files natively on a project account instead of gk-request.
+- From the #1201 bullet (3): It has NO bypass marker (the owner's hard stop) and points at `gh issue create -R zbynekdrlik/airuleset`.
+
+### Moved from internals-gates.md at the #1137 self-filing removal (2026-10-26)
+
+- From the #1203 bullet: Job 54 never touches a non-Claude model, and files its re-review ticket with the pane's native `gh` in the pane cwd (fakes in tests).
+- From the #1203 bullet (1): so the word "fallback" and any ticket need a marker STILL IN FORCE (no later reply on another model; `find_marker(stop_model=managed)` stops at a later managed reply), else it is OFF-LINEUP: restore, journal, no ticket.
+- From the #1203 bullet: (3) watchdog state that gates a gh WRITE is written through into `state` as it changes, and the write first searches for its own episode id: a killed sweep must not file twice.
+- From the #1258/#1259 bullet: an unattended `user-request` is daily-capped (`_log_pass_count(exempt=UNCAPPED_ALWAYS)`); only `architecture-rework` escapes.
+
+### Moved from internals-hooks.md at the #1137 self-filing removal (2026-10-26)
+
+- From the #993/#992 bullet: (2) `block-ungated-issue-filing.sh` adds `architecture-rework` to `ALLOWED`+`EXEMPT_FROM_CAP` (caps/net-drain exempt like user-request) but SKIPS the presence + dismissal-word gates (a mechanical verdict, not owner-asked) and REQUIRES an `Area:` line (`AREA_RE`).
+
+### Moved from internals-tests.md at the #1137 self-filing removal (2026-10-26)
+
+- **#1136 — widening a side-effect trigger turns OLD tests that drive the new band into REAL side effects; a raise-based negative lock is swallowed by the code's own `except Exception`.** The disk filer's new exhausted>=90% trigger made 5 old `run_disk_guard` tests at a synthetic 92% with no `severe_run_fn` reach the real `gk-request`: 8 real tickets (#1144-#1151, closed), and a fresh tmp home per test defeats every dedupe. Before widening a trigger, grep the tests that drive the new band (`statvfs_map({"/": (9`, `_statvfs(9`) and inject the recorder. Negative locks RECORD the call and fail at teardown, never raise inside it; the filer itself refuses its default `run_fn` under `PYTEST_CURRENT_TEST`.

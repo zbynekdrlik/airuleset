@@ -5,7 +5,6 @@ Tests cover:
   1. classify_fleet_host() — paused, webterm-only, webterm-observer, active
   2. run_fleet() uses identity field in SSH command
   3. run_fleet() populates a 'skipped' key in the result
-  4. act_on_due() renders skipped hosts as SKIPPED, not FAILED
 """
 
 import json
@@ -198,38 +197,6 @@ class TestFleetSkipped(unittest.TestCase):
             result = run_fleet(fleet_runner=fake_runner)
         skipped_names = [s["host"] for s in result.get("skipped", [])]
         self.assertNotIn("dev2", skipped_names)
-
-
-# ---------------------------------------------------------------------------
-# act_on_due renders skipped as SKIPPED, not FAILED
-# ---------------------------------------------------------------------------
-
-class TestActOnDueSkipped(unittest.TestCase):
-    """The reopen comment must render skipped hosts as SKIPPED, not FAILED."""
-
-    def test_skipped_rendered_separately(self):
-        from watchdog.mdreview_cadence import act_on_due
-        calls = []
-        def fake_gh(argv):
-            calls.append(argv)
-            return "", 0
-        audit_data = {
-            "schema": 1, "date": "2026-09-06",
-            "boxes": [],
-            "failed": [{"host": "real-fail", "error": "rc=1"}],
-            "skipped": [
-                {"host": "marek@subdev", "reason": "webterm-observer (#867)"},
-            ],
-        }
-        act_on_due(999, "30d", audit_data, gh_runner=fake_gh)
-        # Find the comment body
-        comment_calls = [c for c in calls if "comment" in str(c)]
-        self.assertGreater(len(comment_calls), 0,
-                           "act_on_due must post a comment")
-        body = " ".join(str(x) for x in comment_calls[0])
-        self.assertIn("SKIPPED", body,
-                      f"comment must mention SKIPPED: {body}")
-        self.assertIn("marek@subdev", body)
 
 
 if __name__ == "__main__":

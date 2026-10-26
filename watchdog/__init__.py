@@ -2592,7 +2592,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
              gkorphan_fetch=None, gkorphan_handoff_fetch=None,
              release_state_fetch=None, queue_fetch=None, queue_classify=None,
              reaper_ps_fetch=None, reaper_kill_fn=None,
-             resource_guard_gk_request=None,
+             resource_guard_enabled=False,
              u_fetch=None, disk_guard_enabled=False,
              nice_check_enabled=False,
              mdreview_cadence_enabled=False,
@@ -3259,7 +3259,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
           launch on a shared-stream box; this reaper (Layer 2) cleans up
           anything already running. See `heavy_build_reaper` in
           `watchdog/reaper.py`.
-      (39) (only when `resource_guard_gk_request` is given) SHARED-STREAM
+      (39) (only when `resource_guard_enabled`) SHARED-STREAM
           RESOURCE-GUARD VERIFY (#775), SHARED-STREAM BOX ONLY — VERIFY-ONLY,
           no killer logic (#486). Layer 3 of the subdev-OOM fix: #776 (ugrep)
           and #778 (heavy-build) reap two known runaway signatures; this checks
@@ -3268,10 +3268,10 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
           it is not. Only on a `shared-stream` box, it reads this account's OWN
           cgroup `memory.max` (`/sys/fs/cgroup/user.slice/user-<uid>.slice/`,
           world-readable — no root); a definitively UNLIMITED (`max`) ceiling
-          means the box runs without guardrails → one LOUD journal line + one
-          deduped gk-request per ~day (marker-file throttle). FAIL-SAFE toward
+          means the box runs without guardrails → one LOUD journal line per
+          ~day (marker-file throttle; #1137: no ticket). FAIL-SAFE toward
           SILENCE (#539): off a shared-stream box, an unreadable/missing cgroup,
-          or a finite ceiling → NOTHING; `dry_run` files nothing. Machine
+          or a finite ceiling → NOTHING; `dry_run` writes nothing. Machine
           channel only, never a Discord ping (#546). See `resource_guard_verify`
           in `watchdog/resource_guard.py`.
       (40) PER-BOX DISK-PRESSURE GUARD (#834, hardened #854), gated on
@@ -3324,9 +3324,9 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
           mdreview-audit --fleet and posts the DAILY target-governance delta
           (#874: what each target adds to its OWN .claude/ — commands/skills/
           hooks/rules/imports with provenance + a name classifier) on the
-          pinned ticket, journal-only when nothing changed. When ALSO due (30d
-          since pinned-ticket CLOSE or MODEL_TIERS hash change) it REOPENs the
-          ticket + posts a summary, reusing the same audit. Imports NO notify.
+          tracking ticket while it is OPEN, journal-only when nothing changed.
+          A missing or closed ticket is a journal line: it never creates or
+          reopens one (#1137). Imports NO notify.
           `watchdog/mdreview_cadence.py`'s docstring is the SSOT.
       (44) PRIORITY POLICY ENFORCER (#885), gated on
           `priority_policy_enabled` (True in cmd_watchdog, left False in
@@ -3475,7 +3475,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
           each ~15 min; the rest in `status` + a `checkout-lag` notice to the stream's own pane. `checkout_freshness.py` SSOT.
       (54) MODEL RESTORE (#1203) — `model_restore_enabled`, not on a paused box: a pane on a Claude Code model
           FALLBACK gets `/model <MANAGED_MODEL>` (always-on `model-restore` kind), one resume line, and ONE
-          re-review ticket in its repo after the confirmed restore. `model_restore.run_job` SSOT.
+          RESTORED journal line naming the fallback window (#1137: no ticket). `model_restore.run_job` SSOT.
 
     PAUSED BOX (#851/#1032): when `box_paused` is True — the box's OWN fleet entry
     carries `paused` (a stream the owner froze), resolved once in `cmd_watchdog`
@@ -5536,16 +5536,14 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
          "heavy-build-reaper error", min_budget=_BUDGET_MIN_PS_REAPER_S)
 
     # Job 39 (#775) — VERIFY-ONLY shared-stream resource-guard check. Gated on
-    # `resource_guard_gk_request` being wired (the "wired = on" convention,
-    # network-free tests for every other job, like jobs 8/11/31/36/37/38). The
-    # box-class gate lives INSIDE resource_guard_verify (off a shared-stream box
-    # it reads no cgroup and never alarms). NO killer logic (#486) — it reads
-    # this account's own cgroup memory ceiling and, if UNLIMITED, files ONE
-    # deduped gk-request (via the wired seam) + a LOUD journal line. Fail-safe
-    # toward silence (#539); machine-channel only, never a Discord ping (#546).
-    _add("resource_guard_verify", lambda: resource_guard_gk_request is not None,
-         lambda: resource_guard_verify(
-             gk_request_fn=resource_guard_gk_request, dry_run=dry_run),
+    # `resource_guard_enabled` (True in cmd_watchdog, left False in unit tests).
+    # The box-class gate lives INSIDE resource_guard_verify (off a shared-stream
+    # box it reads no cgroup and never alarms). NO killer logic (#486) — it
+    # reads this account's own cgroup memory ceiling and, if UNLIMITED, writes
+    # ONE deduped LOUD journal line (#1137: no ticket). Fail-safe toward silence
+    # (#539); machine-channel only, never a Discord ping (#546).
+    _add("resource_guard_verify", lambda: resource_guard_enabled,
+         lambda: resource_guard_verify(dry_run=dry_run),
          "resource-guard-verify error", min_budget=_BUDGET_MIN_GH_FETCH_S)
 
     # Job 40 (#834) — PER-BOX DISK-PRESSURE GUARD. Gated on `disk_guard_enabled`
@@ -5596,8 +5594,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
 
     # Job 43 (#858, #874) — MDREVIEW CADENCE. Dev1-gated, daily TTL, imports NO
     # notify. Each daily fire runs ONE mdreview-audit → posts the daily
-    # target-governance delta (#874) on the pinned ticket, and REOPENs it when
-    # also due. Uses its OWN durable state file (env seam
+    # target-governance delta (#874) on the tracking ticket while it is OPEN;
+    # never creates or reopens one (#1137). Uses its OWN durable state file (env seam
     # AIRULESET_MDREVIEW_STATE_PATH), never run_once's state_path — #858
     # re-review state-file aliasing fix.
     _add("mdreview_cadence", lambda: mdreview_cadence_enabled,

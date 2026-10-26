@@ -275,10 +275,9 @@ airuleset installs per box (ruff, rustup with rustfmt/clippy under /opt/rust,
 Playwright browsers in /opt/ms-playwright); a per-account copy is how fohmixer
 filled ~2 GB of a nearly full disk (owner, 30.9.2026).
 
-nástroj pridá airuleset — založ tiket:
-  gh issue create -R zbynekdrlik/airuleset --title "project account {user}: add <tool>" --body-file <file>
-(name the tool + version; it lands in SERVICE_ACCOUNTS["{user}"]["tools"] and
-the next root bootstrap installs it system-wide).
+nástroj pridá airuleset: it is declared in SERVICE_ACCOUNTS["{user}"]["tools"]
+(tool + version) and the next root bootstrap installs it system-wide. Ask the
+owner for it (one question naming the tool + version), never a per-account copy.
 
 Allowed: a project venv INSIDE the repo for the project's own tests
 (.venv/bin/pip install -r …), a local `npm install`, `npx playwright test`.

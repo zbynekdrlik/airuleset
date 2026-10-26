@@ -213,7 +213,6 @@ class TestDiskGuardPassesTheLevel(unittest.TestCase):
                 dev_fn=lambda _p: 1, geteuid_fn=lambda: 1000,
                 box_class_fn=lambda: "workstation",
                 scratch_discover_fn=lambda *_a: [],
-                severe_run_fn=lambda *a, **kw: None,
                 top_consumers_fn=lambda *a, **kw: [])
         return seen
 

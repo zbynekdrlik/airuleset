@@ -28,13 +28,9 @@ If ANY of these are not true, you are NOT done. Keep working.
 
 **Intent, not wording.** The examples above are representative. ANY phrase that shifts incomplete work to a later time, a different session, or a new issue — under any wording — is banned. If you're about to say something that means "I'll do this later," STOP and do it now.
 
-**If you discover something genuinely out of scope** (not in the plan, not in the original prompt, but important), create a GitHub issue for it BEFORE sending the completion report:
-```bash
-gh issue create --title "TODO: <description>" --body "<context and why it matters>"
-```
-This is the ONLY acceptable way to "postpone" work — by creating a tracked issue.
+**If you discover something genuinely out of scope** (not in the plan, not in the original prompt, but important), record it on the CURRENT ticket (a `- [ ]` item or comment) BEFORE sending the completion report — the ONLY acceptable way to "postpone" work (#1259: a new issue only when the owner asks, or for a separate defect outside the request).
 
-**CRITICAL — deferral phrases MUST cite the issue number:**
+**CRITICAL — deferral phrases MUST cite the ticket number:**
 
 If the completion report contains ANY of these deferral patterns (or rewordings):
 - "X is deferred"
@@ -46,19 +42,19 @@ If the completion report contains ANY of these deferral patterns (or rewordings)
 - "this PR doesn't fix Y"
 - "the actual root-cause for X is not yet fixed"
 
-…then the SAME paragraph MUST include the filed issue reference in the format `#N` with a title (per completion-report.md). NO `#N` reference = the issue was never filed = the deferred work is now permanently lost. The hook will block the completion report.
+…then the SAME paragraph MUST cite the `#N` (with its title, per completion-report.md) that records the work. NO `#N` = never recorded = the deferred work is now permanently lost. The hook will block the completion report.
 
 **Banned pattern (the "ghost deferral"):**
 
 > "The actual root-cause fix for X is deferred — you'll see the real value once Y happens."
 
-NO ISSUE NUMBER → the work has been declared incomplete with NO tracking. This is the failure mode the rule exists to prevent. NEVER write a deferral phrase in a completion report without first running `gh issue create` and citing the returned issue number.
+NO `#N` → the work has been declared incomplete with NO tracking. This is the failure mode the rule exists to prevent. NEVER write a deferral phrase in a completion report without first recording the work on the current ticket and citing it.
 
 **Correct pattern:**
 
-> "Root-cause fix for X is filed as #287: Resolve ytbb push failure (`videoIngestionStarved`). This PR adds diagnostic surface; #287 fixes the actual misconfiguration once we see what `top_issue` reports."
+> "Root-cause fix for X is recorded on #287 (Resolve ytbb push failure, `videoIngestionStarved`) as an open `- [ ]` item. This PR adds diagnostic surface; that item fixes the actual misconfiguration once we see what `top_issue` reports."
 
-The issue number proves the work is tracked. Without it, "deferred" is just abandonment.
+The `#N` proves the work is tracked. Without it, "deferred" is just abandonment.
 
 #### Follow-up gate — "genuinely out of scope" has STRICT criteria
 
@@ -71,7 +67,7 @@ Before filing a follow-up issue, apply the bundling gate (per `autonomous-batch-
 - Cross-cutting refactor (rename across >5 files, dep major bump, framework upgrade), OR
 - Genuine design dependency on a separate decision the user must make
 
-If NONE of these apply → the cleanup is small and MUST land in the CURRENT PR, not a follow-up issue. File it, fix it, ship it in the same PR.
+If NONE of these apply → the cleanup is small and MUST land in the CURRENT PR, not a follow-up issue. Fix it, ship it in the same PR.
 
 **This gate is mechanically enforced, not prose-only, on every `gh issue create` / `gh api .../issues` POST** (`hooks/block-ungated-issue-filing.sh`, #137): the issue body must carry a `Scope-gate: <criterion>` line naming which of the six exemptions above applies (`>300-loc`/`schema-migration`/`api-break`/`security-boundary`/`cross-cutting`/`needs-user-decision`), or the owner-asked mode (`user-request`). `planned-work` is retired (#1259): a plan step is a `- [ ]` checklist item in the current ticket, never a new issue. No line, or a fabricated one that doesn't apply → fix it now in the current PR instead of filing.
 

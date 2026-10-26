@@ -305,14 +305,14 @@ class TestDirtyWorktreeGuard(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
-# 7) Foundation-gap + notification tickets — filed via gh, gated + idempotent.
+# 7) Foundation-gap tickets — filed via gh, gated; no onboarding notice (#1137).
 # --------------------------------------------------------------------------- #
-class TestFoundationAndNotificationTickets(unittest.TestCase):
-    def test_notification_ticket_body_has_scope_gate_and_is_gated(self):
+class TestFoundationTickets(unittest.TestCase):
+    def test_gap_tickets_carry_scope_gate_and_no_notice(self):
         with TemporaryDirectory() as d, TemporaryDirectory() as rd:
             repo = Path(d)
             init_repo(repo, remote="https://github.com/zbynekdrlik/foo.git")
-            # gh issue list returns empty (no existing onboarding ticket)
+            # gh issue list returns empty (no existing gap ticket)
             def gh(argv):
                 if "list" in argv:
                     return subprocess.CompletedProcess(argv, 0, "[]", "")
@@ -325,7 +325,9 @@ class TestFoundationAndNotificationTickets(unittest.TestCase):
             ob.onboard_project(str(repo), name="foo",
                                registry_path=str(Path(rd) / "r.json"), run=run)
             created = run.gh_matching("issue", "create")
-            self.assertTrue(created, "no onboarding notification ticket filed")
+            self.assertTrue(created, "the missing-CI gap ticket was not filed")
+            self.assertFalse(any("onboarding" in " ".join(c) for c in created),
+                             "#1137: no onboarding notice ticket")
             # every filed issue body carries a Scope-gate line (block-ungated gate)
             for c in created:
                 body = " ".join(c)

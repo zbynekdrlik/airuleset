@@ -261,15 +261,13 @@ class TheUnwiredGuardHasTeeth(unittest.TestCase):
                # closing `):` moved off the queue_fetch line onto the new one;
                # the anchor grew a last line, the mutation target
                # vault_purge=None is untouched.
-               # #775 re-pin: resource_guard_gk_request=None (job 39's
-               # VERIFY-ONLY shared-stream resource-guard gk-request seam) was
-               # appended on a NEW trailing line after reaper_kill_fn, so the
-               # closing `):` moved off the reaper line onto the new one; the
-               # anchor grew a last line, the mutation target vault_purge=None
-               # is untouched.
+               # #775 re-pin: job 39's gate param was appended on a NEW
+               # trailing line after reaper_kill_fn (#1137 renamed it
+               # resource_guard_gk_request=None -> resource_guard_enabled=False,
+               # same line); the mutation target vault_purge=None is untouched.
                # #797 re-pin: u_fetch=None (job 20's U-freshness reconcile
                # rider's tickets-status-cache read seam) was appended on a NEW
-               # trailing line after resource_guard_gk_request, so the closing
+               # trailing line after the job-39 gate param, so the closing
                # `):` moved off that line onto the new one; the anchor grew a
                # last line, the mutation target vault_purge=None is untouched.
                # #834 re-pin: disk_guard_enabled=False (job 40's per-box
@@ -291,7 +289,7 @@ class TheUnwiredGuardHasTeeth(unittest.TestCase):
                # #993 item 3 re-pin: dispatchable_fetch=None was inserted on its
                # own trailing line after queue_classify; #1137 removed it again.
                "             reaper_ps_fetch=None, reaper_kill_fn=None,\n"
-               "             resource_guard_gk_request=None,\n"
+               "             resource_guard_enabled=False,\n"
                # #866 re-pin: nice_check_enabled=False (job 42's nice-check
                # self-check gate) was appended on a NEW trailing line after
                # disk_guard_enabled=False, so the closing `):` moved off

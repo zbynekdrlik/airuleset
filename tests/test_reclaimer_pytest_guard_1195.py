@@ -54,10 +54,8 @@ def _lane_net():
 
 def test_running_under_pytest_is_the_1136_detection(monkeypatch):
     assert esc.running_under_pytest() is True
-    assert esc.default_filer_refused() is True
     monkeypatch.delenv("PYTEST_CURRENT_TEST")
     assert esc.running_under_pytest() is False
-    assert esc.default_filer_refused() is False
 
 
 def test_the_guard_calls_the_1136_detection():

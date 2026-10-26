@@ -267,8 +267,8 @@ grep -n "airuleset:authority=" CLAUDE.md || true                                
 - **Print a one-line banner:** `autopilot · merge=auto (no manual marker) · authority=<profile> · I N · U M · W K · solving the whole backlog` — the workable count PLUS the parked `U`/`W` counts (`M`/`K` from the SAME `--count`/footer derivation), so the owner sees the split up front, not a bare `N`.
 - **Surface the U/W BREAKDOWN, never just the counts (#527).** Whenever `U > 0` or `W > 0` — at the banner AND in every per-cycle `## ✅ Work Complete` report (Step 4) — print the actual parked MEMBERS, not only the numbers, so the owner SEES what waits without having to ask "máš na mňa otázku?": run `python3 ~/devel/airuleset/airuleset.py core-quals --waiting` (reduced-authority: `slice-quals --waiting`) and list each `U` member with its tag (`answer`/`decision`/`acceptance`/`ping`) + title, then `core-quals --ops-wait` (or `slice-quals --ops-wait`) for each `W` member with its tag (`acceptance`/`ops-wait`) + title. `U` = "čo sa ťa Claude pýta / čo máš schváliť" (a not-yet-sent acceptance is a real approve-the-thread question); `W` = "odoslané, čaká tretia strana".
 - **Invariant — `U > 0` ⟹ every `U` member ALREADY carries a DELIVERED question (#527, owner directive "keď je U väčšie ako nula sa stále musím pýtať či má Claude na mňa otázku").** On EVERY cycle, for each `U` member from `--waiting`, confirm it has a delivered question the owner can act on: a fired ❓ ping (question map) OR a `needs-answer`/`needs-decision` comment that CARRIES the actual question (not a bare label). **This is now MECHANIZED (#539): `--waiting` itself tags any `U` member with no delivered question `no-question!` in its reason column** (a question-map `#N` reference OR an ask-flow-marked comment clears it; an unreadable map / gh error tags nothing — never a false accusation). A `U` member tagged `no-question!` (or one you spot without a question) is a defect — ASK its question now (`❓ ASKED` + a `needs-answer` comment on the issue), **ONE AT A TIME, SEQUENTIALLY** (never a pile — `user-questions-slovak.md`), so the owner never has to prompt "do you have a question for me?". (`acceptance`-tagged `U` members: the question is "approve + send the client acceptance thread"; once sent, the stream adds `ops-wait` and it moves to `W`.) The goal: the owner NEVER asks whether Claude has a question — a positive `U` always means the questions are already on their phone. **#606 (owner directive 2026-08-21): a "U N?" / "otázky na mňa?" status query is itself answered by STARTING this step-by-step delivery — the FIRST U member as its own full `**Otázka — projekt …:**` block, one at a time — NEVER by rendering the raw `--waiting` table or a summary list of every U member to the owner (that table is machine context; the owner cannot decode ticket-by-ticket asks from a compressed list).** Hook-backstopped: `stop-check-prose-violations.sh` blocks an owner-facing turn that piles 3+ `#N …?` per-ticket asks into one question turn.
-- **Version-on-dashboard foundation gate** (web projects): no version label → that foundation
-  issue is the FIRST work item (`version-on-dashboard.md`).
+- **Version-on-dashboard foundation gate** (web projects): no version label → a foundation gap
+  (onboarding files its ticket) that comes before feature work (`version-on-dashboard.md`).
 
 **Branch here on the invocation argument (#52, 2026-07-25):**
 - **`dialog` arg present** (`/autopilot dialog`, or invoked via the `/autopilot-dialog` alias
@@ -940,14 +940,11 @@ merge→gates→push at a time per repo across all sessions).
    >    `Reviewed-by: main <model>` on the integration/merge note (same transcript-derived stamp as
    >    `Design-by:`).** **Every integration records the verdict in the report's
    >    `🏛 Architektúra: <oblasť> — OK|REWORK #N` line** (`completion-report.md`, hook-enforced). A
-   >    `REWORK` verdict → the supervisor files an `architecture-rework` ticket THAT TURN
-   >    (`durable-decisions-to-tickets`; label `architecture-rework`, body: area + files + concrete
-   >    patchwork signs + target concept + contributing tickets; `Scope-gate: architecture-rework`
-   >    + `Area:` + `Dedup-checked:` — the filing hook requires them). ONE open rework ticket per
-   >    area: a further finding in that area = a COMMENT on the existing ticket, never a second.
-   >    The rework ticket is INFRA class (below) and jumps the lane queue. A change into an area
-   >    with an OPEN rework ticket does NOT integrate as more patchwork — it waits for the rework,
-   >    or is folded into it. Also confirm the claimed
+   >    `REWORK` verdict → the supervisor records it on the CURRENT ticket THAT TURN (a `- [ ]`
+   >    item or comment: area + files + concrete patchwork signs + target concept; #1259 — a
+   >    separate ticket only for a defect outside the request). A change into an area with an open
+   >    REWORK finding does NOT integrate as more patchwork — it waits for the rework, or is
+   >    folded into it. Also confirm the claimed
    >    commits, RED/GREEN test pairs, and clean `/review` + `/requesting-code-review` results
    >    genuinely exist on that branch. Result: INTEGRATE if it passes, or BOUNCE it back with the
    >    findings on the ticket + re-dispatch a fresh worker from durable state. A repo with gk

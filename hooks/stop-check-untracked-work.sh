@@ -3,15 +3,14 @@ set -euo pipefail
 
 # Hook: Stop
 # Enforces no-dropped-work.md: any work IDENTIFIED but not completed this session
-# MUST be captured as a tracked GitHub issue (gh issue create -> cite #N) before
-# stopping. Unlike the completion-report ghost-deferral check (which only fires on
+# MUST be recorded on the current ticket (a `- [ ]` item or comment -> cite #N)
+# before stopping. Unlike the completion-report ghost-deferral check (which only fires on
 # completion reports), this fires on EVERY message — the user's three loss patterns
 # happen mid-session, not in the final report:
 #   1. Decomposition-shedding — high-level prompt split, some parts silently dropped.
-#   2. Review findings acknowledged but neither fixed nor filed.
+#   2. Review findings acknowledged but neither fixed nor recorded.
 #   3. "Pre-existing / known / unrelated / out-of-scope" dismissals during testing.
-#   4. Drafting an issue backlog and ASKING permission to create it instead of
-#      running gh issue create (filing issues is non-destructive — never ask).
+#   4. Drafting an issue backlog and ASKING permission instead of recording it.
 # HARD-blocks via {"decision":"block"} with a per-session retry cap (avoids loops
 # when a mention is genuinely meta / unfileable).
 
@@ -198,8 +197,7 @@ if [ -z "$VIOLATION" ] && [ "$ESCAPE" = "0" ] && echo "$MSG" | grep -qiE "remain
 fi
 
 # --- Group 3: drafting an issue backlog but ASKING permission to create it ---
-# Filing issues is non-destructive tracking — it NEVER needs approval. A drafted
-# issue that was never `gh issue create`'d is a dropped issue. Uses a filing-ONLY
+# A drafted backlog that was never recorded on the ticket is dropped work. Uses a filing-ONLY
 # escape (not the fix-inclusive global ESCAPE): a "fixed X" verb must not excuse a
 # never-filed backlog.
 ISSUE_FILED=0
@@ -216,11 +214,11 @@ if [ -n "$VIOLATION" ] && [ "$RETRIES" -lt "$MAX_RETRIES" ]; then
     echo "$((RETRIES+1))" > "$RETRY_FILE"
     case "$VIOLATION" in
         dismissal)
-            REASON="You dismissed a discovered problem as 'pre-existing' / 'known issue' / 'unrelated to this change' / 'out of scope' WITHOUT either fixing it now or filing a tracked GitHub issue. Per no-dropped-work.md, a problem you NOTICE for the first time is one you just DISCOVERED — 'pre-existing' describes its age, not its tracking status. A failing test / warning / breakage you spot during testing is a bug you must capture, or it stays unsolved forever and the user rediscovers it every session.\n\nFix NOW (one of):\n  1. Fix it in this session (then say so explicitly), OR\n  2. gh issue create --title '<concise problem>' --body '<exact error/test name/warning, where it happens, why it matters>' — then cite the returned #N (e.g. 'Filed as #N: <title>').\n\n'pre-existing / known / unrelated / out of scope' is allowed ONLY with a filed #N next to it. See no-dropped-work.md (failure mode 3)." ;;
+            REASON="You dismissed a discovered problem as 'pre-existing' / 'known issue' / 'unrelated to this change' / 'out of scope' WITHOUT either fixing it now or recording it on the current ticket. Per no-dropped-work.md, a problem you NOTICE for the first time is one you just DISCOVERED — 'pre-existing' describes its age, not its tracking status. A failing test / warning / breakage you spot during testing is a bug you must capture, or it stays unsolved forever and the user rediscovers it every session.\n\nFix NOW (one of):\n  1. Fix it in this session (then say so explicitly), OR\n  2. record it on the current ticket: gh issue comment <N> --body '<exact error/test name/warning, where it happens, why it matters>' — then cite it ('Recorded on #N').\n\n'pre-existing / known / unrelated / out of scope' is allowed ONLY with the recording #N next to it. See no-dropped-work.md (failure mode 3)." ;;
         leftover)
             REASON="Your message indicates leftover sub-work from the user's request ('remaining parts', 'the rest can wait', 'handled only part of...') being dropped WITHOUT being recorded. Per no-dropped-work.md (ONE owner request = ONE ticket, #1259), EVERY part you do not complete this session MUST be recorded on the request's ticket BEFORE you stop — otherwise the user has to re-explain work they already asked for.\n\nFix NOW: add each unfinished part as a '- [ ] <part>' item to the ticket body (gh issue edit <N> --body-file ...), then say 'Recorded on #N: <parts>'. NEVER one new issue per part. There is no 'do it later' fate — only do-now or record-now. See no-dropped-work.md (failure mode 1)." ;;
         ask_to_file)
-            REASON="You drafted/proposed GitHub issues but asked the user for PERMISSION to create them ('give the word and I'll create the issues', 'ready to create the backlog?', 'should I file these or hold?', 'once you confirm I'll file them'). Filing issues is NON-DESTRUCTIVE tracking — no code, no production, editable/closeable later — so it NEVER needs approval, and no-dropped-work.md requires identified work to be filed immediately. A drafted issue you never ran 'gh issue create' on is a DROPPED issue; the user then has to say 'yes create them', which is exactly the re-prompting this rule kills.\n\nFix NOW, without asking: write the proposed steps as '- [ ]' items on the request's ONE ticket (gh issue edit), then report 'Recorded on #N'. A NEW issue only for a separate defect outside the request ('Filed as #N: <title>'), never one per step (#1259). If a step's DESIGN is ambiguous, record it anyway and note the open question on the ticket. See no-dropped-work.md 'Prepared != filed' and ask-before-assuming.md (issue-creation row)." ;;
+            REASON="You drafted/proposed GitHub issues but asked the user for PERMISSION to create them ('give the word and I'll create the issues', 'ready to create the backlog?', 'should I file these or hold?', 'once you confirm I'll file them'). no-dropped-work.md: identified work is recorded in the same turn; a drafted backlog you only asked about is DROPPED work, and the user then has to re-prompt.\n\nFix NOW, without asking: write the proposed steps as '- [ ]' items on the current ticket (gh issue edit), then report 'Recorded on #N'. A NEW issue only for a separate defect outside the request ('Filed as #N: <title>'), never one per step (#1259). If a step's DESIGN is ambiguous, record it anyway and note the open question on the ticket. See no-dropped-work.md 'Prepared != filed' and ask-before-assuming.md (issue-creation row)." ;;
     esac
     jq -n --arg reason "$REASON" '{decision: "block", reason: $reason}'
     exit 0

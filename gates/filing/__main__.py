@@ -21,11 +21,11 @@ import sys
 from gates import audit, command_of, field_of, read_payload
 from gates.filing import render
 from gates.filing.parse import (
-    ACK_REACTION_CITE_RE, ALLOWED, AREA_RE, CLIENT_MSG_ORIGIN_RE, CRITERION_RE,
+    ACK_REACTION_CITE_RE, ALLOWED, CLIENT_MSG_ORIGIN_RE, CRITERION_RE,
     DEDUP_RE, EXEMPT_FROM_CAP, LOC_NUM_RE,
     extract_heredocs, flag_value, is_issue_create,
     resolve_body, split_top_level, strip_prefix, tokens_of,
-    _all_labels, _apply_cd, _chain_parent, _chain_parents, _clean_field,
+    _apply_cd, _chain_parent, _chain_parents, _clean_field,
     _explicit_stream_labels, _no_field_decoy, _target_repo_for_segment,
 )
 from gates.filing.caps import (
@@ -199,6 +199,11 @@ def _invalid_criterion_reason(body, body_err, crit):
         reason = ("planned-work-retired -- one owner request = ONE ticket: add this "
                   "step as a `- [ ]` checklist item in the parent ticket (gh issue "
                   "edit), never a new issue")
+    elif crit.lower() == "architecture-rework":
+        # #1137: a REWORK verdict is no longer an automatic, cap-exempt filing.
+        reason = ("architecture-rework-retired -- record the REWORK finding on the "
+                  "CURRENT ticket (a `- [ ]` item or comment); a separate ticket only "
+                  "for a defect outside the request, under its own criterion")
     else:
         # crit present but not one of ALLOWED -- name the bad (attacker-
         # written) value, decoy-neutralised.
@@ -411,31 +416,6 @@ def classify_command(cmd, sid, cwd, repo_dir, log_path, unattended):
                              parents_str, target_repo, ""))
         else:
             crit_l = crit.lower()
-            # #993 -- an architecture-rework ticket is deduped BY AREA (one open
-            # rework ticket per area), so its body MUST carry an `Area:` line naming
-            # the reworked area. Unconditional (attended or not) -- it is this
-            # criterion's structural discipline, the same tier as the >300-loc
-            # self-contradiction check, and BLOCKS before the presence/cap gates.
-            if crit_l == "architecture-rework" and not AREA_RE.search(body or ""):
-                results.append(("BLOCK", clean_title,
-                                 "architecture-rework-missing-area (body must carry "
-                                 "an `Area:` line naming the reworked area -- one open "
-                                 "rework ticket per area)",
-                                 parents_str, target_repo, ""))
-                continue
-            # #993-review: an architecture-rework filing MUST also carry the
-            # `-l architecture-rework` LABEL (mirrors #962's -l needs-gatekeeper
-            # requirement) -- the picker (`_row_label_rank`) promotes ONLY labeled
-            # rework tickets, and requiring the label as a deliberate act raises the
-            # bar against relabelling an ordinary discovery as this exempt criterion.
-            if crit_l == "architecture-rework" \
-                    and "architecture-rework" not in _all_labels(tk, api_call):
-                results.append(("BLOCK", clean_title,
-                                 "architecture-rework-missing-label (add "
-                                 "`-l architecture-rework` -- the picker promotes only "
-                                 "labeled rework tickets)",
-                                 parents_str, target_repo, ""))
-                continue
             # #1027/#1033 -- intake worker-reaction citation gate (fleet rule);
             # BLOCKS before the presence/dedup/cap gates. See helper docstring.
             intake_block = _intake_reaction_block(
@@ -453,14 +433,7 @@ def classify_command(cmd, sid, cwd, repo_dir, log_path, unattended):
             # near-dup/ratchet checks (cheapest first) and `continue` this segment.
             if unattended:
                 unattended_reason = None
-                # #993 -- architecture-rework is a MECHANICAL area-review verdict, not
-                # an owner-asked ticket, so it is gated by NEITHER the presence gate
-                # (its Area: + dedup discipline stand in for the owner-quote) NOR the
-                # dismissal-word gate. It stays in EXEMPT_FROM_CAP for the cap/ratchet
-                # exemption below.
-                if crit_l == "architecture-rework":
-                    pass
-                elif crit_l in EXEMPT_FROM_CAP:
+                if crit_l in EXEMPT_FROM_CAP:
                     # #962: exempt when the body quotes an owner message with
                     # 'verbatim' + a date from the last 24h — evidence the
                     # owner WAS present and explicitly asked.
@@ -525,9 +498,8 @@ def classify_command(cmd, sid, cwd, repo_dir, log_path, unattended):
                         # saw. A non-exempt discovery filing is allowed ONLY while the
                         # repo is strictly draining today (created_today <
                         # closed_today); otherwise BLOCK. A gh error -> BLOCK
-                        # (fail-safe). user-request / architecture-rework
-                        # are exempt (user-request is presence-gated above via
-                        # _has_recent_owner_quote).
+                        # (fail-safe). user-request is exempt (presence-gated
+                        # above via _has_recent_owner_quote).
                         results.append((
                             "BLOCK", clean_title,
                             "net-drain (created_today >= closed_today on this repo "

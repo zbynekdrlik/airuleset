@@ -192,11 +192,11 @@ CANONICAL_SWEEP = [
             "reaper_ps_fetch", _stub_fetch, "list",
             "heavy-build-reaper error"),
     # (39) — #775 shared-stream resource-guard verify (VERIFY-ONLY, shared-stream
-    # box only). A NEW gate seam `resource_guard_gk_request` (the gk-request
-    # filer) — unlike Job 38 it does NOT reuse the reaper seams; the box-class +
-    # cgroup gates live inside resource_guard_verify.
+    # box only). Gated on the plain `resource_guard_enabled` bool (#1137: the
+    # gk-request seam is gone, a journal line only); the box-class + cgroup
+    # gates live inside resource_guard_verify.
     JobSpec("resource_guard_verify", "wd", "resource_guard_verify",
-            "resource_guard_gk_request", _stub_fetch, "list",
+            "resource_guard_enabled", True, "list",
             "resource-guard-verify error"),
     # (40) — #834 per-box disk-pressure guard. Gated on the plain
     # `disk_guard_enabled` bool (True in cmd_watchdog, left False in run_once

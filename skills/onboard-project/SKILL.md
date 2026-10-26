@@ -27,8 +27,7 @@ What it ensures (each step: detect → act only if absent → report `satisfied`
 4. GitHub remote (`gh repo create zbynekdrlik/<name> --private --source . --push` if none)
 5. two/three-branch work branch per existing convention — NEVER changes the existing default branch
 6. foundation-gap tickets — no CI, web-without-version-label, or a Rust web app without a tray icon (`rules/rust-web-tray.md`, #1198) → files a tracked ticket (Scope-gate line; never auto-generates CI)
-7. onboarding notification ticket in the project repo (`onboarding: projekt pod správou airuleset`)
-8. registry entry in `projects-registry.json`
+7. registry entry in `projects-registry.json`
 
 Then report the printed step table to the user (plain Slovak: čo bolo doplnené, čo už bolo v poriadku).
 
@@ -49,7 +48,7 @@ python3 ~/devel/airuleset/airuleset.py onboard-project <path> --audit   # one pr
   3. Add its `<acct>@<box>` `REMOTE_HOSTS` entry (the claudy precedent).
   4. Run `onboard-project <path> --host <acct>@<box>`.
 
-  `airuleset.py accounts status` lists the frozen legacy inventory (a count that only goes down).
+  `airuleset.py accounts status` lists the frozen legacy inventory (a count that only goes down); moving one, when the owner decides, follows `legacy-newlevel.md` in this skill's directory.
 - Never re-implement onboarding steps in this skill body — the CLI owns all logic.
 - Never overwrite an existing file, never auto-generate CI, never mass-fix in audit mode.
 - Deploying the tooling: `python3 airuleset.py push` (never bare `git push`).

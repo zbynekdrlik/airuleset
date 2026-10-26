@@ -33,11 +33,11 @@ A review (`/review`, `/requesting-code-review`, or any ad-hoc inspection) surfac
 
 During a normal run a test fails, a warning appears, or something looks broken. You label it "pre-existing", "a known issue", "unrelated to my change", or "out of scope" — and neither fix it nor file it. Forever unsolved, rediscovered every session.
 
-**Rule:** a problem you NOTICE for the first time is a problem you just DISCOVERED — "pre-existing" describes its age, not its tracking status. The moment you call something pre-existing / known / unrelated / out-of-scope, you MUST either fix it now or `gh issue create` describing what you observed (the failing test name, the warning text, where it happens, why it matters) and cite `#N`. "Pre-existing" without a filed `#N` next to it is banned.
+**Rule:** a problem you NOTICE for the first time is a problem you just DISCOVERED — "pre-existing" describes its age, not its tracking status. The moment you call something pre-existing / known / unrelated / out-of-scope, you MUST either fix it now or record it on the current ticket (what you observed: the failing test name, the warning text, where it happens, why it matters) and cite `#N`. "Pre-existing" without that `#N` next to it is banned.
 
-- "That test was already failing before my change, so I'll skip it." — **WRONG.** File it (`#N`), then skip with the reference.
-- "This is a known issue in the upstream lib, nothing we can do here." — **WRONG.** File it documenting the limitation and the upstream link.
-- "The console warning is unrelated to this PR." — **WRONG.** Unrelated to the PR ≠ unrelated to the project. File it.
+- "That test was already failing before my change, so I'll skip it." — **WRONG.** Record it on `#N`, then skip with the reference.
+- "This is a known issue in the upstream lib, nothing we can do here." — **WRONG.** Record the limitation and the upstream link on `#N`.
+- "The console warning is unrelated to this PR." — **WRONG.** Unrelated to the PR ≠ unrelated to the project. Record it.
 
 #### The mechanism (every fate-2 case) — the CURRENT ticket, never a new one (#1259)
 

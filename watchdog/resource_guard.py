@@ -4,7 +4,7 @@ The standing backstop for the #775 resource guardrails (`cli_resource_guards`).
 On a SHARED-STREAM box (subdev), it reads this account's OWN cgroup memory ceiling
 (`/sys/fs/cgroup/user.slice/user-<uid>.slice/memory.max`, world-readable — no root
 needed) and, if it is still UNLIMITED (`max`), surfaces LOUD that the box runs
-without guardrails — one journal line + one deduped gk-request per ~day.
+without guardrails — one journal line per ~day (#1137: no ticket, no comment).
 
 DELIBERATELY VERIFY-ONLY — NO killer logic (#486: no new thousand-line heuristic).
 The deterministic intervention is the kernel cgroup-OOM killer that `MemoryMax`
@@ -21,9 +21,8 @@ FAIL-SAFE TOWARD SILENCE (#539 bias — never a false alarm):
   * Only a definitively UNLIMITED (`max`) ceiling on a shared-stream box alarms,
     and even then at most ~1/day (marker-file dedup).
 
-Never a Discord ping — machine-channel only (#546): the returned journal lines
-and a deduped gk-request (the SAME `needs-gatekeeper` hand-off lane the gatekeeper
-already drains), never `notify.send()`.
+Never a Discord ping — machine-channel only (#546): the returned journal line,
+never `notify.send()`.
 """
 import os
 import time
@@ -34,19 +33,13 @@ from watchdog.reaper import is_shared_stream_box  # reuse the #778 box-class sea
 # This account's own memory ceiling, readable without root on cgroup v2.
 CGROUP_MEMORY_MAX_FMT = "/sys/fs/cgroup/user.slice/user-{uid}.slice/memory.max"
 
-# Dedup: at most one alert (journal line + gk-request) per this window. A bit
+# Dedup: at most one alert (journal line) per this window. A bit
 # under 24h so a roughly-daily cadence never skips a day; the watchdog polls
 # every 60s, so without this the alert would spam once per cycle.
 DEDUP_INTERVAL_S = 23 * 60 * 60
 
 # The stamp file whose mtime throttles the alert.
 DEFAULT_MARKER_PATH = "~/.claude/resource-guard-alert.stamp"
-
-# The gk-request destination — this feature's own tracking ticket, so the
-# gatekeeper sees "subdev still runs without guardrails" on the SAME hand-off
-# lane it already drains, deduped, never a fresh ticket per day per stream.
-TRACKING_ISSUE = 775
-TRACKING_REPO = "zbynekdrlik/airuleset"
 
 
 def _default_cgroup_read(uid):
@@ -95,20 +88,18 @@ def _touch_marker(marker_path, now):
 
 
 def resource_guard_verify(uid=None, cgroup_read=None, box_class_fn=None,
-                          gk_request_fn=None, marker_path=None, now=None,
-                          dry_run=False, dedup_interval_s=DEDUP_INTERVAL_S):
+                          marker_path=None, now=None, dry_run=False,
+                          dedup_interval_s=DEDUP_INTERVAL_S):
     """Verify this account's shared-stream resource guardrail is in place (#775).
 
-    Returns the journal log lines (possibly empty). Fires an alert (journal line
-    + one gk-request via `gk_request_fn`) ONLY when: this IS a shared-stream box,
+    Returns the journal log lines (possibly empty). Fires an alert (ONE journal
+    line) ONLY when: this IS a shared-stream box,
     the cgroup `memory.max` is definitively `max` (unlimited), AND the dedup
     marker is stale/absent. Every other case returns [] (silence).
 
     Seams (all injectable for tests): `uid` (default os.getuid), `cgroup_read`
     (default reads the real cgroup file), `box_class_fn` (default reads the
-    box-class marker), `gk_request_fn(uid)` (the real filer; None = journal-only,
-    the unwired-seam shape), `marker_path`, `now`, `dry_run` (writes/files
-    nothing)."""
+    box-class marker), `marker_path`, `now`, `dry_run` (writes nothing)."""
     # Box-class gate FIRST — a non-shared-stream box never reads cgroup or alarms.
     if not is_shared_stream_box(box_class_fn):
         return []
@@ -139,16 +130,9 @@ def resource_guard_verify(uid=None, cgroup_read=None, box_class_fn=None,
             "key + run `airuleset.py push`)." % uid)
     logs = [line]
     if dry_run:
-        return logs  # dry-run: report what it WOULD do, write nothing, file nothing
+        return logs  # dry-run: report what it WOULD do, write nothing
 
     marker_err = _touch_marker(marker, now)
     if marker_err:
         logs.append("resource-guard-verify: " + marker_err)
-    if gk_request_fn is None:
-        logs.append("resource-guard-verify: gk_request_fn not wired — journal only")
-        return logs
-    try:
-        gk_request_fn(uid)
-    except Exception as e:  # noqa: BLE001 — best-effort, never a crash
-        logs.append("resource-guard-verify: gk-request error: %r" % (e,))
     return logs

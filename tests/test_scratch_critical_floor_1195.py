@@ -13,7 +13,6 @@ All trees live under ``tmp_path``; times are set with ``os.utime``.
 
 import os
 import time
-import types
 from pathlib import Path
 
 import cli_scratch_sweep as cs
@@ -156,7 +155,5 @@ class TestDiskGuardLevel:
             statvfs_fn=statvfs_map({"/": (92, 20)}), dev_fn=dev_map({"/": 1}),
             geteuid_fn=lambda: 1000, mounts=("/",),
             planners_fn=lambda _h, _n: [],
-            top_consumers_fn=lambda *a, **k: [],
-            severe_run_fn=lambda argv, **kw: types.SimpleNamespace(
-                returncode=0, stdout="", stderr=""))
+            top_consumers_fn=lambda *a, **k: [])
         assert levels == ["critical"], levels

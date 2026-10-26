@@ -52,9 +52,9 @@ So when you re-push (a fix, a follow-up commit):
 - If you must cancel manually: `gh run list --branch <branch> --status in_progress --json
   databaseId,headSha` then `gh run cancel <id>` for any run NOT on your current `git rev-parse HEAD`.
 - **A repo with no concurrency group, or with a push+pull_request double-fire, is a CI-foundation
-  gap** → file an issue to add `concurrency: { group: "ci-${{ github.workflow }}-${{
-  github.ref }}", cancel-in-progress: true }` and to stop the duplicate trigger. (That's the repo's
-  CI code — file the issue, don't silently leave the waste.)
+  gap** → add `concurrency: { group: "ci-${{ github.workflow }}-${{ github.ref }}",
+  cancel-in-progress: true }` and stop the duplicate trigger in the same PR, or note it on the
+  current ticket — never silently leave the waste.
 
 #### After pushing
 

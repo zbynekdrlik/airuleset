@@ -3,7 +3,6 @@
 RED→GREEN: committed BEFORE the implementation so the test fails on import.
 """
 
-import hashlib
 import json
 import sys
 import tempfile
@@ -127,10 +126,6 @@ class TestMemoryRPS(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# cadence — due / not-due / model-generation / reopen / create / runner-failure
-# ---------------------------------------------------------------------------
-
-# ---------------------------------------------------------------------------
 # fleet — one attempt, failed host, paused absent
 # ---------------------------------------------------------------------------
 
@@ -231,24 +226,17 @@ class TestCmdWatchdogEnable(unittest.TestCase):
 
 class TestGhRepoFlag(unittest.TestCase):
 
-    def test_evaluate_cadence_gh_argv_carries_repo_flag(self):
-        from watchdog.mdreview_cadence import evaluate_cadence
-        now = time.time()
-        state = {"schema": 1, "ticket": 999,
-                 "model_tiers_hash": "x", "last_eval_ts": now - 86400}
+    def test_ticket_state_gh_argv_carries_repo_flag(self):
+        from watchdog.mdreview_cadence import ticket_state
         calls = []
         def capture_gh(argv):
             calls.append(argv)
             return json.dumps({"state": "OPEN"}), 0
-        evaluate_cadence(state, now, gh_runner=capture_gh)
+        self.assertEqual(ticket_state(999, gh_runner=capture_gh), "OPEN")
         for c in calls:
             argv_str = " ".join(str(x) for x in c)
             self.assertIn("-R", argv_str,
                           f"gh argv must carry -R flag: {c}")
-
-# ---------------------------------------------------------------------------
-# Finding 6 — act_on_due must check gh rc and return success/failure
-# ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
 # Finding 8 — dev1 gate
@@ -314,13 +302,6 @@ class TestRedactBeforeTrunc(unittest.TestCase):
 
 class TestCadenceJob(unittest.TestCase):
 
-    def _tiers_hash(self):
-        import airuleset
-        import hashlib as _hl
-        return _hl.sha1(
-            str(sorted(airuleset.MODEL_TIERS.items())).encode()
-        ).hexdigest()
-
     def test_ttl_skip(self):
         from watchdog.mdreview_cadence import mdreview_cadence_job
         now = time.time()
@@ -328,7 +309,6 @@ class TestCadenceJob(unittest.TestCase):
             sp = Path(tmp) / "state.json"
             sp.write_text(json.dumps({
                 "schema": 1, "ticket": 999,
-                "model_tiers_hash": self._tiers_hash(),
                 "last_eval_ts": now - 100,
             }), encoding="utf-8")
             with mock.patch("socket.gethostname", return_value="dev1"):
@@ -336,43 +316,30 @@ class TestCadenceJob(unittest.TestCase):
             self.assertTrue(any("ttl-skip" in ln for ln in logs),
                             f"recent eval must ttl-skip: {logs}")
 
-    def test_failure_no_hash_advance_but_ttl_advanced(self):
+    def test_audit_failure_still_advances_ttl(self):
         from watchdog.mdreview_cadence import mdreview_cadence_job
         now = time.time()
-        old_hash = "stale-hash-value"
         with tempfile.TemporaryDirectory() as tmp:
             sp = Path(tmp) / "state.json"
             sp.write_text(json.dumps({
                 "schema": 1, "ticket": 999,
-                "model_tiers_hash": old_hash,
                 "last_eval_ts": now - 86400 * 2,
             }), encoding="utf-8")
             def fake_gh(argv):
                 if "view" in str(argv):
-                    return json.dumps({"state": "closed",
-                                       "closedAt": "2026-01-01T00:00:00Z"}), 0
+                    return json.dumps({"state": "OPEN"}), 0
                 return "", 0
             def boom_audit(fleet=True):
                 raise RuntimeError("audit boom")
             with mock.patch("socket.gethostname", return_value="dev1"):
-                mdreview_cadence_job(
+                logs = mdreview_cadence_job(
                     now, {}, state_path=str(sp),
                     gh_runner=fake_gh, audit_fn=boom_audit)
             state_after = json.loads(sp.read_text())
-            self.assertNotEqual(state_after.get("model_tiers_hash"),
-                                self._tiers_hash(),
-                                "hash must NOT advance on failure")
+            self.assertTrue(any("audit failed" in ln for ln in logs), logs)
             self.assertEqual(state_after["last_eval_ts"], now,
                              "daily TTL MUST advance even on failure")
 
-
-# ---------------------------------------------------------------------------
-# Finding 3 — bootstrap wiring in no-ticket branch
-# ---------------------------------------------------------------------------
-
-# ---------------------------------------------------------------------------
-# Finding 12 — hash must be persisted when absent
-# ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
 # Finding 5 — dedup_pairs and zero_caller_skills must NOT be hardcoded []
@@ -452,12 +419,6 @@ class TestStateFileAliasing(unittest.TestCase):
     run_once's closing save_state overwrites the whole file from its in-memory
     dict, wiping any mid-run writes from the cadence job to that same file."""
 
-    def _tiers_hash(self):
-        import airuleset
-        return hashlib.sha1(
-            str(sorted(airuleset.MODEL_TIERS.items())).encode()
-        ).hexdigest()
-
     def test_run_once_state_survives_cadence_job(self):
         """run_once state file must retain its own keys after cadence job runs.
         The cadence job must use its OWN file (env AIRULESET_MDREVIEW_STATE_PATH),
@@ -510,7 +471,6 @@ class TestStateFileAliasing(unittest.TestCase):
             sp = Path(tmp) / "state.json"
             sp.write_text(json.dumps({
                 "schema": 1, "ticket": 874,
-                "model_tiers_hash": self._tiers_hash(),
                 "last_eval_ts": now - 86400 * 2,
                 "target_governance": {},
             }), encoding="utf-8")
@@ -554,22 +514,13 @@ class TestStateFileAliasing(unittest.TestCase):
 class TestDryRunNoStateWrite(unittest.TestCase):
     """dry-run must log 'would ...' and return WITHOUT writing state."""
 
-    def _tiers_hash(self):
-        import airuleset
-        return hashlib.sha1(
-            str(sorted(airuleset.MODEL_TIERS.items())).encode()
-        ).hexdigest()
-
     def test_dry_run_leaves_state_file_byte_identical(self):
         from watchdog.mdreview_cadence import mdreview_cadence_job
         now = time.time()
-        th = self._tiers_hash()
-        closed_old = "2026-01-01T00:00:00Z"
         with tempfile.TemporaryDirectory() as tmp:
             sp = Path(tmp) / "state.json"
             initial_state = {
                 "schema": 1, "ticket": 999,
-                "model_tiers_hash": th,
                 "last_eval_ts": now - 86400 * 2,
             }
             sp.write_text(json.dumps(initial_state, sort_keys=True),
@@ -577,8 +528,7 @@ class TestDryRunNoStateWrite(unittest.TestCase):
             before_bytes = sp.read_bytes()
             def fake_gh(argv):
                 if "view" in str(argv):
-                    return json.dumps({"state": "closed",
-                                       "closedAt": closed_old}), 0
+                    return json.dumps({"state": "OPEN"}), 0
                 return "", 0
             with mock.patch("socket.gethostname", return_value="dev1"):
                 logs = mdreview_cadence_job(
@@ -590,40 +540,6 @@ class TestDryRunNoStateWrite(unittest.TestCase):
                              f"logs: {logs}")
             self.assertTrue(any("would" in ln.lower() for ln in logs),
                             f"dry-run must log 'would ...': {logs}")
-
-
-# ---------------------------------------------------------------------------
-# 🟡 RE-REVIEW: bootstrap must search for existing ticket before creating
-# ---------------------------------------------------------------------------
-
-class TestBootstrapExistingRecovery(unittest.TestCase):
-    """Before creating, bootstrap must search for an existing ticket with
-    the same title and adopt it if found."""
-
-    def test_existing_ticket_adopted_no_create(self):
-        from watchdog.mdreview_cadence import mdreview_cadence_job, BOOTSTRAP_TITLE
-        now = time.time()
-        create_calls = []
-        def fake_gh(argv):
-            argv_str = " ".join(str(x) for x in argv)
-            if "create" in argv_str:
-                create_calls.append(argv)
-            # Return an existing ticket for the search
-            if "list" in argv_str and "--search" in argv_str:
-                return json.dumps([{"number": 888,
-                                    "title": BOOTSTRAP_TITLE}]), 0
-            return "https://github.com/zbynekdrlik/airuleset/issues/900\n", 0
-
-        with tempfile.TemporaryDirectory() as tmp:
-            sp = Path(tmp) / "state.json"
-            with mock.patch("socket.gethostname", return_value="dev1"):
-                mdreview_cadence_job(now, {}, state_path=str(sp),
-                                    gh_runner=fake_gh)
-            self.assertEqual(len(create_calls), 0,
-                             "bootstrap must NOT create when existing ticket found")
-            state_after = json.loads(sp.read_text())
-            self.assertEqual(state_after.get("ticket"), 888,
-                             "bootstrap must adopt existing ticket number")
 
 
 # ---------------------------------------------------------------------------
@@ -718,16 +634,12 @@ class TestDocstringGateWording(unittest.TestCase):
 class TestGuardedJsonLoads(unittest.TestCase):
     """🔵3 — non-runner json.loads must be guarded."""
 
-    def test_evaluate_cadence_handles_malformed_json(self):
-        from watchdog.mdreview_cadence import evaluate_cadence
-        now = time.time()
-        state = {"schema": 1, "ticket": 999,
-                 "model_tiers_hash": "x", "last_eval_ts": now - 86400}
+    def test_ticket_state_handles_malformed_json(self):
+        from watchdog.mdreview_cadence import ticket_state
         def bad_json_gh(argv):
             return "NOT JSON AT ALL", 0
-        result = evaluate_cadence(state, now, gh_runner=bad_json_gh)
-        self.assertFalse(result["due"],
-                         "malformed JSON must not crash, must return not-due")
+        self.assertIsNone(ticket_state(999, gh_runner=bad_json_gh),
+                          "malformed JSON must not crash, must read as unknown")
 
 
 class TestDedupWiringHermetized(unittest.TestCase):
