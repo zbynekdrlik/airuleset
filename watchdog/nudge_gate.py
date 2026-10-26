@@ -42,7 +42,10 @@ pane gets no machine keystroke of any kind.
 The daily batch is NEVER trimmed (its body goes to a nudge file, #1157), so
 every due kind rides it; an `infra-priority` wave rides it only while its own
 switch is on, its hub receipt posted by the batch callback. A HELD send is
-journalled ONCE per (pane|sid, kind) episode (`first_hold`), never per sweep.
+journalled ONCE per (pane|sid, kind) episode (`first_hold`), never per sweep;
+`end_hold_log` settles that journal at the end of every sweep (a dry run
+restores it). `pre_send_hold` is the ONE latch + spent-day pre-check for a
+caller that would otherwise book a withheld send as a swallow or a nudge.
 
 `mark_sent` stamps any DELIVERED or typed attempt (confirmed, delivered-
 unconfirmed, swallowed — #1023 reopen, #1092 (a)). Fail-safe: a malformed or

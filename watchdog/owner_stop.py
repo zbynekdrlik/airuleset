@@ -40,10 +40,12 @@ bypass it: `relaunch_pane`, `impl_window_presence`, `deliver_goal`. Riders that
 would read a withheld send as a swallow pre-check `pane_latch` and journal a
 hold instead (report-owed, dying-subagent, job 4 working-stall).
 `refresh` (top of every sweep, before any keystroke job) maps every
-claude/node/bun pane to its transcripts (an unmapped pane answers from its
-cwd: fail CLOSED), persists `state[STATE_KEY]` per session (`fact`/`ts`, the
-matched `mclears`, a sibling's `held`; 7-day TTL), seeds the memo and journals
-ONE line per episode. A leaf."""
+claude/node/bun pane to its transcripts (a node/bun pane hosting no claude is
+mapped but never shares a cwd; an unmapped pane answers from its cwd: fail
+CLOSED), persists `state[STATE_KEY]` (per session `fact`/`ts` + matched
+`mclears`, per pane `pane:<pid>` sibling holds, per window `win:<key>` the
+impl window's session; 7-day TTL), seeds the memo and journals ONE line per
+episode. A leaf."""
 import os
 import re
 from pathlib import Path
