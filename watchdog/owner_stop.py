@@ -398,6 +398,14 @@ def pane_latch(pane_id):
     return _MEMO[key]
 
 
+def pane_sid(pane_id):
+    """The session `pane_id` runs this sweep (its cwd's newest when refresh
+    did not map it); None when the pane is not resolved to its own session
+    (an unresolved pane of a shared cwd, a dev server) or nothing maps it."""
+    ctx = _PANES.get(pane_id) or _unmapped(pane_id)
+    return ctx.get("sid") if ctx and ctx.get("own", True) else None
+
+
 def withhold(pane_id, logs=None):
     """True iff `pane_id` is latched: the caller types NOTHING. Journals ONE
     `owner-stop latch: withheld` line per pane per sweep."""

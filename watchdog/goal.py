@@ -5007,9 +5007,13 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
         # conflicts with a `handled` keystroke and is authority-agnostic; `rec`'s
         # `soa` streak persists via `recs`. `stuck_seen` guards the #645
         # two-panes-one-cwd double-advance (same sid twice per sweep).
-        # #1257: a loop the owner paused HERSELF (not a sibling's `via` latch)
-        # is no stall -- its stuck / gk-stall episodes END, they never alert.
-        _own_stop = bool(_hold) and not (_owner_stop.pane_latch(pid) or {}).get("via")
+        # #1257: a loop the owner paused HERSELF is no stall -- its stuck /
+        # gk-stall episodes END, they never alert. `sid` is the cwd's newest
+        # session: only the pane that runs it ends its episodes or drops its
+        # batch (a paused sibling pane of the cwd, or a pane held by a
+        # sibling's `via` latch, touches neither).
+        _mine = _owner_stop.pane_sid(pid) == sid
+        _own_stop = bool(_hold) and _mine
         if _own_stop and not dry_run:
             for _k in ("soa", "soalert", "soa_ts", "gks_ts", "gks_alert"):
                 rec.pop(_k, None)
@@ -5026,7 +5030,8 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
                 now, rec, glance, captured, cwd, sid, pid, loc, send_fn, dry_run,
                 run=run)
         if _hold:      # #1257: the riders below hold; the pane's batch entry goes
-            state.get("nudge_batch", {}).pop(sid, None)
+            if _mine:
+                state.get("nudge_batch", {}).pop(sid, None)
             continue
         # #547 W→I + #552 I→W/U -- partition-audit re-check for this armed pane.
         if ops_wait_fetch is not None:
