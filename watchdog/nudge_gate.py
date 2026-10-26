@@ -28,11 +28,21 @@ ONE `nudge:` batch. Two bounds carry it:
 EXEMPT: RECOVERY identities (`RECOVERY_NUDGE_KINDS`: resume/`continue` after an
 API error, oauth-resume, compact, the owner's own `/autopilot` goal-arm,
 wake-parked, goal-disarm, model-restore) skip both bounds and never count — a
-revival of a dead session is not a prompt interruption. The owner's DECLARED
-schedule (`watch-trigger`, Job 52) is the one `PRIORITY_CAP_EXEMPT_KINDS` member:
-it keeps its own hourly floor (its slots ARE the owner's schedule), never blocks
-or counts toward the day. The #1257 owner-stop latch (`watchdog/owner_stop.py`)
-sits ABOVE all of this: a latched pane gets no keystroke of any kind.
+revival of a dead session is not a prompt interruption; a re-arm spends the
+day only for a budgeted WORK origin (`deliver_goal`'s `_rearm_budgeted`).
+A liveness question is NOT a revival: job 4's stuck-check is the capped
+`working-stall` kind. An OWNER-authored delivery (`user_authored`, granted only
+in `discord_replies`: the owner's reply, ❓-flag prompt, card reopen) passes
+both bounds. The owner's DECLARED schedule (`watch-trigger`, Job 52) is the one
+`PRIORITY_CAP_EXEMPT_KINDS` member: it keeps its own hourly floor (its slots ARE
+the owner's schedule), never blocks or counts toward the day. The #1257
+owner-stop latch (`watchdog/owner_stop.py`) sits ABOVE all of this: a latched
+pane gets no machine keystroke of any kind.
+
+The daily batch is NEVER trimmed (its body goes to a nudge file, #1157), so
+every due kind rides it; an `infra-priority` wave rides it only while its own
+switch is on, its hub receipt posted by the batch callback. A HELD send is
+journalled ONCE per (pane|sid, kind) episode (`first_hold`), never per sweep.
 
 `mark_sent` stamps any DELIVERED or typed attempt (confirmed, delivered-
 unconfirmed, swallowed — #1023 reopen, #1092 (a)). Fail-safe: a malformed or

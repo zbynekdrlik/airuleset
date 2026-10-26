@@ -33,11 +33,16 @@ candidate session of the cwd is). `deliver_goal` checks the session it arms
 by `sid` (`sid_latch`).
 
 ENFORCED at the ONE send-keys builder `tmux_io.keys` (`withhold`: every kind,
-recovery and cap-exempt included; only the owner's own Discord reply passes),
-and on the paths that bypass it: `relaunch_pane`, `impl_window_presence`,
-`deliver_goal`.
-`refresh` (top of every sweep) maps panes to transcripts, persists
-`state[STATE_KEY]` per session and journals ONE line per episode. A leaf."""
+recovery and cap-exempt included; only an owner-authored delivery passes — the
+owner's Discord reply, ❓-flag prompt or card reopen), and on the paths that
+bypass it: `relaunch_pane`, `impl_window_presence`, `deliver_goal`. Riders that
+would read a withheld send as a swallow pre-check `pane_latch` and journal a
+hold instead (report-owed, dying-subagent, job 4 working-stall).
+`refresh` (top of every sweep, before any keystroke job) maps every
+claude/node/bun pane to its transcripts (an unmapped pane answers from its
+cwd: fail CLOSED), persists `state[STATE_KEY]` per session (`fact`/`ts`, the
+matched `mclears`, a sibling's `held`; 7-day TTL), seeds the memo and journals
+ONE line per episode. A leaf."""
 import os
 import re
 from pathlib import Path

@@ -33,7 +33,10 @@
       MAX_WORKING_NUDGES retries (the Claude process itself is wedged) does it ESCALATE
       to ONE Discord ping ("auto-recovery failed — needs you"). So the common case is
       ZERO user-facing pings (it just un-sticks itself); a ping fires only when the
-      automated fix genuinely failed. Safety gates: copy-mode + ambiguous-pane skips
+      automated fix genuinely failed. B9 fix (owner 26.10.2026): it types as the
+      capped `working-stall` kind — at most once per pane per day, held (never
+      counted) under the owner-stop latch / its switch / a spent day
+      (`_working_stall_hold`). Safety gates: copy-mode + ambiguous-pane skips
       (never type into the wrong/scrolled pane), an advancing-subagent check (a live
       worker writing its transcript is progress, not silence → skip), idle-reset
       self-dedup. THRESHOLD is 30 min — the user's explicitly chosen cadence: they said
