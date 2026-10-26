@@ -446,7 +446,10 @@ def _hosts_claude(pane_pid):
     is never taken for a dev server."""
     import watchdog
     root = str(pane_pid or "").strip()
-    if not root.isdigit() or not os.access("/proc", os.R_OK):
+    try:
+        if not root.isdigit() or not os.listdir("/proc"):
+            return True
+    except OSError:            # the shared walk would read a fault as "no Claude"
         return True
     return watchdog._pane_claude_pid(root) is not None
 
