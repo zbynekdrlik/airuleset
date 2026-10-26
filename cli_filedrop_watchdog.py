@@ -398,14 +398,20 @@ def _filedrop_serve():
 
 
 def _public_share_status(url, timeout=3):
-    """HTTP status of GET <url> WITHOUT following redirects, or None on a
-    connection error / timeout (#1114). 200 = the tunnel + filedrop origin served
-    it; 302 = reachable but Access-gated (the login redirect — the go-live property
-    `upload` already relies on); a 5xx / connection failure means the origin is
-    down. Never follows the redirect (so a 302 is not mistaken for the Access page's
-    own 200)."""
+    """The HTTP status alone of `_public_share_probe` (#1114)."""
+    return _public_share_probe(url, timeout)[0]
+
+
+def _public_share_probe(url, timeout=3):
+    """``(status, filedrop port header)`` of GET <url> WITHOUT following
+    redirects, or ``(None, None)`` on a connection error / timeout (#1114). 200 =
+    the tunnel + filedrop origin served it; 302 = Access-gated (the login
+    redirect, never followed, so it is not mistaken for the Access page's own
+    200); a 5xx means the origin is down. #1238: the port header is what the
+    filedrop server puts on its `/s/` route probe answer."""
     import urllib.error
     import urllib.request
+    from filedrop.server import FILEDROP_PORT_HEADER
 
     class _NoRedirect(urllib.request.HTTPRedirectHandler):
         def redirect_request(self, req, fp, code, msg, headers, newurl):
@@ -416,15 +422,12 @@ def _public_share_status(url, timeout=3):
     # default `Python-urllib/3.x` while the same URL serves 200 (david4, 22.9.).
     req = urllib.request.Request(url, headers={"User-Agent": "airuleset-share"})
     try:
-        return opener.open(req, timeout=timeout).status
-    except urllib.error.HTTPError as e:
-        return e.code                            # 302 / 5xx surface here
+        r = opener.open(req, timeout=timeout)
+        return r.status, r.headers.get(FILEDROP_PORT_HEADER)
+    except urllib.error.HTTPError as e:          # 302 / 5xx surface here
+        return e.code, (e.headers.get(FILEDROP_PORT_HEADER) if e.headers else None)
     except Exception:
-        return None                              # timeout / connection refused / DNS
-
-
-# /healthz codes only the tunnel side gives (endpoint, or no listener) #1192
-_TUNNEL_SIDE_CODES = (200, 204, 404, 502, 504)
+        return None, None                        # timeout / connection refused / DNS
 
 
 def cmd_share(args):
@@ -432,8 +435,8 @@ def cmd_share(args):
 
     #1192 (owner 30.9.): ONE public HTTPS URL (`https://<host>/s/<token>/<name>`,
     TLS + Access via the Cloudflare tunnel), printed only after its origin
-    answers locally and the /s/ URL answers 200 or 302 (Access redirect; then
-    the bypassed /healthz decides) — or NO URL, a loud line naming `--private`,
+    answers locally and the /s/ URL answers 200 or 302 (Access redirect; then the
+    bypassed /healthz/s must reach THIS filedrop, #1238) — or NO URL, a loud line naming `--private`,
     exit 1. A missing lane refuses before the file is copied; reachability (a
     5xx, a timeout, a dead tunnel or origin) needs the token so is checked
     after (the unshared copy ages out with the file-drop's prune). `--private`
@@ -492,16 +495,18 @@ def cmd_share(args):
     # is not bound on a tailscale box, so its /s/ would 502 — never advertise it).
     origin_live = _filedrop_is_live(f"http://{bind_ip}:{sp.port}/")
     status = _public_share_status(public_url) if origin_live else None
-    unverified = False
     if origin_live and status == 302:
-        # Access answered at the EDGE: ask the tunnel itself via the token-free
-        # /healthz its path-scoped bypass app lets through (#1192). 530/no answer
-        # = dead tunnel; a tunnel-side code = verified; anything else (302 = no
-        # bypass yet, a WAF 403, a 429) = the edge again -> the URL + the note.
-        hz = _public_share_status(_vd.public_probe_url(public_host))
-        unverified = hz not in (None, 530) + _TUNNEL_SIDE_CODES
-        status = hz if hz in (None, 530) else status
-    if not (origin_live and status in (200, 302)):
+        # #1238: Access answered at the EDGE, which proves nothing about the /s/
+        # ROUTE (a new lane has none until its port harvest). Prove the route:
+        # the bypassed /healthz/s rides the same rule pair as /s/, and only THIS
+        # account's filedrop answers it 204 + its port. Anything else: no URL.
+        code, fd_port = _public_share_probe(_vd.share_route_probe_url(public_host))
+        why = _vd.share_route_failure(code, fd_port, sp.port)
+        if why:
+            print(_vd.refusal_line("share", "the /s/ route of https://%s/ is not "
+                                   "proven — %s" % (public_host, why)), file=sys.stderr)
+            sys.exit(1)
+    elif not (origin_live and status == 200):
         why = ("tunnel origin %s down" % bind_ip if not origin_live
                else _vd.dead_detail(status))
         print(_vd.refusal_line("share", "public URL https://%s/ is DEAD — %s"
@@ -512,8 +517,6 @@ def cmd_share(args):
     except Exception:
         _access = True
     print(_dg.public_share_url_line(public_host, token_name, access=_access))
-    if unverified:
-        print(_vd.access_unverified_note("share"), file=sys.stderr)
 
 
 def _filedrop_status():

@@ -509,11 +509,13 @@ def resolve_public_lane_full(marker_path=None, nodename=None, username=None):
 _CATCHALL_RE = re.compile(r"^(\s*)-\s*service:\s*http_status:404\s*$")
 
 
-def _drop_ingress_already_present(config_text, drop_host, port=None, filedrop_port=None):
+def _drop_ingress_already_present(config_text, drop_host, port=None, filedrop_port=None,
+                                  path="^/s/"):
     """True when `drop_host`'s ingress is already present with the expected port(s).
 
     #1114: with `filedrop_port`, recognises the `/s/` PATH rule (a `hostname` line
-    followed by `path: ^/s/` then `service: http://127.0.0.1:<filedrop_port>`).
+    followed by `path: ^/s/` then `service: http://127.0.0.1:<filedrop_port>`);
+    #1238: `path` names another path rule to that origin (the share route probe).
     Otherwise checks the DROP rule: with `port`, a `hostname` line IMMEDIATELY
     followed by `service: http://127.0.0.1:<port>` — so a preceding `/s/` rule for
     the SAME host (whose next line is `path:`, not `service:`) is never mistaken for
@@ -523,7 +525,7 @@ def _drop_ingress_already_present(config_text, drop_host, port=None, filedrop_po
     esc = re.escape(drop_host)
     if filedrop_port is not None:
         s_pat = (r"(?m)^[ \t]*-[ \t]*hostname:[ \t]*" + esc +
-                 r"[ \t]*\n[ \t]*path:[ \t]*\^/s/[ \t]*\n[ \t]*"
+                 r"[ \t]*\n[ \t]*path:[ \t]*" + re.escape(path) + r"[ \t]*\n[ \t]*"
                  r"service:[ \t]*http://127\.0\.0\.1:" + str(int(filedrop_port)) + r"[ \t]*$")
         return re.search(s_pat, config_text) is not None
     if port is None:
@@ -600,20 +602,26 @@ def render_drop_ingress_augmentation(config_text, drop_host, port=DROP_PORT_BASE
             lambda ind: ("%s- hostname: %s\n%s  service: http://127.0.0.1:%d\n"
                          % (ind, drop_host, ind, port)))
 
-    # #1114 share lane: manage the /s/ rule AND the drop rule as a pair.
+    # #1114 share lane: manage the /s/ rule AND the drop rule as a pair — #1238:
+    # a triple, with the share route probe to the same loopback origin.
+    probe = cli_drop_lanes.share_route_probe_rule()
     drop_ok = _drop_ingress_already_present(config_text, drop_host, port=port)
-    share_ok = _drop_ingress_already_present(config_text, drop_host,
-                                             filedrop_port=filedrop_port)
+    share_ok = all(_drop_ingress_already_present(config_text, drop_host, path=p,
+                                                 filedrop_port=filedrop_port)
+                   for p in (probe, "^/s/"))
     if drop_ok and share_ok:
         return config_text
     config_text = _remove_all_ingress_for_host(config_text, drop_host)
+
+    def entry(ind, path, svc_port):
+        head = "%s- hostname: %s\n" % (ind, drop_host)
+        head += "%s  path: %s\n" % (ind, path) if path else ""
+        return head + "%s  service: http://127.0.0.1:%d\n" % (ind, svc_port)
+
     return _insert_before_catchall(
-        config_text,
-        lambda ind: (
-            "%s- hostname: %s\n%s  path: ^/s/\n%s  service: http://127.0.0.1:%d\n"
-            "%s- hostname: %s\n%s  service: http://127.0.0.1:%d\n"
-            % (ind, drop_host, ind, ind, filedrop_port,
-               ind, drop_host, ind, port)))
+        config_text, lambda ind: (entry(ind, probe, filedrop_port)
+                                  + entry(ind, "^/s/", filedrop_port)
+                                  + entry(ind, None, port)))
 
 
 def _local_filedrop_port(lane):

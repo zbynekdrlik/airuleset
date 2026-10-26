@@ -38,6 +38,12 @@ _NAME_RE = re.compile(r"\A[A-Za-z0-9._-]{1,128}\Z")
 # unforced, unrequested behavior change outside this bug's scope.
 _EXTRA_TEXTLIKE_TYPES = ("application/json", "application/javascript")
 
+# #1238: the token-free proof that a public `/s/` route reaches THIS server (the
+# ingress routes it to the `/s/` origin, under the lane's `/healthz` Access
+# bypass); `share` requires 204 + this header naming its own port.
+SHARE_ROUTE_PROBE_PATH = "/healthz/s"
+FILEDROP_PORT_HEADER = "X-Airuleset-Filedrop-Port"
+
 
 def _with_charset_if_textual(ctype):
     """Append '; charset=utf-8' to a text/* (or JSON/JS) MIME type. Passes
@@ -115,6 +121,12 @@ class Handler(BaseHTTPRequestHandler):
             # user's console stays clean (browser-console-zero-errors) instead of
             # logging a 404 every time they open a shared file.
             self.send_response(204)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        if path == SHARE_ROUTE_PROBE_PATH:          # #1238 /s/ route proof
+            self.send_response(204)
+            self.send_header(FILEDROP_PORT_HEADER, str(self.server.server_address[1]))
             self.send_header("Content-Length", "0")
             self.end_headers()
             return

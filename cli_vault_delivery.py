@@ -4,7 +4,8 @@
 mi ze stale vsade pchas tailscale ktore je bezpecnostne riziko“ — so the #1189
 always-printed tailscale fallback line is gone, back to the #1115 ruling (ONE
 public TLS channel). `secret show`, `secret request` and `upload` go through
-`emit_urls`; `share` uses `select_lane` + `refusal_line` for the same contract:
+`emit_urls`; `share` uses `select_lane` + `refusal_line` (behind Access, the #1238
+`/s/` route proof `share_route_failure` instead of `/healthz`) for the same contract:
 
 - the public lane answers (its token-free `/healthz`, probed with the no-redirect
   GET of `cli_drop_lanes._probe_public_status`, gets 200/204) -> ONE https line;
@@ -81,6 +82,37 @@ def public_bind_ips(bind_ip, encrypted_private, lane_lookup=None):
 
 def public_probe_url(public_host: str) -> str:
     return "https://%s/healthz" % public_host
+
+
+def share_route_probe_url(public_host: str) -> str:
+    """#1238: the token-free URL that proves a lane's `/s/` ROUTE: it sits under
+    the `/healthz` Access bypass and rides the same ingress rule pair as `/s/`."""
+    from filedrop.server import SHARE_ROUTE_PROBE_PATH
+    return "https://%s%s" % (public_host, SHARE_ROUTE_PROBE_PATH)
+
+
+def share_route_failure(code, port_header, port):
+    """None when the route probe proves `/s/` reaches THIS account's filedrop
+    (204 + its own port, #1238), else why it does not — the share refusal's
+    reason. `/healthz` cannot prove it: the no-path rule serves it (502 there
+    is the ephemeral endpoint port with nothing listening)."""
+    if code in (None, 530):
+        return dead_detail(code)
+    if code == PUBLIC_ACCESS_CODE:
+        return ("the route probe got the Access login (302): the lane's /healthz "
+                "bypass is not applied, so the /s/ route cannot be proven")
+    if code != 204:
+        return ("the route probe got HTTP %s instead of this box's filedrop: the "
+                "/s/ rule is missing from the tunnel ingress (a new lane gets it in "
+                "the push that harvests its filedrop port) or the edge answered" % code)
+    if port_header is None:
+        return ("the route probe got 204 without the filedrop port header — not "
+                "this box's filedrop")
+    if str(port_header).strip() != str(port):
+        return ("the /s/ route reaches filedrop port %s, this account serves %s "
+                "(a stale route — the next push re-renders it)"
+                % (str(port_header).strip(), port))
+    return None
 
 
 def dead_detail(code) -> str:
