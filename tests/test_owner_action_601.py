@@ -146,7 +146,7 @@ class OwnerActionRoutesToU(unittest.TestCase):
         # owner-action ticket (it stays tagged `action`).
         rows = {9: _row(9, "needs-owner-action")}
         with mock.patch.object(statusbar, "question_map_ticket_refs",
-                               lambda cwd=None, home=None: set()):
+                               lambda cwd=None, home=None, cover=None: set()):
             self.assertEqual(airuleset._acceptance_present_set(rows), set())
 
 
@@ -207,7 +207,7 @@ class OwnerActionNoQuestionFlag(unittest.TestCase):
     def test_action_member_with_no_delivered_notice_is_flagged(self):
         rows = {7: _row(7, "needs-owner-action")}
         with mock.patch.object(statusbar, "question_map_ticket_refs",
-                               lambda cwd=None, home=None: set()):
+                               lambda cwd=None, home=None, cover=None: set()):
             flagged = airuleset._no_question_flagged(
                 rows, comment_state_fn=lambda n, cwd=None: False)
         self.assertEqual(flagged, {7},
@@ -217,7 +217,7 @@ class OwnerActionNoQuestionFlag(unittest.TestCase):
     def test_action_member_with_delivered_notice_is_not_flagged(self):
         rows = {7: _row(7, "needs-owner-action")}
         with mock.patch.object(statusbar, "question_map_ticket_refs",
-                               lambda cwd=None, home=None: {7}):
+                               lambda cwd=None, home=None, cover=None: {7}):
             flagged = airuleset._no_question_flagged(
                 rows, comment_state_fn=lambda n, cwd=None: False)
         self.assertEqual(flagged, set(),

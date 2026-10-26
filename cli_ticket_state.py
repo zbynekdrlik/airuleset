@@ -84,6 +84,8 @@ _M_MERGED = ("fix merged to the integration branch, not yet on main: waits "
              "for the release cut (#1083)")
 _M_PENDING = ("the fix is on main but a PROD instance does not run it yet: "
               "waits for the deploy (#1141)")
+_M_DOCS = ("the fix is live, and a docs/chore change naming it is merged but "
+           "not released: waits for the release cut (#1228)")
 
 
 @dataclass(frozen=True)
@@ -112,6 +114,8 @@ class Facts:
     `open_pr`: any open linked PR, in any state (it keeps C open).
     `reopened`: GitHub stateReason REOPENED (it keeps C open, ruling 1).
     `on_main`: "" (not on main, or unknown), DEPLOYED, RELEASED or PENDING.
+    `merged_docs`: only a docs/chore/style/ci change named it merged, not
+    released — never M, but it keeps C open (#1228).
     All defaults = the facts are unknown: the label route and nothing else."""
     merged: bool = False
     handed: Union[bool, str] = False
@@ -119,6 +123,7 @@ class Facts:
     on_main: str = ""
     open_pr: bool = False
     reopened: bool = False
+    merged_docs: bool = False
 
 
 @dataclass(frozen=True)
@@ -126,9 +131,9 @@ class TicketFacts:
     """The facts of a whole row set, as `bucketize` reads them (#1141 slice
     3): the merged numbers, the `handed` map (keyed like the rows), the numbers
     with a linked PR in CI, with any open linked PR, and the on-main state by
-    number, the REOPENED numbers, and `m_note` (why the M set is partial, or
-    ""; ruling 3). Empty = unknown: the label buckets (+ gk) of the earlier
-    slices."""
+    number, the REOPENED numbers, `m_note` (why the M set is partial, or "";
+    ruling 3) and `merged_docs` (named only by a merged docs change, #1228).
+    Empty = unknown: the label buckets (+ gk) of the earlier slices."""
     merged: frozenset = frozenset()
     handed: dict = field(default_factory=dict)
     pipeline: frozenset = frozenset()
@@ -136,6 +141,7 @@ class TicketFacts:
     open_pr: frozenset = frozenset()
     reopened: frozenset = frozenset()
     m_note: str = ""
+    merged_docs: frozenset = frozenset()   # #1228
 
     def of(self, number):
         """The `Facts` of ticket `number` (a non-numeric key has none)."""
@@ -148,7 +154,8 @@ class TicketFacts:
                      pipeline=n in self.pipeline,
                      on_main=self.on_main.get(n, ""),
                      open_pr=n in self.open_pr,
-                     reopened=n in self.reopened)
+                     reopened=n in self.reopened,
+                     merged_docs=n in self.merged_docs)
 
 
 def _names(labels):
@@ -396,7 +403,8 @@ def _c_veto(labels, names, facts):
     """What keeps a live fix from reading "done, close it", or "" (#1141
     slice 3, review round 1): unreadable labels (the vetoes cannot be
     checked), a `_C_VETO` label, a reopened ticket (ruling 1), or another fix
-    still pending — merged but not released, in CI, or any open linked PR."""
+    still pending — merged but not released (a docs/chore change too, #1228),
+    in CI, or any open linked PR."""
     if not isinstance(labels, (list, tuple)):
         return "unreadable labels"
     for label in _C_VETO:
@@ -407,6 +415,8 @@ def _c_veto(labels, names, facts):
                 "that flag while it is open)")
     if facts.merged:
         return "another fix merged, not yet released"
+    if facts.merged_docs:
+        return "a docs/chore change merged, not yet released (#1228)"
     if facts.pipeline or facts.open_pr:
         return "an open linked PR"
     return ""
@@ -427,8 +437,9 @@ def classify(row, facts=None, box=None, number=None):
        open: a `_C_VETO` label, unreadable labels, or another fix still
        pending (merged, in CI, or any open linked PR) (#1141 slice 3);
     3. P — an open linked PR's checks are still running;
-    4. M — merged to the integration branch (#1083) or on main but not on
-       PROD yet (PENDING); `prio:bounce` keeps it in I (rework was asked for).
+    4. M — merged to the integration branch (#1083), on main but not on
+       PROD yet (PENDING), or live with only a docs change pending (#1228);
+       `prio:bounce` keeps it in I (rework was asked for).
        The old U-label veto is gone: step 1 already took every question;
     5. on a reduced-authority box `facts.handed` moves a remaining I row to gk
        (#391; a handed row parked in W stays there, as the footer counts it).
@@ -456,9 +467,11 @@ def classify(row, facts=None, box=None, number=None):
     if facts.pipeline:
         return ("P", "an open linked PR is in CI: waits for its checks "
                      "(#1141)")
-    if facts.merged or facts.on_main == PENDING:
+    docs_wait = facts.merged_docs and facts.on_main in (DEPLOYED, RELEASED)
+    if facts.merged or facts.on_main == PENDING or docs_wait:
         if _BOUNCE not in names:
-            return "M", (_M_MERGED if facts.merged else _M_PENDING)
+            return "M", (_M_MERGED if facts.merged else
+                         _M_DOCS if docs_wait else _M_PENDING)
         reason += "; merged, but prio:bounce keeps it here (#1083)"
     if facts.handed and bucket == "I" and box.kind == "slice":
         if facts.handed == "released":

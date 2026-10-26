@@ -2288,6 +2288,10 @@ def record_question(message_id, channel, session, cwd, now=None, path=None,
     d[message_id] = {"session": session, "cwd": str(cwd or ""),
                      "channel": str(channel or ""), "ts": int(now),
                      "asked": asked, "question": q, "block": block}
+    # #1218: the marker is on the LAST line, past the caps — read the full text
+    tracked = __import__("question_attribution").tracked_ticket(question)
+    if tracked is not None:
+        d[message_id]["tracked"] = tracked
     if suppressed:
         # #716: self-documenting marker so the watchdog consumers (reping,
         # orphan floor) and any future reader can identify a Discord-less

@@ -763,7 +763,7 @@ def _partition_workable(rows, own_stream=None):
     return out["I"], out["U"], out["W"]   # HIDDEN: counted on its owner's box
 
 
-def _acceptance_present_set(rows, cwd=None, home=None):
+def _acceptance_present_set(rows, cwd=None, home=None, cover=None):
     """The set of BARE `needs-acceptance` issue numbers in `rows` whose
     acceptance DRAFT has been DELIVERED — a question-map ping references `#N`, the
     "presented for the owner's approval" signal. #622 REPURPOSED this from the
@@ -781,7 +781,9 @@ def _acceptance_present_set(rows, cwd=None, home=None):
     path (which no longer computes this at all — #622). `cwd` (the caller's repo
     root) SCOPES the map read to THIS project — a MUST on a multi-repo box, where
     issue numbers collide across repos (#539 review MAJOR-1); every production call
-    site passes its resolved root.
+    site passes its resolved root. #1218: a ping counts as delivered for the
+    tickets it is ATTRIBUTED to (`cover` = the box's label-U set,
+    `cli_ticket_route.question_cover`), never for a context ref.
 
     Fail-safe: an UNREADABLE map (`question_map_ticket_refs` → None) returns ALL
     bare-needs-acceptance numbers — the conservative DISPLAY default (show them all
@@ -800,8 +802,8 @@ def _acceptance_present_set(rows, cwd=None, home=None):
         # unsent acceptance that beats a hand-off label is tagged too.
         if cli_ticket_state.owner_question(labels) == "acceptance":
             bare.add(number)
-    try:
-        refs = statusbar.question_map_ticket_refs(cwd, home)   # #539 MAJOR-1: cwd-scoped
+    try:   # #539 MAJOR-1: cwd-scoped; #1218: attributed
+        refs = statusbar.question_map_ticket_refs(cwd, home, cover=cover)
     except Exception:
         refs = None
     if refs is None:
@@ -970,20 +972,27 @@ def _question_map_u_supplement(rows, root, runner):
     MINOR-3) to protect the #370 GraphQL budget.
 
     ``runner(argv, cd)`` is the caller's ``_out`` (a subprocess wrapper); ``rows``
-    is the ``_union_open_issues`` / ``_slice_mine_and_handed`` result dict."""
+    is the ``_union_open_issues`` / ``_slice_mine_and_handed`` result dict.
+
+    #1218: ONE map entry is at most ONE U member. Only the tickets an entry can
+    be attributed to are fetched (``question_map_ticket_refs`` with no cover: a
+    tracked entry's ticket, every ref of an unmarked one), so a label-U ticket a
+    tracked question names only as CONTEXT is never fetched; a fetched ticket
+    joins U by its own labels. Every fetched label-U ticket is then also the
+    ticket the attribution attaches its entry to (rule 1 or 2)."""
     import airuleset
-    import cli_ticket_state
+    import cli_ticket_route
     import statusbar as _sb
     try:
-        refs = _sb.question_map_ticket_refs(root)
+        refs = _sb.question_map_ticket_refs(root)   # every attributable ticket
     except Exception:
         return {}
     if not refs:
         return {}
-    own_box = cli_ticket_state.Box(own_stream=airuleset._current_user())
-    result = {}
+    own = airuleset._current_user()
+    fetched = {}
     checked = 0
-    for qn in refs:
+    for qn in sorted(refs):
         if qn in rows:
             continue
         if checked >= _QMAP_SUPPLEMENT_CAP:
@@ -1001,18 +1010,14 @@ def _question_map_u_supplement(rows, root, runner):
         state = obj.get("state", "")
         if isinstance(state, str) and state.upper() != "OPEN":
             continue
-        qlabels = obj.get("labels")
-        # #1141 slice 2: add it to U exactly when this slice box's own
-        # classifier puts it there (a sent acceptance is W, a foreign
-        # question is #654 action-only here).
-        if cli_ticket_state.classify({"labels": qlabels}, None,
-                                     own_box)[0] == "U":
-            result[qn] = {
-                "labels": qlabels,
-                "title": obj.get("title", ""),
-                "createdAt": obj.get("createdAt", ""),
-            }
-    return result
+        fetched[qn] = {"labels": obj.get("labels"),
+                       "title": obj.get("title", ""),
+                       "createdAt": obj.get("createdAt", "")}
+    # #1141 slice 2: U exactly when this slice box's own classifier puts it
+    # there by its labels (a sent acceptance is W, a foreign question is #654
+    # action-only here) — the label-U cover (#1218).
+    cover = cli_ticket_route.question_cover(fetched, own)
+    return {n: row for n, row in fetched.items() if n in cover}
 
 
 # #539: the repo's OWN ask-flow markers — the shape a genuine owner-question
@@ -1084,7 +1089,8 @@ def _issue_question_comment_state(number, cwd=None):
     return False
 
 
-def _no_question_flagged(rows, cwd=None, home=None, comment_state_fn=None):
+def _no_question_flagged(rows, cwd=None, home=None, comment_state_fn=None,
+                         cover=None):
     """The set of `U`-member issue numbers to tag `no-question!`/`no-action!`
     (#539, mechanizing the #527 invariant "U > 0 ⟹ every U member carries a
     DELIVERED question/notice"). For a `needs-owner-action` member (#601) the
@@ -1094,9 +1100,10 @@ def _no_question_flagged(rows, cwd=None, home=None, comment_state_fn=None):
     rows`) renders the flag as `no-action!` for an `action`-reason member. For
     each member of `rows` (the `user_waiting` bucket):
 
-      - covered if the question map references `#N`
-        (`statusbar.question_map_ticket_refs`, the AUTHORITATIVE delivered-ping
-        signal — cheap, local, no gh), OR
+      - covered if a question-map ping is ATTRIBUTED to `#N`
+        (`statusbar.question_map_ticket_refs` with the box's label-U `cover`,
+        #1218 — a context ref is no delivered question; the AUTHORITATIVE
+        delivered-ping signal — cheap, local, no gh), OR
       - covered if a question-shaped comment exists on it (`comment_state_fn`,
         default `_issue_question_comment_state`, a bounded gh fallback run ONLY
         for a map-uncovered member — so a healthy stream pays ZERO gh calls and
@@ -1123,8 +1130,8 @@ def _no_question_flagged(rows, cwd=None, home=None, comment_state_fn=None):
     ones."""
     import cli_ticket_state
     import statusbar
-    try:
-        refs = statusbar.question_map_ticket_refs(cwd, home)   # #539 MAJOR-1: cwd-scoped
+    try:   # #539 MAJOR-1: cwd-scoped; #1218: attributed
+        refs = statusbar.question_map_ticket_refs(cwd, home, cover=cover)
     except Exception:
         refs = None
     if refs is None:

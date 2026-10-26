@@ -74,22 +74,21 @@ U_RECONCILE_TTL_S = 24 * 3600
 # pathological burst, mirroring the question map's own `_QUESTIONS_MAX`.
 U_RECONCILE_MAX = 200
 
-# The FIRST ticket reference in a question's stored text. Same shape as
-# discord_replies._TICKET_NUM_RX; the FIRST match is the question's primary
-# ticket (a passing mention of a second #M must not trigger clearing #M off
-# an unrelated answer). 1-6 digits, matching the repo's convention.
+# A ticket reference in a question's stored text. Same shape as
+# discord_replies._TICKET_NUM_RX; without a tracking marker the FIRST match is
+# the question's primary ticket (a passing mention of a second #M must not
+# trigger clearing #M off an unrelated answer). 1-6 digits, the repo convention.
 _TICKET_NUM_RX = re.compile(r"#(\d{1,6})")
 
 
-def _first_ticket_num(text):
-    """The FIRST `#N` in `text` as an int, or None. Fail-safe on garbage."""
-    m = _TICKET_NUM_RX.search(str(text or ""))
-    if not m:
-        return None
-    try:
-        return int(m.group(1))
-    except (TypeError, ValueError):
-        return None
+def _first_ticket_num(text, entry=None):
+    """The question's PRIMARY ticket (int) or None: the tracking marker's
+    ticket — `entry`'s stored `tracked` (the untruncated question) or one in
+    `text` (#1218: the FIRST `#N` is often a context ticket) — else the FIRST
+    `#N`. Fail-safe on garbage."""
+    tracked = __import__("question_attribution").entry_tracked(entry or {}, text)
+    m = None if tracked is not None else _TICKET_NUM_RX.search(str(text or ""))
+    return tracked if tracked is not None else (int(m.group(1)) if m else None)
 
 
 def capture_answered_ticket(state, reply, now):
@@ -106,7 +105,7 @@ def capture_answered_ticket(state, reply, now):
 
     Cross-box safe by construction: the capture is written by THIS box's own
     job-7 delivery, so it can only ever name a question THIS box asked."""
-    num = _first_ticket_num((reply or {}).get("question"))
+    num = _first_ticket_num((reply or {}).get("question"), reply)
     if num is None:
         return
     cwd = str((reply or {}).get("cwd") or "")
@@ -149,8 +148,8 @@ def _main_map_reask_pairs():
     """The set of (session, #N) pairs a CURRENT main-map entry re-references
     (`notify.load_questions`) -- a FRESH question the asking session is still
     waiting on. A captured (session, #N) present here is a live re-ask and its
-    label must be KEPT. Keyed on the FIRST #N of each entry's stored text (its
-    primary ticket), matching the capture side. Never raises."""
+    label must be KEPT. Keyed on each entry's PRIMARY ticket (`_first_ticket_num`:
+    the tracking marker, else the first #N), matching the capture. Never raises."""
     pairs = set()
     try:
         from notify import load_questions
@@ -162,7 +161,7 @@ def _main_map_reask_pairs():
     for _mid, rec in qmap.items():
         if not isinstance(rec, dict):
             continue
-        num = _first_ticket_num(rec.get("question") or rec.get("block"))
+        num = _first_ticket_num(rec.get("question") or rec.get("block"), rec)
         if num is None:
             continue
         session = str(rec.get("session") or "")

@@ -167,10 +167,10 @@ class RealOdooTitleMapping(unittest.TestCase):
         got = rs.merged_unreleased_issues(
             "/repo", git_fn=git, pr_meta_fn=lambda pr: meta.get(pr),
             cache_path=self.cache, slug="o/r")
-        # tickets from the TITLES (incl. the docs(#N): scope form + multi-ticket
-        # "#7631 #7632"); "úloha 980" (no #) excluded; every BARE BODY cross-ref
-        # (#1 #2 #3 / #9000 / #5) refused; the PR's own number excluded.
-        self.assertEqual(set(got), {7421, 7644, 7581, 7631, 7632})
+        # tickets from the TITLES (multi-ticket "#7631 #7632"; #1228: the
+        # docs(#7421) PR implements nothing); "úloha 980" (no #), every BARE
+        # BODY cross-ref (#1 #2 #3 / #9000 / #5) and the PR's own number out.
+        self.assertEqual(set(got), {7644, 7581, 7631, 7632})
 
     def test_squash_pr_number_is_the_trailing_paren_not_the_scope(self):
         commits = rs._pr_introducing_commits(

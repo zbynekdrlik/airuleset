@@ -76,7 +76,7 @@ _DEV_COMMITS = [
     ("test(#1350): [red] reproduce the widget crash",),
     ("feat(#1350): [green] fix the widget crash",),
     ("fix(#1349): correct the off-by-one",),
-    ("chore: wire up the follow-up", "Closes #1203"),
+    ("fix: wire up the follow-up", "Closes #1203"),
     ('Revert "feat(#1331) old broken thing"',),
 ]
 

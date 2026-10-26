@@ -291,6 +291,8 @@ def _facts(merged, handed, prs, on_main, reopened=frozenset()):
         on_main = {n: s for n, s in (on_main or {}).items() if s == ts.PENDING}
     prs = prs or {}
     return ts.TicketFacts(merged=frozenset(int(n) for n in (merged or ())),
+                          merged_docs=frozenset(   # #1228: keeps C open
+                              int(n) for n in getattr(merged, "docs", ())),
                           handed=dict(handed or {}),
                           pipeline=frozenset(n for n, c in prs.items() if c),
                           on_main=dict(on_main or {}),

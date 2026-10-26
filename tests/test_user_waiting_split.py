@@ -307,10 +307,10 @@ class WaitingReasonAndPingMerge(unittest.TestCase):
                 TemporaryDirectory() as bindir:
             subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
             self._fake_gh(bindir)
-            # scoped to the subprocess cwd (= repo); one ticketless, one with #N.
+            # one ticketless, one naming the U-labelled #4 (#1218 dedup, cwd=repo)
             self._seed_questions(home, {
                 "1": {"cwd": repo, "block": "otazka bez ticketu", "ts": 1},
-                "2": {"cwd": repo, "block": "otazka k #742", "ts": 2},
+                "2": {"cwd": repo, "block": "otazka k #4", "ts": 2},
             })
             r = _run_quals("core-quals", "--waiting", repo, home, bindir)
             self.assertEqual(r.returncode, 0, r.stderr)
@@ -318,7 +318,7 @@ class WaitingReasonAndPingMerge(unittest.TestCase):
                           if ln.split("\t")[3:4] == ["ping"]]
             self.assertEqual(len(ping_lines), 1,
                              "exactly the ONE ticketless ping is listed as a "
-                             "ping member; the #742-referencing ping is deduped")
+                             "ping member; the #4-referencing ping is deduped")
 
 
 if __name__ == "__main__":

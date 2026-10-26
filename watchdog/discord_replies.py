@@ -525,10 +525,8 @@ def deliver_discord_replies(now, run, state, panes_by_sid, dry_run=False,
                 drop_grace_question(r["referenced"])   # #449: graced entry
             else:
                 drop_question(r["referenced"])
-            # #304 review MINOR-5: popping the reply's "first blocked at"
-            # timestamp is itself a real mutation of persisted state (the
-            # fallback-deadline clock) -- a dry-run simulating delivery via
-            # the idle-pane fast path must not silently wipe a REAL clock a
+            # #304 review MINOR-5: the reply's "first blocked at" fallback clock
+            # is real persisted state -- a dry-run must not wipe a REAL clock a
             # concurrent/earlier real sweep already started.
             blocked.pop(r["reply_id"], None)
             # #515: this delivered answer is the RELIABLE "the owner answered"
@@ -544,9 +542,8 @@ def deliver_discord_replies(now, run, state, panes_by_sid, dry_run=False,
             logs.append("reply→%s [%s]" % (watchdog.project_label(r["cwd"]), r["session"][:12]))
 
     def _pending(r, why):
-        # #304 review MINOR-5: creating the "first blocked at" timestamp is
-        # itself real persisted state (the fallback-deadline clock) — a
-        # dry-run must not create one that didn't already exist.
+        # #304 review MINOR-5: the "first blocked at" fallback clock is real
+        # persisted state — a dry-run must not create it.
         if not dry_run:
             blocked.setdefault(r["reply_id"], now)
         # The durable lane once the keystroke path has been blocked long
@@ -564,7 +561,9 @@ def deliver_discord_replies(now, run, state, panes_by_sid, dry_run=False,
             deadline = (DREPLY_NOPANE_FALLBACK_S if why == "no pane"
                         else DREPLY_TICKET_FALLBACK_S)
             if now - blocked[r["reply_id"]] >= deadline:
-                m = _TICKET_NUM_RX.search(r.get("question") or "")
+                t = __import__("question_attribution").entry_tracked(
+                    r, r.get("question"))   # #1218: a marker beats the 1st #N
+                m = _TICKET_NUM_RX.search("#%s" % t if t else (r.get("question") or ""))
                 if m:
                     fu = q_owner.get(r["referenced"])
                     if fu:
