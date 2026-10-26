@@ -290,5 +290,44 @@ class NoRelaunchIntoAShell(unittest.TestCase):
         self.assertNotIn("resurrect", tmux_io.RECOVERY_KINDS)
 
 
+class LatchHoldIsNoSwallow(base._Latched):
+    """Review finding 8: the report-owed (job 25) and dying-subagent riders
+    pre-checked only the daily budget; under the latch their send typed nothing
+    and was booked as a swallow / a nudge, which escalates to an owner ping. A
+    latch hold is journalled as held, never counted, never escalated."""
+
+    def test_report_owed_holds_a_latched_pane(self):
+        import test_report_owed_kind_off_1092 as ro
+        _os().refresh(self.state, [("%42", self.CWD)], self.proj, NOW)
+        now, state, pings, logs = int(time.time()), {}, [], []
+        for _ in range(4):
+            lg, vs = ro.run(now, state, {7: now - 9999},
+                            nudges_enabled=lambda k: True, vs_result=False,
+                            send_fn=lambda *a, **k: pings.append(a))
+            logs += lg
+            self.assertEqual(vs.calls, [], lg)
+        self.assertEqual(pings, [], "a latch hold never escalates to the owner")
+        self.assertTrue(any("report-owed held (owner-stop" in ln for ln in logs),
+                        logs)
+
+    def test_dying_subagent_holds_a_latched_pane(self):
+        sub = self.proj / "agent-x.jsonl"
+        sub.write_text(base.json.dumps({
+            "type": "assistant", "isApiErrorMessage": True,
+            "message": {"content": "API Error"}}) + "\n")
+        state, logs, pings, tmux = {}, [], [], self._tmux()
+        for _ in range(4):
+            base.wd._nudge_dying_subagent(
+                state, logs, lambda *a, **k: pings.append(a), self.PID, tmux,
+                base.GOAL_IDLE_CAP, "proj", "owner", time.time(), sub, 900,
+                "api-error", "apierr", 0, 3, False, tpath=self.tpath,
+                sleep_fn=lambda s: None)
+        self.assertEqual(tmux.sent, [])
+        self.assertNotIn("subagent-apierr:agent-x", state)
+        self.assertEqual(pings, [])
+        self.assertTrue(any("subagent-apierr-held" in ln and "owner-stop" in ln
+                            for ln in logs), logs)
+
+
 if __name__ == "__main__":
     unittest.main()
