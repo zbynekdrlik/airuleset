@@ -226,5 +226,37 @@ class TwoPanesOneCwd(unittest.TestCase):
                                 "drop:owner-stop", paused_newest)
 
 
+class ImplWindowRespectsTheLatch(base._Pane):
+    """Review finding 6: `impl_window_presence` (#1060) recreated a missing
+    dual-agent impl window and resumed Claude there with no latch check; a
+    session the owner stopped in that cwd stays stopped."""
+
+    def _windows(self, calls):
+        def run(argv, timeout=8):
+            calls.append(list(argv))
+            return "miva1\t0\tmiva1\n" if argv[:2] == ["tmux", "list-windows"] else ""
+        return run
+
+    def test_a_latched_impl_cwd_is_not_relaunched(self):
+        from watchdog import tmux_io
+        self._append(*(OWNER_WORK + FACTS["pause"]))
+        _os().refresh({}, [], self.proj, NOW)
+        calls, logs = [], []
+        rc = tmux_io.impl_window_presence({"cwd": self.CWD},
+                                          run=self._windows(calls), logs=logs)
+        self.assertEqual(rc, "owner-stop", logs)
+        self.assertEqual([c for c in calls if c[:2] == ["tmux", "new-window"]], [])
+        self.assertTrue(any("owner-stop" in ln for ln in logs), logs)
+
+    def test_an_unlatched_impl_cwd_is_relaunched(self):
+        from watchdog import tmux_io
+        self._append(*OWNER_WORK)
+        _os().refresh({}, [], self.proj, NOW)
+        calls = []
+        rc = tmux_io.impl_window_presence({"cwd": self.CWD},
+                                          run=self._windows(calls), logs=[])
+        self.assertEqual(rc, "relaunched")
+
+
 if __name__ == "__main__":
     unittest.main()
