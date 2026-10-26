@@ -439,8 +439,8 @@ def impl_window_presence(marker, run=None, logs=None, dry_run=False,
         return None
     run = run or watchdog._default_run
     out = run(["tmux", "list-windows", "-a", "-F",
-               "#{session_name}\t#{window_index}\t#{window_name}"]) or ""
-    sessions = {}
+               "#{session_name}\t#{window_index}\t#{window_name}\t#{pane_id}"]) or ""
+    sessions, impl_pane = {}, {}
     for line in out.splitlines():
         parts = line.split("\t")
         if len(parts) < 3:
@@ -448,6 +448,8 @@ def impl_window_presence(marker, run=None, logs=None, dry_run=False,
         sess, name = parts[0].strip(), parts[2].strip()
         if sess:
             sessions.setdefault(sess, []).append(name)
+        if sess and name == "impl" and len(parts) > 3:
+            impl_pane[sess] = parts[3].strip()
     if not sessions:
         return "no-session"
     # The session-created hook renames window 0 to the box name (== session
@@ -465,13 +467,16 @@ def impl_window_presence(marker, run=None, logs=None, dry_run=False,
             break
     if target is None:
         return "no-managed-session"
+    from watchdog import owner_stop     # #1257: the owner stopped it = stays stopped
     if "impl" in sessions[target]:
+        owner_stop.note_window("%s:impl" % target, impl_pane.get(target),
+                               time.time(), dry_run)
         logs.append("dual: impl window present on %s" % target)
         return "present"
     cwd = (marker.get("cwd") or "").strip() if isinstance(marker, dict) else ""
-    from watchdog import owner_stop     # #1257: the owner stopped it = stays stopped
     pdir = projects_dir or owner_stop._SWEEP.get("projects_dir")
-    latch = owner_stop.cwd_latch(pdir, os.path.expanduser(cwd)) if cwd and pdir else None
+    latch = owner_stop.window_latch("%s:impl" % target, pdir, os.path.expanduser(
+        cwd)) if cwd and pdir else None
     if latch:
         logs.append("dual: impl window missing on %s — owner-stop latch (%s), not "
                     "relaunched" % (target, latch.get("fact")))

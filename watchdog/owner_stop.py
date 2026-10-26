@@ -315,6 +315,30 @@ def sid_latch(projects_dir, cwd, sid, state=None):
         return None
 
 
+def note_window(key, pane_id, now, dry_run=False):
+    """Remember the session of tmux window `key` (the dual-agent impl window,
+    #1060) while it exists — it shares its cwd with the main window — so
+    `window_latch` judges THAT session once the window is gone."""
+    state = _SWEEP.get("state")
+    ctx = _PANES.get(pane_id) if pane_id else None
+    if dry_run or not isinstance(state, dict) or not ctx or not ctx.get("sid"):
+        return
+    if not isinstance(state.get(STATE_KEY), dict):
+        state[STATE_KEY] = {}
+    state[STATE_KEY]["win:%s" % key] = {"sid": ctx["sid"], "seen": now}
+
+
+def window_latch(key, projects_dir, cwd):
+    """The latch for window `key`'s last remembered session (`note_window`),
+    else for `cwd`'s newest session."""
+    state = _SWEEP.get("state")
+    recs = state.get(STATE_KEY) if isinstance(state, dict) else None
+    rec = recs.get("win:%s" % key) if isinstance(recs, dict) else None
+    if isinstance(rec, dict) and rec.get("sid"):
+        return sid_latch(projects_dir, cwd, rec["sid"], state)
+    return cwd_latch(projects_dir, cwd, state)
+
+
 def _stamp(path):
     try:
         st = os.stat(path)
