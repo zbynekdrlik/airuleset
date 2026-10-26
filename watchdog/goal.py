@@ -4675,8 +4675,7 @@ def _deliver_batch(collect, pid, sid, loc, tpath, run, state, now, handled,
     journal the REAL outcome (#486): delivered / held / a typed attempt named by
     its `send_outcome` kind (typed-undone, typed-stranded, swallowed, ...) /
     `deferred (not typed ...)` only when no keystroke was typed."""
-    _bt, _incl = _nudge_gate.compose_batch(
-        [(c, t) for c, t, _ in collect], max_chars=_nudge_gate.BATCH_MAX_CHARS)
+    _bt, _incl = _nudge_gate.compose_batch([(c, t) for c, t, _ in collect])
     if not _bt:
         return
     watchdog._janitor_mark_watch(state, pid, now)

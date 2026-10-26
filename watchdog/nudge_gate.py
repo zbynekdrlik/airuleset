@@ -45,8 +45,8 @@ import time
 # The gated job-20 rider categories (the batch members). Jobs 8/11 (bounce /
 # gk-request backstops), card, goal-sweep and subagent-stuck stay OUT of the
 # batch (own lanes with their own bounds) but are bound by the per-pane day.
-# #923 CLASSIFICATION: WORK_DRIVING sections lead the batch, AUDIT sections are
-# trimmed first. Every new gated category joins exactly ONE of the two sets.
+# #923 CLASSIFICATION: WORK_DRIVING sections lead the batch, AUDIT sections
+# follow. Every new gated category joins exactly ONE of the two sets.
 WORK_DRIVING_CATEGORIES = frozenset({
     "release-gap", "queue-arrival",
     "bounce-verdict",   # #1066 lane B: a fresh gk BOUNCE verdict drives work
@@ -280,11 +280,11 @@ def mark_sent(state, sid, category, now):
 # `_JANITOR_OWN_PREFIXES` for stranded-nudge cleanup.
 BATCH_PREFIX = "nudge:"
 
-# The max-chars hard cap for a BATCHED delivery (#923). Individual riders cap
-# their own text at 700; the batch adds a prefix + per-section headers, so the
-# batch cap must be > 700 to fit at least one full rider section. Set to 1400
-# (two full riders). send_verified's _type_literal chunk-typing handles texts
-# up to several KB (CC's input box accepts them) — the limit is readability.
+# B9 fix (owner 26.10.2026): the daily batch is NEVER trimmed — since #1157 its
+# body goes to a nudge file and ONE pointer row is typed, so every due kind rides
+# the pane's one daily batch. 1400 was the pre-#1157 TYPED-batch cap; it stays
+# only as the bound `send_outcome._presend_own` uses to recognise such a typed
+# batch still sitting in a box.
 BATCH_MAX_CHARS = 1400
 
 
@@ -321,45 +321,19 @@ def batch_eligible(state, sid, now):
     return wd + au
 
 
-def compose_batch(items, max_chars=None):
-    """Compose a batch message from `[(category, text), ...]`.
-
-    Orders WORK_DRIVING sections first, AUDIT second. Each section is formatted
-    as `[category] text`. The message leads with `BATCH_PREFIX` so machine-prefix
-    recognition classifies it as a machine nudge.
-
-    When `max_chars` is given and the composed message exceeds it, AUDIT sections
-    are trimmed from the end first (the priority taxonomy's trim order), then
-    WORK_DRIVING from the end — work-driving is never trimmed while audit
-    sections remain.
-
-    Returns `(composed_text, included_categories)` — a 2-tuple so callers know
-    which families survived trimming and can mark only those (#923 caller-refactor).
-    Empty items returns `('', [])`."""
-    if not items:
+def compose_batch(items):
+    """Compose ONE batch message from `[(category, text), ...]`: WORK_DRIVING
+    sections first, AUDIT second, each `[category] text`, led by `BATCH_PREFIX`
+    so machine-prefix recognition classifies it as a machine nudge. Nothing is
+    trimmed (the body goes to a nudge file, #1157). Returns `(composed_text,
+    included_categories)` — every known gated category in `items`, in order;
+    `('', [])` when none."""
+    sections = ([(c, t) for c, t in items if c in WORK_DRIVING_CATEGORIES]
+                + [(c, t) for c, t in items if c in AUDIT_CATEGORIES])
+    if not sections:
         return "", []
-    wd = [(c, t) for c, t in items if c in WORK_DRIVING_CATEGORIES]
-    au = [(c, t) for c, t in items if c in AUDIT_CATEGORIES]
-
-    def _build(sections):
-        parts = [BATCH_PREFIX]
-        for cat, text in sections:
-            parts.append(" [%s] %s" % (cat, text))
-        return "".join(parts)
-
-    result = _build(wd + au)
-    if max_chars is not None and len(result) > max_chars:
-        # Trim audit from the end, then work-driving if still over.
-        while au and len(result) > max_chars:
-            au.pop()
-            result = _build(wd + au)
-        while wd and len(result) > max_chars:
-            wd.pop()
-            result = _build(wd + au)
-    included = [c for c, _ in wd + au]
-    if not included:
-        return "", []   # every section trimmed — nothing to deliver
-    return result, included
+    return (BATCH_PREFIX + "".join(" [%s] %s" % s for s in sections),
+            [c for c, _t in sections])
 
 
 def mark_batch_sent(state, sid, categories, now):
