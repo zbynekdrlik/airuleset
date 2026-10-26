@@ -543,5 +543,24 @@ class ImplWindowReadsItsOwnSession(_CwdSessions):
         self.assertEqual(rc, "relaunched", logs)
 
 
+class ANeutralPromptIsAnOwnerAct(base._Pane):
+    """Review 2, finding 7: a NEUTRAL owner prompt (one that merely contains a
+    stop word) neither sets nor clears a latch, but it IS an owner act: a new
+    session whose only prompts are neutral must not inherit the previous
+    session's exit or pause while the owner is working in it."""
+
+    def test_a_neutral_prompt_stops_the_inheritance(self):
+        self._append(*(OWNER_WORK + FACTS["exit"]))
+        old = time.time() - 600
+        os.utime(self.tpath, (old, old))
+        fresh = self.tpath.parent / "sess-fresh.jsonl"
+        fresh.write_text(base.json.dumps(base._a("Ready.", T0 + 300)) + "\n")
+        self.assertEqual(_os().cwd_latch(self.proj, self.CWD)["fact"], "exit")
+        with open(fresh, "a", encoding="utf-8") as h:
+            h.write(base.json.dumps(_u("oprav stop button na webe", T0 + 400))
+                    + "\n")
+        self.assertIsNone(_os().cwd_latch(self.proj, self.CWD))
+
+
 if __name__ == "__main__":
     unittest.main()
