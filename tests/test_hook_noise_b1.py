@@ -157,7 +157,9 @@ class VaultHeredoc(unittest.TestCase):
                 "python3 - <<'EOF'\nkey = open('%s/k.env').read()\nEOF" % KEYS,
                 "cat <<'EOF' | bash\ncat %s/k.env\nEOF" % KEYS,
                 "cat > /tmp/x <<EOF\n$(cat %s/k.env)\nEOF" % KEYS,
-                "cat > /tmp/x <<'EOF'\nhello\nEOF\ncat %s/k.env" % KEYS):
+                "cat > /tmp/x <<'EOF'\nhello\nEOF\ncat %s/k.env" % KEYS,
+                "cat <<'EOF' > >(bash)\ncat %s/k.env\nEOF" % KEYS,
+                "cat <<'EOF' |\nbash\ncat %s/k.env\nEOF" % KEYS):
             with self.subTest(command=command):
                 r = _bash(self, self.HOOK, command)
                 self.assertEqual(r.returncode, 2, r.stderr)
