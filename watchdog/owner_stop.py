@@ -503,14 +503,17 @@ def _note_pane(recs, pid, cwd, held, now, dry_run, seen):
     return logs
 
 
-def _note_session(recs, sid, cwd, own, found, now, dry_run):
+def _note_session(recs, sid, cwd, own, found, now, dry_run, quiet=False):
     """A pane's OWN session: persist its fact (`own`) and the clears matched
-    to the watchdog's own disarm (`found`); journal SET / cleared once."""
+    to the watchdog's own disarm (`found`); journal SET / cleared once
+    (`quiet` for a session no pane owns: its pane hold is the one line)."""
     old = recs.get(sid) if isinstance(recs.get(sid), dict) else {}
     where = "%s sid=%s" % (os.path.basename(str(cwd)) or cwd, sid)
     mcl = sorted(set(old.get("mclears") or ()) | set(found))[-MAX_MCLEARS:]
     logs = []
-    if own and (old.get("fact"), old.get("ts")) != (own["fact"], own.get("ts")):
+    if quiet:
+        pass
+    elif own and (old.get("fact"), old.get("ts")) != (own["fact"], own.get("ts")):
         logs.append("owner-stop latch %s -> SET (%s%s, %s): no machine keystroke "
                     "and no /goal arm until the owner types a new prompt"
                     % (where, own["fact"], " in the previous session"
@@ -603,7 +606,8 @@ def refresh(state, panes, projects_dir, now, dry_run=False, run=None):
     for sid, (cwd, fact, found, ctx) in unclaimed.items():
         if sid not in seen:              # no pane owns it this sweep
             seen.add(sid)
-            logs += _note_session(recs, sid, cwd, fact, found, now, dry_run)
+            logs += _note_session(recs, sid, cwd, fact, found, now, dry_run,
+                                  quiet=True)
             ctx["rec"] = recs.get(sid)
     if not dry_run:
         for sid in [k for k, v in recs.items() if k not in seen and (
