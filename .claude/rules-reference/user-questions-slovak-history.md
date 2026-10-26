@@ -36,3 +36,17 @@ Deliver a genuine away-user question as the `❓ NEEDS YOU:` / `❓ ASKED:` TEXT
 Every ticket you mention gets a short plain-Slovak explanation of what it is ABOUT — NEVER a bare number or range. Ask in SMALL parts, one decision at a time, iterate — never one sweeping answer to a pile of many different tickets. Full worked examples (the jargon to plain rewrite, the ticket-explaining rule, the small-parts rationale) live in `skills/user-questions-slovak`.
 
 **A "U N?" / "otazky na mna?" STATUS query is answered by STARTING this step-by-step flow — never by rendering the raw `--waiting` table or a summary list of all U members (#606, owner directive 2026-08-21: "nikdy nemam dostavat sumarne informacie u vsetkych U vzdy musis ist step by step").** The `--waiting` table (`core-quals`/`slice-quals --waiting`) is MACHINE context — the owner cannot decode ticket-by-ticket asks from a compressed list. Answer it by delivering the FIRST U member as its OWN full `**Otazka — projekt ...:**` block (2-4 vety uvod co ta vec JE + preco caka na neho, moznosti s dosledkami, jedna `❓` rozhodovacia linka), one at a time, moving to the next only after the current one is answered. Hook-backstopped: `stop-check-prose-violations.sh` blocks an owner-facing turn that piles 3+ `#N ...?` per-ticket asks into one question turn.
+
+---
+
+#### Removed from `user-questions-slovak.md` in the issue 1137 slice-B trim (2026-10-26, verbatim)
+
+These paragraphs restated what `message-status-marker.md` owns (owner-scoped delivery, the re-ask rules) and the module's own context-gate pointer to the skill; the module now points there.
+
+~~~markdown
+**Owner-scoped DELIVERY (#710):** which SURFACE the `❓` marker reaches is owner-scoped — for owner **david** it is the Discord phone ping; for owner **zbynek** it is the footer `U N` + webterm (no phone ping; marek decommissioned). This scopes ONLY the delivery channel — the session discipline (the `❓` marker, the self-contained block, the re-ask rules) is unchanged for every owner.
+
+**Re-poke with NO user input since the last ask** → ONLY the bare `❓ NEEDS YOU: <text>` marker line, VERBATIM — never the full block (#740, hook-blocked `stop-check-question-quality.sh` exit 2). **ANY conversation happened in between** → the question is asked NANOVO A CELÁ.
+
+The full hook-enforced template, both re-ask branches, worked examples, and away-user delivery mechanics are in the `skills/user-questions-slovak` skill — loaded automatically on `AskUserQuestion`. History + rationale: `.claude/rules-reference/user-questions-slovak-history.md` (#859).
+~~~

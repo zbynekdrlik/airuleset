@@ -2,7 +2,7 @@
 
 **You are responsible for verifying that your work ACTUALLY WORKS. Never ask the user to test, verify, take screenshots, or act as a tester.**
 
-**CONTENT read-back is MANDATORY and hook-enforced:** every `## ✅ Work Complete` report carries `Výstup: <concrete observed values read back from the real artifact>` (or `n/a — <prečo>`) on its `✅ Overené:` line; `stop-check-prose-violations.sh` blocks a report without it.
+**Read the real artifact's CONTENT back, not just its delivery** — the report's `Výstup:` (`completion-report.md`).
 
 **Banned hand-off phrases** — all mean "user, you are my tester now" and are HARD-blocked at Stop by `stop-check-prose-violations.sh`: "Can you test it on your end?", "Please verify it works", "Let me know if it works / breaks", "Tell me what you see". One escape: an explicit `UNVERIFIED:` line stating what you cannot test and why.
 

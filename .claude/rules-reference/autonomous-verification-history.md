@@ -30,3 +30,13 @@ When work hits a missing locally-installable dependency — `command not found`,
 ## Verification content read-back — the montalu3 incident
 
 **Mechanical anchor (#446 — this discipline provably failed as prose):** montalu3 (2026-08-13) shipped order-status notification emails with 0 € prices everywhere — only send/delivery was verified, never the RENDERED content, though the sent mail was readable from the DB. The report-level trace is therefore MANDATORY and hook-enforced: every `## ✅ Work Complete` report carries `✅ Výstup: <concrete observed values read back from the real artifact>` (or an explicit `n/a — <prečo>` when the work truly has no user-facing output) — see `completion-report.md` (Hard rules); `stop-check-prose-violations.sh` blocks a report without it, with a value-free line, or with an `n/a` contradicting the report's own 🌐/📱 surface.
+
+---
+
+#### Removed from `autonomous-verification.md` in the issue 1137 slice-B trim (2026-10-26, verbatim)
+
+This paragraph restated the `Výstup:` token that `completion-report.md` owns (hook-enforced there); the module now points there.
+
+~~~markdown
+**CONTENT read-back is MANDATORY and hook-enforced:** every `## ✅ Work Complete` report carries `Výstup: <concrete observed values read back from the real artifact>` (or `n/a — <prečo>`) on its `✅ Overené:` line; `stop-check-prose-violations.sh` blocks a report without it.
+~~~

@@ -52,7 +52,6 @@ class TestQuestionPolicy(TestCase):
         surfaces = {
             "modules/core/message-status-marker.md": None,
             "modules/core/milestone-notifications.md": "skills/milestone-notifications-deep/DEEP.md",
-            "modules/core/user-questions-slovak.md": "skills/user-questions-slovak/SKILL.md",
         }
         for rel, companion in surfaces.items():
             t = read(rel)
@@ -66,6 +65,10 @@ class TestQuestionPolicy(TestCase):
         msm = read("modules/core/message-status-marker.md")
         self.assertIn("ALWAYS pings the phone", msm)   # the invariant is kept
         self.assertIn("owner-scoped", msm.lower())
+        # #1137 slice B: user-questions-slovak no longer restates the owner
+        # scope; it points at message-status-marker.md, which owns it.
+        self.assertIn("owner-scoped delivery: `message-status-marker.md`",
+                      read("modules/core/user-questions-slovak.md"))
 
     def test_marker_rule_bans_reproach_and_burying(self):
         t = read("modules/core/message-status-marker.md")
