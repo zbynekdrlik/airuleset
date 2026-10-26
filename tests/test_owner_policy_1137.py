@@ -275,6 +275,12 @@ class PerTargetPolicy(_Home):
     """Review R3: the policy filters EVERY target by its own owner, and an
     EMPTY owner (the shared channel) is zbynek."""
 
+    def setUp(self):
+        super().setUp()
+        # an empty owner first asks resolve_owner() (V7): pin it to "" so the
+        # shared-channel branch is what these tests read on every box
+        os.environ["AIRULESET_NOTIFY_OWNER"] = ""
+
     def _mirror(self, line):
         p = self.home / ".claude" / "channels" / "discord" / ".env"
         p.write_text(p.read_text() + line + "\n")
@@ -432,6 +438,7 @@ class WaitingSuppressedFoldsIntoU(unittest.TestCase):
         os.utime(t, (now - 200, now - 200))
         for patch in (m.patch.object(watchdog.usage, "_USAGE_CACHE_PATH",
                                      str(Path(tmp) / "usage.json")),
+                      m.patch.object(notify, "_questions_path", lambda: str(qpath)),
                       m.patch.dict(os.environ, {"HOME": str(home)})):
             patch.start()
             self.addCleanup(patch.stop)
@@ -461,6 +468,51 @@ class WaitingSuppressedFoldsIntoU(unittest.TestCase):
         q = self._run(seed)
         self.assertEqual(list(q), [key])
         self.assertEqual(q[key]["block"], "vlastná otázka")
+
+
+class SuppressedFoldSeam(unittest.TestCase):
+    """Verification V6: production code has no test-environment branch; the
+    tests keep the real home clean through the `_questions_path` seam."""
+
+    def test_no_pytest_branch_in_production_code(self):
+        self.assertNotIn("PYTEST_CURRENT_TEST",
+                         inspect.getsource(notify.record_suppressed_question))
+
+    def test_default_path_is_the_questions_seam(self):
+        tmp = tempfile.mkdtemp(prefix="airuleset-1137-seam-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        qpath = Path(tmp) / "q.json"
+        with m.patch.object(notify, "_questions_path", lambda: str(qpath)):
+            self.assertTrue(notify.record_suppressed_question(
+                "5e55abc0-51d0-4a5e-9f1e-00000000beef", "/devel/x", "❓ **x** — otázka"))
+        self.assertIn("suppressed:5e55abc0-51d0-4a5e-9f1e-00000000beef",
+                      json.loads(qpath.read_text()))
+
+
+class EmptyOwnerResolves(_Home):
+    """Verification V7: an explicit EMPTY owner first resolves the account
+    (`resolve_owner`, david1-4 -> david without tmux); only a still-empty one
+    is the shared channel's reader (zbynek)."""
+
+    def _as_user(self, user):
+        os.environ.pop("AIRULESET_NOTIFY_OWNER", None)
+        os.environ.pop("TMUX", None)
+        p = m.patch.object(notify, "_current_user", lambda: user)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_david_account_empty_owner_is_delivered(self):
+        self._as_user("david1")
+        self.assertFalse(notify.question_ping_off(""))
+        self.assertEqual(notify.send("x", owner="", dedup_key="gkstale:o:9"), "sent")
+        self.assertEqual([a[1] for a in self.posts], ["123456789"])
+
+    def test_unresolvable_empty_owner_is_the_shared_reader(self):
+        self._as_user("nobody-v7")
+        self.assertTrue(notify.question_ping_off(""))
+        self.assertEqual(notify.send("x", owner="", dedup_key="gkstale:o:10"),
+                         "suppressed")
+        self.assertEqual(self.posts, [])
 
 
 if __name__ == "__main__":

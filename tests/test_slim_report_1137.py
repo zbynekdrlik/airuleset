@@ -282,8 +282,10 @@ class RemovedChecksAreGone(_Hook):
                          "🌐")
 
     def test_slim_ui_deploy_without_url_blocks(self):
+        # verification V2: the deploy trigger is main's (no Slovak `nasaden`
+        # widening), so the slim fixture names the deploy the way main reads it.
         self.assert_only(slim(riesenie="**Riešenie:** Dashboard má novú stránku, "
-                                       "nasadené na prod."), "🌐")
+                                       "deployed to prod."), "🌐")
 
     def _no_stderr(self, msg, phrase):
         r = self.run_hook(msg)
@@ -347,6 +349,52 @@ class PlaybookHookRetired(unittest.TestCase):
         self.assertIn("retired by #1137", text)
         self.assertNotIn("stop-check-playbook-review",
                          (ROOT / "settings" / "hooks.json").read_text())
+
+
+OVR_STATUSBAR = OVR_OK.replace("arch dashboard OK", "arch statusbar OK")
+
+
+class VerificationRound(_Hook):
+    """The verifier's findings on the review round (V2-V4)."""
+
+    def test_v2_slovak_deploy_words_do_not_arm_the_ui_check(self):
+        # main's deploy trigger has no `nasaden`: it matched "nenasadené" and
+        # "nasadenie" and blocked reports that deploy no page.
+        for uloha, riesenie in (
+                ("**Úloha:** Pätička (statusline UI) má ukazovať U.",
+                 "**Riešenie:** statusbar.py číta cache; nasadené push-om."),
+                ("**Úloha:** Test pre version-on-dashboard skill.",
+                 "**Riešenie:** len testy, nenasadené.")):
+            with self.subTest(uloha=uloha):
+                self.assert_clean(slim(ovr=OVR_STATUSBAR, uloha=uloha,
+                                       riesenie=riesenie, done="✅ DONE: hotovo"))
+
+    def test_v2_real_ui_deploy_without_url_still_blocks(self):
+        self.assert_only(slim(riesenie="**Riešenie:** Nová stránka dashboardu, "
+                                       "deploy verified on prod.",
+                              done="✅ DONE: hotovo"), "🌐")
+
+    def test_v2_inline_url_on_riesenie_satisfies_the_ui_check(self):
+        self.assert_clean(slim(riesenie="**Riešenie:** Dashboard deployed to prod.  "
+                                        "%s https://dash.example.com/" % GLOBE))
+
+    def test_v3_na_next_to_parenthesized_url_blocks(self):
+        self.assert_only(slim(
+            ovr=OVR_OK.replace("pätička ukazuje „v1.4.2“", "n/a — interná zmena"),
+            riesenie="**Riešenie:** Pätička číta verziu (%s https://dash.example.com/)"
+                     % GLOBE), "n/a")
+
+    def test_v4_bullet_bold_labels_count(self):
+        for pfx in ("- ", "* ", "> "):
+            with self.subTest(pfx=pfx):
+                self.assert_clean(slim(
+                    uloha=pfx + "**Úloha:** Dashboard má ukazovať verziu.",
+                    riesenie=pfx + "**Riešenie:** Pätička číta verziu.  "
+                                   "%s https://dash.example.com/" % GLOBE))
+
+    def test_v4_bullet_label_must_still_be_bold(self):
+        self.assert_only(slim(uloha="- Úloha: Dashboard má ukazovať verziu."),
+                         "Úloha")
 
 
 if __name__ == "__main__":

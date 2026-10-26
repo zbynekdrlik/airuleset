@@ -397,5 +397,42 @@ class TestRetiredHelpersGone(unittest.TestCase):
         self.assertFalse(hasattr(wd, "lane_has_live_evidence"))
 
 
+def _main_registry_source():
+    """main's goal_registry.py — the `/goal` lines deployed on every box today."""
+    for ref in ("main", "origin/main"):
+        r = subprocess.run(["git", "-C", str(REPO), "show", ref + ":goal_registry.py"],
+                           capture_output=True, text=True, timeout=30)
+        if r.returncode == 0 and r.stdout:
+            return r.stdout
+    raise AssertionError("neither main nor origin/main carries goal_registry.py")
+
+
+class TestDeployedGoalsKept(unittest.TestCase):
+    """Verification V1: a `/goal` typed from main's CURRENT template (the
+    stream report pointer still names `completion-report.md`) and stranded in a
+    box at deploy time must stay recognised, or the janitor declines it (the
+    #1113-recurrence class)."""
+
+    def test_every_main_variant_is_listed(self):
+        import importlib.util
+        with TemporaryDirectory() as d:
+            src = Path(d) / "main_goal_registry_v1.py"
+            src.write_text(_main_registry_source(), encoding="utf-8")
+            spec = importlib.util.spec_from_file_location("main_goal_registry_v1", src)
+            main_gr = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(main_gr)
+        have = set(goal_registry.all_goal_line_variants())
+        missing = [v[:60] for v in main_gr.all_goal_line_variants() if v not in have]
+        self.assertEqual(missing, [])
+
+    def test_current_render_with_old_pointer_is_listed(self):
+        have = goal_registry.all_goal_line_variants()
+        for authority, role in goal_registry.variant_specs():
+            line = goal_registry.render_goal_line(authority, role)
+            old = line.replace("variant, `skills/completion-report-deep/DEEP.md`)",
+                               "variant, `completion-report.md`)")
+            self.assertIn(old, have, (authority, role))
+
+
 if __name__ == "__main__":
     unittest.main()
