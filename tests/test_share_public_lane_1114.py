@@ -34,6 +34,7 @@ import cli_drop_gateway as dg          # noqa: E402
 import cli_filedrop_watchdog as fw     # noqa: E402
 import cli_webterm_tunnel as tun       # noqa: E402
 import filedrop                        # noqa: E402
+import filedrop.server as fserver      # noqa: E402
 import filedrop.share as fshare        # noqa: E402
 from filedrop.server import make_server, safe_resolve  # noqa: E402
 
@@ -295,7 +296,8 @@ class TestCmdSharePublicFirst(unittest.TestCase):
                                lambda *a, **k: lane_full), \
              mock.patch.object(fw, "_public_share_status", lambda u, timeout=3: status), \
              mock.patch.object(fw, "_public_share_probe",   # #1238: this account's route
-                               lambda u, timeout=3: (204, "8790"), create=True):
+                               lambda u, timeout=3: (204, fserver.instance_id(8790)),
+                               create=True):
             out, err = io.StringIO(), io.StringIO()
             self.exit_code = None
             with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):

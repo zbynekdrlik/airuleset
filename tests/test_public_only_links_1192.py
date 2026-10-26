@@ -33,6 +33,7 @@ import cli_filedrop_watchdog as fw
 import cli_vault
 import cli_vault_delivery as vd
 import filedrop
+from filedrop import server as fserver
 from filedrop import share as fshare
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -303,9 +304,10 @@ class TestShare(unittest.TestCase):
     PRIVATE = ("http://100.64.0.1:8790/TOKTOKTOKTOKTOKTOK12/rec.wav",
                "http://192.168.1.5:8790/TOKTOKTOKTOKTOKTOK12/rec.wav")
 
-    def run_share(self, lane_full, status, *, private=False, route=(204, "8790")):
-        """`route` = the #1238 `/healthz/s` probe answer (status, filedrop port
+    def run_share(self, lane_full, status, *, private=False, route=None):
+        """`route` = the #1238 `/healthz/s` probe answer (status, filedrop id
         header); the default is THIS account's filedrop (8790 = LOCAL_URL)."""
+        route = route or (204, fserver.instance_id(8790))
         self.resolved = []
 
         def resolve(*a, **k):

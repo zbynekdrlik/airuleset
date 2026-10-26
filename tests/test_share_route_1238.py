@@ -102,14 +102,16 @@ class TestDeployLoopReappliesAfterTheHarvest(_TempCache):
     """The wiring: the harvest's changed keys reach the controller re-render
     in the SAME push, right after the persist."""
 
-    def deploy(self, stdout):
+    def deploy(self, stdout, rc=0):
         import airuleset
         import cli_remote
         ct = _ct()
         handed = []
 
         def fake_run(argv, *a, **k):
-            return types.SimpleNamespace(returncode=0, stdout=stdout, stderr="")
+            leg = any("airuleset.py install" in str(x) for x in argv)
+            return types.SimpleNamespace(returncode=rc if leg else 0,
+                                         stdout=stdout if leg else "", stderr="")
 
         hosts = [{"name": "fohmixer@dev1", "host": "100.104.8.125",
                   "user": "fohmixer", "repo_path": "~/devel/airuleset",
@@ -124,13 +126,25 @@ class TestDeployLoopReappliesAfterTheHarvest(_TempCache):
                 mock.patch.object(ct, "reapply_after_harvest",
                                   side_effect=lambda ch, **k: handed.append(list(ch))), \
                 _quiet():
-            cli_remote._deploy_to_all_remotes([], set())
+            try:
+                cli_remote._deploy_to_all_remotes([], set())
+                self.exit_code = None
+            except SystemExit as e:
+                self.exit_code = e.code
         return handed
 
     def test_a_new_lanes_harvested_port_is_reapplied_in_the_same_push(self):
         handed = self.deploy("installed\nAIRULESET-FILEDROP-PORT 8791\n")
         self.assertEqual(handed, [[FOH_KEY]])
         self.assertEqual(dl.read_drop_lanes_cache(path=self.cache), {FOH_KEY: 8791})
+
+    def test_a_failed_target_still_reapplies_before_the_push_fails(self):
+        # review round 1: the leg's port line is printed before its later
+        # post-checks, so a target that FAILS still harvests; the re-render
+        # must not wait for an all-green push
+        handed = self.deploy("installed\nAIRULESET-FILEDROP-PORT 8791\n", rc=1)
+        self.assertEqual(handed, [[FOH_KEY]])
+        self.assertEqual(self.exit_code, 1)
 
     def test_an_unchanged_port_hands_over_nothing(self):
         dl.write_drop_lanes_cache({FOH_KEY: 8791}, path=self.cache)
@@ -170,6 +184,16 @@ class TestReapplyAfterHarvest(unittest.TestCase):
             self.assertIsNone(ct.reapply_after_harvest([FOH_KEY]))
         real_apply.assert_not_called()
 
+    def test_a_test_run_with_only_the_controller_seam_never_applies(self):
+        # review round 1: injecting is_controller_fn alone used to run the REAL
+        # apply_tunnel against the real ~/.cloudflared under a test
+        ct = _ct()
+        with mock.patch.dict(os.environ, {"PYTEST_CURRENT_TEST": "t"}), \
+                mock.patch.object(ct, "apply_tunnel") as real_apply:
+            self.assertIsNone(ct.reapply_after_harvest(
+                [FOH_KEY], is_controller_fn=lambda: True))
+        real_apply.assert_not_called()
+
     def test_a_failing_apply_is_loud_and_never_raises(self):
         err = io.StringIO()
         with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
@@ -185,6 +209,56 @@ class TestReapplyAfterHarvest(unittest.TestCase):
                 [FOH_KEY], apply_fn=mock.Mock(return_value=False),
                 is_controller_fn=lambda: True))
         self.assertIn(FOH_KEY, err.getvalue())
+
+
+class TestControllerAccountCheck(unittest.TestCase):
+    """Review round 1: the ONLY non-test guard on a live controller tunnel
+    write. Controller box AND the `airuleset` pwd account, nothing else."""
+
+    def check(self, box, user, missing=False):
+        import pwd
+        if missing:
+            box_patch = mock.patch.dict("sys.modules", {"watchdog.reaper": None})
+        else:
+            box_patch = mock.patch("watchdog.reaper.default_box_class", return_value=box)
+        with box_patch, mock.patch.object(pwd, "getpwuid",
+                                          return_value=types.SimpleNamespace(pw_name=user)):
+            return _ct().is_controller_account()
+
+    def test_only_the_controller_box_as_airuleset_is_the_controller(self):
+        self.assertIs(self.check("controller", "airuleset"), True)
+        self.assertIs(self.check("controller", "claudy"), False)
+        self.assertIs(self.check("workstation", "airuleset"), False)
+        self.assertIs(self.check(None, "airuleset"), False)
+
+    def test_an_unreadable_box_class_is_never_the_controller(self):
+        self.assertIs(self.check(None, "airuleset", missing=True), False)
+
+
+class TestControllerRenderShape(_TempCache):
+    """Review round 1: one pin on what the moved render emits — hosted lanes
+    first, then the drop lanes, the service routes, claudy, the catch-all."""
+
+    def test_the_render_keeps_every_rule_family_in_order(self):
+        import cli_webterm_palo as palo
+        configs = []
+
+        def capture(*a, **k):
+            configs.append(a[3])
+            return True
+
+        with mock.patch.object(w.profiles, "LANE_HOST", {"palo": "controller"}), \
+                mock.patch.object(tun, "_provision_managed_tunnel", side_effect=capture):
+            _ct().apply_tunnel(_ct().hosted_lanes())
+        cfg = configs[0]
+        order = [palo._spec().tunnel_hostname, "drop-gk.newlevel.media",
+                 "backup.newlevel.media", "claudy.newlevel.media",
+                 "service: http_status:404"]
+        idx = [cfg.index(x) for x in order]
+        self.assertEqual(idx, sorted(idx), cfg)
+        self.assertTrue(cfg.rstrip("\n").endswith("service: http_status:404"))
+        self.assertIn("  - hostname: claudy.newlevel.media\n"
+                      "    service: http://100.101.214.103:8791\n", cfg)
 
 
 class TestOneRenderForInstallAndPush(_TempCache):
@@ -210,8 +284,10 @@ class TestOneRenderForInstallAndPush(_TempCache):
         return configs[0]
 
     def reapply(self, changed):
-        return lambda: _ct().reapply_after_harvest(changed,
-                                                   is_controller_fn=lambda: True)
+        ct = _ct()   # both seams injected: the real render, the faked provisioner
+        return lambda: ct.reapply_after_harvest(
+            changed, is_controller_fn=lambda: True,
+            apply_fn=lambda: ct.apply_tunnel(ct.hosted_lanes()))
 
     def test_the_first_push_install_has_no_share_route_for_a_new_lane(self):
         self.assertNotIn(FOH_ORIGIN, self.capture(w._setup_controller_webterm))
@@ -312,16 +388,27 @@ class TestFiledropAnswersTheRouteProbe(unittest.TestCase):
         self.port = self.httpd.server_address[1]
         self.base = "http://127.0.0.1:%d" % self.port
 
-    def test_get_answers_204_with_its_own_port(self):
+    def test_get_answers_204_with_its_own_instance_id(self):
         with urllib.request.urlopen(self.base + "/healthz/s", timeout=5) as r:
             self.assertEqual(r.status, 204)
-            self.assertEqual(r.headers.get(fserver.FILEDROP_PORT_HEADER), str(self.port))
+            self.assertEqual(r.headers.get(fserver.FILEDROP_ID_HEADER),
+                             fserver.instance_id(self.port))
 
     def test_head_answers_the_same(self):
         req = urllib.request.Request(self.base + "/healthz/s", method="HEAD")
         with urllib.request.urlopen(req, timeout=5) as r:
             self.assertEqual(r.status, 204)
-            self.assertEqual(r.headers.get(fserver.FILEDROP_PORT_HEADER), str(self.port))
+            self.assertEqual(r.headers.get(fserver.FILEDROP_ID_HEADER),
+                             fserver.instance_id(self.port))
+
+    def test_the_id_names_this_account_on_this_box_and_only_it(self):
+        # review round 1: 8788 serves on several boxes, so the port is no identity
+        mine = fserver.instance_id(self.port)
+        self.assertRegex(mine, r"\A[0-9a-f]{16}\Z")
+        self.assertEqual(mine, fserver.instance_id(self.port))
+        self.assertNotEqual(mine, fserver.instance_id(self.port + 1))
+        with mock.patch("os.uname", return_value=types.SimpleNamespace(nodename="otherbox")):
+            self.assertNotEqual(mine, fserver.instance_id(self.port))
 
     def test_plain_healthz_is_still_not_a_filedrop_route(self):
         with self.assertRaises(urllib.error.HTTPError) as cm:
@@ -330,7 +417,7 @@ class TestFiledropAnswersTheRouteProbe(unittest.TestCase):
 
     def test_the_share_probe_reads_the_status_and_the_port(self):
         self.assertEqual(fw._public_share_probe(self.base + "/healthz/s"),
-                         (204, str(self.port)))
+                         (204, fserver.instance_id(self.port)))
 
 
 if __name__ == "__main__":

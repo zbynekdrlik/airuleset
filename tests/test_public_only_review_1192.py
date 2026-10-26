@@ -29,6 +29,7 @@ import cli_filedrop_watchdog as fw
 import cli_vault
 import cli_webterm_access as acc
 import filedrop
+from filedrop import server as fserver
 from filedrop import share as fshare
 
 HOST = "drop-subdev-david4.newlevel.media"
@@ -71,7 +72,7 @@ class _ShareHarness(unittest.TestCase):
 
     def run_share(self, lane, codes, *, local_live=True):
         """`codes` maps "/s/" to its status and "/healthz/s" (#1238, the /s/
-        route probe) to `(status, filedrop port header)`."""
+        route probe) to `(status, filedrop id header)`."""
         self.shared = []
         self.probed = []
 
@@ -117,7 +118,8 @@ class TestShareAccessLane(_ShareHarness):
     is served by the no-path rule's EPHEMERAL endpoint, never by the `/s/`
     origin, so no code there proves the `/s/` route. Only the bypassed
     `/healthz/s` (the same rule pair as `/s/`) answered 204 by THIS account's
-    filedrop (its port, 8790 = the shared file's local port) prints the URL."""
+    filedrop (its instance id, port 8790 = the shared file's local port) prints
+    the URL."""
     ROUTE = "https://%s/healthz/s" % HOST
 
     def refused(self, route):
@@ -148,13 +150,28 @@ class TestShareAccessLane(_ShareHarness):
         self.refused((403, None))      # a WAF answer is the edge, not the route
 
     def test_a_sibling_accounts_filedrop_is_not_this_route(self):
-        self.assertIn("8796", self.refused((204, "8796")))
+        sibling = fserver.instance_id(8796)
+        self.assertIn(sibling, self.refused((204, sibling)))
 
-    def test_a_204_without_the_port_header_is_not_a_filedrop(self):
+    def test_another_boxs_filedrop_on_the_same_port_is_not_this_route(self):
+        # review round 1: 8788 serves on several boxes, so the id is not the port
+        self.refused((204, "0123456789abcdef"))
+
+    def test_a_204_without_the_id_header_is_not_a_filedrop(self):
         self.refused((204, None))
 
+    def test_a_404_names_a_filedrop_that_predates_the_probe(self):
+        # a box whose filedrop.service still runs pre-#1238 code answers 404
+        self.assertIn("filedrop.service", self.refused((404, None)))
+
+    def test_a_missing_rule_names_both_lane_kinds_fix(self):
+        err = self.refused((502, None))
+        self.assertIn("push", err)
+        self.assertIn("drop-gateway --apply", err)
+
     def test_this_accounts_filedrop_on_the_route_prints_the_url(self):
-        out, err = self.run_share(LANE, {"/s/": 302, "/healthz/s": (204, "8790")})
+        out, err = self.run_share(LANE, {"/s/": 302, "/healthz/s":
+                                         (204, fserver.instance_id(8790))})
         self.assertIsNone(self.exit_code)
         lines = url_lines(out)
         self.assertEqual(len(lines), 1, out)
