@@ -4,20 +4,16 @@ spustili a dali pokračovať gk-quality/gk-infra aj keď som ich mal /exit … t
 nesmieš!").
 
 SET from STRUCTURED facts, never pane prose (`classify`, `_exits`):
-  exit          claude is GONE from a pane: the pane sits at a bare shell and no
-                live claude pane serves its cwd, so the cwd's newest session
-                ended (Claude Code 2.1.306 writes NO transcript record for
-                `/exit` — probed 26.10.2026 — so this is a tmux-pane fact; a
-                `/exit` or `/quit` command record still counts if one appears);
-  goal-none     the owner's `/goal` answered `No goal set`;
-  goal-cleared  a `Goal cleared:` record that is not the watchdog's own #522
-                question-repoke disarm (`state["goal_disarmed_q"]` within
-                MACHINE_CLEAR_WINDOW_S);
+  exit          a pane at a bare shell no live claude pane's cwd matches: the
+                cwd's newest session ended (CC 2.1.306 writes NO `/exit` record,
+                probed 26.10.2026; a `/exit`/`/quit` record still counts);
+  goal-none     the owner's `/goal clear` / `/goal` answered `No goal set`;
+  goal-cleared  a `Goal cleared:` that is not the watchdog's own #522 disarm
+                (`state["goal_disarmed_q"]`, MACHINE_CLEAR_WINDOW_S);
   interrupt     `[Request interrupted by user…]`;
-  pause         the owner's genuine prompt is a short pause/stop instruction
-                (`PAUSE_RX`: Slovak + English, word-bounded, at most
-                PAUSE_MAX_WORDS words — a long task text that mentions "stop"
-                is a task, not an instruction).
+  pause         a SHORT (PAUSE_MAX_WORDS) genuine owner prompt matching the
+                word-bounded Slovak/English `PAUSE_RX` (a long task text that
+                mentions "stop" is a task, not an instruction).
 CLEARED only by a later OWNER act: a genuine non-stop prompt
 (`questions._is_genuine_human_prompt` — a machine prompt, `continue`, a nudge
 pointer, a task notification never counts), any other owner slash command, or
@@ -29,12 +25,9 @@ previous session.
 
 ENFORCED at the ONE send-keys builder `tmux_io.keys` (`withhold`: every kind,
 recovery and cap-exempt included; only the owner's own Discord reply passes),
-plus the paths that bypass it: `relaunch_pane`, the resurrect relaunch and
-`deliver_goal` (no `/goal` of any origin). `refresh` runs once at the top of
-every sweep: it maps each claude pane to its transcripts, persists
-`state[STATE_KEY]` per session (a fact older than the bounded tail survives)
-and journals ONE `owner-stop latch` line per episode. A leaf: watchdog modules
-are imported lazily."""
+and on the paths that bypass it: `relaunch_pane`, resurrect, `deliver_goal`.
+`refresh` (top of every sweep) maps panes to transcripts, persists
+`state[STATE_KEY]` per session and journals ONE line per episode. A leaf."""
 import os
 import re
 from pathlib import Path
@@ -290,16 +283,23 @@ def refresh(state, panes, projects_dir, now, dry_run=False, run=None):
     _SWEEP["state"] = state
     recs = state.get(STATE_KEY)
     recs = dict(recs) if isinstance(recs, dict) else {}
-    for cwd, tpath in (_exits(panes, projects_dir, run) if run else ()):
+    try:
+        exits = _exits(panes, projects_dir, run) if run else ()
+    except Exception as e:         # noqa: BLE001 -- a pane-scan fault never stops the sweep
+        exits = ()
+        logs.append("owner-stop latch: exit scan failed (%r), no exit latched" % (e,))
+    for cwd, tpath in exits:
         rec = recs.get(tpath.stem)
         if not isinstance(rec, dict):
+            try:   # the session's END: nothing in it happened after the exit
+                rec = {"fact": "exit", "ts": max([os.path.getmtime(tpath)] + [
+                    t for t in (_ts(e) for e in _tail(tpath)) if t])}
+            except OSError:
+                continue
             logs.append("owner-stop latch %s sid=%s -> SET (exit: no claude in the "
                         "pane): the next session there gets no machine keystroke "
                         "until the owner types" % (os.path.basename(cwd) or cwd,
                                                      tpath.stem))
-            # the session's END: nothing in it happened after the exit
-            rec = {"fact": "exit", "ts": max([os.path.getmtime(tpath)] + [
-                t for t in (_ts(e) for e in _tail(tpath)) if t])}
         if not dry_run:
             recs[tpath.stem] = dict(rec, seen=now)
     seen = set()
