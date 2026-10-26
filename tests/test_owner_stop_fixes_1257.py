@@ -383,5 +383,32 @@ class OnlyClaudePanesShareACwd(_CwdSessions):
         self.assertIsNone(_os().pane_latch("%B"))
 
 
+class SiblingHoldIsAPaneEpisode(_CwdSessions):
+    """Review 2, finding 2: an unresolved pane's sibling hold was stored on its
+    cwd's NEWEST session record, which another pane resolved as its own, so
+    every sweep journalled `sid=SA -> cleared` and `sid=SA -> SET (pause of
+    sid SB …)`: two false lines naming the wrong session. The hold is a PANE
+    episode, journalled once; the sibling's session record is not touched."""
+
+    def test_an_unresolved_pane_journals_its_sibling_hold_once(self):
+        self._session("SA", [_u("sprav ticket 5", NOW - 900),
+                             base._a("robím", NOW - 5)], NOW - 5)
+        self._session("SB", [_u("sprav ticket 6", NOW - 7000),
+                             _u("pauza", NOW - 600)], NOW - 600)
+        state, logs = {}, []
+        for i in range(3):
+            with m.patch.object(base.wd, "_pane_claude_start_epoch",
+                                side_effect=lambda pid, run=None: {"%A": NOW - 950}.get(pid)):
+                logs += _os().refresh(state, [("%A", self.CWD), ("%B", self.CWD)],
+                                      self.proj, NOW + 60 * i,
+                                      run=lambda argv, timeout=8: "")
+            self.assertEqual((_os().pane_latch("%B") or {}).get("fact"), "pause")
+            self.assertIsNone(_os().pane_latch("%A"))
+        self.assertEqual(sum("SET" in ln for ln in logs), 1, logs)
+        self.assertIn("%B", [ln for ln in logs if "SET" in ln][0])
+        self.assertFalse(any("cleared" in ln for ln in logs), logs)
+        self.assertNotIn("SA", state.get(_os().STATE_KEY, {}))
+
+
 if __name__ == "__main__":
     unittest.main()
