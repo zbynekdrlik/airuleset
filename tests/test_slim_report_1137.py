@@ -122,7 +122,10 @@ class SlimReportPasses(_Hook):
     def test_vystup_na_with_reason_accepted_without_url(self):
         ovr = OVR_OK.replace("Výstup: pätička ukazuje „v1.4.2“",
                              "Výstup: n/a — interná zmena hooku")
-        self.assert_clean(slim(ovr=ovr, riesenie="**Riešenie:** Hook číta jeden riadok."))
+        # a non-UI change (no dashboard deploy words: the restored 🌐 check, R2)
+        self.assert_clean(slim(ovr=ovr, uloha="**Úloha:** Hook má čítať jeden riadok.",
+                               riesenie="**Riešenie:** Hook číta jeden riadok.",
+                               done="✅ DONE: hook opravený"))
 
     def test_slash_tokens_accepted(self):
         self.assert_clean(slim(ovr=OVR_OK.replace("review", "/review")
@@ -208,7 +211,8 @@ class SlimReportGates(_Hook):
         self.assert_only(slim(uloha=""), "Úloha")
 
     def test_missing_riesenie_blocks(self):
-        self.assert_only(slim(riesenie=""), "Riešenie")
+        self.assert_only(slim(riesenie="%s https://dash.example.com/" % GLOBE),
+                         "Riešenie")
 
     def test_localhost_inline_url_still_blocks(self):
         r = self.run_hook(slim(riesenie="**Riešenie:** Náhľad beží.  %s "
@@ -244,7 +248,8 @@ class OldFormsStillAccepted(_Hook):
 
     def test_overene_line_with_goal_what_changed_passes(self):
         self.assert_clean(slim(uloha="**Goal:** Dashboard má ukazovať verziu.",
-                               riesenie="**What changed:** Pätička číta verziu."))
+                               riesenie="**What changed:** Pätička číta verziu.  "
+                                        "%s https://dash.example.com/" % GLOBE))
 
     def test_plain_uloha_riesenie_in_question_not_a_report(self):
         msg = ("Úloha: zistiť prečo padá CI.\nRiešenie: dve možnosti.\n"
@@ -331,8 +336,11 @@ class PlaybookHookRetired(unittest.TestCase):
         self.assertTrue(stub.exists())
         msg = json.dumps({"last_assistant_message": "## ✅ Work Complete\nx",
                           "session_id": "stub-%s" % uuid.uuid4().hex[:8]})
+        home = tempfile.TemporaryDirectory(prefix="airuleset-1137-stub-")
+        self.addCleanup(home.cleanup)
         r = subprocess.run(["bash", str(stub)], input=msg, capture_output=True,
-                           text=True, timeout=10)
+                           text=True, timeout=10,
+                           env={**os.environ, "HOME": home.name})
         self.assertEqual((r.returncode, r.stdout, r.stderr), (0, "", ""))
         text = stub.read_text()
         self.assertIn("set -euo pipefail", text)

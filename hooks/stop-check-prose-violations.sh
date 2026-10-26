@@ -1527,11 +1527,13 @@ fi
 IS_COMPLETION_HEADING=$(msg_has "$MSG" -qE "^## ✅ Work Complete|^✅ Work Complete" && echo 1 || echo 0)
 HAS_PR_URL=$(msg_has "$MSG" -qE "https?://github\.com/[^[:space:]]+/pull/[0-9]+" && echo 1 || echo 0)
 HAS_COMPLETION_PHRASE=$(msg_has "$MSG" -qiE "awaiting[^.]{0,40}(merge|your merge|merge it)|mergeable[, ]+clean|all [0-9]+/[0-9]+ checks (are )?(green|passing)|all checks (are )?green|mergeStateStatus=CLEAN|mergeable=MERGEABLE|ready to merge|Plan steps \([0-9]+/[0-9]+ done\)|✅ Work Complete|work complete[: ]|per pr-merge-policy|merged (to|into) (main|master)|auto-?merged" && echo 1 || echo 0)
-# Goal/outcome pair: `**Úloha:**`/`**Riešenie:**` (#1137) or the old
-# `**Goal:**`/`**What changed:**`. Alternation, never a bracket class, for the
-# multibyte letters (a [] class matches per BYTE under a bare C locale).
-GOAL_RX='\*\*(goal|(ú|u)loha):?\*\*|^(goal|(ú|u)loha):'
-OUTCOME_RX='\*\*(what changed|outcome|rie(š|s)enie):?\*\*|^(what changed|outcome|rie(š|s)enie):'
+# Goal/outcome pair: `**Úloha:**`/`**Riešenie:**` (#1137) — only as a BOLD
+# label at line start, so a ❓ message that merely says "Úloha: …" is never
+# forced into the template — or the old `**Goal:**`/`**What changed:**`.
+# Alternation, never a bracket class, for the multibyte letters (a [] class
+# matches per BYTE under a bare C locale).
+GOAL_RX='^[[:space:]]*\*\*(ú|u)loha:?\*\*|\*\*goal:?\*\*|^goal:'
+OUTCOME_RX='^[[:space:]]*\*\*rie(š|s)enie:?\*\*|\*\*(what changed|outcome):?\*\*|^(what changed|outcome):'
 HAS_GOAL_AND_OUTCOME=0
 if LC_ALL=C.UTF-8 msg_has "$MSG" -qiE "$GOAL_RX" && LC_ALL=C.UTF-8 msg_has "$MSG" -qiE "$OUTCOME_RX"; then
     HAS_GOAL_AND_OUTCOME=1
@@ -1590,74 +1592,138 @@ fi
 
 # Completion-report fields (#1137, issue 1233: the owner reads only what the task
 # was and how it was solved, so the report is four lines; every gate behind it
-# stays). ONE `✅ Overené:` line carries the verification tokens:
+# stays). ONE `✅ Overené:` line carries the verification tokens, separated by ` · `:
 #   plan N/N · review 0 🔴 0 🟡 0 🔵 · deep 0 🔴 0 🟡 0 🔵 · arch <area> OK|REWORK fixed|REWORK #N
 #   · Výstup: <observed values | n/a — why> · playbook: <lesson | none>
-# The pre-#1137 forms (the `/plan-check` audit line, `✅ Výstup:`, `🏛 Architektúra:`,
-# `📔 Playbook:`, `**Goal:**`/`**What changed:**`) are still accepted so an older
-# session is never blocked. Presence probes are REQUIRED-FIELD msg_has (fail OPEN,
-# #194); the Výstup substance probes fire only on positively obtained text.
-# LC_ALL=C.UTF-8 wherever a pattern carries a diacritic (#316).
+# The LAST such line (optional `- ` / `> ` / `**` prefix) is the report's own, so a
+# template quoted above it is never read. A token the line CARRIES is judged on
+# its own segment only; the pre-#1137 forms (the `/plan-check` audit line,
+# `✅ Výstup:`, `🏛 Architektúra:`, `📔 Playbook:`, `**Goal:**`/`**What changed:**`)
+# answer only for a token the Overené line does not carry, and never read an
+# Overené line (no borrowing the deep pass's zeros for a dishonest review). The
+# presence probes are REQUIRED-FIELD msg_has (fail OPEN, #194); the Výstup
+# substance probes fire only on positively obtained text. LC_ALL=C.UTF-8 wherever
+# a pattern carries a diacritic (#316).
 if [ "$IS_COMPLETION" = "1" ]; then
     OVR_RX='✅[[:space:]]*\**[[:space:]]*(overen(é|e)|verified)[[:space:]]*\**[[:space:]]*:'
+    OVR_LINE_RX="^[[:space:]]*((>|[-*+][[:space:]])[[:space:]]*)*(\*\*)?[[:space:]]*${OVR_RX}"
     OVR_LINE=""
-    if _OVR_LINES=$(LC_ALL=C.UTF-8 msg_lines "$MSG" -iE "^[[:space:]]*${OVR_RX}"); then
-        OVR_LINE=$(head -1 <<<"$_OVR_LINES")
+    if _OVR_LINES=$(LC_ALL=C.UTF-8 msg_lines "$MSG" -iE "$OVR_LINE_RX"); then
+        OVR_LINE=$(tail -1 <<<"$_OVR_LINES")
     fi
-    # The counters must be the post-fix state: exactly `0 🔴 0 🟡 0 🔵`, adjacent
-    # to their own token, so `review 1 🔴 … · deep 0 🔴 0 🟡 0 🔵` cannot borrow
-    # the deep pass's zeros (the bounded old-form probe below can).
+    # The old-form probes read the message WITHOUT any Overené line.
+    MSG_OLD="$MSG"
+    if [ -n "$OVR_LINE" ]; then
+        _MO_RC=0
+        MSG_OLD=$(LC_ALL=C.UTF-8 grep -viE "$OVR_LINE_RX" <<<"$MSG" 2>/dev/null) || _MO_RC=$?
+        [ "$_MO_RC" -ge 2 ] && MSG_OLD="$MSG"
+    fi
+    # Segments of the Overené line: the label stripped, split on the literal ` · `.
+    OVR_SEGS=()
+    if [ -n "$OVR_LINE" ]; then
+        _OB=$(LC_ALL=C.UTF-8 sed -E "s/^.*${OVR_RX}//I" <<<"$OVR_LINE" 2>/dev/null) || _OB="$OVR_LINE"
+        while [[ "$_OB" == *" · "* ]]; do
+            OVR_SEGS+=("${_OB%%" · "*}")
+            _OB="${_OB#*" · "}"
+        done
+        OVR_SEGS+=("$_OB")
+    fi
+    # _ovr_seg <token-ERE> — prints the first segment STARTING with the token
+    # (leading/trailing blanks and `*` trimmed); rc 1 = the line does not carry it.
+    _ovr_seg() {
+        local s
+        [ "${#OVR_SEGS[@]}" -gt 0 ] || return 1
+        for s in "${OVR_SEGS[@]}"; do
+            s="${s#"${s%%[![:space:]*]*}"}"
+            s="${s%"${s##*[![:space:]*]}"}"
+            if LC_ALL=C.UTF-8 msg_has "$s" -qiE "^($1)"; then
+                printf '%s' "$s"
+                return 0
+            fi
+        done
+        return 1
+    }
+    # _c3_exact <segment> <token-ERE> — the counters right after the token are
+    # exactly `0 🔴 0 🟡 0 🔵` and no further counter follows them.
+    _c3_exact() {
+        LC_ALL=C.UTF-8 msg_has "$1" -qiE "^(${2})${_C3}" || return 1
+        local rest="${1#*🔵}"
+        [[ "$rest" != *🔴* && "$rest" != *🟡* && "$rest" != *🔵* ]]
+    }
     _C3='[[:space:]]*:?[[:space:]]*0[[:space:]]*🔴[[:space:]]*0[[:space:]]*🟡[[:space:]]*0[[:space:]]*🔵'
-    _TOK='(^|[^[:alnum:]_-])'
     HAS_GOAL=$(LC_ALL=C.UTF-8 msg_has "$MSG" -qiE "$GOAL_RX" && echo 1 || echo 0)
     HAS_OUTCOME=$(LC_ALL=C.UTF-8 msg_has "$MSG" -qiE "$OUTCOME_RX" && echo 1 || echo 0)
-    HAS_PLAN_CHECK=0; HAS_REVIEW=0; HAS_RCR=0; HAS_ARCH=0
-    if [ -n "$OVR_LINE" ]; then
-        HAS_PLAN_CHECK=$(msg_has "$OVR_LINE" -qiE "${_TOK}/?plan(.?check)?:?[[:space:]]+[0-9]+[[:space:]]*/[[:space:]]*[0-9]+" && echo 1 || echo 0)
-        HAS_REVIEW=$(msg_has "$OVR_LINE" -qiE "${_TOK}/?review${_C3}" && echo 1 || echo 0)
-        HAS_RCR=$(msg_has "$OVR_LINE" -qiE "${_TOK}deep${_C3}" && echo 1 || echo 0)
-        HAS_ARCH=$(msg_has "$OVR_LINE" -qE "${_TOK}arch[^·]*([[:space:]]OK\b|REWORK[[:space:]]+(fixed|#[0-9]+))" && echo 1 || echo 0)
+
+    # plan N/N — N must equal M.
+    if _S=$(_ovr_seg '/?plan(.?check)?\b'); then
+        HAS_PLAN_CHECK=0
+        _NM=$(sed -nE 's#^/?[Pp][Ll][Aa][Nn]([^[:space:]0-9]*)?:?[[:space:]]+([0-9]+)[[:space:]]*/[[:space:]]*([0-9]+).*$#\2 \3#p' <<<"$_S" 2>/dev/null || true)
+        _N="${_NM% *}"
+        _M="${_NM#* }"
+        if [ -n "$_NM" ] && [ "$((10#$_N))" -eq "$((10#$_M))" ]; then
+            HAS_PLAN_CHECK=1
+        fi
+    else
+        # Old forms. Bounded/anchored as before.
+        HAS_PLAN_CHECK=$(msg_has "$MSG_OLD" -qiE "/plan.?check|plan-check.*(fulfilled|passed|clean|complete)|✅.*plan.?check" && echo 1 || echo 0)
     fi
-    # Old forms. HAS_REVIEW's gaps are BOUNDED (`.{0,300}`, #194: an unbounded
-    # `.*A.*B.*C` hits PCRE's backtracking limit on a crafted line); `(?<!code-)`
-    # keeps /requesting-code-review out of the /review probe.
-    [ "$HAS_PLAN_CHECK" = "1" ] || HAS_PLAN_CHECK=$(msg_has "$MSG" -qiE "/plan.?check|plan-check.*(fulfilled|passed|clean|complete)|✅.*plan.?check" && echo 1 || echo 0)
-    [ "$HAS_REVIEW" = "1" ] || HAS_REVIEW=$(msg_has "$MSG" -qP '(?<!code-)/review[: ].{0,300}0 🔴.{0,300}0 🟡.{0,300}0 🔵|(?<!code-)/review[: ].{0,300}all (findings|issues|items).{0,300}addressed|(?<!code-)/review[: ].{0,300}addressed in commit' && echo 1 || echo 0)
-    [ "$HAS_RCR" = "1" ] || HAS_RCR=$(msg_has "$MSG" -qiE "requesting.?code.?review.*0 🔴.*0 🟡.*0 🔵|requesting.?code.?review.*all (findings|issues|items).*addressed|requesting.?code.?review.*addressed in commit|✅.*superpowers:requesting.*0 🔴.*0 🟡.*0 🔵|✅.*request.?code.?review.*0 🔴.*0 🟡.*0 🔵|✅.*code.?review.*\(deep\).*0 🔴.*0 🟡.*0 🔵" && echo 1 || echo 0)
-    # #993-review: U+1F3DB is TEXT-default, so it often arrives with VS16 (U+FE0F).
-    _ARCH_VS16=$'\xef\xb8\x8f'
-    ARCH_RX='🏛('"$_ARCH_VS16"')?[[:space:]]*\**[[:space:]]*(architekt(ú|u)ra|architecture)[[:space:]]*\**[[:space:]]*:'
-    [ "$HAS_ARCH" = "1" ] || HAS_ARCH=$(LC_ALL=C.UTF-8 msg_has "$MSG" -qiE "$ARCH_RX" && echo 1 || echo 0)
+    if _S=$(_ovr_seg '/?review\b'); then
+        HAS_REVIEW=$(_c3_exact "$_S" '/?review' && echo 1 || echo 0)
+    else
+        # HAS_REVIEW's gaps are BOUNDED (`.{0,300}`, #194: an unbounded
+        # `.*A.*B.*C` hits PCRE's backtracking limit on a crafted line);
+        # `(?<!code-)` keeps /requesting-code-review out of the /review probe.
+        HAS_REVIEW=$(msg_has "$MSG_OLD" -qP '(?<!code-)/review[: ].{0,300}0 🔴.{0,300}0 🟡.{0,300}0 🔵|(?<!code-)/review[: ].{0,300}all (findings|issues|items).{0,300}addressed|(?<!code-)/review[: ].{0,300}addressed in commit' && echo 1 || echo 0)
+    fi
+    if _S=$(_ovr_seg '/?deep\b'); then
+        HAS_RCR=$(_c3_exact "$_S" '/?deep' && echo 1 || echo 0)
+    else
+        HAS_RCR=$(msg_has "$MSG_OLD" -qiE "requesting.?code.?review.*0 🔴.*0 🟡.*0 🔵|requesting.?code.?review.*all (findings|issues|items).*addressed|requesting.?code.?review.*addressed in commit|✅.*superpowers:requesting.*0 🔴.*0 🟡.*0 🔵|✅.*request.?code.?review.*0 🔴.*0 🟡.*0 🔵|✅.*code.?review.*\(deep\).*0 🔴.*0 🟡.*0 🔵" && echo 1 || echo 0)
+    fi
+    # arch <area> OK | REWORK fixed | REWORK #N (an optional `(topic)` after #N);
+    # a negated `NOT OK` / `nie OK` is no verdict.
+    if _S=$(_ovr_seg 'arch\b'); then
+        HAS_ARCH=0
+        if LC_ALL=C.UTF-8 msg_has "$_S" -qE '^[Aa][Rr][Cc][Hh][[:space:]]+[^[:space:]].*[[:space:]](OK|REWORK[[:space:]]+fixed|REWORK[[:space:]]+#[0-9]+([[:space:]]*\(.*\))?)$' \
+           && ! LC_ALL=C.UTF-8 msg_has "$_S" -qiE '[[:space:]](not|nie|no|non|ne)[[:space:]]+OK$'; then
+            HAS_ARCH=1
+        fi
+    else
+        # #993-review: U+1F3DB is TEXT-default, so it often arrives with VS16 (U+FE0F).
+        _ARCH_VS16=$'\xef\xb8\x8f'
+        ARCH_RX='🏛('"$_ARCH_VS16"')?[[:space:]]*\**[[:space:]]*(architekt(ú|u)ra|architecture)[[:space:]]*\**[[:space:]]*:'
+        HAS_ARCH=$(LC_ALL=C.UTF-8 msg_has "$MSG_OLD" -qiE "$ARCH_RX" && echo 1 || echo 0)
+    fi
     # Playbook proof (folded in from the retired stop-check-playbook-review.sh,
     # same scope: heading reports only).
     HAS_PLAYBOOK=1
     if [ "$IS_COMPLETION_HEADING" = "1" ]; then
-        HAS_PLAYBOOK=$(msg_has "$MSG" -qE "📔 Playbook:" && echo 1 || echo 0)
-        if [ "$HAS_PLAYBOOK" = "0" ] && [ -n "$OVR_LINE" ]; then
-            HAS_PLAYBOOK=$(msg_has "$OVR_LINE" -qiE "${_TOK}playbook[[:space:]]*:" && echo 1 || echo 0)
+        if _ovr_seg '/?playbook[[:space:]]*:' >/dev/null; then
+            HAS_PLAYBOOK=1
+        else
+            HAS_PLAYBOOK=$(msg_has "$MSG_OLD" -qE "📔 Playbook:" && echo 1 || echo 0)
         fi
     fi
 
-    # Výstup (#446, montalu3 0 € emails): the value after `Výstup:` — the Overené
-    # token's segment, else the old `✅ Výstup:` line (line-anchored first, so a
-    # backticked MENTION of the template earlier in the message is not judged).
+    # Výstup (#446, montalu3 0 € emails): the value after `Výstup:` up to the
+    # next ` · ` (its own segment), else the old `✅ Výstup:` line (line-anchored
+    # first, so a backticked MENTION of the template earlier is not judged).
     VYSTUP_RX='(v(ý|y)stup|output)[[:space:]]*\**[[:space:]]*:'
     OLD_VYSTUP_RX="✅[[:space:]]*\**[[:space:]]*${VYSTUP_RX}"
     # VYSTUP_VAL stays EMPTY when the value could not be read (the substance
     # probes then skip); a value read back as empty becomes " " (value-free).
     VYSTUP_VAL=""
     HAS_VYSTUP=0
-    if [ -n "$OVR_LINE" ] && LC_ALL=C.UTF-8 msg_has "$OVR_LINE" -qiE "${_TOK}${VYSTUP_RX}"; then
+    if _S=$(_ovr_seg "$VYSTUP_RX"); then
         HAS_VYSTUP=1
-        # The value runs from `Výstup:` to the next ` · <token>` (or line end).
-        if _VV=$(LC_ALL=C.UTF-8 sed -E "s/^.*${_TOK}${VYSTUP_RX}[[:space:]]*//I; s/[[:space:]]*·[[:space:]]*(playbook|arch|plan|review|deep)([^[:alnum:]].*)?$//I" <<<"$OVR_LINE" 2>/dev/null); then
+        if _VV=$(LC_ALL=C.UTF-8 sed -E "s/^${VYSTUP_RX}[[:space:]]*//I" <<<"$_S" 2>/dev/null); then
             VYSTUP_VAL="${_VV:- }"
         fi
     else
-        HAS_VYSTUP=$(LC_ALL=C.UTF-8 msg_has "$MSG" -qiE "$OLD_VYSTUP_RX" && echo 1 || echo 0)
+        HAS_VYSTUP=$(LC_ALL=C.UTF-8 msg_has "$MSG_OLD" -qiE "$OLD_VYSTUP_RX" && echo 1 || echo 0)
         _VL=""
-        if _VLS=$(LC_ALL=C.UTF-8 msg_lines "$MSG" -iE "^[[:space:]]*${OLD_VYSTUP_RX}"); then _VL=$(head -1 <<<"$_VLS"); fi
-        if [ -z "$_VL" ] && _VLS=$(LC_ALL=C.UTF-8 msg_lines "$MSG" -iE "$OLD_VYSTUP_RX"); then _VL=$(head -1 <<<"$_VLS"); fi
+        if _VLS=$(LC_ALL=C.UTF-8 msg_lines "$MSG_OLD" -iE "^[[:space:]]*${OLD_VYSTUP_RX}"); then _VL=$(head -1 <<<"$_VLS"); fi
+        if [ -z "$_VL" ] && _VLS=$(LC_ALL=C.UTF-8 msg_lines "$MSG_OLD" -iE "$OLD_VYSTUP_RX"); then _VL=$(head -1 <<<"$_VLS"); fi
         if [ -n "$_VL" ] && _VV=$(LC_ALL=C.UTF-8 sed -E "s/^.*${OLD_VYSTUP_RX}//I" <<<"$_VL" 2>/dev/null); then
             VYSTUP_VAL="${_VV:- }"
         fi
@@ -1698,6 +1764,24 @@ if [ "$IS_COMPLETION" = "1" ]; then
             echo "VIOLATION: The Výstup value carries no concrete observed value — cite what you actually SAW in the real artifact (a number or a quoted span, on the same line), or write 'Výstup: n/a — <prečo>'. Send/delivery/'funguje' is liveness, not content." >&2
             add_hard "Výstup value is value-free — cite concrete observed values (numbers/quoted text) read from the real artifact, or an explicit 'n/a — <prečo>'"
         fi
+    fi
+fi
+
+# HARD: a UI deploy with no clickable 🌐 URL (restored by the #1137 review, owner
+# rule #595: a message that names something openable carries its URL). Armed only
+# by a completion report or an explicit `✅ Deploy:` line, so casual "deployed to
+# dev1+dev2" chat never trips it; `nasaden` covers the Slovak report. The 🌐 URL
+# may sit inline on the Riešenie line. An unanswerable count (`?`) or an
+# unanswerable UI probe never accuses (#194). The multi-environment ">= 2 🌐
+# lines" variant stays removed (#1137).
+HAS_DEPLOY_LINE=$(msg_has "$MSG" -qE "✅ Deploy:" && echo 1 || echo 0)
+if { [ "$IS_COMPLETION" = "1" ] || [ "$HAS_DEPLOY_LINE" = "1" ]; } \
+   && LC_ALL=C.UTF-8 msg_has "$MSG" -qiE "✅ Deploy:|deploy.*(verified|complete|done|success|redeploy|auto.?redeploy)|verified.*deploy|deployed.*(to|successfully)|nasaden"; then
+    GLOBE_COUNT=$(msg_count "$MSG" -E "🌐.*https?://")
+    if [ "$GLOBE_COUNT" != "?" ] && [ "$GLOBE_COUNT" -lt 1 ] \
+       && ! msg_missing "$MSG" -qiE "frontend|dashboard|\bui\b|web app|browser|admin panel"; then
+        echo "VIOLATION: The report deploys a UI (frontend / dashboard / web app) but carries no clickable 🌐 URL. Add '🌐 <url>' for the user-facing page (on the Riešenie line or its own line) — never a backend/API URL, never localhost. See completion-report.md and no-localhost-urls.md." >&2
+        add_hard "UI deploy with no 🌐 URL line — add the user-clickable 🌐 <url> of the deployed page (owner rule #595)"
     fi
 fi
 
