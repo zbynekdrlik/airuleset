@@ -25,17 +25,23 @@ from gates import read_payload, command_of, field_of, emit_block_stderr, allow
 
 DESIGN_BY_LOG = "design-by-gate.log"
 
-# A comment-POST invocation prefilter. TWO shapes (#1061 review):
-#   1. `gh issue comment` (optional -R/--repo, the post-record-design-comment.sh
-#      shape).
-#   2. `gh api …issues/<N>/comments` — the REST POST the dispatch gate itself
-#      READS from (gates.designdispatch._fetch_comment_bodies), so a spoof there
-#      is directly trusted; it MUST be gated too. A bare GET on that path carries
-#      no `Design-by: main` body, so the body-signature check below never fires
-#      for a read.
+# A comment-POST prefilter (#1061 review): `gh issue comment` (optional
+# -R/--repo) and a `gh api …issues/<N>/comments` call that WRITES a body.
 _GH_COMMENT_RE = re.compile(
-    r"\bgh\s+(?:(?:-R[=\s]*|--repo[=\s]+)\S+\s+)?issue\s+comment\b"
-    r"|\bgh\s+api\b[^\n]*?/issues/[0-9]+/comments\b")
+    r"\bgh\s+(?:(?:-R[=\s]*|--repo[=\s]+)\S+\s+)?issue\s+comment\b")
+_GH_API_COMMENTS_RE = re.compile(r"\bgh\s+api\b[^\n]*?/issues/[0-9]+/comments\b")
+# Issue 1137 B1: a READ (no field/input/write method) posts nothing, even
+# when its --jq filter names the token.
+_API_WRITE_RE = re.compile(
+    r"\s(?:-f|-F|--field|--raw-field|--input)\b|(?:-X|--method)[=\s]*(?:POST|PATCH|PUT)",
+    re.IGNORECASE)
+
+
+def _posts_comment(cmd):
+    if _GH_COMMENT_RE.search(cmd):
+        return True
+    return any(_API_WRITE_RE.search(cmd[m.start():].split("\n", 1)[0])
+               for m in _GH_API_COMMENTS_RE.finditer(cmd))
 
 # `Design-by: main` (bold/bullet tolerant), the spoof signature. Deliberately
 # does NOT match `Design-by: worker` (an honest worker stamp is fine).
@@ -100,7 +106,7 @@ def _body_texts(cmd, cwd):
 
 def evaluate(cmd, cwd):
     """('allow'|'block', reason). Pure of process exit for tests."""
-    if not cmd or not _GH_COMMENT_RE.search(cmd):
+    if not cmd or not _posts_comment(cmd):
         return "allow", "not a comment post (gh issue comment / gh api …/comments)"
     if _BYPASS_RE.search(cmd):
         _log("BYPASS", cwd, _BYPASS_RE.search(cmd).group("reason").strip())
@@ -116,21 +122,12 @@ def evaluate(cmd, cwd):
 
 def _block_message():
     return (
-        "BLOCKED: a lane author (worker/implementer) may not post "
-        "`Design-by: main` (#1061 / #1060 L3b).\n"
+        "BLOCKED: a lane author may not post `Design-by: main` -- the main session's\n"
+        "  stamp comes from `python3 ~/devel/airuleset/airuleset.py design-record`.\n"
         "\n"
-        "  The truthful authorship stamp is written by the MAIN session via\n"
-        "  `airuleset.py design-record` (it reads the model from the session's\n"
-        "  OWN transcript; from a worktree it stamps `Design-by: worker`). A\n"
-        "  worker OR the dual-agent implementer session hand-typing\n"
-        "  `Design-by: main` is exactly the spoof the dispatch precondition\n"
-        "  (gates.designdispatch, which trusts a `Design-by: main` comment) must\n"
-        "  not be fooled by.\n"
-        "\n"
-        "  - If you ARE the main: run design-record from the main checkout, not a\n"
-        "    worktree.\n"
-        "  - If you are the worker/implementer: post your `Anchors-confirmed:` /\n"
-        "    `Design-question:` comment WITHOUT a `Design-by: main` line.\n"
+        "  A worker or the dual-agent implementer cites the main's design by its\n"
+        "  comment id, WITHOUT the `Design-by: main` token (#1061 / #1060 L3b);\n"
+        "  from a worktree, design-record itself stamps `Design-by: worker`.\n"
         "\n"
         "  Bypass (rare, logged): add `# airuleset:design-by-ok <reason>` to the\n"
         "  command.")
