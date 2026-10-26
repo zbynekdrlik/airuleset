@@ -12,6 +12,7 @@ import os
 import sys
 import time
 import unittest
+import unittest.mock as m
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -115,6 +116,21 @@ class MachineClearPersists(base._Pane):
         self.assertIn(self.SID, state[_os().STATE_KEY])
         _os().refresh(state, [], self.proj, NOW + _os().RECORD_TTL_S + 1)
         self.assertNotIn(_os().STATE_KEY, state)
+
+
+class RefreshSeedsTheMemo(base._Pane):
+    """Review finding 9: `refresh` already evaluated every mapped pane; the
+    first `pane_latch` of the sweep must not re-read the transcript tail."""
+
+    def test_the_first_pane_latch_reads_no_tail(self):
+        self._append(*(OWNER_WORK + FACTS["pause"]))
+        osm = _os()
+        state = {}
+        with m.patch.object(osm, "_tail", wraps=osm._tail) as spy:
+            osm.refresh(state, [(self.PID, self.CWD)], self.proj, NOW)
+            reads = spy.call_count
+            self.assertEqual(osm.pane_latch(self.PID)["fact"], "pause")
+            self.assertEqual(spy.call_count, reads)
 
 
 if __name__ == "__main__":
