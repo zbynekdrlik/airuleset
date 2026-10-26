@@ -565,7 +565,7 @@ class ReviewRoundText(unittest.TestCase):
         self.assertNotIn("filing mandate", ndw)
         self.assertNotIn("pre-answered YES", ndw)
         cpw = _read("modules/core/complete-planned-work.md")
-        self.assertIn("a ticket closes only when its items are done or moved", cpw)
+        self.assertNotIn("a ticket closes only when its items are done or moved", cpw)
 
     def test_architecture_check_files_one_ticket(self):
         ac = _norm(_read("skills/architecture-check/SKILL.md"))
