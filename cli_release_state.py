@@ -28,11 +28,11 @@ shape watchdog.repo_identity (#1068) uses (its own `memoized` degrades to a plai
 compute outside a watchdog sweep, so a genuine module-global memo is used here).
 The memo is BYPASSED whenever a seam is injected, so tests always compute fresh.
 
-Fail-safe EMPTY in every direction — a two-branch repo with no origin/develop,
-a git/REST error, an unmapped PR — the never-falsely-done direction: a ticket
-whose merge state cannot be derived simply STAYS in `I`, never silently dropped
-into `M`. stdlib only; imports nothing from the airuleset package, so it is
-import-safe from cli_quals / airuleset / statusbar.
+Fail-safe EMPTY in every direction (no origin/develop, a git/REST error, an
+unmapped PR): a ticket whose merge state cannot be derived STAYS in `I`, never
+silently dropped into `M`. #1228: a docs/chore/style/ci change implements no
+ticket (`cli_commit_kind`, the one stdlib leaf imported here — import-safe from
+cli_quals / airuleset / statusbar).
 """
 
 import json
@@ -42,6 +42,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import cli_commit_kind
+
 # The develop→staging→main train's non-default branches. `origin/main..origin/X`
 # is every commit on X not yet on main — the merged-but-unreleased set.
 _UNRELEASED_BRANCHES = ("develop", "staging")
@@ -50,36 +52,27 @@ _UNRELEASED_BRANCHES = ("develop", "staging")
 # from …") or a squash/rebase merge whose subject ENDS with the PR number as a
 # trailing `(#N)`. We read the PR NUMBER ONLY from these two shapes.
 _MERGE_PR_RE = re.compile(r"Merge pull request #(\d+)\b")
-# END-ANCHORED (#1083 REWORK): GitHub appends the squash/rebase PR number as a
-# TRAILING `(#N)`, so a conventional-commit scope earlier in the subject
-# ("docs(#7421): … (#7662)") is NEVER read as the PR number — only the final
-# `(#7662)` is. A revert "X (#42)" (#50) likewise yields the outer #50.
+# END-ANCHORED (#1083 REWORK): only the TRAILING `(#N)` GitHub appends is the PR
+# number, never a conventional-commit scope earlier in the subject
+# ("docs(#7421): … (#7662)" -> 7662; a revert "X (#42)" (#50) -> 50).
 _SQUASH_PR_RE = re.compile(r"\(#(\d+)\)\s*$")
 
-# TITLE issue refs (#1083 REWORK) — on the target 3-branch repo (odoo-erp) the
-# implemented ticket number(s) live in the PR TITLE, not the body, and carry NO
-# closing keyword: `#7644 (M1): …`, the multi-ticket `#7631 #7632 …`, and the
-# conventional-commit scope `docs(#7421): …`. So a `#N` in the TITLE is an
-# implemented ticket (the PR's own number is excluded by the caller); a bare
-# number with no `#` ("úloha 980") never matches. The negative lookbehind
-# `(?<![\w/])` rejects a cross-repo `owner/repo#N` reference while still matching
-# `#7644`, `docs(#7421)` and both of `#7631 #7632` (delta review #1083).
+# TITLE issue refs (#1083 REWORK) — on odoo-erp the implemented ticket(s) live
+# in the PR TITLE with NO closing keyword (`#7644 (M1): …`, `#7631 #7632 …`, the
+# scope form `fix(#7421): …`), so a title `#N` is a ticket (the caller drops the
+# PR's own number; "úloha 980" has no `#`; #1228: a docs/chore title carries
+# none). `(?<![\w/])` rejects a cross-repo `owner/repo#N` (delta review #1083).
 _TITLE_REF_RE = re.compile(r"(?<![\w/])#(\d+)")
 
-# A revert PR title is `Revert "<original title>"`; the original carries the
-# ticket, but a revert UNDOES the fix, so the reverted (still-open) ticket must
-# STAY in `I`, never be dropped into `M` — the never-falsely-done contract (delta
-# review #1083). A revert title carries NO implemented ticket.
+# A revert title (`Revert "<original>"`) UNDOES the fix, so it carries NO ticket:
+# the reverted still-open ticket STAYS in `I` (never-falsely-done, #1083 review).
 _REVERT_TITLE_RE = re.compile(r'^\s*Revert\s+"')
 
 # BODY issue refs — GitHub's OWN auto-close semantics ONLY: a CLOSING KEYWORD
-# (close/closes/closed, fix/fixes/fixed, resolve/resolves/resolved) OR a
-# `Issue: #N` line, each immediately before `#N`. A BARE `#N` in the BODY is a
-# cross-reference (follow-up to #N, part of epic #N, cross-repo owner/repo#N) the
-# PR does NOT close, so it must NOT pull an UNRELATED open ticket out of `I` into
-# `M` (the never-falsely-done contract; adversarial review #1083, both reviewers,
-# BLOCKER). A cross-repo `owner/repo#N` has no space before `#`, so `\s+#` never
-# matches it. (The TITLE, unlike the body, IS the ticket carrier — see above.)
+# (close/fix/resolve and their forms) or an `Issue: #N` line right before `#N`.
+# A BARE body `#N` is a cross-reference (follow-up, epic, owner/repo#N) the PR
+# does not close, so it never pulls an unrelated open ticket into `M` (#1083
+# review BLOCKER); a cross-repo `owner/repo#N` has no space before `#`.
 _CLOSE_KW_RE = re.compile(
     r"(?i)\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b\s*:?\s+#(\d+)")
 _ISSUE_LINE_RE = re.compile(r"(?im)^\s*Issue:\s*#(\d+)")
@@ -88,6 +81,9 @@ _ISSUE_LINE_RE = re.compile(r"(?im)^\s*Issue:\s*#(\d+)")
 # `_PARTIAL[root]` = why this process's M set is partial ("" = complete).
 _MEMO = {}
 _PARTIAL = {}
+# #1228: PR-cache entries written under the docs rule carry `"v": 2`; an older
+# entry is re-judged once from its introducing commit (`_legacy_nothing`).
+_CACHE_V = 2
 
 
 def _reset_memo():
@@ -114,12 +110,10 @@ MERGED_UNRELEASED_MAX_PRS = 60
 # new entry, so a killed refresh keeps its progress (the rest fill later).
 MERGED_UNRELEASED_META_BUDGET = 15
 
-# #1112 — a SANITY cap on the two-branch `<main>..<prefix>/dev` commit walk, NOT
-# the (b) cap's twin: (b) protects a REST budget, while this walk makes ZERO
-# network calls (the #1090 fork case is already hidden by `_canonical_ref_prefix`).
-# It guards only a PATHOLOGICAL range (a re-created dev, a cross-repo graft: tens
-# of thousands of commits), set FAR above any real backlog (~80 tickets × ~5
-# commits ≈ 400 must NOT be hidden); a broken range hides M with a journal line.
+# #1112 — a SANITY cap on the two-branch `<main>..<prefix>/dev` walk (ZERO
+# network, unlike (b)): only a PATHOLOGICAL range (a re-created dev, a graft)
+# exceeds it, FAR above a real backlog (~80 tickets × ~5 commits ≈ 400 must NOT
+# be hidden); a broken range hides M with a journal line.
 MERGED_UNRELEASED_MAX_COMMITS = 2000
 
 
@@ -387,15 +381,14 @@ def _save_cache(cache_path, data):
 
 def _issue_refs(title, body, exclude_pr):
     """The implemented-ticket numbers for a PR, with the PR's OWN number removed.
-    Two carriers (#1083 REWORK):
-      * TITLE — EVERY `#N` is an implemented ticket (the odoo-erp convention: the
-        ticket number(s) live in the title, incl. the `docs(#N):` scope form and
-        the multi-ticket `#7631 #7632` form);
-      * BODY — ONLY GitHub closing-keyword refs + `Issue: #N` lines; a bare body
-        `#N` is a cross-reference and deliberately NOT counted (see `_CLOSE_KW_RE`)."""
+    Two carriers (#1083 REWORK): the TITLE, where EVERY `#N` is a ticket (the
+    odoo-erp convention, incl. the `fix(#N):` scope and `#7631 #7632` forms; a
+    revert title carries none), and the BODY, ONLY closing-keyword refs +
+    `Issue: #N` lines (a bare body `#N` is a cross-reference, `_CLOSE_KW_RE`).
+    #1228: a docs/chore/style/ci change (or `[no-test: docs…]`) carries none."""
+    if cli_commit_kind.implements_nothing(title, body):
+        return set()
     title_text = title or ""
-    # A revert title carries no implemented ticket (its quoted original would
-    # otherwise drop the reverted still-open ticket into M — delta review #1083).
     refs = set() if _REVERT_TITLE_RE.match(title_text) else {
         int(m) for m in _TITLE_REF_RE.findall(title_text)}
     body_text = body or ""
@@ -403,6 +396,13 @@ def _issue_refs(title, body, exclude_pr):
     refs |= {int(m.group(1)) for m in _ISSUE_LINE_RE.finditer(body_text)}
     refs.discard(int(exclude_pr))
     return refs
+
+
+def _legacy_nothing(entry, root):
+    """#1228: True for a PR-cache entry written before the docs rule (no `v`)
+    whose introducing commit is a docs/chore/style/ci change (local git)."""
+    return (entry.get("v") != _CACHE_V and cli_commit_kind
+            .introducing_commit_implements_nothing(root, entry.get("oid")))
 
 
 def _pr_introducing_commits(root, git_fn, prefix="origin"):
@@ -448,24 +448,17 @@ def _compute_two_branch(root, git_full_fn, prefix, ref_exists_fn):
     ticket. No REST, no cache, no network. Fail-safe EMPTY (missing main ref,
     empty range, or a range over the cap).
 
-    ACCEPTED over-count (subject convention): like the 3-branch PR-TITLE path,
-    EVERY `#N` in a subject is read as an implemented ticket — the real fleet
-    convention carries the ticket as a bare subject ref (`fix: [green] #1114 …`),
-    so restricting to only the scoped `feat(#N):` forms would MISS most real
-    commits. A subject that ALSO cites an unrelated `#N` for context, or a
-    GitHub `Merge pull request #N` PR number, therefore enters this raw set — but
-    the harm is bounded at the consumer: `bucketize` (#1141) intersects M
-    with the OPEN-WORKABLE set, so a number that is not an open workable ticket
-    (a PR number, a closed/cross-repo ref) never surfaces in `M`. This mirrors
-    the accepted trade-off the 3-branch title path already makes.
+    ACCEPTED over-count: like the 3-branch PR-TITLE path, EVERY `#N` in an
+    implementing subject is read as a ticket (the fleet writes the ticket as a
+    bare subject ref, `fix: [green] #1114 …`); an extra context `#N` or a
+    `Merge pull request #N` number is bounded by `bucketize` (#1141), which
+    keeps M to open workable tickets. #1228: a docs/chore/style/ci commit (a
+    design doc naming an epic) carries no ticket at all (`_issue_refs`).
 
-    ACCEPTED limitations: (a) a revert whose ORIGINAL `feat(#N)` commit is ALSO
-    in range re-adds `#N` (same as the 3-branch PR+revert pair); (b) a body
-    containing a raw RS byte (\\x1e) truncates that body's post-RS refs (subject
-    refs survive) — astronomically rare; (c) a two-branch FORK yields empty here
-    (a fork lacks `upstream/develop`, so `_canonical_ref_prefix` returns None
-    before this path — `prefix` is effectively always `origin`), fail-safe never
-    false."""
+    ACCEPTED limitations: (a) a revert whose ORIGINAL `feat(#N)` is ALSO in
+    range re-adds `#N`; (b) a raw RS byte (\\x1e) in a body truncates its later
+    refs; (c) a two-branch FORK yields empty (`_canonical_ref_prefix` returns
+    None first) — fail-safe, never false."""
     main_ref = _two_branch_main_ref(root, prefix, ref_exists_fn)
     if main_ref is None:
         return frozenset()
@@ -586,12 +579,16 @@ def _compute_merged_unreleased(root, git_fn, git_full_fn, pr_meta_fn, cache_path
                 unread += 1  # REST failed — leave uncached, retry next refresh
                 continue
             title, body = meta
-            entry = {"issues": sorted(_issue_refs(title, body, pr)), "oid": oid}
+            entry = {"issues": sorted(_issue_refs(title, body, pr)), "oid": oid,
+                     "v": _CACHE_V}
             cache[key] = entry
             new_metas += 1
             _save_cache(cache_path, cache)   # (c) save after EVERY new entry
-        elif not entry.get("oid"):
-            entry["oid"] = oid   # backfill an oid-less (legacy-shaped) entry
+        elif entry.get("v") != _CACHE_V:
+            entry["oid"] = entry.get("oid") or oid   # backfill an oid-less one
+            if _legacy_nothing(entry, root):         # #1228: re-judged ONCE
+                entry["issues"] = []
+            entry["v"] = _CACHE_V
             _save_cache(cache_path, cache)
         for n in entry.get("issues", []):
             issues.add(int(n))
@@ -667,7 +664,8 @@ def merged_released_oids(root, open_numbers, is_ancestor_fn=None,
         # cached PR ever (the append-only cache grows unboundedly).
         open_hits = [int(n) for n in entry.get("issues", []) if int(n) in open_set]
         oid = entry.get("oid")
-        if open_hits and oid and is_ancestor_fn(oid, root):
+        if (open_hits and oid and not _legacy_nothing(entry, root)   # #1228
+                and is_ancestor_fn(oid, root)):
             for n in open_hits:
                 out.setdefault(n, []).append(oid)
     return out
