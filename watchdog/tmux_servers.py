@@ -30,7 +30,8 @@ def default_socket_path(env=None):
 def listening_inodes(path, proc_root="/proc"):
     found = set()
     try:
-        with open(os.path.join(proc_root, "net", "unix")) as f:
+        with open(os.path.join(proc_root, "net", "unix"), encoding="utf-8",
+                  errors="replace") as f:   # any user may bind any socket name
             for line in f:
                 p = line.split()
                 if len(p) >= 8 and p[7] == path and p[3] == LISTENING:
@@ -179,7 +180,8 @@ def _signal(target, kill, proc_root, logs, head):
         return None
 
     try:
-        with open(os.path.join(proc_root, str(target), "comm")) as f:
+        with open(os.path.join(proc_root, str(target), "comm"),
+                  encoding="utf-8", errors="replace") as f:
             comm = f.read().strip()
     except OSError:
         comm = ""
