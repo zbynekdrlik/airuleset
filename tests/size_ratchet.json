@@ -452,7 +452,7 @@
     "tests/test_probe_first_limit_recovery.py": 214,
     "tests/test_process_subdev_skill.py": 415,
     "tests/test_prod_read_self_service_500.py": 131,
-    "tests/test_prod_transfer_1105.py": 554,
+    "tests/test_prod_transfer_1105.py": 563,
     "tests/test_prompt_wedge.py": 502,
     "tests/test_prose_gate_architecture_line_993.py": 126,
     "tests/test_prose_gate_ascii_art.py": 51,

@@ -155,6 +155,15 @@ class TestSecretValueGuard(unittest.TestCase):
         line = ("Prod-transfer: token %s — sensitivity: secret" % _fake_token())
         self.assertIsNotNone(pt.line_has_secret_value(line))
 
+    def test_assigned_key_value_flagged(self):
+        # Issue 1137 B1 retired the generic entropy rule; a value assigned to a
+        # *_KEY name and a webhook URL carrying its token are still secrets.
+        hex40 = "3f9a0c1d2e3f4a5b6c7d" + "8e9f0a1b2c3d4e5f6071"
+        for value in ("ODOO_" + "KEY=" + hex40,
+                      "https://discord.com/api/web" + "hooks/1234567890/" + hex40 + hex40):
+            line = "Prod-transfer: %s — sensitivity: secret" % value
+            self.assertIsNotNone(pt.line_has_secret_value(line), value)
+
     def test_clean_name_and_path_not_flagged(self):
         line = ("Prod-transfer: Stripe API key — supplied by David 21.9.2026 — "
                 "erp-test: ir.config_parameter stripe.key — prod path: "

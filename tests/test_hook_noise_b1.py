@@ -326,7 +326,9 @@ class ScriptCheckScratch(unittest.TestCase):
         home = _home(self)
         for path, content in (
                 (ODOO_REPO + "/scripts/run_gates.sh", NO_PIPEFAIL),
-                (ODOO_REPO + "/addons/x/tests/test_race_9409.py", EXCEPT_PASS),
+                (ODOO_REPO + "/addons/x/models/race_9409.py", EXCEPT_PASS),
+                (ODOO_REPO + "/addons/x/tests/test_race_9409.py",
+                 EXCEPT_PASS.replace("FileNotFoundError", "Exception")),
                 ("/tmp/../home/u/devel/odoo/odoo-erp/scripts/x.sh", NO_PIPEFAIL)):
             with self.subTest(path=path):
                 self.assertEqual(self.write(path, content, home).returncode, 2)
