@@ -560,9 +560,9 @@ class TestEndedSupervisorPane(unittest.TestCase):
         self.assertTrue(any("queue-arrival" in ln and "hold:floor" in ln
                             for ln in logs), logs)
         self._sweep(NOW + 20 * 60, [10, 11, 12, 13])
-        # the binding hold for a pane with ONE kind is the owner's 3 h cross-kind
-        # total cap (#913/#1023), which sits above the 60-min per-kind floor.
-        logs, typed = self._sweep(NOW + 60 + 3 * HOUR, [10, 11, 12, 13])
+        # the binding hold is the owner's ONE-nudge-per-day bound (B9, 26.10.2026:
+        # the per-kind floor and the cross-kind total cap are both a day).
+        logs, typed = self._sweep(NOW + 60 + 24 * HOUR, [10, 11, 12, 13])
         self.assertEqual(len(typed), 1, logs)
         self.assertIn("#12", typed[0])
         self.assertIn("#13", typed[0])
