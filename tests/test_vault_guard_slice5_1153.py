@@ -72,12 +72,12 @@ class MetaSource(Base):
     def test_a_meta_source_feeds_only_text_filters(self):
         # Every consumer that can turn a NAME into a read or an action.
         self.both(
-            allowed=[],
+            allowed=["ls %s | awk '{print}'" % R],      # issue 1137 B1 review B4
             denied=["stat -c %%n %s/* | xargs cat" % R,
                     "ls -d %s/* | xargs -I{} head {}" % R,
                     "ls %s | bash" % R,
                     "ls %s | tee /tmp/names" % R,
-                    "ls %s | awk '{print}'" % R,
+                    "ls %s | awk '{print | \"sh\"}'" % R,
                     "ls %s | sed -n p" % R,
                     "ls %s | python3 -c 'import sys; print(sys.stdin.read())'" % R,
                     "ls %s | while read f; do head \"$f\"; done" % R,
@@ -94,13 +94,14 @@ class MetaSource(Base):
                     "stat %s | stat -" % KEY])
 
     def test_only_a_bare_unassigned_ls_or_stat(self):
+        # Issue 1137 B1 review B4: `wc`/`sha256sum` naming a key are sources too.
         self.both(
-            allowed=[],
+            allowed=["wc -c %s | grep x" % KEY, "sha256sum %s | cut -c1-8" % KEY],
             denied=["/tmp/x/ls %s | grep x" % R,
                     "PATH=/tmp/x ls %s | grep x" % R,
                     "sudo ls %s | grep x" % R,
-                    "wc -c %s | grep x" % KEY,
-                    "sha256sum %s | cut -c1-8" % KEY,
+                    "/tmp/x/wc -c %s | grep x" % KEY,
+                    "PATH=/tmp/x sha256sum %s | cut -c1-8" % KEY,
                     "test -f %s | cat" % KEY])
 
     def test_grouping_and_rebinding_keep_the_whole_command_rule(self):
