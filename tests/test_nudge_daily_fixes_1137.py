@@ -235,5 +235,57 @@ class OwnerActionsArePastTheCap(b1257._Pane):
                             "%s line %d" % (c.func.attr, c.lineno))
 
 
+class OneHoldLinePerEpisode(b1257._Pane):
+    """Review finding 15: a held send journalled `send-verified
+    hold:pane-budget …` + `batch-nudge … held` (and a direct rider its
+    `hold:total-cap …`) on EVERY 60-s sweep, ~2.9k lines per pane per day. A
+    hold is journalled once per (pane, kind) episode — the delivery that
+    blocks it — and again only when a new episode starts."""
+
+    def _count(self, logs, needle):
+        return sum(1 for ln in logs if needle in ln)
+
+    def test_a_held_send_journals_once_per_episode(self):
+        state = {"nudge_pane_attempts": {self.PID: [time.time() - 60]}}
+        logs = []
+        for _ in range(3):
+            ok, tmux, out, lg = self._send("release-gap", state)
+            logs += lg
+            self.assertFalse(ok)
+            self.assertTrue(out.get("pane_budget_held"))
+            self.assertEqual(tmux.sent, [])
+        self.assertEqual(self._count(logs, "hold:pane-budget"), 1, logs)
+        state["nudge_pane_attempts"][self.PID] = [time.time() - 30]  # new day's send
+        _ok, _t, _o, lg = self._send("release-gap", state)
+        self.assertEqual(self._count(lg, "hold:pane-budget"), 1, lg)
+
+    def test_a_held_batch_journals_once_per_episode(self):
+        state = {"nudge_pane_attempts": {self.PID: [time.time() - 60]}}
+        logs = []
+        for _ in range(3):
+            goal._deliver_batch([("release-gap", "x", None)], self.PID, self.SID,
+                                "loc", self.tpath, self._tmux(), state,
+                                time.time(), set(), None, lambda *a, **k: None,
+                                logs, None)
+        self.assertEqual(self._count(logs, "hold:pane-budget"), 1, logs)
+        self.assertEqual(self._count(logs, "batch-nudge loc -> held"), 1, logs)
+
+    def test_a_direct_rider_total_cap_hold_journals_once(self):
+        tc = prio._RiderBase("run")
+        tc.setUp()
+        self.addCleanup(tc.doCleanups)
+        state = {}
+        ng.mark_sent(state, tc.sid, "release-gap", prio.NOW - 3600)
+        qrecs = {tc.sid: {"base": [1], "first_seen": prio.NOW - prio.DAY}}
+        logs = []
+        for _ in range(3):
+            logs += tc._run(qrecs, [{"id": 1, "kind": "ticket", "num": 1,
+                                     "tag": "infra"},
+                                    {"id": 2, "kind": "ticket", "num": 2,
+                                     "tag": "infra"}],
+                            tc._tmux(), state=state, handled=set())
+        self.assertEqual(self._count(logs, "hold:total-cap"), 1, logs)
+
+
 if __name__ == "__main__":
     unittest.main()
