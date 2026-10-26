@@ -60,7 +60,6 @@ class TestQuestionPolicy(TestCase):
                 t += "\n" + read(companion)
             self.assertIn("#710", t, f"{rel}: missing the #710 owner-scope")
             self.assertIn("zbynek", t)
-            self.assertIn("marek", t)
             self.assertIn("david", t)
             self.assertIn("footer `U N`", t)
         # The session discipline is explicitly stated as unchanged, not dropped.

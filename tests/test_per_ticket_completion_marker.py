@@ -38,11 +38,9 @@ class TestMessageStatusMarkerRule(TestCase):
         t = read(self.MOD)
         self.assertIn("ARMED", t)
         self.assertIn("◎ /goal", t)
-        # #1084: machine compacts are REMOVED — the per-ticket compact phrasing is
-        # gone; the armed-goal exception + the removed note are what the module
-        # must still document.
-        self.assertIn("safe compaction boundary", t)
-        self.assertIn("Machine compacts REMOVED #1084", t)
+        # #1137 slice B: the compaction-boundary rationale and the #1084
+        # removed-note are history (message-status-marker-history.md); the
+        # armed-goal rule itself is what the module must still document.
 
     def test_reserve_working_for_genuinely_in_flight_work(self):
         t = read(self.MOD)
