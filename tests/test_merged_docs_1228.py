@@ -142,9 +142,9 @@ class LegacyCacheEntries(unittest.TestCase):
                 pr_meta_fn=lambda pr: self.fail("a cached PR is never re-read"))
             saved = json.loads(Path(cache).read_text())
         self.assertEqual(set(got), {7644})
-        self.assertEqual(saved["7662"]["issues"], [])
-        self.assertEqual(saved["7700"]["issues"], [])
-        self.assertEqual(saved["7660"]["issues"], [7644])
+        self.assertEqual((saved["7662"]["issues"], saved["7662"]["docs"]), ([7421], True))
+        self.assertEqual((saved["7700"]["issues"], saved["7700"]["docs"]), ([7421], True))
+        self.assertEqual((saved["7660"]["issues"], saved["7660"]["docs"]), ([7644], False))
 
     def test_released_legacy_docs_entries_are_not_on_main(self):
         with TemporaryDirectory() as repo, TemporaryDirectory() as d:
@@ -311,7 +311,8 @@ class LegacyMigrationRound1(unittest.TestCase):
         self.assertEqual(first, {7644: [fix]})
         self.assertEqual(second, {7644: [fix]})
         self.assertEqual(self.reads, [])
-        self.assertEqual(saved["7662"], {"issues": [], "oid": docs, "v": 2})
+        self.assertEqual(saved["7662"],
+                         {"issues": [7421], "oid": docs, "v": 2, "docs": True})
 
     def test_a_malformed_oid_never_reaches_git(self):
         calls = []
