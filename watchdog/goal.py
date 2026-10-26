@@ -5007,7 +5007,13 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
         # conflicts with a `handled` keystroke and is authority-agnostic; `rec`'s
         # `soa` streak persists via `recs`. `stuck_seen` guards the #645
         # two-panes-one-cwd double-advance (same sid twice per sweep).
-        if sid not in stuck_seen and not _hold:   # #1257: a paused loop is no stall
+        # #1257: a loop the owner paused HERSELF (not a sibling's `via` latch)
+        # is no stall -- its stuck / gk-stall episodes END, they never alert.
+        _own_stop = bool(_hold) and not (_owner_stop.pane_latch(pid) or {}).get("via")
+        if _own_stop and not dry_run:
+            for _k in ("soa", "soalert", "soa_ts", "gks_ts", "gks_alert"):
+                rec.pop(_k, None)
+        if sid not in stuck_seen and not _own_stop:
             stuck_seen.add(sid)
             logs += _lane_stuck_owner_alert(now, run, rec, glance, sid, cwd, pid,
                                             loc, send_fn, dry_run)
