@@ -2060,8 +2060,9 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
                                      run, state, now, sleep_fn, logs,
                                      nudge=_nudge):
             # #1092 (e) -- recovering our OWN stranded /goal was a keystroke into
-            # the pane; count it against the per-pane budget for a watchdog re-arm.
-            if origin in _GOAL_WATCHDOG_REARM_ORIGINS:
+            # the pane; it spends the day for a budgeted WORK re-arm only (the
+            # same `_rearm_budgeted` the bare-box path uses, never a recovery).
+            if _rearm_budgeted:
                 _nudge_gate.mark_pane_attempt(state, pid, now)
             watchdog._janitor_clear_watch(state, pid)
             if not _await_goal_armed(pid, run, sleep_fn):   # #720 same arm-confirm
