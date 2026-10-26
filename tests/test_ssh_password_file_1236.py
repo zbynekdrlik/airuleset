@@ -52,6 +52,8 @@ class _FakeHome(unittest.TestCase):
         env = mock.patch.dict(os.environ, {"HOME": str(self.home)})
         env.start()
         self.addCleanup(env.stop)
+        # the suite-wide FAKE file (conftest / push Pass B): resolve for real here
+        os.environ.pop(cli_ssh_password.ENV_OVERRIDE, None)
         self.pw = self.home / ".secrets" / "newlevel-ssh-password"
 
     def make_file(self, mode=0o600):
@@ -108,6 +110,32 @@ class TestPasswordFile(_FakeHome):
         with self.assertRaises(cli_ssh_password.SshPasswordFileError) as cm:
             cli_ssh_password.password_file()
         self.assertIn("not a regular file", str(cm.exception))
+
+
+class TestOverrideSeam(_FakeHome):
+    """The AIRULESET_SSH_PASSWORD_FILE test seam: honoured with the same
+    checks, written by the push gate for Pass B, set by conftest for pytest."""
+
+    def test_override_path_is_used_with_the_same_checks(self):
+        fake = self.home / "fake-pw"
+        with mock.patch.dict(os.environ, {cli_ssh_password.ENV_OVERRIDE: str(fake)}):
+            with self.assertRaises(cli_ssh_password.SshPasswordFileError):
+                cli_ssh_password.password_file()
+            fake.write_text(FAKE_VALUE + "\n")
+            os.chmod(fake, 0o600)
+            self.assertEqual(cli_ssh_password.password_file(), str(fake))
+
+    def test_suite_fake_file_is_0600(self):
+        path = Path(cli_ssh_password.fake_file_for_suite(self.home))
+        self.assertEqual(oct(path.stat().st_mode & 0o777), "0o600")
+        with mock.patch.dict(os.environ, {cli_ssh_password.ENV_OVERRIDE: str(path)}):
+            self.assertEqual(cli_ssh_password.password_file(), str(path))
+
+    def test_both_runners_get_a_fake_file(self):
+        import inspect
+        self.assertIn("fake_file_for_suite(", inspect.getsource(cli_remote.cmd_push))
+        conftest = (REPO / "tests" / "conftest.py").read_text()
+        self.assertIn('"%s"' % cli_ssh_password.ENV_OVERRIDE, conftest)
 
 
 class TestRemoteSshPrefix(_FakeHome):
@@ -296,7 +324,7 @@ def _literal_password_hits(text):
     hits = ["argv -p" for _ in ARGV_P.finditer(text)]
     for m in SHELL_P.finditer(text):
         value = (m.group(1) or m.group(2)).strip("'\"`,;)")
-        if not (PLACEHOLDER.match(value) or value in FAKE_FIXTURES):
+        if value and not (PLACEHOLDER.match(value) or value in FAKE_FIXTURES):
             hits.append("literal")
     return hits
 
@@ -304,9 +332,11 @@ def _literal_password_hits(text):
 class TestNoLiteralInSource(unittest.TestCase):
 
     def test_guard_catches_both_shapes(self):
-        self.assertTrue(_literal_password_hits('["sshpass", "-p", "v"]'))
-        self.assertTrue(_literal_password_hits("sshpass -p hunter2 ssh h"))
-        self.assertTrue(_literal_password_hits("SSHPASS=hunter2 sshpass -e"))
+        # built by concatenation so this source itself holds no literal
+        self.assertTrue(_literal_password_hits('["sshpass", ' + '"-p", "v"]'))
+        self.assertTrue(_literal_password_hits("sshpass -p " + "hunter2 ssh h"))
+        self.assertTrue(_literal_password_hits("SSHPASS=" + "hunter2 sshpass -e"))
+        self.assertTrue(_literal_password_hits("sshpass -p " + "'hunter2' ssh h"))
         self.assertFalse(_literal_password_hits('sshpass -p "$PW" ssh h'))
         self.assertFalse(_literal_password_hits("sshpass -f ~/.secrets/x ssh"))
 

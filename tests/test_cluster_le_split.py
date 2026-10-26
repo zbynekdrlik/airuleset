@@ -60,7 +60,6 @@ REMOTE_NAMES = [
     "_ssh_retry_backoff_s",
     "_ssh_control_dir_for_push",
     "_ssh_multiplex_opts",
-    "_redacted_ssh_cmd",
     "_HOME_AUDIT_MARKER",
     "_shared_remote_host_ips",
     "_remote_cmd_with_home_audit",

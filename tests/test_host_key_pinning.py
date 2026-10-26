@@ -214,7 +214,7 @@ class TestRealForestshopDevPinned(unittest.TestCase):
     """#679: forestshop-dev is a PUBLIC-DNS target (forestshop-dev.newlevel.media
     = 178.105.89.168, no tailscale) on the SHARED-PASSWORD branch — its two
     REMOTE_HOSTS entries carry no `identity`, so the deploy loop takes the
-    no-identity `sshpass -p newlevel` branch. It is the same public-internet
+    no-identity `sshpass -f <password file>` branch. It is the same public-internet
     threat class as spinbike (#669) and WORSE: an un-pinned =no leg hands the
     fleet-shared password to whatever key answers, so a MITM on the path to this
     public DNS host (or a DNS hijack) gets any key accepted AND the password.

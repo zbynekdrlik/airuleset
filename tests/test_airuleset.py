@@ -12277,33 +12277,6 @@ class TestSshControlDirForPush(TestCase):
             self.assertIsNone(airuleset._ssh_control_dir_for_push())
 
 
-class TestRedactedSshCmd(TestCase):
-    """The manual single-target retry hint printed on an exhausted
-    transient failure must never leak the shared subdev password into the
-    push log (security-basics.md)."""
-
-    def test_identity_based_cmd_is_unchanged(self):
-        cmd = ["ssh", "-i", "/x/k", "-o", "StrictHostKeyChecking=no",
-               "gatekeeper@1.2.3.4", "echo hi"]
-        self.assertEqual(airuleset._redacted_ssh_cmd(cmd), cmd)
-
-    def test_sshpass_password_is_redacted(self):
-        cmd = ["sshpass", "-p", "newlevel", "ssh", "-o",
-               "StrictHostKeyChecking=no", "u@1.2.3.4", "echo hi"]
-        out = airuleset._redacted_ssh_cmd(cmd)
-        self.assertNotIn("newlevel", out)
-        self.assertIn("<REDACTED>", out)
-        expected = list(cmd)
-        expected[2] = "<REDACTED>"
-        self.assertEqual(out, expected)
-
-    def test_original_cmd_list_is_not_mutated(self):
-        cmd = ["sshpass", "-p", "newlevel", "ssh", "u@1.2.3.4", "echo hi"]
-        original = list(cmd)
-        airuleset._redacted_ssh_cmd(cmd)
-        self.assertEqual(cmd, original)
-
-
 class TestCmdPushTargetLevelSshRetry(TestCase):
     """A connection-closed/reset ssh failure on ONE target must not leave
     the wave with a permanent hole -- it retries ONLY that target,
@@ -12489,8 +12462,8 @@ class TestCmdPushTargetLevelSshRetry(TestCase):
                 airuleset.cmd_push(args)
         out = buf.getvalue()
         self.assertIn("Manual retry once reachable:", out)
-        self.assertNotIn("newlevel", out)
-        self.assertIn("<REDACTED>", out)
+        self.assertIn("sshpass -f ", out)   # #1236: names only the password FILE
+        self.assertNotIn("sshpass -p", out)
 
 
 class TestCmdPushSshMultiplexing(TestCase):
@@ -14096,7 +14069,7 @@ class TestBlockDestructiveRemoteHook(TestCase):
 
     def test_allows_sshpass_wrapped_install(self):
         r = self._run(
-            'sshpass -p newlevel ssh -o StrictHostKeyChecking=no user@dev2 '
+            'sshpass -f "$PWFILE" ssh -o StrictHostKeyChecking=no user@dev2 '
             '"cd repo && git pull --ff-only && python3 airuleset.py install"'
         )
         self.assertEqual(r.returncode, 0, r.stdout)
@@ -14774,9 +14747,9 @@ class TestBlockSubdevSshMisuseHook(TestCase):
 
     def test_allows_montalu1_via_sshpass(self):
         # montalu1 (renamed from montalu, #537) shares the default-key family's
-        # sshpass -p path — no identity required.
+        # sshpass path — no identity required.
         r = self._run(
-            'sshpass -p newlevel ssh -o StrictHostKeyChecking=no montalu1@subdev "ls"')
+            'sshpass -f "$PWFILE" ssh -o StrictHostKeyChecking=no montalu1@subdev "ls"')
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
     def test_allows_marek_with_gatekeeper_identity_882(self):

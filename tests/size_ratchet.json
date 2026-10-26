@@ -116,7 +116,7 @@
     "tests/_hook_state_cleanup.py": 207,
     "tests/_tmux_reaper.py": 124,
     "tests/authority_testlib.py": 226,
-    "tests/conftest.py": 280,
+    "tests/conftest.py": 294,
     "tests/test_5378_ripple_goal_statusline_761.py": 130,
     "tests/test_947_reversal_locks.py": 116,
     "tests/test_acceptance_queued_622.py": 246,
