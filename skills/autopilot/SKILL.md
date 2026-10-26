@@ -132,7 +132,7 @@ grep -n "airuleset:authority=" CLAUDE.md || true                                
   still tracked, never lost, never blocking 🏁 (#468/#512). **`U` = only what Claude ASKS / the owner
   must APPROVE** ("čo sa ťa Claude pýta / čo máš schváliť"). The standalone `Q` ❓-pings badge folds
   into `U N` too (#512: a ticketless session ping is a thing waiting on the owner; a ping tracked
-  on / naming a U-labelled or its only `#N` is that ticket's — #1218). **#526 acceptance
+  on / naming a U-labelled or sole counted `#N` is that ticket's — #1218). **#526 acceptance
   automat:** `needs-acceptance` is a STATE MACHINE — while its client thread has NOT yet been
   approved+sent it sits in `U`/`--waiting` (above); once the stream SENDS the thread and adds
   `ops-wait` it moves to `W`/`--ops-wait` (below, tagged `acceptance` there) — now waiting on the
