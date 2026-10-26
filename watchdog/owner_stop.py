@@ -26,7 +26,11 @@ the owner's own `Goal set:` arm. While latched no machine keystroke can type a
 slash command or a `/goal`, so a later command record is the owner's. A
 session with neither a fact nor an owner act in its WHOLE transcript (a
 `claude` the owner restarted but has not typed into) inherits the cwd's
-previous session.
+previous session. Each pane reads ITS OWN session: when two or more panes
+share a cwd, the session whose resume boundary matches the pane's claude
+start (#645); a pane that does not resolve fails CLOSED (latched when any
+candidate session of the cwd is). `deliver_goal` checks the session it arms
+by `sid` (`sid_latch`).
 
 ENFORCED at the ONE send-keys builder `tmux_io.keys` (`withhold`: every kind,
 recovery and cap-exempt included; only the owner's own Discord reply passes),
@@ -204,26 +208,54 @@ def _evaluate(ctx):
     entries = _tail(tpath)
     latch, saw, found = scan(entries, ctx.get("rec"),
                              _machine_clears(state, tpath.stem))
-    if saw or not prev or not _whole(tpath, entries):
-        return latch, found
-    inherited = scan(_tail(prev), ctx.get("prev_rec"),
-                     _machine_clears(state, prev.stem))[0]
-    return (dict(inherited, inherited=True) if inherited else None), found
+    if not saw and prev and _whole(tpath, entries):
+        inherited = scan(_tail(prev), ctx.get("prev_rec"),
+                         _machine_clears(state, prev.stem))[0]
+        latch = dict(inherited, inherited=True) if inherited else None
+    for alt, rec in ([] if latch else ctx.get("alts") or ()):
+        other = scan(_tail(alt), rec, _machine_clears(state, alt.stem))[0]
+        if other:      # an unresolved pane of a shared cwd fails CLOSED
+            return dict(other, via=alt.stem), found
+    return latch, found
 
 
 def _latch_of(ctx):
     return _evaluate(ctx)[0]
 
 
-def _two_newest(projects_dir, cwd):
+def _sessions(projects_dir, cwd):
+    """The cwd's transcripts, newest first."""
     from watchdog import transcripts
     d = Path(projects_dir) / transcripts.encode_project_dir(cwd)
     try:
-        files = sorted(d.glob("*.jsonl"), key=lambda p: p.stat().st_mtime,
-                       reverse=True)
+        return sorted(d.glob("*.jsonl"), key=lambda p: p.stat().st_mtime,
+                      reverse=True)
     except OSError:
-        return None, None
+        return []
+
+
+def _two_newest(projects_dir, cwd):
+    files = _sessions(projects_dir, cwd)
     return (files[0] if files else None), (files[1] if len(files) > 1 else None)
+
+
+def _own_session(ctx, pid, n, run, recs, projects_dir):
+    """`n` (>1) panes share the cwd: point `ctx` at the session whose resume
+    boundary matches this pane's claude start (#645). Unresolved (no start, 0
+    or >1 boundary owners), keep the newest and add the other candidates as
+    `alts`, so the pane fails CLOSED. No inheritance: the previous session of
+    a shared cwd is not this pane's."""
+    import watchdog
+    from watchdog import transcripts
+    cands = _sessions(projects_dir, ctx["cwd"])[:n + 1]
+    start = watchdog._pane_claude_start_epoch(pid, run=run) if run else None
+    own = [t for t in cands if start is not None
+           and transcripts._transcript_resume_boundary_at(t, start)]
+    if len(own) == 1:
+        ctx.update(tpath=own[0], sid=own[0].stem, rec=recs.get(own[0].stem),
+                   prev=None, prev_rec=None)
+    else:
+        ctx["alts"] = [(t, recs.get(t.stem)) for t in cands if t != ctx["tpath"]]
 
 
 def _context(projects_dir, cwd, state, recs=None):
@@ -237,11 +269,32 @@ def _context(projects_dir, cwd, state, recs=None):
 
 
 def cwd_latch(projects_dir, cwd, state=None):
-    """The latch for `cwd`'s current session (`deliver_goal`, resurrect); a
-    caller without `state` reads the sweep's (`refresh`)."""
+    """The latch for `cwd`'s newest session; a caller without `state` reads the
+    sweep's (`refresh`)."""
     state = state if state is not None else _SWEEP.get("state")
     try:
         return _latch_of(_context(projects_dir, cwd, state))
+    except Exception:          # noqa: BLE001 -- unreadable = no proof of a stop
+        return None
+
+
+def sid_latch(projects_dir, cwd, sid, state=None):
+    """The latch for session `sid` of `cwd` (`deliver_goal` arms THAT session):
+    its own transcript, inheriting from the cwd's next older session; the
+    cwd's newest when `sid` has no transcript yet."""
+    state = state if state is not None else _SWEEP.get("state")
+    try:
+        files = _sessions(projects_dir, cwd)
+        idx = [p.stem for p in files].index(str(sid))
+    except ValueError:
+        return cwd_latch(projects_dir, cwd, state)
+    try:
+        recs = state.get(STATE_KEY) if isinstance(state, dict) else None
+        recs = recs if isinstance(recs, dict) else {}
+        prev = files[idx + 1] if idx + 1 < len(files) else None
+        return _latch_of({"cwd": cwd, "tpath": files[idx], "sid": str(sid),
+                          "prev": prev, "state": state, "rec": recs.get(str(sid)),
+                          "prev_rec": recs.get(prev.stem) if prev else None})
     except Exception:          # noqa: BLE001 -- unreadable = no proof of a stop
         return None
 
@@ -255,7 +308,8 @@ def _stamp(path):
 
 
 def _memo_key(pane_id, ctx):
-    return (pane_id, _stamp(ctx.get("tpath")), _stamp(ctx.get("prev")))
+    return (pane_id, _stamp(ctx.get("tpath")), _stamp(ctx.get("prev")),
+            tuple(_stamp(t) for t, _r in ctx.get("alts") or ()))
 
 
 def _unmapped(pane_id):
@@ -387,10 +441,14 @@ def refresh(state, panes, projects_dir, now, dry_run=False, run=None):
                                                      tpath.stem))
         if not dry_run:
             recs[tpath.stem] = dict(rec, seen=now)
-    seen = set()
+    seen, shared = set(), {}
+    for _p, cwd in panes or ():
+        shared[cwd] = shared.get(cwd, 0) + 1
     for pid, cwd in panes or ():
         try:
             ctx = _context(projects_dir, cwd, state, recs)
+            if ctx["sid"] and shared[cwd] > 1:
+                _own_session(ctx, pid, shared[cwd], run, recs, projects_dir)
             latch, found = _evaluate(ctx) if ctx["sid"] else (None, [])
         except Exception as e:     # noqa: BLE001 -- one bad pane never stops the sweep
             logs.append("owner-stop latch %s -> unreadable (%r), not latched" % (pid, e))
@@ -403,22 +461,28 @@ def refresh(state, panes, projects_dir, now, dry_run=False, run=None):
         old = recs.get(sid) if isinstance(recs.get(sid), dict) else {}
         where = "%s sid=%s" % (os.path.basename(str(cwd)) or cwd, sid)
         mcl = sorted(set(old.get("mclears") or ()) | set(found))[-MAX_MCLEARS:]
+        held = [latch["via"], latch["fact"], latch.get("ts")] if latch and \
+            latch.get("via") else None    # a shared-cwd sibling's, not persisted
         if latch:
-            same = (old.get("fact"), old.get("ts")) == (latch.get("fact"),
-                                                        latch.get("ts"))
+            same = old.get("held") == held if held else (
+                old.get("fact"), old.get("ts")) == (latch["fact"], latch.get("ts"))
             if not same:
                 logs.append("owner-stop latch %s -> SET (%s%s, %s): no machine "
                             "keystroke and no /goal arm until the owner types a "
                             "new prompt" % (where, latch["fact"],
                                             " in the previous session"
-                                            if latch.get("inherited") else "",
+                                            if latch.get("inherited") else
+                                            " of sid %s, pane unresolved" % held[0]
+                                            if held else "",
                                             _clock(latch.get("ts"))))
-        elif old.get("fact"):
+        elif old.get("fact") or old.get("held"):
             logs.append("owner-stop latch %s -> cleared (the owner typed a new "
                         "prompt)" % where)
         if not dry_run:
             new = dict({"seen": now}, **({"mclears": mcl} if mcl else {}))
-            if latch:
+            if held:
+                new["held"] = held
+            elif latch:
                 new.update(fact=latch["fact"], ts=latch.get("ts") or 0)
             if latch or mcl:
                 recs[sid] = new

@@ -1764,7 +1764,7 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
         _log_goal_sync("DROP declared-virgin-retired sid=%s cwd=%s" % (sid, cwd))
         return "drop:declared-virgin-retired"
     # #1257 -- a session the owner stopped/paused/left is NEVER armed, any origin.
-    _ostop = _owner_stop.cwd_latch(projects_dir, cwd, state)
+    _ostop = _owner_stop.sid_latch(projects_dir, cwd, sid, state)
     if _ostop:
         _log_goal_sync("DROP owner-stop sid=%s cwd=%s origin=%s fact=%s"
                        % (sid, cwd, origin, _ostop.get("fact")))
