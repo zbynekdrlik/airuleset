@@ -186,5 +186,47 @@ class StallEpisodesUnderTheLatch(unittest.TestCase):
         self.assertEqual(len(self.h._alerts(sends)), 1, sends)
 
 
+class AnUnclaimedSessionJournalsQuietly(unittest.TestCase):
+    """Review 5, finding 6: an unresolved pane whose newest session's own
+    transcript holds a stop journalled SET twice per episode (the pane hold
+    AND the session record), and a later clear said "the owner typed a new
+    prompt" for a session no pane owns. The pane line is the one line."""
+    CWD = "/home/newlevel/devel/quietunclaimed"
+
+    def test_one_set_line_per_episode(self):
+        import json
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        self.addCleanup(owner_stop.reset)
+        proj = Path(d.name)
+        sd = proj / wd.encode_project_dir(self.CWD)
+        sd.mkdir(parents=True)
+        now = 1_800_000_000
+
+        def row(role, text, ts):
+            iso = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(ts))
+            if role == "user":
+                return {"type": "user", "timestamp": iso,
+                        "message": {"role": "user", "content": text}}
+            return {"type": "assistant", "timestamp": iso,
+                    "message": {"content": [{"type": "text", "text": text}]}}
+        for sid, rows, mt in (("SA", [row("user", "sprav ticket 5", now - 900),
+                                      row("assistant", "robím", now - 800)], now - 800),
+                              ("SB", [row("user", "sprav ticket 6", now - 600),
+                                      row("user", "pauza", now - 550)], now - 600)):
+            f = sd / (sid + ".jsonl")
+            f.write_text("".join(json.dumps(r) + "\n" for r in rows))
+            os.utime(f, (mt, mt))
+        logs, state = [], {}
+        with m.patch.object(wd, "_pane_claude_start_epoch",
+                            side_effect=lambda pid, run=None: {"%A": now - 950}.get(pid)):
+            for i in range(2):
+                logs += owner_stop.refresh(state, [("%A", self.CWD), ("%B", self.CWD)],
+                                           proj, now + 60 * i,
+                                           run=lambda argv, timeout=8: "")
+        self.assertEqual(sum("SET" in ln for ln in logs), 1, logs)
+        self.assertEqual((owner_stop.pane_latch("%B") or {}).get("fact"), "pause")
+
+
 if __name__ == "__main__":
     unittest.main()
