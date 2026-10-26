@@ -1,8 +1,8 @@
-"""#1061 item 2 -- gates.designdispatch: an autopilot-worker dispatch is REFUSED
-unless the newest `Design-by:` comment on every issue is `Design-by: main
-<Fable id>` (fail-closed on an unreadable thread).
+"""#1061 item 2 -- gates.designdispatch: `check_issue` refuses unless the newest
+`Design-by:` comment on the issue is `Design-by: main <managed main id>`
+(fail-closed on an unreadable thread). Its dispatch-time `evaluate` was retired
+by issue 1137 B1; the implementer runs `--issue N` itself.
 """
-import json
 import os
 import shutil
 import sys
@@ -16,9 +16,9 @@ sys.path.insert(0, str(REPO))
 from gates import designdispatch as dd  # noqa: E402
 
 
-# #1046: some classes call dd.* IN-PROCESS, which _logs to
-# ~/.claude/design-by-gate.log via expanduser("~"). Point HOME at a fresh empty
-# dir for the whole module (module-scoped save+restore — batch-31-safe).
+# #1046: dd.* runs IN-PROCESS and reads model_lineup / airuleset via
+# expanduser("~"). Point HOME at a fresh empty dir for the whole module
+# (module-scoped save+restore — batch-31-safe).
 _A1046_ORIG_HOME = None
 _A1046_HOME = None
 
@@ -40,24 +40,10 @@ def tearDownModule():
 FABLE = "claude-fable-5-1"
 
 
-def _payload(prompt, subagent="autopilot-worker", tool="Agent", cwd="/repo"):
-    return json.dumps({
-        "tool_name": tool, "cwd": cwd,
-        "tool_input": {"subagent_type": subagent, "prompt": prompt}})
-
-
-def _ev(prompt, comments, **kw):
-    """evaluate() with fetch/resolve_slug/fable_id injected. `comments` may be a
-    list (one issue) or a dict {issue: [bodies]}."""
-    def fetch(slug, number, cwd):
-        if isinstance(comments, dict):
-            return comments.get(number)
-        return comments
-    # #1070 review 🔵: inject is_pr so evaluate() stays network-free — the real
-    # _is_pull_request would otherwise shell out to `gh api …/issues/<N>` here.
-    return dd.evaluate(_payload(prompt, **kw), fetch=fetch,
-                       resolve_slug=lambda cwd: "owner/repo",
-                       is_pr=lambda n, slug, cwd: (False, None), fable_id=FABLE)
+def _ci(comments):
+    """check_issue() on issue 1061 with fetch/fable_id injected."""
+    return dd.check_issue(1061, "owner/repo", "/repo",
+                          fetch=lambda slug, number, cwd: comments, fable_id=FABLE)
 
 
 class TestNewestDesignBy(unittest.TestCase):
@@ -129,102 +115,43 @@ class TestIssueNumbers(unittest.TestCase):
             dd.issue_numbers("Work issue 1061 with items 1, 2, 3, 5"), [1061])
 
 
-class TestEvaluate(unittest.TestCase):
-    def test_non_agent_allows(self):
-        v, _ = dd.evaluate(_payload("Work issue 1061 in repo", tool="Bash"))
-        self.assertEqual(v, "allow")
-
-    def test_non_worker_allows(self):
-        v, _ = _ev("Work issue 1061 in repo", ["Design-by: worker x"],
-                   subagent="Explore")
-        self.assertEqual(v, "allow")
-
-    def test_no_issue_blocks_fail_closed(self):
-        # #1061 review-3: an autopilot-worker dispatch naming no ticket is
-        # REFUSED (fail-closed), not allowed.
-        v, r = _ev("do some infra work", [])
-        self.assertEqual(v, "block")
-        self.assertIn("names no ticket", r)
-
-    def test_bare_issue_word_main_allows(self):
-        # the real fleet prompt shape (no `#`).
-        v, _ = _ev("Work airuleset issue 1061 (owner escalation)",
-                   ["Design-by: main claude-fable-5-1"])
-        self.assertEqual(v, "allow")
-
-    def test_bare_issue_word_worker_blocks(self):
-        v, r = _ev("Work airuleset issue 1061 (owner escalation)",
-                   ["Design-by: worker claude-opus-4-8"])
-        self.assertEqual(v, "block")
-        self.assertIn("worker", r)
-
+class TestCheckIssue(unittest.TestCase):
     def test_main_fable_allows(self):
-        v, _ = _ev("Work issue #1061 in repo",
-                   ["Design-by: main claude-fable-5-1"])
-        self.assertEqual(v, "allow")
+        self.assertTrue(_ci(["Design-by: main claude-fable-5-1"])[0])
 
     def test_main_fable_1m_tag_allows(self):
-        v, _ = _ev("Work issue #1061 in repo",
-                   ["Design-by: main claude-fable-5-1[1m]"])
-        self.assertEqual(v, "allow")
+        self.assertTrue(_ci(["Design-by: main claude-fable-5-1[1m]"])[0])
 
     def test_worker_design_blocks(self):
-        v, r = _ev("Work issue #1061 in repo",
-                   ["Design-by: worker claude-opus-4-8"])
-        self.assertEqual(v, "block")
+        ok, r = _ci(["Design-by: worker claude-opus-4-8"])
+        self.assertFalse(ok)
         self.assertIn("worker", r)
 
     def test_wrong_model_blocks(self):
         # #1119: claude-opus-4-8 stays an allowed dispatch id but is NOT a
         # managed MAIN model, so a `Design-by: main claude-opus-4-8` stamp is
-        # still refused; the reason now names the accepted managed MAIN models.
-        v, r = _ev("Work issue #1061 in repo",
-                   ["Design-by: main claude-opus-4-8"])
-        self.assertEqual(v, "block")
+        # still refused; the reason names the accepted managed MAIN models.
+        ok, r = _ci(["Design-by: main claude-opus-4-8"])
+        self.assertFalse(ok)
         self.assertIn("managed MAIN model", r)
 
     def test_opus_5_5_main_allows(self):
         # #1119: the new managed main authors designs as claude-opus-5-5.
-        v, _ = _ev("Work issue #1061 in repo",
-                   ["Design-by: main claude-opus-5-5"])
-        self.assertEqual(v, "allow")
+        self.assertTrue(_ci(["Design-by: main claude-opus-5-5"])[0])
 
     def test_no_design_by_blocks(self):
-        v, r = _ev("Work issue #1061 in repo", ["just a normal comment"])
-        self.assertEqual(v, "block")
+        ok, r = _ci(["just a normal comment"])
+        self.assertFalse(ok)
         self.assertIn("no `Design-by:`", r)
 
     def test_gh_error_blocks_fail_closed(self):
-        v, r = _ev("Work issue #1061 in repo", None)  # fetch returns None
-        self.assertEqual(v, "block")
+        ok, r = _ci(None)  # fetch returns None
+        self.assertFalse(ok)
         self.assertIn("fail-closed", r)
 
-    def test_unresolvable_slug_blocks(self):
-        v = dd.evaluate(_payload("Work issue #1061 in repo"),
-                        fetch=lambda s, n, c: ["Design-by: main " + FABLE],
-                        resolve_slug=lambda cwd: None, fable_id=FABLE)[0]
-        self.assertEqual(v, "block")
-
-    def test_batch_one_missing_blocks(self):
-        v, r = _ev("Work issues #1056 #1057 in repo",
-                   {1056: ["Design-by: main claude-fable-5-1"],
-                    1057: ["no design here"]})
-        self.assertEqual(v, "block")
-        self.assertIn("#1057", r)
-
-    def test_batch_all_main_allows(self):
-        v, _ = _ev("Work issues #1056 #1057 in repo",
-                   {1056: ["Design-by: main claude-fable-5-1"],
-                    1057: ["Design-by: main claude-fable-5-1"]})
-        self.assertEqual(v, "allow")
-
-    def test_bypass_token_allows(self):
-        v, r = dd.evaluate(
-            _payload("do infra work\nairuleset:design-by-ok infra hotfix"),
-            fetch=lambda s, n, c: ["no design"],
-            resolve_slug=lambda cwd: "owner/repo", fable_id=FABLE)
-        self.assertEqual(v, "allow")
-        self.assertIn("bypass", r)
+    def test_retired_dispatch_parts_are_gone(self):
+        for name in ("evaluate", "_block_message", "_is_pull_request"):
+            self.assertFalse(hasattr(dd, name), name)
 
 
 if __name__ == "__main__":

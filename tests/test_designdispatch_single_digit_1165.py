@@ -12,7 +12,6 @@ ticket at any width (`issue 4, 7` -> [4, 7]): over-checking blocks, the safe
 direction for a fail-closed gate. A 1-digit `#N` outside an `issue` run
 (`step #1`, `bounce #2`, `PR #7`) never outranks a stronger reference.
 """
-import json
 import os
 import shutil
 import sys
@@ -31,7 +30,7 @@ _TMP_HOME = None
 
 
 def setUpModule():
-    # dd._log writes ~/.claude/design-by-gate.log in-process -- keep it hermetic.
+    # dd.* runs in-process and reads model_lineup via HOME -- keep it hermetic.
     global _ORIG_HOME, _TMP_HOME
     _ORIG_HOME = os.environ.get("HOME")
     _TMP_HOME = tempfile.mkdtemp(prefix="a1165-modhome-")
@@ -46,24 +45,7 @@ def tearDownModule():
     shutil.rmtree(_TMP_HOME, ignore_errors=True)
 
 
-FABLE = "claude-fable-5-1"
-MAIN_DESIGN = "Design-by: main claude-opus-5-5"
 FOHMIXER_PROMPT = "Work issue 4 (#4, S0 bootstrap) in fohmixer"
-
-
-def _payload(prompt, cwd="/repo"):
-    return json.dumps({
-        "tool_name": "Agent", "cwd": cwd,
-        "tool_input": {"subagent_type": "autopilot-worker", "prompt": prompt}})
-
-
-def _ev(prompt, comments_by_issue):
-    """evaluate() network-free: fetch/resolve_slug/is_pr injected."""
-    def fetch(slug, number, cwd):
-        return comments_by_issue.get(number)
-    return dd.evaluate(_payload(prompt), fetch=fetch,
-                       resolve_slug=lambda cwd: "owner/fohmixer",
-                       is_pr=lambda n, slug, cwd: (False, None), fable_id=FABLE)
 
 
 class TestSingleDigitParse(unittest.TestCase):
@@ -123,10 +105,6 @@ class TestPrefixlessNumbersAreNotTickets(unittest.TestCase):
     def test_word_containing_issue_is_not_a_prefix(self):
         self.assertEqual(dd.issue_numbers("tissue 5 sample"), [])
 
-    def test_no_ticket_prompt_still_refused(self):
-        v, r = _ev("bump to 0.1.5, deploy v2, run 3 lanes", {})
-        self.assertEqual(v, "block")
-        self.assertIn("names no ticket", r)
 
 
 class TestWeakHashNeverOutranks(unittest.TestCase):
@@ -158,34 +136,6 @@ class TestWeakHashNeverOutranks(unittest.TestCase):
     def test_hash_only_line_is_the_lead_when_nothing_stronger(self):
         self.assertEqual(dd.issue_numbers("Fix #4 and #7"), [4, 7])
         self.assertEqual(dd.issue_numbers("Work zbynekdrlik/fohmixer#4"), [4])
-
-    def test_step_prose_hash_line_blocks_as_no_design_rather_than_pr_skip(self):
-        # the fail-open path: a weak `PR #7` lead would be skipped as a PR and
-        # the dispatch ALLOWED with issue 1165 never design-checked.
-        v, r = dd.evaluate(
-            _payload("This batch rides PR #7.\nWork issue 1165"),
-            fetch=lambda slug, n, cwd: {1165: ["no design"]}.get(n),
-            resolve_slug=lambda cwd: "owner/repo",
-            is_pr=lambda n, slug, cwd: (n == 7, None), fable_id=FABLE)
-        self.assertEqual(v, "block")
-        self.assertIn("#1165", r)
-
-
-class TestEvaluateSingleDigit(unittest.TestCase):
-    def test_fohmixer_main_design_allows(self):
-        # RED on the pre-#1165 code: the prompt parsed to [] -> "names no ticket".
-        v, r = _ev(FOHMIXER_PROMPT, {4: [MAIN_DESIGN]})
-        self.assertEqual(v, "allow", r)
-
-    def test_fohmixer_worker_design_blocks_on_issue_4(self):
-        v, r = _ev(FOHMIXER_PROMPT, {4: ["Design-by: worker claude-opus-4-8"]})
-        self.assertEqual(v, "block")
-        self.assertIn("#4", r)
-
-    def test_single_digit_batch_one_missing_blocks(self):
-        v, r = _ev("Work issues 4, 7 in fohmixer", {4: [MAIN_DESIGN], 7: []})
-        self.assertEqual(v, "block")
-        self.assertIn("#7", r)
 
 
 if __name__ == "__main__":

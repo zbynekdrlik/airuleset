@@ -9030,7 +9030,6 @@ from cli_quals import (  # noqa: E402  (#433 cluster I facade — leaf re-export
     ops_wait_ages_fn as ops_wait_ages_fn,
     _stale_ops_wait_flagged as _stale_ops_wait_flagged,
     _tacit_window_flagged as _tacit_window_flagged,
-    _compute_net_stale_w as _compute_net_stale_w,
     _release_recheck_flagged as _release_recheck_flagged,
     _release_train_drained as _release_train_drained,
     _unpark_release_flagged as _unpark_release_flagged,

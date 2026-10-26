@@ -47,7 +47,7 @@ until the ratchet cap, then the oldest move to `.claude/rules-reference/internal
   cannot stay "unchanged"; downstream `nudge-module-context-cost.sh` then exits 1 (2
   `test_context_diet_tier3` fails). The honest fix measures only `categorize_entries`'s modules half.
 - **#1064 — the `Design-by:` stamp records the CONFIGURED (launch) model, the API-SERVED model
-  is an optional ` (served: <id>)` audit suffix.** The stamp is the ONE token the dispatch gate
+  is an optional ` (served: <id>)` audit suffix.** The stamp is the ONE token the design check
   (`gates.designdispatch.check_issue`), the anti-spoof gate (`gates.designbypost`) and the float
   audit (`cli_model_audit`) read. It USED to record the served model, so a Fable-LAUNCHED main
   served another model for a turn (a FLOAT) stamped the wrong id and the gate refused the main's
@@ -61,7 +61,7 @@ until the ratchet cap, then the oldest move to `.claude/rules-reference/internal
   `(role, model)` 2-tuple (served is surfaced in `check_issue`'s refusal reason via
   `_newest_design_by_match`); the accepted set is unchanged (only the Fable id). The design-record
   `unknown` refusal now fires ONLY when NEITHER configured NOR served resolves.
-  - **Dependency-light discipline (why the imports are lazy):** the dispatch gate never imports
+  - **Dependency-light discipline (why the imports are lazy):** the design check never imports
     `cli_authorship`, and the anti-spoof gate calls ONLY `authorship_role` (never
     `configured_model`) — so `cli_authorship`'s `watchdog`/`airuleset` imports MUST stay lazy
     (inside `configured_model`/`_managed_model`/`_pane_configured_model`), else the two light gate

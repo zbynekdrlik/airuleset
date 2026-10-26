@@ -54,7 +54,7 @@ For each member, before the first line of code:
    there and mean what the design says).
 3. Anchors hold → post a short `Anchors-confirmed:` comment (`gh issue comment <N>`) naming what you
    verified, then implement. **NEVER author a design and NEVER post a `Design-by: main` line** — the
-   `gates.designbypost` hook blocks that from a lane cwd, and it is the exact spoof the dispatch gate
+   `gates.designbypost` hook blocks that from a lane cwd, and it is the exact spoof the design check
    must never trust.
 4. An anchor is WRONG / missing, or the design cannot be implemented as written → post a
    `Design-question:` comment, `SendMessage` `main`, and STOP. Never silently pick a different

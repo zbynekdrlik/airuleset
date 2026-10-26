@@ -15,7 +15,6 @@ away from the real `issue N` line (design gate fail-open: the PR is skipped,
 the ticket is never design-checked). A `PR #N` / `pull #N` / `pull request #N`
 reference is never a ticket, for every consumer.
 """
-import json
 import os
 import shutil
 import sys
@@ -26,18 +25,15 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
-from gates import designdispatch as dd  # noqa: E402
 from gates import ticketrefs  # noqa: E402
 import cli_lane_liveness as ll  # noqa: E402
-
-FABLE = "claude-fable-5-1"
 
 _ORIG_HOME = None
 _TMP_HOME = None
 
 
 def setUpModule():
-    # dd._log writes ~/.claude/design-by-gate.log in-process -- keep it hermetic.
+    # in-process consumers read HOME-relative state -- keep it hermetic.
     global _ORIG_HOME, _TMP_HOME
     _ORIG_HOME = os.environ.get("HOME")
     _TMP_HOME = tempfile.mkdtemp(prefix="a1165r2-modhome-")
@@ -116,19 +112,6 @@ class TestReviewFindings(unittest.TestCase):
         self.assertEqual(ticketrefs.issue_numbers(
             "notes in /tmp/s/issue-1165-r2/"), [])
 
-    def test_design_gate_checks_a_ticket_after_a_singular_pr(self):
-        payload = json.dumps({
-            "tool_name": "Agent", "cwd": "/repo",
-            "tool_input": {"subagent_type": "autopilot-worker",
-                           "prompt": "Work issues #41, PR #50, #43"}})
-        design = "Design-by: main claude-fable-5-1"
-        v, r = dd.evaluate(
-            payload, fetch=lambda slug, n, cwd: {41: [design], 43: []}.get(n),
-            resolve_slug=lambda cwd: "owner/repo",
-            is_pr=lambda n, slug, cwd: (n == 50, None), fable_id=FABLE)
-        self.assertEqual(v, "block")
-        self.assertIn("#43", r)
-
     def test_branch_with_non_ticket_leading_digits_never_widens(self):
         # `git log -20 <branch>` includes base history; a branch that LEADS with
         # digits must not fall back to it (fail-safe toward live).
@@ -138,47 +121,6 @@ class TestReviewFindings(unittest.TestCase):
             with self.subTest(branch=branch):
                 self.assertEqual(ll._lane_ticket_numbers(
                     "/repo", branch, lambda cmd: _R(subj)), set())
-
-
-class TestDesignGateSeesPastAPrLead(unittest.TestCase):
-    def test_pr_lead_no_longer_fail_opens_the_ticket(self):
-        # pre-fix: lead = the PR line -> [201] -> skipped as a PR -> ALLOW with
-        # issue 1165 never design-checked.
-        payload = json.dumps({
-            "tool_name": "Agent", "cwd": "/repo",
-            "tool_input": {"subagent_type": "autopilot-worker",
-                           "prompt": "Review PR #201 fixes first\nWork issue 1165"}})
-        v, r = dd.evaluate(
-            payload, fetch=lambda slug, n, cwd: {1165: ["no design"]}.get(n),
-            resolve_slug=lambda cwd: "owner/repo",
-            is_pr=lambda n, slug, cwd: (n == 201, None), fable_id=FABLE)
-        self.assertEqual(v, "block")
-        self.assertIn("#1165", r)
-
-
-class TestDesignGatePrOnlyFallback(unittest.TestCase):
-    """#1070 item 2 stays: a dispatch that only rides a PR is allowed once gh
-    confirms it IS a PR; a `PR #N` that is really an issue is design-checked."""
-
-    def _ev(self, prompt, is_pr, fetch):
-        payload = json.dumps({
-            "tool_name": "Agent", "cwd": "/repo",
-            "tool_input": {"subagent_type": "autopilot-worker", "prompt": prompt}})
-        return dd.evaluate(payload, fetch=fetch,
-                           resolve_slug=lambda cwd: "owner/repo",
-                           is_pr=is_pr, fable_id=FABLE)
-
-    def test_single_digit_pr_only_prompt_allows_when_gh_says_pr(self):
-        def fetch(slug, n, cwd):
-            raise AssertionError("a PR must never be design-checked")
-        v, r = self._ev("update PR #7 title/body", lambda n, s, c: (True, None), fetch)
-        self.assertEqual(v, "allow", r)
-
-    def test_pr_ref_that_is_an_issue_is_design_checked(self):
-        v, r = self._ev("update PR #7 title/body", lambda n, s, c: (False, None),
-                        lambda slug, n, cwd: {7: ["no design"]}.get(n))
-        self.assertEqual(v, "block")
-        self.assertIn("#7", r)
 
 
 class _R:

@@ -112,37 +112,27 @@ class TestBanLock(TestCase):
 
 
 class TestDesignGateOpus55(TestCase):
-    """The #1061 dispatch gate accepts a `<main-model> main` design stamp for the
+    """The #1061 design check accepts a `<main-model> main` design stamp for the
     new managed main (claude-opus-5-5), while still accepting a Fable stamp
     through the transition and refusing a worker/other-model stamp."""
 
-    def _payload(self, prompt):
-        return json.dumps({"tool_name": "Agent", "cwd": "/repo",
-                           "tool_input": {"subagent_type": "autopilot-worker",
-                                          "prompt": prompt}})
-
-    def _ev(self, bodies):
+    def _ok(self, bodies):
         from gates import designdispatch as dd
         # No fable_id injected -> production accepted set (managed main + Fable).
-        return dd.evaluate(
-            self._payload("Work issue #1119 in repo"),
-            fetch=lambda s, n, c: bodies,
-            resolve_slug=lambda cwd: "owner/repo",
-            is_pr=lambda n, s, c: (False, None))[0]
+        return dd.check_issue(1119, "owner/repo", "/repo",
+                              fetch=lambda s, n, c: bodies)[0]
 
     def test_accepts_opus_5_5_main(self):
-        self.assertEqual(self._ev(["Design-by: main claude-opus-5-5"]), "allow")
+        self.assertTrue(self._ok(["Design-by: main claude-opus-5-5"]))
 
     def test_accepts_opus_5_5_main_1m(self):
-        self.assertEqual(self._ev(["Design-by: main claude-opus-5-5[1m]"]),
-                         "allow")
+        self.assertTrue(self._ok(["Design-by: main claude-opus-5-5[1m]"]))
 
     def test_still_accepts_fable_main_transition(self):
-        self.assertEqual(self._ev(["Design-by: main claude-fable-5-1"]), "allow")
+        self.assertTrue(self._ok(["Design-by: main claude-fable-5-1"]))
 
     def test_blocks_worker_stamp(self):
-        self.assertEqual(self._ev(["Design-by: worker claude-opus-5-5"]),
-                         "block")
+        self.assertFalse(self._ok(["Design-by: worker claude-opus-5-5"]))
 
 
 class TestBurnTier(TestCase):

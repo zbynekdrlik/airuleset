@@ -1676,10 +1676,9 @@ def ops_wait_ages_fn(ops_wait, root, member_quals):
     prefetch, memoized per call. A member present in the prefetch is parsed from
     it (`_ages_from_comments`); one absent from it (truncated list / label just
     changed / `member_quals` None) falls back to the per-issue `_issue_comment_
-    ages`. The ONE seam shared by the `--ops-wait` reason column
-    (`cli_quals_cmd._ops_wait_flag_sets`) and the footer's stale-W count
-    (`_compute_net_stale_w` in `cmd_tickets_status`), so BOTH pay O(quals) gh
-    calls, not O(members) — with results byte-identical to the per-member path.
+    ages`. The seam of the `--ops-wait` reason column
+    (`cli_quals_cmd._ops_wait_flag_sets`), so it pays O(quals) gh calls, not
+    O(members) — with results byte-identical to the per-member path.
 
     Routed through `airuleset.*` (not bare names) so a test mocking
     `airuleset._issue_comment_ages` / `_stream_self_login` / `_gh_out` intercepts,
@@ -1856,41 +1855,6 @@ def _tacit_window_flagged(rows, cwd=None, now=None, self_login=None,
         else:
             tacit_wait.add(number)               # in window -> tacit-wait
     return tacit_wait, tacit_close
-
-
-def _compute_net_stale_w(ops_wait, cwd=None, ages_fn=None, now=None,
-                         member_quals=None):
-    """#989: compute the net stale W count — ``_stale_ops_wait_flagged`` minus
-    the ``_tacit_window_flagged`` exemption.
-
-    #1067 (a): when ``ages_fn`` is not supplied and ``member_quals`` is given,
-    build the shared batched-prefetch ``ages_fn`` (``ops_wait_ages_fn``) so the
-    footer's hot stale-W refresh pays O(quals) gh calls, not O(members) — the
-    SAME seam ``_ops_wait_flag_sets`` uses. An explicit ``ages_fn`` still wins
-    (test fakes / callers that already share a fetch).
-
-    ``_tacit_window_flagged`` returns a 2-tuple ``(tacit_wait, tacit_close)``
-    that must be unpacked and unioned before subtraction.  The #986 review
-    commit (55864130) inlined this subtraction in ``cmd_tickets_status`` but
-    forgot the unpacking, producing ``set - tuple`` → ``TypeError``.  This
-    helper encapsulates the correct pattern (matching ``cli_quals_cmd.py``
-    lines 528-531) so both call sites share the tested derivation.
-
-    Returns the count (``int``) of net-stale members.  Raises on any
-    upstream failure (the caller's ``try/except`` is the fail-open wrapper)."""
-    if ages_fn is None and member_quals:
-        ages_fn = ops_wait_ages_fn(ops_wait, cwd, member_quals)
-    stale = _stale_ops_wait_flagged(ops_wait, cwd=cwd, ages_fn=ages_fn,
-                                    now=now)
-    tacit_wait, tacit_close = _tacit_window_flagged(ops_wait, cwd=cwd,
-                                                    ages_fn=ages_fn, now=now)
-    # #1167: a ticket whose Odoo task sits inside its Verifikácia auto-close
-    # wait (the Job 49 status, `cli_odoo_board`) is not stale — the SAME
-    # exemption `cli_quals_cmd._ops_wait_flag_sets` applies to the listing.
-    import cli_odoo_board
-    auto_close = cli_odoo_board.auto_close_wait_numbers(ops_wait, cwd, now=now)
-    net_stale = stale - (tacit_wait | tacit_close) - auto_close
-    return len(net_stale)
 
 
 # #699 — RELEASE-parked W freshness: the TIGHT hourly cadence, distinct from the
