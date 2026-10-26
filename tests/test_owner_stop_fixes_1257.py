@@ -258,5 +258,37 @@ class ImplWindowRespectsTheLatch(base._Pane):
         self.assertEqual(rc, "relaunched")
 
 
+class NoRelaunchIntoAShell(unittest.TestCase):
+    """Review finding 7: the #804 mode-5 resurrect RELAUNCH (typing `claude
+    --continue` into a dead stream's bare shell) is unreachable under the latch
+    (every relaunchable pane IS a bare shell, which latches) and env-off; the
+    action path is deleted. The DEAD-SESSION census line stays."""
+
+    def test_a_dead_stream_is_reported_and_never_relaunched(self):
+        from tempfile import TemporaryDirectory
+        from watchdog import goal, resurrect, roster, tmux_io
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        cwd, now = "/home/newlevel/devel/deadstream", 100000
+        env = {"AIRULESET_GOAL_ROSTER_PATH": str(Path(d.name) / "roster.json"),
+               "AIRULESET_RESURRECT_ACTION": "1"}
+        with m.patch.dict(os.environ, env):
+            r = {}
+            roster.upsert(r, cwd, "old-sid", "full", now - 7200)
+            roster.save_roster(r)
+            tmux = base.DeliverGoalFakeTmux([("%bash", "bash", cwd, "222")],
+                                            "newlevel@dev1:~/devel/deadstream$ ")
+            logs = goal.goal_lane_sweep(now, run=tmux, projects_dir=Path(d.name),
+                                        backlog_fetch=lambda c: 5, state={})
+        self.assertTrue(any("-> dead-session" in ln for ln in logs), logs)
+        self.assertFalse(any(ln.startswith("resurrect ") for ln in logs), logs)
+        self.assertEqual([a for a in tmux.sent if "send-keys" in " ".join(a)], [])
+        for name in ("relaunch", "decide", "launch_cmd", "action_enabled",
+                     "find_pane", "due"):
+            self.assertFalse(hasattr(resurrect, name), name)
+        self.assertFalse(hasattr(goal, "_resurrect_dead_entry"))
+        self.assertNotIn("resurrect", tmux_io.RECOVERY_KINDS)
+
+
 if __name__ == "__main__":
     unittest.main()
