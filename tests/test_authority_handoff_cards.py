@@ -152,7 +152,7 @@ class TestAutopilotSkillCarriesProfiles(TestCase):
         # integration branch — never a substitute for the Hand-off line.
         t = read(self.SKILL)
         idx = t.index("Reduced-authority streams (branch-merge / fork-no-merge) carry")
-        end = t.index("The heading + audit-summary", idx)
+        end = t.index("The heading + Úloha/Riešenie", idx)   # #1137 slim report
         window = " ".join(t[idx:end].split())
         self.assertIn("Hand-off: READY-FOR-REVIEW komentár na #N", window)
         self.assertIn("for BOTH profiles", window)

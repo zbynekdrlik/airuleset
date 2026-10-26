@@ -2159,16 +2159,7 @@ from watchdog.cards import (  # noqa: E402
     _normalize_closed as _normalize_closed,
     _commits_in_window as _commits_in_window,
     card_reconcile as card_reconcile,
-    REPORT_GRACE_S as REPORT_GRACE_S,
-    REPORT_MAX_SWALLOWS as REPORT_MAX_SWALLOWS,
-    REPORT_REPROBE_S as REPORT_REPROBE_S,
-    REPORT_MAX_LISTED as REPORT_MAX_LISTED,
-    REPORT_TAIL_LINES as REPORT_TAIL_LINES,
     _iso_epoch as _iso_epoch,
-    report_boundary_after as report_boundary_after,
-    _self_callback_records as _self_callback_records,
-    _autopilot_mutex_held as _autopilot_mutex_held,
-    report_reconcile as report_reconcile,
     _owned_identity as _owned_identity,
     make_owned_closed_filter as make_owned_closed_filter,
 )
@@ -2484,7 +2475,7 @@ PAUSED_SUPPRESSED_JOBS = frozenset({
     "burn_alert_job",               # per-box burn owner alert
     "long_turn_watch",              # long-turn owner alert
     "delivery_stall_watch",         # delivery-stall owner alert
-    "card_reconcile",               # report-owed / unreported-card owner nudge
+    "card_reconcile",               # unreported-card owner nudge
     "stuck_main_sweep",             # stuck-main owner alert
     "conformance_check",            # job 34 drift (also never pings post-#1032)
     "conformance_heartbeat_check",  # job 35 central dead-box owner alarm
@@ -4407,9 +4398,11 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
                     excerpt = pane_question_excerpt(captured)
                     detail = excerpt or ("Session sa zastavila na otázke "
                                          "(AskUserQuestion) — pozri sa naň.")
+                    # kind="questions" (#1137): the ❓ relay rides the question
+                    # route — the owner's -q thread and the owner policy.
                     send_fn("❓ **%s** — čaká na teba\n> %s" % (project, detail),
                             owner=owner, dedup_key="waiting:%s:%s" % (key, w["first_seen"]),
-                            dry_run=dry_run)
+                            dry_run=dry_run, kind="questions")
                 w["confirmed"] = True          # seen this poll → a LATER poll may ping
                 continue                       # waiting on the user → not a working-stall
 
@@ -5280,23 +5273,16 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
     # "wired = on" convention and the same confirm-then-announce contract.
     # Detection only, no tmux round-trip (the cwd map came from the pane
     # sweep above). Best-effort — a failure here must never cost a sweep.
-    # Job 25 also runs REPORT reconciliation (#525) — the SAME registry entry
-    # (no new job), a second check over the same closed set for a saturated
-    # supervisor that merged tickets but never wrote their per-ticket report.
-    # It early-returns on empty `cwd_by_sid` (a no-op in the characterization
-    # sweep) and types in-band, so it takes panes_by_sid/projects_dir/sleep_fn.
-    # #534: ONE owner-scoping filter, shared by both jobs so its per-repo
-    # GraphQL ownership lookup fires at most once per repo per sweep (both jobs
-    # derive the identical `merged_closes` candidate set for a given root). Built
-    # HERE, per sweep, so its memo is fresh each sweep (a gh-failure sweep
-    # re-queries next sweep rather than latching a wrong owner map).
+    # Its REPORT reconciliation (#525 `report-owed:` nudge + 📮 escalation) is
+    # RETIRED (#1137, issue 1233). #534: the owner-scoping filter is built HERE,
+    # per sweep, so its memo is fresh each sweep (a gh-failure sweep re-queries
+    # next sweep rather than latching a wrong owner map).
     # #1097: compose the #534 owner filter with a GitHub-STATE + ROLE verifier so
     # a prose "fixes #<old>" of a long-closed ticket (odoo-erp 1e9e1f4d0 re-owed
     # #4) is not re-derived as owed, and a ticket is owed only to the window whose
     # ROLE owns its work class (gk's FLOW vs INFRA roots of one repo). Built HERE,
     # per sweep, so its per-(root,set) verify memo + journal are fresh each sweep
-    # and the SAME composed callable is shared by BOTH jobs (its ETag-cached read
-    # thus fires at most once per candidate per sweep). `since_fn` is the same
+    # (its ETag-cached read fires at most once per candidate per sweep). `since_fn` is the same
     # `now - CARD_WINDOW_S` window `merged_closes` used. Journal lines
     # (`owed-verify drop/keep-unreadable …`) accumulate on `_owned_scope.logs`,
     # appended to the job's log output below.
@@ -5310,11 +5296,6 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
                                 reopen_fetch=reopen_fetch,
                                 owner_by_sid=owner_by_sid,
                                 owned_closed=_owned_scope)
-                 + report_reconcile(now, run, state, cwd_by_sid, panes_by_sid,
-                                    send_fn=send_fn, dry_run=dry_run,
-                                    owner_by_sid=owner_by_sid,
-                                    projects_dir=projects_dir, sleep_fn=sleep_fn,
-                                    owned_closed=_owned_scope)
                  + list(_owned_scope.logs),
          "card-reconcile error", min_budget=_BUDGET_MIN_GH_BATCH_S,
          gh_poll_hold=True,          # #1040 pure-read poller

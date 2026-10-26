@@ -34,8 +34,8 @@ untouched — this lane removes the DELIVERY machinery only.
   - the surviving symbols the other jobs reference are KEPT and intact:
     `pending_compact_hold` (now unconditionally `False` — no machine compact is
     ever pending), `_find_pane_for_session`, `resolve_self_pane`,
-    `resolve_declared_window_pane`, `_COMPACT_COMPLETION_HEADING_RX`,
-    `_compact_recent_human_activity`, `compact_sync_log_path`.
+    `resolve_declared_window_pane` (the report-reconcile readers' helpers left
+    with job 25's report half, #1137).
 """
 
 import inspect
@@ -462,8 +462,6 @@ class TestCompactMachineryDeleted(unittest.TestCase):
 KEPT_COMPACT_SYMBOLS = (
     "compact_sweep", "pending_compact_hold", "_find_pane_for_session",
     "resolve_self_pane", "resolve_declared_window_pane",
-    "_COMPACT_COMPLETION_HEADING_RX", "_compact_recent_human_activity",
-    "compact_sync_log_path",
     # KEPT: cli_lane_live_gate (the #1193 live-lane gate) imports this constant
     # as its single source for watchdog.count_live_workers().
     "COMPACT_LIVE_WORKER_FRESHNESS_S",

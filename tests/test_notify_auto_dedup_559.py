@@ -39,6 +39,11 @@ class _HomeIsolated(unittest.TestCase):
         self._env = dict(os.environ)
         os.environ["HOME"] = str(self.home)
         self.addCleanup(lambda: os.environ.clear() or os.environ.update(self._env))
+        # #1137: pin an empty owner (never on the owner policy): a bare box
+        # resolves owner=zbynek, whose non-alarm sends are suppressed now.
+        _pin = mock.patch.dict(os.environ, {"AIRULESET_NOTIFY_OWNER": ""})
+        _pin.start()
+        self.addCleanup(_pin.stop)
         # A real POST is stubbed truthy so send() reaches "sent" without network.
         orig = notify._post_discord
         notify._post_discord = lambda *a, **k: True
@@ -96,8 +101,8 @@ class TestSendDedupsKeylessCalls(_HomeIsolated):
         # Pin time so the two sends can never straddle a bucket boundary (which
         # would flip st2 back to "sent") — determinism on a contended box.
         with mock.patch("notify.time.time", return_value=1000.0):
-            st1 = notify.send("identical body", env=self.ENV, owner="zbynek")
-            st2 = notify.send("identical body", env=self.ENV, owner="zbynek")
+            st1 = notify.send("identical body", env=self.ENV, owner="david")
+            st2 = notify.send("identical body", env=self.ENV, owner="david")
         self.assertEqual(st1, "sent")
         self.assertEqual(
             st2, "dedup",
@@ -106,8 +111,8 @@ class TestSendDedupsKeylessCalls(_HomeIsolated):
             "are still unthrottleable (the #559 bug)")
 
     def test_distinct_keyless_bodies_both_send(self):
-        st1 = notify.send("first distinct body", env=self.ENV, owner="zbynek")
-        st2 = notify.send("second distinct body", env=self.ENV, owner="zbynek")
+        st1 = notify.send("first distinct body", env=self.ENV, owner="david")
+        st2 = notify.send("second distinct body", env=self.ENV, owner="david")
         self.assertEqual(st1, "sent")
         self.assertEqual(st2, "sent",
                          "two legitimately-DISTINCT keyless pings must BOTH send "
@@ -115,17 +120,17 @@ class TestSendDedupsKeylessCalls(_HomeIsolated):
 
     def test_identical_keyless_send_after_window_sends_again(self):
         with mock.patch("notify.time.time", return_value=1000.0):
-            st1 = notify.send("windowed body", env=self.ENV, owner="zbynek")
+            st1 = notify.send("windowed body", env=self.ENV, owner="david")
         with mock.patch("notify.time.time",
                         return_value=1000.0 + notify.AUTO_DEDUP_WINDOW_S + 5):
-            st2 = notify.send("windowed body", env=self.ENV, owner="zbynek")
+            st2 = notify.send("windowed body", env=self.ENV, owner="david")
         self.assertEqual(st1, "sent")
         self.assertEqual(st2, "sent",
                          "identical content re-sent AFTER the window must send "
                          "again — the time bucket bounds the dedup window")
 
     def test_keyless_send_is_not_suppressed(self):
-        st = notify.send("some keyless alert body", env=self.ENV, owner="zbynek")
+        st = notify.send("some keyless alert body", env=self.ENV, owner="david")
         self.assertEqual(st, "sent",
                          "a keyless send is never a #546 suppressed alert class")
 
@@ -141,7 +146,7 @@ class TestSendDedupsKeylessCalls(_HomeIsolated):
 class TestKeylessSendIsTraceableInTheLog(_HomeIsolated):
 
     def test_log_line_carries_auto_key_not_dash(self):
-        notify.send("a traceable keyless body", env=self.ENV, owner="zbynek")
+        notify.send("a traceable keyless body", env=self.ENV, owner="david")
         log = Path(notify.delivery_log_path()).read_text(encoding="utf-8")
         self.assertIn("key=auto:", log,
                       "a keyless send must log a traceable key=auto:... line")

@@ -112,7 +112,8 @@ class TestAutopilotSkillLoopBody(TestCase):
     def test_batch_report_cites_the_full_template(self):
         t = read(self.SKILL)
         self.assertIn("completion-report.md", t)
-        self.assertIn("/plan-check", t)
+        # #1137: the audit line became the `✅ Overené:` plan/review/deep tokens
+        self.assertIn("plan N/N", t)
         self.assertIn("/requesting-code-review", t)
 
     def test_end_of_run_stop_condition_step4_untouched(self):

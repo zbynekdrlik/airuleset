@@ -51,7 +51,8 @@ HEAD = ("## ✅ Work Complete\n\n"
         "🏛 Architektúra: dochádzkový kiosk — OK\n\n")
 TAIL = ("\n---\n\n"
         "**Goal:** Dochádzkový kiosk pre výrobu.\n"
-        "**What changed:** Kiosk beží na erp-test-david.\n\n"
+        "**What changed:** Kiosk beží na erp-test-david.\n"
+        "📔 Playbook: nič nové\n\n"  # #1137: playbook proof moved here
         "✅ DONE: #1393 (kiosk) odovzdané na review, nič ďalšie nečaká.")
 CLEAN_COMPLETION_REPORT = HEAD + TAIL
 

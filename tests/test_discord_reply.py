@@ -1297,6 +1297,10 @@ class SendReturnMessageId(unittest.TestCase):
         p = m.patch.object(notify, "_read_env", lambda: dict(self.env))
         p.start()
         self.addCleanup(p.stop)
+        # #1137: empty owner (a bare box resolves zbynek, now suppressed)
+        o = m.patch.object(notify, "resolve_owner", lambda: "")
+        o.start()
+        self.addCleanup(o.stop)
         # #559: keyless send()s now auto-derive a content-hash dedup key, so
         # repeated identical keyless sends (every test here uses body "hi")
         # would collide via the SHARED dedup dir. Isolate the dedup/delivery

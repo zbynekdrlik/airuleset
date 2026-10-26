@@ -74,8 +74,9 @@ class TestQuestionPingOffPredicate(unittest.TestCase):
         self.assertFalse(notify.question_ping_off("someoneelse"))
 
     def test_owners_off_set_is_exactly_zbynek(self):
-        # marek removed #882 (decommissioned)
-        self.assertEqual(set(notify.QUESTION_PING_OWNERS_OFF), {"zbynek"})
+        # marek removed #882 (decommissioned); #1137 renamed the set into the
+        # one owner-level policy OWNER_PING_ALLOW
+        self.assertEqual(set(notify.OWNER_PING_ALLOW), {"zbynek"})
 
 
 # --------------------------------------------------------------------------- #
@@ -152,13 +153,14 @@ class TestSendSuppressesQuestionsForOffOwners(_HomeIsolated):
         self.assertTrue(lines, "a suppressed question must leave a delivery-log line")
         self.assertIn("#710", lines[-1])
 
-    def test_default_kind_to_zbynek_is_NOT_suppressed(self):
-        # ONLY questions are owner-scoped off; a ✅ / any other notification to
-        # zbynek is unaffected (still POSTs on the normal thread).
+    def test_default_kind_to_zbynek_is_suppressed_too(self):
+        # REVERSED by #1137 (issue 1233, owner "v discorde skoro nič nečítam"):
+        # a ✅ / any non-alarm notification to zbynek is suppressed as well;
+        # tests/test_owner_policy_1137.py locks the allowed alarm classes.
         self._write_env()
         r = notify.send("hotovo", owner="zbynek", kind="default")
-        self.assertEqual(r, "sent")
-        self.assertEqual(len(self.posts), 1)
+        self.assertEqual(r, "suppressed")
+        self.assertEqual(self.posts, [])
 
     def test_return_message_id_shape_is_respected(self):
         self._write_env()

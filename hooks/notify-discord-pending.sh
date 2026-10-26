@@ -104,7 +104,7 @@ printf '%s' "$INPUT" | PYTHONPATH="${AIRULESET_PY%/airuleset.py}" \
 
 # #1152: ONE fork-free pass over the message lines finds the last non-blank
 # line, whether this is a ✅ done turn, the last "✅ DONE:" line and the first
-# "**What changed/Goal" line. It used to be `printf | grep` pipelines, and a
+# "**What changed/Goal/Riešenie" line. It used to be `printf | grep` pipelines, and a
 # failed (or, past 64 KiB, SIGPIPE'd) grep read as "no marker", which sent a
 # ✅ turn to the branch that deletes the pending. Per line like grep, so no
 # match spans two lines; [[:space:]] keeps grep's locale-aware meaning. A
@@ -113,7 +113,7 @@ LAST_LINE="" IS_DONE=1 DLINE="" GLINE=""
 _scan_lines() {
     local line
     local re_done='✅[[:space:]]*DONE:|#+[[:space:]]*✅[[:space:]]*work complete|✅[[:space:]]*work complete'
-    local re_dline='✅[[:space:]]*DONE:' re_gline='^\*\*(What changed|Goal)\b'
+    local re_dline='✅[[:space:]]*DONE:' re_gline='^\*\*(What changed|Goal|Riešenie)\b'
     local -a lines
     if ! mapfile -t lines <<<"$MSG"; then
         _degraded "line-split-failed" "could not split the message into lines; used the grep pipelines instead"
@@ -653,7 +653,7 @@ elif [ "$IS_DONE" = 0 ]; then
     else
         SUPPRESSED=0
         # Prefer an explicit "✅ DONE: <outcome>" line; else the report's
-        # "What changed" / "Goal" one-liner; else a generic Slovak fallback.
+        # "Riešenie" / "What changed" / "Goal" one-liner; else a generic fallback.
         # DLINE/GLINE come from _scan_lines. The prefixes go with bash regexes
         # (the old seds, same patterns): an unguarded sed that failed aborted
         # the hook under `set -e` and lost the ✅ (#1152).
@@ -664,7 +664,7 @@ elif [ "$IS_DONE" = 0 ]; then
             [[ $C =~ ^.*✅[[:space:]]*DONE:[[:space:]]* ]] && C="${C:${#BASH_REMATCH[0]}}"
         else
             C="$GLINE"
-            [[ $C =~ ^\*\*(What\ changed|Goal):?\*\*:?[[:space:]]* ]] \
+            [[ $C =~ ^\*\*(What\ changed|Goal|Riešenie):?\*\*:?[[:space:]]* ]] \
                 && C="${C:${#BASH_REMATCH[0]}}"
             [ -z "$C" ] && C="práca dokončená"
         fi

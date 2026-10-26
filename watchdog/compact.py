@@ -27,10 +27,6 @@ retired job 14:
   * `_find_pane_for_session` / `resolve_self_pane` / `resolve_declared_window_pane`
     — pane resolvers used by `watchdog/goal.py` and `airuleset.py goal-arm` /
     `status`; never compact-specific.
-  * `_COMPACT_COMPLETION_HEADING_RX` / `_compact_recent_human_activity` /
-    `compact_sync_log_path` — read by `watchdog/cards.py` (job 25): the canonical
-    Work-Complete heading regex, the dual-signal recent-human primitive, and the
-    self-callback sync-log path.
 
 The compaction OBSERVATION helpers proper (`_pane_compacting`,
 `COMPACTING_MARKER`, `_QUEUED_COMPACT_RX`, the transcript compaction records
@@ -49,7 +45,6 @@ patch).
 
 import logging
 import os
-import re
 from pathlib import Path
 
 import watchdog
@@ -219,68 +214,6 @@ def resolve_declared_window_pane(cwd, run=None, projects_dir=None):
     if tinfo:
         sid = tinfo[0].stem
     return pid, pcwd, sid
-
-# The SAME canonical heading `hooks/stop-check-prose-violations.sh`'s own
-# `IS_COMPLETION_HEADING` classifier anchors on (`^## ✅ Work Complete|^✅
-# Work Complete`). KEPT after #599 (compact itself no longer reads it — the
-# `⏳` exemption that used it is gone), because `watchdog/cards.py::
-# report_boundary_after` (job 25) still imports it FROM HERE so a genuine
-# report is read by the identical rule that enforces it must be genuine, never
-# a parallel, independently-drifting spelling.
-_COMPACT_COMPLETION_HEADING_RX = re.compile(
-    r"(?m)^(?:## )?✅ Work Complete\b")
-
-# #1084 L2: the compact REQUEST store this constant used to age out is DELETED —
-# it is NO LONGER a request TTL. Its ONLY surviving role is the upper CLAMP
-# ceiling for `_compact_recent_human_window` (below): a `AIRULESET_COMPACT_RECENT_
-# HUMAN_S` env value >= this is clamped to `this - 1` so a misconfigured window
-# can't lapse the recent-human veto. 30 min is retained as that clamp bound.
-COMPACT_REQUEST_MAX_AGE_S = 30 * 60
-
-# #377 — never deliver into a live human Q&A window with THIS session.
-# Reuses job 9's own dual-signal primitive rather than duplicating it.
-COMPACT_RECENT_HUMAN_ACTIVITY_S = 120   # env AIRULESET_COMPACT_RECENT_HUMAN_S
-
-_COMPACT_DISCORD_ANSWER_PREFIXES = (
-    "Odpoveď z Discordu:", "Odpoveď užívateľa na tvoju otázku")
-
-def _compact_recent_human_window(window_s=None):
-    """An explicit `window_s=` is returned verbatim. The CONSTANT/ENV
-    default is clamped to `[1, COMPACT_REQUEST_MAX_AGE_S)` so a
-    misconfigured env var can neither silently disable the veto (0/
-    negative) nor recreate a lapse-before-clear starvation (a value at or
-    above the request TTL)."""
-    if window_s is not None:
-        return window_s
-    try:
-        raw = int(os.environ.get("AIRULESET_COMPACT_RECENT_HUMAN_S",
-                                 COMPACT_RECENT_HUMAN_ACTIVITY_S))
-    except ValueError:
-        raw = COMPACT_RECENT_HUMAN_ACTIVITY_S
-    if raw < 1:
-        return 1
-    if raw >= COMPACT_REQUEST_MAX_AGE_S:
-        return COMPACT_REQUEST_MAX_AGE_S - 1
-    return raw
-
-def _compact_recent_human_activity(cwd, sid, now, projects_dir=None, window_s=None):
-    """True when the user has been active on THIS session within
-    `window_s` seconds. Delegates to `_goal_autoarm_recent_human_activity`
-    (a general, goal-owned dual-signal primitive: the UserPromptSubmit
-    presence marker OR the transcript's own last human-prompt timestamp),
-    passing the Discord-answer prefixes so a relayed answer counts as
-    recent human activity here too. Unmeasurable never blocks."""
-    pdir = projects_dir or watchdog.PROJECTS_DIR
-    tpath = watchdog._transcript_for_session(pdir, sid, cwd)
-    win = _compact_recent_human_window(window_s)
-    recent, _reason = watchdog._goal_autoarm_recent_human_activity(
-        sid, tpath, now, window_s=win,
-        extra_human_prefixes=_COMPACT_DISCORD_ANSWER_PREFIXES)
-    return recent
-
-def compact_sync_log_path():
-    """`~/.claude/compact-sync.log`, resolved at CALL time."""
-    return Path.home() / ".claude" / "compact-sync.log"
 
 def pending_compact_hold(sid, now=None, hold_s=None, path=None):
     """#1084 L2: machine-triggered compacts are REMOVED, so NO `/compact` is ever

@@ -46,9 +46,9 @@ COMPLETION_REPORT_DEEP = ROOT / "skills" / "completion-report-deep" / "DEEP.md"
 # test_prose_gate_pipeline_race.py, test_goal_backlog_proof.py,
 # test_design_gate.py, test_airuleset.py) -- this fix must NEVER touch them,
 # it only clarifies the DISPATCH MECHANISM that satisfies them.
-LOCKED_AUDIT_LINES = (
-    "/review: 0 🔴 0 🟡 0 🔵",
-    "/requesting-code-review: 0 🔴 0 🟡 0 🔵",
+LOCKED_AUDIT_LINES = (  # #1137: the ✅ Overené: tokens (old forms still accepted)
+    "review 0 🔴 0 🟡 0 🔵",
+    "deep 0 🔴 0 🟡 0 🔵",
 )
 
 # The literal invocation shape that must never be recommended anywhere in

@@ -925,11 +925,13 @@ class TestDiscordNotifyHooks(TestCase):
         home = self._mention_home()
         self._stop(sid, "✅ DONE: nasadené v1.2.3")   # records a pending ✅
         payload = json.dumps({"session_id": sid, "cwd": tempfile.mkdtemp()})
+        # #1137: a zbynek ✅ is suppressed by the owner policy, so the
+        # mention mechanics are exercised on david
         out = subprocess.run(
             ["bash", str(self.IDLE)], input=payload, text=True, capture_output=True,
             env={**os.environ, "HOME": home, "DISCORD_NOTIFY_DRYRUN": "1",
-                 "AIRULESET_NOTIFY_OWNER": "zbynek"}).stdout
-        self.assertTrue(out.startswith("<@773451844110385193> **✅"),
+                 "AIRULESET_NOTIFY_OWNER": "david"}).stdout
+        self.assertTrue(out.startswith("<@90000> **✅"),
                         f"idle ping not @mention-prefixed: {out!r}")
 
     def _mirror_home(self):
@@ -3453,7 +3455,9 @@ class TestProseViolationsPrlessCompletion(TestCase):
                "🏛 Architektúra: dochádzkový kiosk — OK\n\n"
                "---\n\n"
                "**Goal:** Dochádzkový kiosk pre výrobu.\n"
-               "**What changed:** Kiosk beží na erp-test-david, odovzdané gatekeeperovi.\n\n"
+               "**What changed:** Kiosk beží na erp-test-david, odovzdané gatekeeperovi.\n"
+               # #1137: the playbook proof moved into this gate
+               "📔 Playbook: nič nové\n\n"
                "✅ DONE: #1393 (kiosk) odovzdané na review, nič ďalšie nečaká.")
         r = self._run(msg)
         self.assertEqual(r.returncode, 0)
@@ -3476,53 +3480,16 @@ class TestProseViolationsPrlessCompletion(TestCase):
 class TestIssueRefTitles(TestCase):
     """issue-reference-context.md: every issue/PR ref carries its title — ALL messages.
 
-    The bare-ref check in stop-check-prose-violations.sh is a SOFT warning (stderr,
-    no block) — it fires on keyworded bare refs in any message, not just completion
-    reports, and stays quiet when a title/topic is present.
+    The hook's stderr-only bare-ref warning was retired (#1137); the module rule
+    stays (the Odoo thread/task URL checks remain hook-enforced).
     """
 
-    HOOK = airuleset.REPO_DIR / "hooks" / "stop-check-prose-violations.sh"
     MODULE = airuleset.REPO_DIR / "modules" / "core" / "issue-reference-context.md"
-
-    def _sid(self):
-        sid = f"test-ref-{uuid.uuid4().hex[:12]}"
-        self.addCleanup(lambda: Path(f"/tmp/airuleset-stop-block-{sid}").unlink(missing_ok=True))
-        return sid
-
-    def _run(self, msg):
-        payload = json.dumps({"last_assistant_message": msg, "session_id": self._sid()})
-        return subprocess.run(["bash", str(self.HOOK)], input=payload,
-                              capture_output=True, text=True, env=hermetic_hook_env(self))
 
     def test_module_exists_and_in_profile(self):
         self.assertTrue(self.MODULE.exists())
         entries = airuleset.parse_profile(airuleset.UNIVERSAL_PROFILE)
         self.assertIn("modules/core/issue-reference-context.md", entries)
-
-    def test_bare_pr_ref_warns_outside_completion(self):
-        # Not a completion report — still warns (the always-on behavior).
-        r = self._run("Quick update: PR #7 — pushed and CI is running.\n⏳ WORKING: CI")
-        self.assertIn("Bare issue/PR number", r.stderr)
-
-    def test_bare_closes_ref_warns(self):
-        r = self._run("Committed the fix. Closes #234 in this commit.\n✅ DONE")
-        self.assertIn("Bare issue/PR number", r.stderr)
-
-    def test_bare_issue_mention_warns(self):
-        r = self._run("Issue #42 is still open, will pick it up next.\n✅ DONE")
-        self.assertIn("Bare issue/PR number", r.stderr)
-
-    def test_titled_pr_ref_clean(self):
-        r = self._run("Quick update: PR #7: Refactor driver.rs and add lyrics test — CI running.\n⏳ WORKING: CI")
-        self.assertNotIn("Bare issue/PR number", r.stderr)
-
-    def test_titled_closes_ref_clean(self):
-        r = self._run("Committed the fix. Closes #234 (driver.rs over the 1000-line cap).\n✅ DONE")
-        self.assertNotIn("Bare issue/PR number", r.stderr)
-
-    def test_no_ref_clean(self):
-        r = self._run("Pushed the lint fix, nothing else to report.\n✅ DONE")
-        self.assertNotIn("Bare issue/PR number", r.stderr)
 
 
 class TestPreAskAutoAnswerMergeQuestions(TestCase):
@@ -8617,12 +8584,12 @@ class TestDiscordAutopilotNotify(TestCase):
     def test_send_dry_run_prepends_mention_and_does_not_claim(self):
         import io
         import contextlib
-        env = {"DISCORD_MENTION_ZBYNEK": "111222333"}
+        env = {"DISCORD_MENTION_DAVID": "111222333"}   # #1137: not zbynek
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
-            r1 = self.notify.send("BODY", env=env, owner="zbynek",
+            r1 = self.notify.send("BODY", env=env, owner="david",
                                   dedup_key="k#1", dry_run=True)
-            r2 = self.notify.send("BODY", env=env, owner="zbynek",
+            r2 = self.notify.send("BODY", env=env, owner="david",
                                   dedup_key="k#1", dry_run=True)
         out = buf.getvalue()
         self.assertEqual(r1, "dry-run")
@@ -8671,7 +8638,7 @@ class TestDiscordAutopilotNotify(TestCase):
         import unittest.mock as m
         with tempfile.TemporaryDirectory() as home:
             with m.patch.dict(os.environ, {"HOME": home}):
-                r = self.notify.send("BODY", env={}, owner="zbynek",
+                r = self.notify.send("BODY", env={}, owner="david",  # #1137
                                      dedup_key="o/x#9")
                 self.assertEqual(r, "no-config")
                 # key released → reclaimable
@@ -8971,12 +8938,14 @@ class TestDiscordAutopilotNotify(TestCase):
         # Non-regression: omitting --owner-name keeps today's EXACT
         # behavior -- the fix is purely additive, never a default change.
         home = self._env_home()
-        env = {**os.environ, "HOME": home, "AIRULESET_NOTIFY_OWNER": "zbynek"}
+        # #1137: zbynek's non-alarm sends are suppressed by the owner policy,
+        # so the fallback mechanics are exercised on marek
+        env = {**os.environ, "HOME": home, "AIRULESET_NOTIFY_OWNER": "marek"}
         r = subprocess.run([sys.executable, str(self.AIRULESET), "notify",
                             "--body", "hello", "--dry-run"],
                            capture_output=True, text=True, env=env)
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("<@111222333> hello", r.stdout)
+        self.assertIn("<@444555666> hello", r.stdout)
 
     def test_cli_provision_question_thread_success(self):
         args = m.Mock(provision_question_thread=True, find_only=False,
@@ -9121,7 +9090,7 @@ class TestDiscordAutopilotNotify(TestCase):
 
     def test_cli_autopilot_done_dry_run(self):
         home = self._env_home()
-        env = {**os.environ, "HOME": home, "AIRULESET_NOTIFY_OWNER": "zbynek"}
+        env = {**os.environ, "HOME": home, "AIRULESET_NOTIFY_OWNER": "marek"}  # #1137
         r = subprocess.run(
             [sys.executable, str(self.AIRULESET), "notify", "--autopilot-done",
              "--dry-run", "--repo", "o/cam", "--pr", "88", "--review", "ok",
@@ -9129,7 +9098,7 @@ class TestDiscordAutopilotNotify(TestCase):
              json.dumps([{"n": 41, "title": "T", "goal": "G", "achieved": "A"}])],
             capture_output=True, text=True, env=env)
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("<@111222333> ", r.stdout)
+        self.assertIn("<@444555666> ", r.stdout)
         self.assertIn("🎯 **Cieľ:** G", r.stdout)
         self.assertIn("✅ **Dosiahnuté:** A", r.stdout)
         self.assertIn("hotové 2 · ostáva 4", r.stdout)
@@ -9343,8 +9312,8 @@ class TestApiWatchdog(TestCase):
     def tearDown(self):
         self.w.usage._USAGE_CACHE_PATH = self._orig_usage_cache
 
-    def _send(self, body, owner=None, dedup_key=None, dry_run=False):
-        self.pings.append((body, dedup_key, owner))
+    def _send(self, body, owner=None, dedup_key=None, dry_run=False, **_kw):
+        self.pings.append((body, dedup_key, owner))   # kind= (#1137) accepted
         return "sent"
 
     def _state_sans_model_audit(self):

@@ -632,7 +632,7 @@ push / PR / merge / deploy, never that backup.
    DB, the rendered document, the live screen) and record CONCRETE observed values — price,
    currency, order number, heading — never send/delivery/liveness alone (the montalu3 0 € email
    incident: emails "verified" as delivered while every price rendered 0 €). These observed values
-   feed the report's mandatory `✅ Výstup:` line (`completion-report.md` — an explicit
+   feed the report's mandatory `Výstup:` token on its `✅ Overené:` line (`completion-report.md` — an explicit
    `n/a — <prečo>` when the ticket truly has no user-facing output), and the run-card fires only
    AFTER this read-back. No per-issue
    device ping for the deploy itself (`milestone-notifications.md`); do NOT gate it on approval.
@@ -653,11 +653,10 @@ push / PR / merge / deploy, never that backup.
    test names, decisions, and the shared PR #). Create the file if missing.
 11. Run the `playbook-review` skill — capture reusable procedures, gotchas, and non-obvious
     decisions to the project playbook per `project-playbook-maintenance.md`. Your evidence block
-    below MUST carry the `📔 Playbook:` line — the SUPERVISOR relays it into the `## Work Complete`
-    report, and it is THAT report `stop-check-playbook-review.sh` actually checks (a Stop hook,
-    registered on `Stop` only — `Stop` never fires for a subagent like you, `SubagentStop` does, so
-    the check cannot fire on your own turn at all; see `#215`/`#216`). Your obligation is running the
-    Skill call itself and putting its result on this line — the mechanical check is one level up.
+    below MUST carry its result as a `📔 Playbook:` line — the SUPERVISOR relays it into the
+    `playbook:` token of the `## Work Complete` report's `✅ Overené:` line, and it is THAT report
+    `stop-check-prose-violations.sh` checks (a `Stop` hook — `Stop` never fires for a subagent like
+    you, `SubagentStop` does; see `#215`/`#216`). Your obligation is the Skill call itself and this line.
 
 ## ASK-THE-USER (surface these to the user — your prompts reach their main session — discuss, then continue)
 

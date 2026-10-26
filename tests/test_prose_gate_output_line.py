@@ -72,7 +72,8 @@ _HEAD = ("## ✅ Work Complete\n\n"
 _TAIL_GLOBE = ("\n---\n\n"
                "**Goal:** Zákazník má dostať email pri zmene stavu objednávky.\n"
                "**What changed:** Pri zmene stavu objednávky sa zákazníkovi "
-               "odošle email s cenou a menou.\n\n"
+               "odošle email s cenou a menou.\n"
+               "📔 Playbook: nič nové\n\n"  # #1137: playbook proof moved here
                "%s Prod: https://varos.example.com/shop\n\n"
                "**[odoo-erp] PR #2101: Order status notification emails**\n"
                "https://github.com/zbynekdrlik/odoo-erp/pull/2101 — merged 1a2b3c4\n"
@@ -93,7 +94,8 @@ _FORK_HEAD = ("## ✅ Work Complete\n\n"
               % (RED, YELLOW, BLUE, RED, YELLOW, BLUE))
 _FORK_TAIL = ("\n---\n\n"
               "**Goal:** Dochádzkový kiosk pre výrobu.\n"
-              "**What changed:** Kiosk beží na erp-test-david.\n\n"
+              "**What changed:** Kiosk beží na erp-test-david.\n"
+              "📔 Playbook: nič nové\n\n"  # #1137: playbook proof moved here
               "✅ DONE: #1393 (kiosk) odovzdané na review, nič ďalšie nečaká.")
 
 GOOD_VYSTUP = ("✅ Výstup: email obj. #2041 — cena 12,50 €, mena CZK pri CZ "

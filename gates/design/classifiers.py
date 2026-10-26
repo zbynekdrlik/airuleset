@@ -350,7 +350,7 @@ _SB_LINE_RE = re.compile(
     re.IGNORECASE,
 )
 # A bare negative token with no trailing reason — the exact "rubber-stamp"
-# shape `completion-report.md`'s `✅ Výstup:` line (#446) also rejects.
+# shape `completion-report.md`'s `Výstup:` token (#446) also rejects.
 _SB_BARE_NA_RE = re.compile(
     r"^(?:n/?a|nie|no|none|-)$",
     re.IGNORECASE,

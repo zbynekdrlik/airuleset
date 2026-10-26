@@ -6517,7 +6517,7 @@ def _notify_run_card(args, compose_autopilot_card, send):
                       return_message_id=True, project=project)
         status, message_id = result if isinstance(result, tuple) else (result, None)
         print(status)
-        if status == "sent":
+        if status in ("sent", "suppressed"):    # #1137: owner policy = delivered
             if message_id:
                 record_card_message(
                     message_id,

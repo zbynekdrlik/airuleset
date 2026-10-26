@@ -4,7 +4,7 @@ Owner scope correction 2026-09-05: marek's dev stream is decommissioned
 (odoo-erp issue 6257) but his webterm observe dashboard (marek.newlevel.media)
 must survive. These tests lock BOTH sides of the split:
   - STREAM surfaces: marek ABSENT (no stream provisioning, no soniox, no notify
-    stream reroute, no QUESTION_PING_OWNERS_OFF)
+    stream reroute, no OWNER_PING_ALLOW)
   - LANE surfaces: marek PRESENT (REMOTE_HOSTS, AUTHORITY_BY_USER fork-no-merge,
     WEBTERM_OBSERVER_USERS, WEBTERM_DASHBOARD_TABS, profile_for_host, Access realm)
 """
@@ -20,9 +20,9 @@ class TestMarekStreamAbsent882(unittest.TestCase):
     """marek must stay OUT of stream-provisioning surfaces."""
 
     def test_not_in_question_ping_owners_off(self):
-        from notify import QUESTION_PING_OWNERS_OFF
-        self.assertNotIn("marek", QUESTION_PING_OWNERS_OFF,
-                         "marek must not be in QUESTION_PING_OWNERS_OFF (#882)")
+        from notify import OWNER_PING_ALLOW     # #1137 rename of the #710 set
+        self.assertNotIn("marek", OWNER_PING_ALLOW,
+                         "marek must not be in OWNER_PING_ALLOW (#882)")
 
     def test_not_in_skills_extra(self):
         self.assertNotIn("marek", getattr(airuleset, "SKILLS_EXTRA_BY_USER", {}),

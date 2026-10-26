@@ -40,7 +40,8 @@ _HEAD = ("## ✅ Work Complete\n\n"
          % (RED, YELLOW, BLUE, RED, YELLOW, BLUE))
 _TAIL = ("\n---\n\n"
          "**Goal:** Prerobiť oblasť autopilot orchestrácie.\n"
-         "**What changed:** Pridaný area-review gate.\n\n"
+         "**What changed:** Pridaný area-review gate.\n"
+         "📔 Playbook: nič nové\n\n"  # #1137: playbook proof moved into this gate
          "**[airuleset] PR #993: area review gate**\n"
          "https://github.com/zbynekdrlik/airuleset/pull/993 — merged 1a2b3c4\n")
 

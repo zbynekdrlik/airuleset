@@ -314,6 +314,47 @@ if [ "${PROJECT_UNRESOLVED:-0}" = "1" ]; then
     _delivery_log "unresolved-project" "no-cwd-or-origin"
 fi
 
+# #710 -> #1137: the owner-level Discord policy (notify.OWNER_PING_ALLOW). This
+# shell transport carries only ❓ and ✅, neither of which is ever an allowed class
+# for a restricted owner (zbynek: only acctblock/credential-dead/healthz-down
+# alarms reach Discord), so a ❓ OR ✅ whose PRIMARY owner is on the policy is
+# SUPPRESSED entirely (primary + mirrors) and logged `suppressed` (never a silent
+# drop). `--question-ping-off` answers "is this owner on the policy". david
+# (david1-4 -> david) keeps FULL delivery. `_delivery_log` self-gates on dry-run.
+# exit 0 so the confirm paths record LASTQ/LASTOK instead of retrying every turn.
+# Only when the PRIMARY owner is non-empty: an empty owner is never on the policy
+# (the CLI would fall back to resolve_owner() and could pick up the box's tmux
+# owner). The reason is a SINGLE field token (the log line ends with `qhash=`).
+if [ -n "$PRIMARY_OWNER" ] \
+   && [ "$(python3 "$AIRULESET_PY" notify --question-ping-off --owner-name "$PRIMARY_OWNER" 2>/dev/null || echo 0)" = "1" ]; then
+    _delivery_log "suppressed" "#710/#1137-owner-policy-owner=${PRIMARY_OWNER}"
+    # #716: the POST is suppressed, but a genuinely-TICKETLESS ❓ from an OFF
+    # owner (zbynek/marek) must still fold into the footer `U N` — the surface
+    # #710 redirected them to. Record a Discord-LESS "suppressed" map entry
+    # (a synthetic non-snowflake key keyed on the session, channel-less) so
+    # `statusbar.ticketless_question_pings` counts it. Only on the ❓ Stop-hook
+    # path (ND_SESSION_ID set); pipe CONTENT_BASE (header + question, no
+    # per-target @mention — record_question strips mentions anyway) so the
+    # fold's #N dedup and `question_map_ticket_refs` see the same text a
+    # delivered ❓ would carry. Best-effort — never blocks the exit; a
+    # ticket-carrying ❓ is deduped OUT of the ticketless fold by statusbar
+    # itself, exactly as a delivered one is.
+    #
+    # #716 review 🟡1: dry-run-GATED — the dry-run early-return lives INSIDE
+    # emit_one, which the #710 block never reaches (it exit-0s first), so
+    # without this guard a DISCORD_NOTIFY_DRYRUN=1 preview would write a real
+    # `suppressed:<sid>` entry into the live map (a phantom footer U N from a
+    # mere preview). Mirrors the delivered path (records only inside the real
+    # HTTP-2xx branch) and notify.send's own "never dry-run-mutating" #710 gate.
+    if [ "$KIND" = "questions" ] && [ -n "${ND_SESSION_ID:-}" ] && [ "${DISCORD_NOTIFY_DRYRUN:-0}" != "1" ]; then
+        printf '%s' "$CONTENT_BASE" | \
+        python3 "$AIRULESET_PY" notify --record-question --suppressed \
+            --question-stdin --session "$ND_SESSION_ID" --cwd "$CWD" \
+            >/dev/null 2>&1 || true
+    fi
+    exit 0
+fi
+
 # #687: cross-session (cross-USER) content dedup for the ✅ ping ONLY. Four
 # david sessions (SEPARATE unix accounts) delivered the identical ✅ (bounce
 # resolved) as four Discord messages. Coalesce an identical payload across
@@ -337,55 +378,6 @@ if [ "$EMOJI" = "✅" ] && [ "${DISCORD_NOTIFY_DRYRUN:-0}" != "1" ]; then
         _delivery_log "deduped" "cross-session-content"
         exit 0
     fi
-fi
-
-# #710: owner-scoped ❓ QUESTION-ping suppression — the interactive Stop-hook
-# transport (this file is reached via ND_EMOJI="❓" -> KIND="questions"). A ❓
-# ping whose PRIMARY owner has Discord question delivery OFF (zbynek/marek — they
-# take questions in webterm + the footer `U N`, not a phone ping) is SUPPRESSED
-# entirely (primary + any mirrors), never POSTed. PRIMARY-owner-scoped, matching
-# the Python `notify.send(kind="questions")` chokepoint exactly (both suppress
-# iff the primary owner is off — a mirror INTO an OFF owner from a delivering
-# primary does not occur in production: the david->zbynek question mirror is off
-# by design). Logged as an explicit `suppressed` delivery-log decision (never a
-# silent drop — the #546/#704 machine-channel pattern). Scoped to
-# KIND=="questions" so ✅ and every other emoji are untouched; david (and
-# david1-4 -> david) keeps FULL delivery. `_delivery_log` self-gates on dry-run,
-# so a preview stays silent AND reflects the suppression (no output). exit 0 so
-# the ❓ confirm path (send_q) records LASTQ instead of retrying every turn.
-# Only when the PRIMARY owner is non-empty: an empty owner is never off (the
-# CLI would fall back to resolve_owner() and could pick up the box's tmux owner
-# — e.g. zbynek — wrongly suppressing an empty-owner send that would otherwise
-# deliver to the shared fallback channel). The reason is a SINGLE field token
-# (no spaces — the delivery-log line has a trailing `qhash=` field).
-if [ "$KIND" = "questions" ] && [ -n "$PRIMARY_OWNER" ] \
-   && [ "$(python3 "$AIRULESET_PY" notify --question-ping-off --owner-name "$PRIMARY_OWNER" 2>/dev/null || echo 0)" = "1" ]; then
-    _delivery_log "suppressed" "#710-question-ping-off-owner=${PRIMARY_OWNER}"
-    # #716: the POST is suppressed, but a genuinely-TICKETLESS ❓ from an OFF
-    # owner (zbynek/marek) must still fold into the footer `U N` — the surface
-    # #710 redirected them to. Record a Discord-LESS "suppressed" map entry
-    # (a synthetic non-snowflake key keyed on the session, channel-less) so
-    # `statusbar.ticketless_question_pings` counts it. Only on the ❓ Stop-hook
-    # path (ND_SESSION_ID set); pipe CONTENT_BASE (header + question, no
-    # per-target @mention — record_question strips mentions anyway) so the
-    # fold's #N dedup and `question_map_ticket_refs` see the same text a
-    # delivered ❓ would carry. Best-effort — never blocks the exit; a
-    # ticket-carrying ❓ is deduped OUT of the ticketless fold by statusbar
-    # itself, exactly as a delivered one is.
-    #
-    # #716 review 🟡1: dry-run-GATED — the dry-run early-return lives INSIDE
-    # emit_one, which the #710 block never reaches (it exit-0s first), so
-    # without this guard a DISCORD_NOTIFY_DRYRUN=1 preview would write a real
-    # `suppressed:<sid>` entry into the live map (a phantom footer U N from a
-    # mere preview). Mirrors the delivered path (records only inside the real
-    # HTTP-2xx branch) and notify.send's own "never dry-run-mutating" #710 gate.
-    if [ -n "${ND_SESSION_ID:-}" ] && [ "${DISCORD_NOTIFY_DRYRUN:-0}" != "1" ]; then
-        printf '%s' "$CONTENT_BASE" | \
-        python3 "$AIRULESET_PY" notify --record-question --suppressed \
-            --question-stdin --session "$ND_SESSION_ID" --cwd "$CWD" \
-            >/dev/null 2>&1 || true
-    fi
-    exit 0
 fi
 
 emit_one "$PRIMARY_OWNER"      # primary — always fires (owner may be empty)

@@ -939,7 +939,7 @@ merge→gates→push at a time per repo across all sessions).
    >    MAIN (#871/#1061) — the worker's two adversarial reviews are only a pre-filter; record
    >    `Reviewed-by: main <model>` on the integration/merge note (same transcript-derived stamp as
    >    `Design-by:`).** **Every integration records the verdict in the report's
-   >    `🏛 Architektúra: <oblasť> — OK|REWORK fixed|REWORK #N` line** (`completion-report.md`,
+   >    `arch <oblasť> OK|REWORK fixed|REWORK #N` token on its `✅ Overené:` line** (`completion-report.md`,
    >    hook-enforced). A `REWORK` is FIXED in the same change (bounce the lane, or fix it at
    >    integration) → `REWORK fixed`. Only a separate, larger defect that cannot be fixed there
    >    becomes ONE ticket labelled `architecture-rework` under the normal #1259 filing gate (a real
@@ -997,7 +997,7 @@ merge→gates→push at a time per repo across all sessions).
    > 0 € email class: emails "verified" delivered while every price rendered 0 €). This is the
    > worktree-mode sibling of CYCLE step 8's own read-back: on an isolated dispatch YOU (the
    > supervisor) compose the cards, not the worker, so the observed values must exist HERE. They
-   > feed the integration cycle report's mandatory `✅ Výstup:` line (`completion-report.md` — an explicit
+   > feed the integration cycle report's mandatory `Výstup:` token (`completion-report.md` — an explicit
    > `n/a — <prečo>` when a member truly has no user-facing output), and each card fires only
    > AFTER this read-back.
    > **Fire the per-ticket run-card yourself, for EACH surviving member, right after this ONE
@@ -1047,12 +1047,12 @@ merge→gates→push at a time per repo across all sessions).
 5. **Report each COMPLETED INTEGRATION CYCLE as a REAL completion — the ARMED GOAL + any lanes
    still running continue the loop (2026-07-25 revision).** Once an integration cycle's
    verification + integration + the per-member run-cards are done and the mutex is released, end the
-   turn with the COMPACT `## ✅ Work Complete` template (#940, ~7 lines, `completion-report.md`) for
-   the members integrated in this cycle: ONE audit-summary line (`✅ /plan-check: N/N ·
-   /review: 0 🔴 0 🟡 0 🔵 · /requesting-code-review: 0 🔴 0 🟡 0 🔵` — RELAYS each worker's own
-   `plan:` + review fields; you never re-run plan-check or review yourself, #215/#216/#363) +
-   `✅ Výstup:` (RELAYS each worker's Step-4 read-back; deploy version merges here) +
-   `**Goal:**`/`**What changed:**` + 🌐 URL(s) + `📔 Playbook:` + terminal marker. **On
+   turn with the 4-line `## ✅ Work Complete` template (#1137, `completion-report.md`) for the
+   members integrated in this cycle: `**Úloha:**` + `**Riešenie:**` (+ 🌐 URL) + ONE `✅ Overené:`
+   line (`plan N/N · review 0 🔴 0 🟡 0 🔵 · deep 0 🔴 0 🟡 0 🔵` RELAYS each worker's own `plan:` +
+   review fields — you never re-run plan-check or review yourself, #215/#216/#363 — `· arch … ·
+   Výstup:` RELAYS each worker's Step-4 read-back, deploy version included, `· playbook:`) +
+   terminal marker. **On
    `U > 0`/`W > 0` the report ALSO prints the parked BREAKDOWN** (Step-1 `--waiting`/`--ops-wait`
    members + tags, #527), never a bare `U N`. **On a `Spec:`-bearing member (its ticket body carries
    `Spec: #N §x`) the report ALSO appends the reconciliation line `Spec-status #N: done §…, pending
@@ -1073,11 +1073,11 @@ merge→gates→push at a time per repo across all sessions).
    batch, so nothing double-pings.
    **Reduced-authority streams (branch-merge / fork-no-merge) carry the SAME Step 5 mandate — never
    silence (#58, the david #2129 incident).** There is no PR-to-main, no merge, no deploy for these
-   streams — use the same compact template, replacing deploy/🌐/PR lines with `completion-report.md`'s
-   reduced-authority variant: `✅ Lokálne overenie:` + `✅ Hand-off: READY-FOR-REVIEW komentár na
-   #N (<topic>) + --handoff karta` for BOTH profiles (#349: branch-merge posts it too) +
-   `✅ PR: #M do <integration> zmergnutý <sha>` for branch-merge. The heading + audit-summary +
-   Goal/What changed + terminal `✅ DONE:` are NON-OPTIONAL regardless of authority — a bare
+   streams — use the same 4 lines; Riešenie names the hand-off (`Hand-off: READY-FOR-REVIEW komentár na
+   #N (<topic>) + --handoff karta` for BOTH profiles, #349: branch-merge posts it too, plus
+   `PR #M do <integration> zmergnutý <sha>` for branch-merge) and Výstup is the Lokálne overenie
+   read-back. The heading + Úloha/Riešenie + Overené + terminal `✅ DONE:` are NON-OPTIONAL
+   regardless of authority — a bare
    `✅ DONE: #N hotové` is still blocked by the Stop-hook gate (`stop-check-prose-violations.sh`).
    **The `/goal` loop has NO compact HOLD (#1084).** Machine compacts are removed for good, so the
    loop never runs a HOLD turn, never probes a compact status, and never launches a boundary-hold

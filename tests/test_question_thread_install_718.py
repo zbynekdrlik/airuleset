@@ -74,7 +74,7 @@ class TestProvisionOwnerQuestionThreadForInstall(unittest.TestCase):
             self.assertNotIn("_Q=", Path(p).read_text())
 
     def test_marek_no_longer_suppressed_882(self):
-        # marek decommissioned #882 — no longer in QUESTION_PING_OWNERS_OFF,
+        # marek decommissioned #882 — not in OWNER_PING_ALLOW (#1137 rename),
         # so provision_owner_question_thread_for_install would NOT skip him.
         # Since marek is decommissioned, this just verifies the OFF predicate.
         self.assertFalse(notify.question_ping_off("marek"))

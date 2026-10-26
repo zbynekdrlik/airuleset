@@ -103,7 +103,7 @@ After all selected issues are committed locally:
 2. Monitor CI per `ci-monitoring.md` — one run, all jobs green
 3. PR description lists ALL bundled issues (`Closes #12`, `Closes #15`, `Closes #18` on separate lines so GitHub auto-closes them on merge)
 4. Auto-merge when every gate is green per `pr-merge-policy.md`, monitor main CI + deploy to terminal, verify; manual-marker (`airuleset:merge=manual`) projects: stop at the green PR and wait for the explicit merge instruction
-5. Single completion report per `completion-report.md` listing all bundled issues in the **Goal** / **What changed** lines and PR title (e.g. `Bundle: fix #12 + #15 + #18 — <one-line summary>`) — sent AFTER merge + deploy + verify (manual-marker: at the green PR, ending `❓ approve merge?`)
+5. Single completion report per `completion-report.md` listing all bundled issues in the **Úloha** / **Riešenie** lines and PR title (e.g. `Bundle: fix #12 + #15 + #18 — <one-line summary>`) — sent AFTER merge + deploy + verify (manual-marker: at the green PR, ending `❓ approve merge?`)
 
 #### Anti-patterns (all rewordings apply)
 

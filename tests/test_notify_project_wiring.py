@@ -228,14 +228,15 @@ class TestSendHookProjectRouting(_HomeIsolated):
     def _run(self, emoji, cwd, curl_path):
         env = {**os.environ, "HOME": str(self.home), "ND_EMOJI": emoji,
               "ND_TEXT": "hotovo", "ND_CWD": cwd,
-              "AIRULESET_NOTIFY_OWNER": "zbynek", "PATH": curl_path,
+              # #1137: a zbynek ✅ is suppressed; routing runs on david
+              "AIRULESET_NOTIFY_OWNER": "david", "PATH": curl_path,
               "AIRULESET_CONTENT_DEDUP_DIR": str(self.cdedup)}
         env.pop("DISCORD_NOTIFY_DRYRUN", None)
         return subprocess.run(["bash", str(SEND_HOOK)], input="",
                               capture_output=True, text=True, env=env)
 
     def test_default_kind_routes_to_the_configured_project_thread(self):
-        self._write_env(project_channel="333")
+        self._write_env(project_channel="333", owner="david")
         urls_log = self.home / "urls.log"
         curl_path = _path_with_fake_curl_capturing_channel(str(urls_log))
         self.addCleanup(shutil.rmtree, curl_path.split(os.pathsep)[0], True)

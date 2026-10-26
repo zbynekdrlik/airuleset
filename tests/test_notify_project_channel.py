@@ -60,6 +60,11 @@ class _HomeIsolated(unittest.TestCase):
         self._env = dict(os.environ)
         os.environ["HOME"] = str(self.home)
         self.addCleanup(lambda: os.environ.clear() or os.environ.update(self._env))
+        # #1137: pin an empty owner (never on the owner policy): a bare box
+        # resolves owner=zbynek, whose non-alarm sends are suppressed now.
+        _pin = m.patch.dict(os.environ, {"AIRULESET_NOTIFY_OWNER": ""})
+        _pin.start()
+        self.addCleanup(_pin.stop)
 
     @property
     def log(self):
@@ -518,6 +523,7 @@ class TestSpawnProvisionProjectThreadGuard(_HomeIsolated):
 # --------------------------------------------------------------------------- #
 
 class TestSendProjectRouting(_HomeIsolated):
+    # #1137: zbynek's non-alarm sends are suppressed; routing runs on david
 
     def _post(self, ok=True):
         orig = notify._post_discord
@@ -536,27 +542,27 @@ class TestSendProjectRouting(_HomeIsolated):
         notify._post_discord = fake
         self.addCleanup(lambda: setattr(notify, "_post_discord", orig))
         env = {"DISCORD_BOT_TOKEN": "t",
-               "DISCORD_NOTIFICATION_CHANNEL_ZBYNEK": "111",
-               "DISCORD_NOTIFICATION_CHANNEL_ZBYNEK_P_ODOO_ERP": "333"}
-        st = notify.send("hi", env=env, owner="zbynek", project="odoo-erp")
+               "DISCORD_NOTIFICATION_CHANNEL_DAVID": "111",
+               "DISCORD_NOTIFICATION_CHANNEL_DAVID_P_ODOO_ERP": "333"}
+        st = notify.send("hi", env=env, owner="david", project="odoo-erp")
         self.assertEqual(st, "sent")
         self.assertEqual(posted, ["333"])
 
     def test_real_send_with_no_project_thread_still_self_heals(self):
         self._post(True)
         env = {"DISCORD_BOT_TOKEN": "t",
-               "DISCORD_NOTIFICATION_CHANNEL_ZBYNEK": "111"}
+               "DISCORD_NOTIFICATION_CHANNEL_DAVID": "111"}
         with m.patch.object(notify, "_spawn_provision_project_thread") as fake:
-            st = notify.send("hi", env=env, owner="zbynek", project="odoo-erp")
+            st = notify.send("hi", env=env, owner="david", project="odoo-erp")
         self.assertEqual(st, "sent")
-        fake.assert_called_once_with("zbynek", "odoo-erp")
+        fake.assert_called_once_with("david", "odoo-erp")
 
     def test_dry_run_never_spawns_a_self_heal(self):
         # A preview call must have ZERO side effects beyond printing.
         env = {"DISCORD_BOT_TOKEN": "t",
-               "DISCORD_NOTIFICATION_CHANNEL_ZBYNEK": "111"}
+               "DISCORD_NOTIFICATION_CHANNEL_DAVID": "111"}
         with m.patch.object(notify, "_spawn_provision_project_thread") as fake:
-            notify.send("hi", env=env, owner="zbynek", project="odoo-erp",
+            notify.send("hi", env=env, owner="david", project="odoo-erp",
                        dry_run=True)
         fake.assert_not_called()
         self.assertEqual(self.log_lines(), [])
@@ -564,9 +570,9 @@ class TestSendProjectRouting(_HomeIsolated):
     def test_no_project_is_unaffected(self):
         self._post(True)
         env = {"DISCORD_BOT_TOKEN": "t",
-               "DISCORD_NOTIFICATION_CHANNEL_ZBYNEK": "111"}
+               "DISCORD_NOTIFICATION_CHANNEL_DAVID": "111"}
         with m.patch.object(notify, "_spawn_provision_project_thread") as fake:
-            st = notify.send("hi", env=env, owner="zbynek")
+            st = notify.send("hi", env=env, owner="david")
         self.assertEqual(st, "sent")
         fake.assert_not_called()
 

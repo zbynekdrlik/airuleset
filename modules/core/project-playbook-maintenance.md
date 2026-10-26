@@ -30,6 +30,6 @@ A `.claude/rules/<area>.md` arrives on its own when you touch a matching file �
 
 #### Post-ticket mandate
 
-Run the `playbook-review` skill **po každom tickete**, before the completion report — it emits the required `📔 Playbook:` line and `stop-check-playbook-review.sh` enforces its presence. Both own the mandate; this module just points at it.
+Run the `playbook-review` skill **po každom tickete**, before the completion report — its result is the report's `playbook:` token (or a `📔 Playbook:` line), enforced by `stop-check-prose-violations.sh`.
 
 Applies to all rewordings and semantic equivalents.

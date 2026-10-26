@@ -64,18 +64,14 @@ After writing: check everything you touched for bloat.
 - Keep the `## Playbook router` section ≤ ~10 lines. If it's growing beyond that, the router is becoming documentation — trim to the active areas only.
 - In-repo edits (skill files, CLAUDE.md) ride the ticket's PR so the learning is visible in the diff.
 
-## Step 4 — Emit the completion-report line
+## Step 4 — Emit the completion-report token
 
-Add **exactly one** `📔 Playbook:` line to the completion report (after the `**Goal:**`/`**What changed:**` line, before the terminal `✅ DONE:` marker):
-
-```
-📔 Playbook: <1–2 lines — what was learned, what was updated, which skill file was touched>
-```
-
-If nothing was found in Step 1:
+Put the result in the `playbook:` token at the end of the report's `✅ Overené:` line (#1137):
 
 ```
-📔 Playbook: nič nové — review ran, no reusable procedure or stale entry found
+✅ Overené: … · playbook: <what was learned/updated, which file was touched>
 ```
 
-The line is **mandatory** — the completion-report gate checks for it. "I skipped the review" is not acceptable; "review ran, nothing new" is.
+If nothing was found in Step 1: `playbook: none`. A separate `📔 Playbook: <…>` line is still accepted.
+
+The token is **mandatory** — `stop-check-prose-violations.sh` blocks a report without it. "I skipped the review" is not acceptable; "review ran, nothing new" is.

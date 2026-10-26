@@ -282,22 +282,6 @@ msg_lines() {
     return 0
 }
 
-# msg_line_no <text> <grep-args...> — 1-based line number of the first match,
-# or empty for "no match" AND for "could not tell". Feeds only the SOFT ordering
-# warning, so an unknown stays silent rather than manufacturing an order
-# violation out of a line number the hook never obtained.
-msg_line_no() {
-    local text="$1"
-    shift
-    local out="" rc=0
-    out=$(grep -m1 -n "$@" <<<"$text" 2>/dev/null) || rc=$?
-    if [ "$rc" -ge 2 ]; then
-        record_undet "$rc" "-m1 -n $*"
-        return 0
-    fi
-    printf '%s' "${out%%:*}"
-}
-
 # MSG_NOGOAL: MSG minus printed /goal TEMPLATE lines. The autopilot /goal
 # templates are sanctioned machinery text and legitimately contain phrases the
 # prose checks below hunt ("start…run…immediately…or…check" tripped the
@@ -1543,8 +1527,13 @@ fi
 IS_COMPLETION_HEADING=$(msg_has "$MSG" -qE "^## ✅ Work Complete|^✅ Work Complete" && echo 1 || echo 0)
 HAS_PR_URL=$(msg_has "$MSG" -qE "https?://github\.com/[^[:space:]]+/pull/[0-9]+" && echo 1 || echo 0)
 HAS_COMPLETION_PHRASE=$(msg_has "$MSG" -qiE "awaiting[^.]{0,40}(merge|your merge|merge it)|mergeable[, ]+clean|all [0-9]+/[0-9]+ checks (are )?(green|passing)|all checks (are )?green|mergeStateStatus=CLEAN|mergeable=MERGEABLE|ready to merge|Plan steps \([0-9]+/[0-9]+ done\)|✅ Work Complete|work complete[: ]|per pr-merge-policy|merged (to|into) (main|master)|auto-?merged" && echo 1 || echo 0)
+# Goal/outcome pair: `**Úloha:**`/`**Riešenie:**` (#1137) or the old
+# `**Goal:**`/`**What changed:**`. Alternation, never a bracket class, for the
+# multibyte letters (a [] class matches per BYTE under a bare C locale).
+GOAL_RX='\*\*(goal|(ú|u)loha):?\*\*|^(goal|(ú|u)loha):'
+OUTCOME_RX='\*\*(what changed|outcome|rie(š|s)enie):?\*\*|^(what changed|outcome|rie(š|s)enie):'
 HAS_GOAL_AND_OUTCOME=0
-if msg_has "$MSG" -qiE "\*\*Goal:?\*\*|^Goal:" && msg_has "$MSG" -qiE "\*\*What changed:?\*\*|\*\*Outcome:?\*\*|^What changed:|^Outcome:"; then
+if LC_ALL=C.UTF-8 msg_has "$MSG" -qiE "$GOAL_RX" && LC_ALL=C.UTF-8 msg_has "$MSG" -qiE "$OUTCOME_RX"; then
     HAS_GOAL_AND_OUTCOME=1
 fi
 
@@ -1589,256 +1578,126 @@ fi
 # HARD: completion-report intent detected but canonical heading missing.
 # This is the slovnormal-mcp failure mode — prose report bypassed all audits.
 if [ "$IS_COMPLETION_SIGNAL" = "1" ] && [ "$IS_COMPLETION_HEADING" = "0" ]; then
-    echo "VIOLATION: Your message is a completion report (PR URL + completion-signal phrase or Goal/What changed prose) but does NOT start with the canonical heading '## ✅ Work Complete'. completion-report.md MANDATES the FULL template every time — heading + audits block + --- separator + Goal + What changed + 🌐 URLs + PR title/URL. Prose substitutes ('PR clean. 8/8 checks green. mergeable=MERGEABLE...') are BANNED — they bypass the audit gates the user relies on (per slovnormal-mcp PR #9 incident: missing /requesting-code-review, missing 🌐 URLs, missing /plan-check all slipped through because no heading was present)." >&2
-    echo "" >&2
-    echo "  Rewrite the message NOW using the COMPACT template (#940, ~7 lines):" >&2
-    echo "" >&2
+    echo "VIOLATION: Your message is a completion report but does NOT start with the canonical heading '## ✅ Work Complete' — a prose summary bypasses the verification gates. Rewrite it with the template (completion-report.md):" >&2
     echo "    ## ✅ Work Complete" >&2
-    echo "" >&2
-    echo "    ✅ /plan-check: N/N · /review: 0 🔴 0 🟡 0 🔵 · /requesting-code-review: 0 🔴 0 🟡 0 🔵" >&2
-    echo "    ✅ Výstup: <konkrétne hodnoty z artefaktu> | n/a — <prečo>" >&2
-    echo "    ✅ Regression test: <test>:<line> — RED <sha>, GREEN <sha>   (bug-fix only; OMIT for non-bug)" >&2
-    echo "    🌐 <url>   (user-clickable URL; omit if no web UI)" >&2
-    echo "    **Goal:** <1 sentence> — **What changed:** <1-2 sentences>" >&2
-    echo "    📔 Playbook: <captured | n/a>" >&2
-    echo "    ✅ DONE: <one-line>" >&2
-    echo "" >&2
-    echo "  FORK-NO-MERGE / BRANCH-MERGE hand-off: same template, replace deploy lines with:" >&2
-    echo "    ✅ Lokálne overenie: <tests+lint result on the fork/integration branch>" >&2
-    echo "    ✅ Hand-off: READY-FOR-REVIEW komentár na #N (<topic>) + --handoff karta" >&2
-    echo "" >&2
-    echo "  See completion-report.md → 'MANDATORY compact template'." >&2
+    echo "    **Úloha:** <čo sa chcelo>" >&2
+    echo "    **Riešenie:** <ako sa to vyriešilo>  🌐 <url ak má práca UI>" >&2
+    echo "    ✅ Overené: plan N/N · review 0 🔴 0 🟡 0 🔵 · deep 0 🔴 0 🟡 0 🔵 · arch <oblasť> OK · Výstup: <hodnoty | n/a — prečo> · playbook: <lekcia | none>" >&2
+    echo "    ✅ DONE: <jeden riadok>" >&2
+    echo "  Hand-off streams: Riešenie names the READY-FOR-REVIEW hand-off (+ --handoff karta)." >&2
     add_hard "Prose completion report missing canonical '## ✅ Work Complete' heading — use the full template, not a prose summary"
 fi
 
-# Check completion report has Goal + What changed + plan-check + /review lines
+# Completion-report fields (#1137, issue 1233: the owner reads only what the task
+# was and how it was solved, so the report is four lines; every gate behind it
+# stays). ONE `✅ Overené:` line carries the verification tokens:
+#   plan N/N · review 0 🔴 0 🟡 0 🔵 · deep 0 🔴 0 🟡 0 🔵 · arch <area> OK|REWORK fixed|REWORK #N
+#   · Výstup: <observed values | n/a — why> · playbook: <lesson | none>
+# The pre-#1137 forms (the `/plan-check` audit line, `✅ Výstup:`, `🏛 Architektúra:`,
+# `📔 Playbook:`, `**Goal:**`/`**What changed:**`) are still accepted so an older
+# session is never blocked. Presence probes are REQUIRED-FIELD msg_has (fail OPEN,
+# #194); the Výstup substance probes fire only on positively obtained text.
+# LC_ALL=C.UTF-8 wherever a pattern carries a diacritic (#316).
 if [ "$IS_COMPLETION" = "1" ]; then
-    HAS_GOAL=$(msg_has "$MSG" -qiE "\*\*Goal:?\*\*|^Goal:" && echo 1 || echo 0)
-    HAS_OUTCOME=$(msg_has "$MSG" -qiE "\*\*What changed:?\*\*|\*\*Outcome:?\*\*|^What changed:|^Outcome:" && echo 1 || echo 0)
-    HAS_PLAN_CHECK=$(msg_has "$MSG" -qiE "/plan.?check|plan-check.*(fulfilled|passed|clean|complete)|✅.*plan.?check" && echo 1 || echo 0)
-    # /review audit must include all THREE counters (🔴 🟡 🔵) — no skipping minor findings.
-    # Accept either explicit "0 🔴 0 🟡 0 🔵" or "all findings addressed" with 🔵 mentioned.
-    # MUST disambiguate from /requesting-code-review which contains "/review" as substring.
-    # Use perl negative lookbehind: /review preceded by NOT "code-" (rules out requesting-code-review).
-    #
-    # #194 — the gaps are BOUNDED (`.{0,300}`), not `.*`. An unbounded `.*A.*B.*C`
-    # explores a split-point space quadratic in the number of candidate `A`s, and
-    # message text alone could drive it past PCRE's backtracking limit: measured on
-    # GNU grep 3.11, a `/review: ` line carrying ~5000 repeats of `0 🔴` (30 KB)
-    # exits 2 in 0.11 s, while the same size of neutral filler answers cleanly.
-    # That removed the TRIGGER as well as the amplifier. The bound is also the
-    # tighter reading of the rule: an audit line is a short fixed template, and an
-    # unbounded gap would happily match `/review:` at the head of a 300 KB line and
-    # its counters at the tail.
-    #
-    # The bound is sized by what REAL reports look like, never by speed: with
-    # grep's required-literal pre-filter defeated (decoys placed before the
-    # anchor), every candidate from 120 to 1000 answers a 1 MB adversarial line
-    # in under 0.35 s, while the unbounded form errors at 30 KB. 120 was too
-    # tight and rejected two ordinary shapes outright — a verbose standards
-    # sentence (gap 169) and a found-and-fixed summary (gap 161) — which turned
-    # the bound into a new way to report a line that is PRESENT as MISSING, an
-    # accusation the agent cannot act on because nothing names length. 300
-    # clears the longest real shape measured by ~1.8x. Note the twin HAS_RCR
-    # probe below is unbounded ERE (a DFA — no backtracking limit to hit), so a
-    # bound tight enough to reject a /review line passes its identical twin,
-    # which makes the resulting block undiagnosable from its own reason.
-    HAS_REVIEW=$(msg_has "$MSG" -qP '(?<!code-)/review[: ].{0,300}0 🔴.{0,300}0 🟡.{0,300}0 🔵|(?<!code-)/review[: ].{0,300}all (findings|issues|items).{0,300}addressed|(?<!code-)/review[: ].{0,300}addressed in commit' && echo 1 || echo 0)
-    # requesting-code-review (superpowers skill, deep pass) — must also pass clean.
-    # Distinguish from /review by requiring the literal token "requesting-code-review" or "request.*code.?review" or "superpowers:requesting".
-    HAS_RCR=$(msg_has "$MSG" -qiE "requesting.?code.?review.*0 🔴.*0 🟡.*0 🔵|requesting.?code.?review.*all (findings|issues|items).*addressed|requesting.?code.?review.*addressed in commit|✅.*requesting.?code.?review.*0 🔴.*0 🟡.*0 🔵|✅.*superpowers:requesting.*0 🔴.*0 🟡.*0 🔵|✅.*request.?code.?review.*0 🔴.*0 🟡.*0 🔵|✅.*code.?review.*\(deep\).*0 🔴.*0 🟡.*0 🔵" && echo 1 || echo 0)
-    if [ "$HAS_GOAL" = "0" ] || [ "$HAS_OUTCOME" = "0" ] || [ "$HAS_PLAN_CHECK" = "0" ] || [ "$HAS_REVIEW" = "0" ] || [ "$HAS_RCR" = "0" ]; then
-        echo "VIOLATION: Work Complete report is missing required lines. completion-report.md MANDATES this structure (audits at TOP, Goal/What changed/PR URL at BOTTOM — terminal scrolls, last lines are what the user sees):" >&2
-        [ "$HAS_GOAL" = "0" ] && { echo "  - MISSING: '**Goal:** <1 sentence restating the user's ask in plain language>' — placed at the bottom, after audits." >&2; add_hard "Missing **Goal:** line"; }
-        [ "$HAS_OUTCOME" = "0" ] && { echo "  - MISSING: '**What changed:** <1-2 sentences in user-visible language>' — placed at the bottom, after audits." >&2; add_hard "Missing **What changed:** line"; }
-        [ "$HAS_PLAN_CHECK" = "0" ] && { echo "  - MISSING: '✅ /plan-check: N/N fulfilled' — invoke the plan-check skill, fix any NOT DONE items, then add the line." >&2; add_hard "Missing ✅ /plan-check audit line"; }
-        [ "$HAS_REVIEW" = "0" ] && { echo "  - MISSING: '✅ /review: clean — 0 🔴 0 🟡 0 🔵 (or addressed in commit <sha>)' — apply /review standards (Correctness/Security/Performance/Maintainability/Style), fix every 🔴 critical, 🟡 warning, AND 🔵 suggestion inside the diff. The 🔵 counter is required — '0 🔴 0 🟡' alone is incomplete (no skipping minor findings). Then add the line." >&2; add_hard "Missing ✅ /review audit line with 0 🔴 0 🟡 0 🔵"; }
-        [ "$HAS_RCR" = "0" ] && { echo "  - MISSING: '✅ /requesting-code-review: clean — 0 🔴 0 🟡 0 🔵 (or addressed in commit <sha>)' — invoke the superpowers:requesting-code-review skill (the DEEP pass), fix every 🔴/🟡/🔵 it surfaces, then add the line. The user ALWAYS runs this after the completion report and it catches issues that /review misses — skipping = guaranteed rework. Both /review AND /requesting-code-review are required." >&2; add_hard "Missing ✅ /requesting-code-review audit line with 0 🔴 0 🟡 0 🔵"; }
-        echo "See completion-report.md for the exact template." >&2
+    OVR_RX='✅[[:space:]]*\**[[:space:]]*(overen(é|e)|verified)[[:space:]]*\**[[:space:]]*:'
+    OVR_LINE=""
+    if _OVR_LINES=$(LC_ALL=C.UTF-8 msg_lines "$MSG" -iE "^[[:space:]]*${OVR_RX}"); then
+        OVR_LINE=$(head -1 <<<"$_OVR_LINES")
     fi
-
-    # Bug-fix PRs MUST include a regression-test evidence line.
-    # Triggered when the report mentions: Closes/Fixes/Resolves #N, or fix:/bug:/regression: in title,
-    # or PR title starts with "fix" / contains "bugfix" / "hotfix" / "patch".
-    IS_BUGFIX_REPORT=0
-    if msg_has "$MSG" -qiE '(closes|fixes|resolves)\s+#[0-9]+'; then IS_BUGFIX_REPORT=1; fi
-    if msg_has "$MSG" -qiE 'PR.*:.*\b(fix|bugfix|hotfix|patch|regression|repair)\b|^(fix|bugfix|hotfix|patch|regression):'; then IS_BUGFIX_REPORT=1; fi
-    if msg_has "$MSG" -qiE '\b(bug fix|bug-fix|regression fix|fixed (the )?(bug|regression|issue|defect))\b'; then IS_BUGFIX_REPORT=1; fi
-
-    if [ "$IS_BUGFIX_REPORT" = "1" ]; then
-        # Required line format examples:
-        #   ✅ Regression test: tests/foo_test.rs:42 — RED on a1b2c3d, GREEN on e4f5g6h
-        #   ✅ Regression test: e2e/login.spec.ts:15 — failed before fix (a1b2c3d), passes after fix (e4f5g6h)
-        HAS_REGRESSION=$(msg_has "$MSG" -qiE '✅\s*regression test:.*[a-f0-9]{7}' && echo 1 || echo 0)
-        if [ "$HAS_REGRESSION" = "0" ]; then
-            echo "VIOLATION: Bug-fix completion report missing the '✅ Regression test:' evidence line. Per regression-test-first.md, every bug fix needs a test commit BEFORE the fix commit, and the report must cite both SHAs:" >&2
-            echo "  Required line:" >&2
-            echo "    ✅ Regression test: <test_path>:<line> — RED on <test_sha>, GREEN on <fix_sha>" >&2
-            echo "  Or:" >&2
-            echo "    ✅ Regression test: <test_path>:<line> — failed before fix (<test_sha>), passes after fix (<fix_sha>)" >&2
-            echo "  See regression-test-first.md and completion-report.md." >&2
-            add_hard "Missing ✅ Regression test: <path>:<line> — RED <sha>, GREEN <sha> line on bug-fix PR"
-        fi
+    # The counters must be the post-fix state: exactly `0 🔴 0 🟡 0 🔵`, adjacent
+    # to their own token, so `review 1 🔴 … · deep 0 🔴 0 🟡 0 🔵` cannot borrow
+    # the deep pass's zeros (the bounded old-form probe below can).
+    _C3='[[:space:]]*:?[[:space:]]*0[[:space:]]*🔴[[:space:]]*0[[:space:]]*🟡[[:space:]]*0[[:space:]]*🔵'
+    _TOK='(^|[^[:alnum:]_-])'
+    HAS_GOAL=$(LC_ALL=C.UTF-8 msg_has "$MSG" -qiE "$GOAL_RX" && echo 1 || echo 0)
+    HAS_OUTCOME=$(LC_ALL=C.UTF-8 msg_has "$MSG" -qiE "$OUTCOME_RX" && echo 1 || echo 0)
+    HAS_PLAN_CHECK=0; HAS_REVIEW=0; HAS_RCR=0; HAS_ARCH=0
+    if [ -n "$OVR_LINE" ]; then
+        HAS_PLAN_CHECK=$(msg_has "$OVR_LINE" -qiE "${_TOK}/?plan(.?check)?:?[[:space:]]+[0-9]+[[:space:]]*/[[:space:]]*[0-9]+" && echo 1 || echo 0)
+        HAS_REVIEW=$(msg_has "$OVR_LINE" -qiE "${_TOK}/?review${_C3}" && echo 1 || echo 0)
+        HAS_RCR=$(msg_has "$OVR_LINE" -qiE "${_TOK}deep${_C3}" && echo 1 || echo 0)
+        HAS_ARCH=$(msg_has "$OVR_LINE" -qE "${_TOK}arch[^·]*([[:space:]]OK\b|REWORK[[:space:]]+(fixed|#[0-9]+))" && echo 1 || echo 0)
     fi
-
-    # The mandatory '✅ Výstup:' output-content verification line — the montalu3
-    # incident (2026-08-13): order-status notification emails shipped with 0 €
-    # prices everywhere; only SEND/DELIVERY was verified, never the RENDERED
-    # content, although the sent mail was readable from the DB. The prose rule
-    # (autonomous-verification.md, "liveness is not verification") provably
-    # failed, so the report-level trace is MECHANICAL now — same family as the
-    # '✅ Regression test:' check above. The line is UNCONDITIONAL for every
-    # completion report (heading, signal and PR-less routes alike): the hook
-    # cannot judge whether the work produced a user-facing artifact — only the
-    # agent can — so the CLASSIFICATION itself must be visible and conscious:
-    # either concrete OBSERVED values read back from the real artifact, or an
-    # explicit 'n/a — <prečo>'. Fail directions per the #194 taxonomy above:
-    # the presence probe is a REQUIRED-FIELD msg_has (fail OPEN — an
-    # unevaluable check never becomes an accusation); the substance and
-    # n/a-vs-🌐 contradiction probes only ever fire on POSITIVELY obtained
-    # evidence (a msg_lines failure skips them, msg_missing's unknown skips
-    # the contradiction). LC_ALL=C.UTF-8 is forced on every grep whose
-    # pattern carries a diacritic ('Výstup' — the '-i' fold next to a
-    # multibyte char is locale-dependent under a bare C locale, the same
-    # lesson the Slovak detectors above already encode).
-    # #993 — the mandatory '🏛 Architektúra:' area-review verdict line. Every
-    # integrated change passes a main-session (Fable) AREA review (SKILL.md bod
-    # f) with a binary verdict, and it must be VISIBLE in the report. Same
-    # UNCONDITIONAL / fail-OPEN discipline as the Výstup line: the presence probe
-    # is a REQUIRED-FIELD msg_has (an unevaluable grep never becomes an
-    # accusation). LC_ALL forced (the pattern carries the 🏛 multibyte glyph +
-    # the 'á' diacritic — the same locale lesson as Výstup).
-    # #993-review 🟡: U+1F3DB is TEXT-default, so models/terminals routinely emit
-    # it with the VS16 emoji-presentation selector (U+FE0F) — `🏛️`. Accept an
-    # OPTIONAL VS16 after the glyph so a correct report is never false-blocked.
+    # Old forms. HAS_REVIEW's gaps are BOUNDED (`.{0,300}`, #194: an unbounded
+    # `.*A.*B.*C` hits PCRE's backtracking limit on a crafted line); `(?<!code-)`
+    # keeps /requesting-code-review out of the /review probe.
+    [ "$HAS_PLAN_CHECK" = "1" ] || HAS_PLAN_CHECK=$(msg_has "$MSG" -qiE "/plan.?check|plan-check.*(fulfilled|passed|clean|complete)|✅.*plan.?check" && echo 1 || echo 0)
+    [ "$HAS_REVIEW" = "1" ] || HAS_REVIEW=$(msg_has "$MSG" -qP '(?<!code-)/review[: ].{0,300}0 🔴.{0,300}0 🟡.{0,300}0 🔵|(?<!code-)/review[: ].{0,300}all (findings|issues|items).{0,300}addressed|(?<!code-)/review[: ].{0,300}addressed in commit' && echo 1 || echo 0)
+    [ "$HAS_RCR" = "1" ] || HAS_RCR=$(msg_has "$MSG" -qiE "requesting.?code.?review.*0 🔴.*0 🟡.*0 🔵|requesting.?code.?review.*all (findings|issues|items).*addressed|requesting.?code.?review.*addressed in commit|✅.*superpowers:requesting.*0 🔴.*0 🟡.*0 🔵|✅.*request.?code.?review.*0 🔴.*0 🟡.*0 🔵|✅.*code.?review.*\(deep\).*0 🔴.*0 🟡.*0 🔵" && echo 1 || echo 0)
+    # #993-review: U+1F3DB is TEXT-default, so it often arrives with VS16 (U+FE0F).
     _ARCH_VS16=$'\xef\xb8\x8f'
-    ARCH_RX='🏛('"$_ARCH_VS16"')?[[:space:]]*\**[[:space:]]*(architekt[uú]ra|architecture)[[:space:]]*\**[[:space:]]*:'
-    HAS_ARCH=$(LC_ALL=C.UTF-8 msg_has "$MSG" -qiE "$ARCH_RX" && echo 1 || echo 0)
-    if [ "$HAS_ARCH" = "0" ]; then
-        echo "VIOLATION: Work Complete report missing the '🏛 Architektúra:' area-review verdict line — required on EVERY report (#993). Each integrated change passes a main-session (Fable) review of the whole AREA the change lands in (not just the diff), with a binary verdict; the verdict is visible in the report. Add one of:" >&2
-        echo "  Required line (one of):" >&2
-        echo "    🏛 Architektúra: <oblasť> — OK" >&2
-        echo "    🏛 Architektúra: <oblasť> — REWORK fixed" >&2
-        echo "    🏛 Architektúra: <oblasť> — REWORK #N (<názov>)" >&2
-        echo "  See completion-report.md and skills/autopilot/SKILL.md (Main review gate, bod f)." >&2
-        add_hard "Missing 🏛 Architektúra: line — state the area-review verdict (OK, REWORK fixed in this change, or REWORK #N with the separate rework ticket)"
+    ARCH_RX='🏛('"$_ARCH_VS16"')?[[:space:]]*\**[[:space:]]*(architekt(ú|u)ra|architecture)[[:space:]]*\**[[:space:]]*:'
+    [ "$HAS_ARCH" = "1" ] || HAS_ARCH=$(LC_ALL=C.UTF-8 msg_has "$MSG" -qiE "$ARCH_RX" && echo 1 || echo 0)
+    # Playbook proof (folded in from the retired stop-check-playbook-review.sh,
+    # same scope: heading reports only).
+    HAS_PLAYBOOK=1
+    if [ "$IS_COMPLETION_HEADING" = "1" ]; then
+        HAS_PLAYBOOK=$(msg_has "$MSG" -qE "📔 Playbook:" && echo 1 || echo 0)
+        if [ "$HAS_PLAYBOOK" = "0" ] && [ -n "$OVR_LINE" ]; then
+            HAS_PLAYBOOK=$(msg_has "$OVR_LINE" -qiE "${_TOK}playbook[[:space:]]*:" && echo 1 || echo 0)
+        fi
     fi
-    VYSTUP_RX='✅[[:space:]]*\**[[:space:]]*(v[ýy]stup|output)[[:space:]]*\**[[:space:]]*:'
-    HAS_VYSTUP=$(LC_ALL=C.UTF-8 msg_has "$MSG" -qiE "$VYSTUP_RX" && echo 1 || echo 0)
-    if [ "$HAS_VYSTUP" = "0" ]; then
-        echo "VIOLATION: Work Complete report missing the '✅ Výstup:' content-verification line — required on EVERY report. Work that produced/changed a user-facing OUTPUT artifact (email, document, render, UI screen, notification, report) must cite CONCRETE OBSERVED VALUES read back from the REAL artifact — never 'sent OK'/'delivered'/'funguje' (that is liveness, not content — the montalu3 0 € email incident). Work with NO user-facing output states the explicit n/a form instead:" >&2
-        echo "  Required line (one of):" >&2
-        echo "    ✅ Výstup: email obj. 2041 — cena 12,50 €, mena CZK, zákaznícke číslo zvýraznené v hlavičke" >&2
-        echo "    ✅ Výstup: n/a — čisto interná zmena hooku, žiadny user-facing artefakt" >&2
-        echo "  See completion-report.md (Hard rules) and autonomous-verification.md." >&2
-        add_hard "Missing ✅ Výstup: line — cite concrete observed values read back from the real artifact, or an explicit 'n/a — <prečo>'"
+
+    # Výstup (#446, montalu3 0 € emails): the value after `Výstup:` — the Overené
+    # token's segment, else the old `✅ Výstup:` line (line-anchored first, so a
+    # backticked MENTION of the template earlier in the message is not judged).
+    VYSTUP_RX='(v(ý|y)stup|output)[[:space:]]*\**[[:space:]]*:'
+    OLD_VYSTUP_RX="✅[[:space:]]*\**[[:space:]]*${VYSTUP_RX}"
+    # VYSTUP_VAL stays EMPTY when the value could not be read (the substance
+    # probes then skip); a value read back as empty becomes " " (value-free).
+    VYSTUP_VAL=""
+    HAS_VYSTUP=0
+    if [ -n "$OVR_LINE" ] && LC_ALL=C.UTF-8 msg_has "$OVR_LINE" -qiE "${_TOK}${VYSTUP_RX}"; then
+        HAS_VYSTUP=1
+        # The value runs from `Výstup:` to the next ` · <token>` (or line end).
+        if _VV=$(LC_ALL=C.UTF-8 sed -E "s/^.*${_TOK}${VYSTUP_RX}[[:space:]]*//I; s/[[:space:]]*·[[:space:]]*(playbook|arch|plan|review|deep)([^[:alnum:]].*)?$//I" <<<"$OVR_LINE" 2>/dev/null); then
+            VYSTUP_VAL="${_VV:- }"
+        fi
     else
-        # Line present — judge its SUBSTANCE, but only on positively obtained
-        # text: a msg_lines failure leaves VYSTUP_LINE empty and every probe
-        # below is skipped (never an accusation built on an unevaluable read).
-        # Selection is LINE-ANCHORED first (adversarial review of this check,
-        # F2): a quoted MENTION of the template earlier in the message — e.g.
-        # prose narrating this hook's own stderr guidance, "`✅ Výstup: n/a —
-        # <prečo>`", before the rewritten report — sits mid-line behind a
-        # backtick and must not be the line the substance/contradiction probes
-        # judge, or a mention converts into a fail-CLOSED accusation against a
-        # report whose REAL line is fine. The unanchored fallback keeps the
-        # probes alive for an indented/prefixed real line; the presence probe
-        # above deliberately stays unanchored raw-MSG (fail-open: a mention
-        # can only make a missing line look present, never accuse).
-        VYSTUP_LINE=""
-        if _VYSTUP_LINES=$(LC_ALL=C.UTF-8 msg_lines "$MSG" -iE "^[[:space:]]*${VYSTUP_RX}"); then
-            VYSTUP_LINE=$(head -1 <<<"$_VYSTUP_LINES")
-        fi
-        if [ -z "$VYSTUP_LINE" ]; then
-            if _VYSTUP_LINES=$(LC_ALL=C.UTF-8 msg_lines "$MSG" -iE "$VYSTUP_RX"); then
-                VYSTUP_LINE=$(head -1 <<<"$_VYSTUP_LINES")
-            fi
-        fi
-        if [ -n "$VYSTUP_LINE" ]; then
-            VYSTUP_NA=0
-            if LC_ALL=C.UTF-8 msg_has "$VYSTUP_LINE" -qiE "${VYSTUP_RX}[[:space:]]*n/a[[:space:]]*(—|–|-)+[[:space:]]*[^[:space:]]"; then
-                VYSTUP_NA=1
-            fi
-            if [ "$VYSTUP_NA" = "1" ]; then
-                # 'n/a' claims the work has NO user-facing output — a report
-                # whose own 🌐/📱 lines present a user-clickable surface
-                # contradicts that claim by construction (completion-report.md
-                # reserves those markers for THIS work's own user-facing
-                # surfaces). The accusation fires only on a POSITIVE 🌐/📱
-                # sighting: msg_missing resolves unknown as "lacks it", so an
-                # unevaluable check skips, never accuses.
-                if ! msg_missing "$MSG" -qE "^[[:space:]]*(🌐|📱)"; then
-                    echo "VIOLATION: '✅ Výstup: n/a' contradicts this report's own 🌐/📱 line(s) — the report itself presents a user-clickable surface, so the work HAS a user-facing output. Open that live surface, read real values from it (rendered page content, UI screen values, the version label) and cite them on the Výstup line instead of n/a." >&2
-                    add_hard "✅ Výstup: n/a while the report lists a 🌐/📱 user-facing surface — read real observed values from that live surface instead"
-                fi
-            else
-                # Value floor: a genuine read-back essentially always carries a
-                # digit (price, order number, version, count) or a quoted span
-                # (an observed heading/label) — 'odoslané OK' carries neither.
-                # A bare 'n/a' with no reason lands here too (the n/a branch
-                # above requires the dash + a stated reason). Alternation of
-                # literal quote characters, never a bracket class — a multibyte
-                # char inside [] matches per-BYTE under a bare C locale.
-                if ! LC_ALL=C.UTF-8 msg_has "$VYSTUP_LINE" -qE '[0-9]|"|„|“|”|«|»|‚|‘|’|'\'; then
-                    echo "VIOLATION: The '✅ Výstup:' line carries no concrete observed value — a real read-back from the artifact has a number (cena, číslo objednávky, verzia, počet) or a quoted span; 'odoslané OK'/'delivered'/'funguje' is liveness, not content. Open the REAL artifact (the sent email from the DB, the rendered document, the live UI screen) and cite what you actually SAW — the values must be ON the '✅ Výstup:' line itself (one line; a continuation line below it is not scanned). If the work truly has no user-facing output, write the explicit form '✅ Výstup: n/a — <prečo>'." >&2
-                    add_hard "✅ Výstup: line is value-free — cite concrete observed values (numbers/quoted text) read from the real artifact, or an explicit 'n/a — <prečo>'"
-                fi
-            fi
+        HAS_VYSTUP=$(LC_ALL=C.UTF-8 msg_has "$MSG" -qiE "$OLD_VYSTUP_RX" && echo 1 || echo 0)
+        _VL=""
+        if _VLS=$(LC_ALL=C.UTF-8 msg_lines "$MSG" -iE "^[[:space:]]*${OLD_VYSTUP_RX}"); then _VL=$(head -1 <<<"$_VLS"); fi
+        if [ -z "$_VL" ] && _VLS=$(LC_ALL=C.UTF-8 msg_lines "$MSG" -iE "$OLD_VYSTUP_RX"); then _VL=$(head -1 <<<"$_VLS"); fi
+        if [ -n "$_VL" ] && _VV=$(LC_ALL=C.UTF-8 sed -E "s/^.*${OLD_VYSTUP_RX}//I" <<<"$_VL" 2>/dev/null); then
+            VYSTUP_VAL="${_VV:- }"
         fi
     fi
 
-    # Check ORDER: Goal/What changed must appear AFTER audit lines (audits at top, Goal at bottom)
-    # Routed through msg_line_no so an errored lookup is RECORDED rather than
-    # reading as "no Goal line" (#194 companion 5). An unknown line number stays
-    # empty and the ORDER check below simply does not fire — this warning is
-    # SOFT, and manufacturing an ordering claim from a number the hook never
-    # obtained is the one thing it must not do.
-    GOAL_LINE=$(msg_line_no "$MSG" -E "\*\*Goal:?\*\*")
-    AUDIT_LINE=$(msg_line_no "$MSG" -E "✅.*(/plan.?check|review.*clean|review.*0 🔴)")
-    if [ -n "$GOAL_LINE" ] && [ -n "$AUDIT_LINE" ] && [ "$GOAL_LINE" -lt "$AUDIT_LINE" ]; then
-        echo "VIOLATION: 'Goal' line appears BEFORE the audit lines. Wrong order. The terminal scrolls — the user only sees the LAST visible passage without scrolling back. Put audits/CI/plan-check/review at the TOP, then a '---' separator, then Goal + What changed + PR URL + ❓Question at the BOTTOM. See completion-report.md → 'Why this order'." >&2
+    _MISS=()
+    [ "$HAS_GOAL" = "1" ] || _MISS+=("**Úloha:** (what was asked, plain language)")
+    [ "$HAS_OUTCOME" = "1" ] || _MISS+=("**Riešenie:** (how it was solved)")
+    [ "$HAS_PLAN_CHECK" = "1" ] || _MISS+=("plan N/N (run the plan-check skill, fix every NOT DONE item)")
+    [ "$HAS_REVIEW" = "1" ] || _MISS+=("review 0 🔴 0 🟡 0 🔵 (fix every /review finding, then report the post-fix zeros)")
+    [ "$HAS_RCR" = "1" ] || _MISS+=("deep 0 🔴 0 🟡 0 🔵 (superpowers:requesting-code-review, every finding fixed)")
+    [ "$HAS_ARCH" = "1" ] || _MISS+=("arch <oblasť> OK / REWORK fixed / REWORK #N (area-review verdict, #993; old form 🏛 Architektúra: <oblasť> — REWORK fixed)")
+    [ "$HAS_VYSTUP" = "1" ] || _MISS+=("Výstup: <values read back from the real artifact> or n/a — <why> (#446)")
+    [ "$HAS_PLAYBOOK" = "1" ] || _MISS+=("playbook: <lesson | none> (run the playbook-review skill; a lesson goes to the project's .claude/rules/<area>.md; 📔 Playbook: also accepted)")
+    if [ "${#_MISS[@]}" -gt 0 ]; then
+        echo "VIOLATION: Work Complete report is missing required fields. Template (completion-report.md):" >&2
+        echo "    **Úloha:** <čo sa chcelo>  /  **Riešenie:** <ako sa to vyriešilo>  🌐 <url ak UI>" >&2
+        echo "    ✅ Overené: plan N/N · review 0 🔴 0 🟡 0 🔵 · deep 0 🔴 0 🟡 0 🔵 · arch <oblasť> OK · Výstup: <hodnoty | n/a — prečo> · playbook: <lekcia | none>" >&2
+        for _m in "${_MISS[@]}"; do
+            echo "  - MISSING: $_m" >&2
+            add_hard "Missing $_m"
+        done
     fi
 
-    # Check trailing question is clearly marked with ❓
-    LAST_CHAR=$(echo "$MSG" | tr -d '[:space:]' | tail -c 1)
-    # The ❓ marker EXONERATES a trailing "?", so ask whether it is MISSING.
-    if [ "$LAST_CHAR" = "?" ] && msg_missing "$MSG" -qE "❓"; then
-        echo "VIOLATION: Your message ends with '?' but no ❓ marker is present. Questions must be clearly marked so the user spots them in the terminal scroll — they can't tell a question from a status line at a glance. Use '❓ **Question:** <concise 1-2 sentence question>' as the very last line. If it isn't actually a question for the user, rephrase as a statement. See completion-report.md → 'Pending question'." >&2
-    fi
-fi
-
-# Check bare PR/issue numbers without titles — ALL messages (not just completion reports).
-# Per issue-reference-context.md: the user manages many projects, does NOT keep tickets
-# open, and cannot decode a bare '#N' by number. EVERY reference the user reads — status
-# updates, milestone pings, mid-work narration, "filed as", "closes", plan steps,
-# completion reports — must carry the title/topic next to the number.
-# Soft warning (stderr, not a hard block): the rule does the enforcing; this catches slips
-# without trapping the agent on edge cases (e.g. a 'Closes #N' inside a commit-message block,
-# which is exempt git syntax).
-# Right: 'PR #54: <title>' / '#42 (karaoke sanitizer)' / 'Closes #234 (driver.rs cap)'.
-BARE_REF=0
-# "issue|PR|pull request|pull #N" NOT immediately followed by ':' or ' (' (a title/topic).
-if msg_has "$MSG" -qPi "\b(issue|PR|pull request|pull) #[0-9]+(?! *[:(])(?![0-9])"; then BARE_REF=1; fi
-# action-verb "#N" (closes/fixes/resolves/filed/tracked/see/blocked by/depends on/addressed in)
-# NOT followed by ' (' (a parenthetical topic).
-if msg_has "$MSG" -qPi "\b(closes|fixes|resolves|fixed|filed as|filed:|tracked as|tracking|see|blocked by|depends on|address(ed)? in) #[0-9]+(?! *\()(?![0-9])"; then BARE_REF=1; fi
-if [ "$BARE_REF" = "1" ]; then
-    echo "VIOLATION (soft): Bare issue/PR number without its title/topic. The user does NOT keep tickets open and cannot decode '#N' by number — this applies to EVERY message, not just completion reports." >&2
-    echo "  - WRONG: 'PR #54 — mergeable, clean' / 'Fixes #234' / 'Working on #42' / 'See #91'" >&2
-    echo "  - RIGHT: 'PR #54: Refactor driver.rs and add lyrics test' / 'Fixes #234 (driver.rs over 1000-line cap)' / 'Working on #42 (karaoke sanitizer)' / 'See #91 (NDI rebind)'" >&2
-    echo "Add the title/topic next to the number — copy it from 'gh issue view N' / 'gh pr view N'. Commit-message 'Closes #N' is exempt (git syntax). See issue-reference-context.md." >&2
-fi
-
-# Check for follow-up issue filings in completion reports.
-# Per complete-planned-work.md "Follow-up gate", same-PR small cleanups (enum migration,
-# type tightening, magic-number extraction, <100 LoC same-file polish) MUST land in the
-# current PR — NOT in a follow-up issue. Follow-ups are reserved for genuinely
-# out-of-scope work that fails the bundling gate (>300 LoC, schema change, API break,
-# security boundary, cross-cut refactor).
-if [ "$IS_COMPLETION" = "1" ]; then
-    if msg_has "$MSG" -qiE "follow.?up (filed|issue|tracked|created|opened|logged)[:= ]+#[0-9]+|filed (as|under) #[0-9]+ for (next|follow.?up|separate|dedicated)|tracked (in|as) #[0-9]+ (as|for) (separate|follow.?up|next|dedicated)|(will|to) address.*(in (a )?(next|follow.?up|dedicated|separate) pr|in (the )?next session)|(opened|created) #[0-9]+ (for|to track) (the )?(follow.?up|cleanup|tidy|polish|migration|refactor|migrate)"; then
-        echo "VIOLATION: You filed a follow-up issue from a completion report. Per complete-planned-work.md 'Follow-up gate', same-PR small cleanups (<100 LoC, same-file polish, enum migration, type tightening, magic-number extraction, missing test on touched path) MUST land in the CURRENT PR — not a follow-up. Follow-ups are reserved for work that FAILS the bundling gate (>300 LoC, DB schema change, API break, security boundary, cross-cut refactor). If the discovered task does NOT meet one of those criteria, close the follow-up issue and add a commit to THIS PR. See complete-planned-work.md → 'Follow-up gate' and ask-before-assuming.md pre-answered table." >&2
+    if [ -n "$VYSTUP_VAL" ]; then
+        if LC_ALL=C.UTF-8 msg_has "$VYSTUP_VAL" -qiE "^[[:space:]]*n/a[[:space:]]*(—|–|-)+[[:space:]]*[^[:space:]]"; then
+            # 'n/a' claims no user-facing output; a 🌐/📱 URL in the same report
+            # contradicts it. Fires only on a POSITIVE sighting (msg_missing's
+            # unknown skips).
+            if ! msg_missing "$MSG" -qE "^[[:space:]]*(🌐|📱)|[[:space:]](🌐|📱)[[:space:]]*https?://"; then
+                echo "VIOLATION: 'Výstup: n/a' contradicts this report's own 🌐/📱 URL — the work HAS a user-facing output. Open it and cite values read from it (page content, UI values, the version label)." >&2
+                add_hard "Výstup: n/a while the report lists a 🌐/📱 user-facing surface — read real observed values from that live surface instead"
+            fi
+        elif ! LC_ALL=C.UTF-8 msg_has "$VYSTUP_VAL" -qE '[0-9]|"|„|“|”|«|»|‚|‘|’|'\'; then
+            # Value floor: a real read-back carries a digit (price, order number,
+            # version, count) or a quoted span; 'odoslané OK' carries neither. A
+            # bare 'n/a' with no reason lands here too.
+            echo "VIOLATION: The Výstup value carries no concrete observed value — cite what you actually SAW in the real artifact (a number or a quoted span, on the same line), or write 'Výstup: n/a — <prečo>'. Send/delivery/'funguje' is liveness, not content." >&2
+            add_hard "Výstup value is value-free — cite concrete observed values (numbers/quoted text) read from the real artifact, or an explicit 'n/a — <prečo>'"
+        fi
     fi
 fi
 
@@ -1877,12 +1736,6 @@ if [ "$IS_COMPLETION" = "1" ]; then
             add_hard "Deferral phrase in completion report without explicit 'Filed as #N' / 'Tracked as #N' reference"
         fi
     fi
-fi
-
-# Check for "skip 🔵 review findings" / "🔵 deferred / out of scope / minor" patterns.
-# The user wants every review finding fixed inside the diff — no skipping minor issues.
-if msg_has "$MSG" -qiE "🔵.*(defer|skip|out of scope|not address|leave (it|them|for|to)|next (session|pr|commit)|not blocking|low.priority|nice.?to.?have|stylistic|cosmetic|address later|address next)|(defer|skip|leave|ignore).*🔵|out of scope.*(suggestion|🔵|stylistic|nit|nice.?to.?have|minor finding)|(suggestions?|minor findings?|🔵 findings?).*(defer|skip|out of scope|leave|next session|next pr|won.?t address|will not address|not addressing|can wait|low.priority|address later|address next)|(won.?t|will not|not) address(ing)?.*(suggestion|🔵|minor finding)"; then
-    echo "VIOLATION: You're skipping or deferring 🔵 (suggestion) review findings. The user wants the highest-quality code possible — fix EVERY review finding inside this PR's diff, including 🔵. Phrases like '🔵 deferred', '🔵 out of scope', '🔵 minor — leaving them', '🔵 stylistic — skip', '🔵 nice-to-have — defer', or 'won't address the suggestions' are banned. The ONLY allowed exception is a 🔵 finding that points at code OUTSIDE the diff — for that, file a GitHub issue with a title and reference it. NEVER silently skip a 🔵 inside the diff. See completion-report.md → 'Pre-completion gate'." >&2
 fi
 
 # Check for quality-bypass shortcut menus or "your call" delegation.
@@ -1962,71 +1815,6 @@ fi
 # option is a smaller VM"), so they warn without gating an honest message.
 if msg_has "$MSG" -qiE "your call|cheaper option|quicker option|easier path|you decide(.*merge)?|your decision|up to you.*merge"; then
     echo "VIOLATION: You shifted a decision back to the user ('your call' / 'you decide' / 'cheaper / quicker option' / 'easier path'). When the goals already determine the answer, make the call yourself and keep working. Genuine product/scope decisions the user has a stake in are still theirs — everything else is yours. See autonomous-quality-discipline.md, ask-before-assuming.md." >&2
-fi
-
-# Detect "STOP at green PR URL" / "Awaiting your merge it" / "Phase N remains gated" prose
-# These are template-bypass shorthands. If they appear, the message must use the full template.
-if msg_has "$MSG" -qiE "STOP at (the )?green pr|stop at green pr url|stop at green-pr"; then
-    if [ "$IS_COMPLETION_HEADING" = "0" ]; then
-        echo "VIOLATION: 'STOP at green PR URL' is template-bypass prose. Any 'we're done, PR is ready, awaiting merge' message MUST use the full Completion Report template (## ✅ Work Complete with audits, Goal, What changed, 🌐 URLs, PR title/URL). Replace the prose with the template. See completion-report.md → 'Full template every time'." >&2
-    fi
-fi
-
-# Detect "Phase N remains gated on Phase M merge" / "Phase N is gated on" / "next phase awaits"
-# This is a "Remaining/Future" mention disguised as plan continuity — banned per complete-planned-work.md.
-if msg_has "$MSG" -qiE "phase [0-9]+ (remains|is) gated on|phase [0-9]+ awaits|phase [0-9]+ blocked on .*(merge|phase)|next phase (awaits|gated|blocked)|gated on phase [0-9]+ merge"; then
-    echo "VIOLATION: 'Phase N remains gated on Phase M' is a 'Remaining / Future' mention disguised as plan continuity. complete-planned-work.md and completion-report.md ban these in the report. The next phase is the next session's prompt — do NOT explain gating here. Cut the line. See completion-report.md → 'Banned shortcuts'." >&2
-fi
-
-# Check for PR completion message missing the PR URL
-# Signal: completion language about a PR but no https://github.com/.../pull/N URL anywhere in message
-if msg_has "$MSG" -qiE "awaiting (your|merge)|pr (is )?(ready|mergeable)|mergeable[, ]+(clean|all)|all checks (are )?green|ready to merge|per pr-merge-policy|awaiting.*\"merge it\""; then
-    # The PR URL EXONERATES the announcement, so ask whether it is MISSING.
-    if msg_missing "$MSG" -qE "https?://github\.com/[^[:space:]]+/pull/[0-9]+"; then
-        echo "VIOLATION: You announced PR completion ('mergeable clean', 'awaiting merge', 'all checks green', etc.) without providing the PR URL. completion-report.md and pr-merge-policy.md MANDATE the PR URL on the completion line: '✅ PR: <https://github.com/.../pull/N> — mergeable, clean'. Always paste the full URL — the user works remotely and cannot click 'PR #11'. Use the EXACT completion-report.md template, not a prose summary." >&2
-    fi
-fi
-
-# Check deploy verification has 🌐 URL lines for USER-CLICKABLE web URLs.
-# Multi-environment (dev+prod / dev+staging / prod+staging) ⇒ require ≥2 🌐 lines.
-# Single UI deploy ⇒ require ≥1 🌐 line.
-# 🌐 lines list USER-clickable URLs (frontend / dashboard / admin) — NEVER backend/API URLs.
-# Backend URLs are agent verification evidence, not human clickables.
-# Gate: only fire on COMPLETION REPORTS or messages with explicit `✅ Deploy:` line.
-# Casual "deployed to dev1+dev2" mentions (admin chitchat) must NOT trigger this rule.
-HAS_DEPLOY_LINE=$(msg_has "$MSG" -qE "✅ Deploy:" && echo 1 || echo 0)
-if { [ "$IS_COMPLETION" = "1" ] || [ "$HAS_DEPLOY_LINE" = "1" ]; } && msg_has "$MSG" -qiE "✅ Deploy:|deploy.*(verified|complete|done|success|redeploy|auto.?redeploy)|verified.*deploy|deployed.*(to|successfully)"; then
-    # "Does the report carry enough 🌐 lines" is a REQUIRED-FIELD question, so an
-    # unanswerable count must NOT read as zero and become an accusation — it
-    # prints `?` and both branches below are skipped.
-    GLOBE_COUNT=$(msg_count "$MSG" -E "🌐.*https?://")
-
-    # Anti-pattern: 🌐 line listing a backend/API URL — clutters the user's clickable list.
-    GLOBE_HAS_BACKEND=$(msg_has "$MSG" -qiE "🌐.*(backend|/api/|api[: ]|:8000|:8080|:5000|api endpoint|api server)" && echo 1 || echo 0)
-
-    HAS_DEV=$(msg_has "$MSG" -qiE "\bdev\b|\bdevelopment\b" && echo 1 || echo 0)
-    HAS_PROD=$(msg_has "$MSG" -qiE "\bprod\b|\bproduction\b" && echo 1 || echo 0)
-    HAS_STAGING=$(msg_has "$MSG" -qiE "\bstaging\b|\bstage\b" && echo 1 || echo 0)
-    HAS_UI=$(msg_has "$MSG" -qiE "frontend|dashboard|\bui\b|web app|browser|admin panel" && echo 1 || echo 0)
-
-    MULTI_ENV=0
-    [ "$HAS_DEV" = "1" ] && [ "$HAS_PROD" = "1" ] && MULTI_ENV=1
-    [ "$HAS_DEV" = "1" ] && [ "$HAS_STAGING" = "1" ] && MULTI_ENV=1
-    [ "$HAS_PROD" = "1" ] && [ "$HAS_STAGING" = "1" ] && MULTI_ENV=1
-
-    if [ "$GLOBE_HAS_BACKEND" = "1" ]; then
-        echo "VIOLATION: A 🌐 URL line lists a backend/API URL (matched ':8000' / ':8080' / '/api/' / 'backend:' / 'api:'). The user reads the 🌐 list to click in a browser — backend URLs are noise there. Backend evidence belongs in '✅ Deploy:' (e.g. 'dev backend serves v1.0.97-dev.9 via /api/version'), NOT in the 🌐 list. Remove backend/API entries from 🌐. See completion-report.md → 'Dashboards & URLs'." >&2
-    fi
-
-    if [ "$GLOBE_COUNT" = "?" ]; then
-        :  # unknown count — see msg_count; never accuse on a number we don't have
-    elif [ "$MULTI_ENV" = "1" ] && [ "$GLOBE_COUNT" -lt 2 ]; then
-        echo "VIOLATION: Deploy mentions multiple environments (dev/staging/prod) but the report has only $GLOBE_COUNT clickable 🌐 URL line(s). List every USER-CLICKABLE web URL on its own '🌐 <env>: <url>' line — typically one per environment. Read the project's CLAUDE.md '## Dashboards' / '## URLs' section. Do NOT list backend/API URLs — only user-facing browser URLs. URLs in prose ('curl http://...') do NOT count. See completion-report.md → 'Dashboards & URLs'." >&2
-        add_hard "Multi-env deploy with <2 🌐 URL lines"
-    elif [ "$HAS_UI" = "1" ] && [ "$GLOBE_COUNT" -lt 1 ]; then
-        echo "VIOLATION: Deploy mentions a UI/frontend/dashboard but the report has no clickable 🌐 URL line. The user cannot click URLs buried in prose. Add at least one '🌐 <env>: <url>' line for the user-facing dashboard (NOT backend/API). See completion-report.md → 'Dashboards & URLs', and no-localhost-urls.md." >&2
-        add_hard "UI deploy with no 🌐 URL line"
-    fi
 fi
 
 # Check for a localhost/127.0.0.1/0.0.0.0 URL on a 🌐 (or 📱) line — issue #13

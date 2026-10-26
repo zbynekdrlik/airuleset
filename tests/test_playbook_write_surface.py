@@ -63,7 +63,8 @@ class TestMandateTargetsThePathScopedSurface(TestCase):
     def test_hook_reason_points_at_the_loading_surface(self):
         # the block message is the ONE piece of guidance a session sees at the
         # moment it must comply — it must not send the write to a dead surface
-        t = read("hooks/stop-check-playbook-review.sh")
+        # (#1137: the playbook proof now lives in the prose gate)
+        t = read("hooks/stop-check-prose-violations.sh")
         self.assertIn(".claude/rules/", t)
 
 

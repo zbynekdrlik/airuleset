@@ -504,7 +504,7 @@ class ReworkFixedOrOneTicket(unittest.TestCase):
         self.assertNotIn("Scope-gate: architecture-rework", auto)
         self.assertIn("open `architecture-rework` ticket does NOT integrate", auto)
         deep = _norm(_read("skills/completion-report-deep/DEEP.md"))
-        self.assertIn("— REWORK fixed", deep)
+        self.assertIn("`REWORK fixed` (patchwork fixed in this change)", deep)  # slim report
         self.assertNotIn("records the finding on the current ticket", deep)
         self.assertIn("REWORK fixed", _read("modules/core/completion-report.md"))
 

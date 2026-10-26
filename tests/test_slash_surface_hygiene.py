@@ -14,9 +14,9 @@
 # not being in the picker at all: `user-invocable: false` (documented
 # frontmatter field, code.claude.com/docs/en/skills.md) hides the skill
 # from the user picker while keeping model Skill-tool invocation. The
-# post-ticket mandate machinery is untouched: stop-check-playbook-review.sh
-# greps the 📔 Playbook: line in the completion report, never the command
-# name (locked by tests/test_playbook.py).
+# post-ticket mandate machinery is untouched: stop-check-prose-violations.sh
+# greps the report's playbook: token, never the command name (#1137, locked
+# by tests/test_slim_report_1137.py).
 import sys
 from pathlib import Path
 from unittest import TestCase

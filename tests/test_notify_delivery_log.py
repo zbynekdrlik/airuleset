@@ -28,6 +28,7 @@ that pollutes stderr while exiting 0 is otherwise invisible.
 """
 
 import os
+from unittest import mock
 import re
 import shutil
 import subprocess
@@ -61,6 +62,11 @@ class _HomeIsolated(unittest.TestCase):
         # under self.home; works under BOTH pytest and `unittest discover` (the
         # push gate never reads conftest.py's own isolation fixture).
         self.cdedup = self.home / "content-dedup"
+        # #1137: pin an empty owner (never on the owner policy): a bare box
+        # resolves owner=zbynek, whose non-alarm sends are suppressed now.
+        _pin = mock.patch.dict(os.environ, {"AIRULESET_NOTIFY_OWNER": ""})
+        _pin.start()
+        self.addCleanup(_pin.stop)
 
     @property
     def log(self):

@@ -81,6 +81,8 @@ class _Harness(unittest.TestCase):
                "ND_EMOJI": emoji, "ND_TEXT": text,
                "ND_CWD": str(cwd or ROOT),
                "AIRULESET_CONTENT_DEDUP_DIR": str(self.store),
+               # #1137: empty owner (a bare box resolves zbynek = suppressed)
+               "AIRULESET_NOTIFY_OWNER": "",
                "PATH": str(self.curldir) + os.pathsep + os.environ.get("PATH", "")}
         env.pop("DISCORD_NOTIFY_DRYRUN", None)
         env.pop("ND_DRYRUN_FILE", None)

@@ -22,6 +22,7 @@ These locks:
 """
 
 import os
+from unittest import mock
 import shutil
 import sys
 import tempfile
@@ -41,6 +42,11 @@ class _HomeIsolated(unittest.TestCase):
         self._orig_home = os.environ.get("HOME")
         os.environ["HOME"] = str(self.home)
         self.addCleanup(self._restore_home)
+        # #1137: pin an empty owner (never on the owner policy): a bare box
+        # resolves owner=zbynek, whose non-alarm sends are suppressed now.
+        _pin = mock.patch.dict(os.environ, {"AIRULESET_NOTIFY_OWNER": ""})
+        _pin.start()
+        self.addCleanup(_pin.stop)
         # Any suppressed send must NEVER touch the network — a spy proves it.
         self._orig_post = notify._post_discord
         self.posts = []

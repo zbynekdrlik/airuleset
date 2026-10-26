@@ -1,11 +1,11 @@
 """watchdog.owed_verify — #1097: verify a locally-derived "owed" candidate set
 against GitHub (state + closed_at) and scope it to the window's ROLE, composed
-onto the existing #534 ``owned_closed`` seam that watchdog jobs 24
-(``card_reconcile``) and 25 (``report_reconcile``) share.
+onto the existing #534 ``owned_closed`` seam of watchdog job 25
+(``card_reconcile``; its ``report_reconcile`` half is retired, #1137).
 
 Why this leaf exists
 --------------------
-Both jobs derive their owed set from ``watchdog.cards.merged_closes``, which runs
+The job derives its owed set from ``watchdog.cards.merged_closes``, which runs
 a ``Closes/Fixes/Resolves #N`` regex over EVERY commit merged on the delivery ref
 inside the 48 h window. Two defects that produced a false owner escalation on gk
 (2026-09-21, odoo-erp #4 — closed 2026-01-17, re-derived as freshly owed from the

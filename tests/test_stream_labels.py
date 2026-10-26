@@ -83,7 +83,7 @@ class TestSendHookAppendsStreamUser(unittest.TestCase):
             capture_output=True, text=True).stdout.strip()
         self.assertTrue(expected, "notify --project-label produced nothing")
         env = {**hermetic_hook_env(self), "ND_EMOJI": "✅", "ND_TEXT": "hotovo",
-              "ND_CWD": str(ROOT), "DISCORD_NOTIFY_DRYRUN": "1"}
+              "ND_CWD": str(ROOT), "DISCORD_NOTIFY_DRYRUN": "1", "AIRULESET_NOTIFY_OWNER": ""}  # #1137
         env.pop("ND_DRYRUN_FILE", None)
         r = subprocess.run(["bash", str(SEND_HOOK)], input="",
                            capture_output=True, text=True, env=env)

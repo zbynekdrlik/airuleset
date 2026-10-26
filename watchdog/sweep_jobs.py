@@ -220,7 +220,7 @@ def deliver_pending_done(now, send_fn, projects_dir, owner_by_sid=None,
         # on, so a later /goal re-poke re-recording the identical ✅ pings once
         # TOTAL across BOTH deliverers. Only on a real (or already-)delivery, never
         # a transient failure — the idle hook's confirm-gated LASTOK, mirrored.
-        if not dry_run and status in ("sent", "dedup"):
+        if not dry_run and status in ("sent", "dedup", "suppressed"):   # #1137 owner policy
             _write_ok_lastok(sid, content, pending_prefix)
         logs.append("delivered ✅ sid=%s [%s] idle=%dm"
                     % (sid[:8], project or "-", int(idle // 60)))

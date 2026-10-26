@@ -403,11 +403,12 @@ class RunOnceWiringSourceLock(unittest.TestCase):
         self.assertIn("make_owned_closed_filter()", self.src)
         self.assertIn("_owned_scope = make_verified_closed_filter(", self.src)
 
-    def test_same_composed_callable_handed_to_both_jobs(self):
+    def test_composed_callable_handed_to_card_reconcile(self):
+        # #1137: report_reconcile is retired, card_reconcile is the one consumer
         self.assertEqual(
-            2, self.src.count("owned_closed=_owned_scope"),
-            "both card_reconcile and report_reconcile must receive the SAME "
-            "composed callable via owned_closed=_owned_scope")
+            1, self.src.count("owned_closed=_owned_scope"),
+            "card_reconcile must receive the composed callable via "
+            "owned_closed=_owned_scope")
 
     def test_since_fn_uses_the_card_window(self):
         self.assertIn("CARD_WINDOW_S", self.src)

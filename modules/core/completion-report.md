@@ -1,11 +1,8 @@
 ### Completion Report
 
 **Context gate — related rules you MUST also apply:**
-- `complete-planned-work.md` — finish the job before reporting (no Remaining/Future/TODO sections)
-- `autonomous-verification.md` — ✅ means functional verification (clicked, confirmed), not liveness
-- `e2e-real-user-testing.md` — E2E rows reference real Playwright tests, not API smokes
-- `pr-merge-policy.md` — auto-merge default: the report is sent AFTER merged + deployed + verified; manual-marker (`airuleset:merge=manual`) projects stop at the green PR with ❓
+- `complete-planned-work.md` — finish the job before reporting
+- `autonomous-verification.md` — ✅ means functional verification, not liveness
+- `pr-merge-policy.md` — report AFTER merged + deployed + verified; manual-marker projects stop at the green PR with ❓
 
-**MANDATORY compact template (~7 lines, #940):** `## ✅ Work Complete` heading + ONE audit-summary line (plan-check + review + requesting-code-review) + `✅ Výstup:` line + `🏛 Architektúra:` line + `🌐` URL (if UI) + Goal/What changed + `📔 Playbook:` + terminal marker. `✅ Výstup:` is ALWAYS present — concrete OBSERVED values, or `n/a — <prečo>`. `🏛 Architektúra: <oblasť> — OK|REWORK fixed|REWORK #N` = area-review verdict (#993). Hook-enforced (`stop-check-prose-violations.sh`).
-
-The full template, hard rules, and enforcement details are in the situational companion `skills/completion-report-deep/DEEP.md` — loaded automatically on `plan-check`/`gh pr merge` commands. History + rationale: `.claude/rules-reference/completion-report-history.md` (#859).
+**MANDATORY 4-line template (#1137):** `## ✅ Work Complete` · `**Úloha:**` what was asked · `**Riešenie:**` how it was solved (+ `🌐 <url>` if UI) · `✅ Overené: plan N/N · review 0 🔴 0 🟡 0 🔵 · deep 0 🔴 0 🟡 0 🔵 · arch <oblasť> OK|REWORK fixed|REWORK #N · Výstup: <observed values | n/a — why> · playbook: <lesson | none>` · terminal marker. Hook-enforced (`stop-check-prose-violations.sh`); hard rules in `skills/completion-report-deep/DEEP.md` (auto-loads on `plan-check`/`gh pr merge`).

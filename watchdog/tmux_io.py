@@ -104,7 +104,7 @@ MACHINE_NUDGE_KINDS = frozenset({
     "bounce-verdict",
     # goal auto-arm / dying-subagent stuck-check
     "goal-sweep", "subagent-stuck",
-    # idle-pane backstops + report-owed card (jobs 8/11 + cards)
+    # idle-pane backstops + card flags (jobs 8/11 + card_flags)
     "bounce", "gk-request", "card",
     # #1036 Job 49 — Odoo task-hygiene overseer nudge (per-kind staged, OFF by
     # default; NOT a nudge_gate GATED_CATEGORY — its cadence is decided by

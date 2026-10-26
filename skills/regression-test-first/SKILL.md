@@ -50,15 +50,9 @@ NEVER use `[no-test: …]` to skip a bug fix whose logic CAN be unit-tested. If 
 
 **One sanctioned category: a CI-YAML conditional-logic fix** (a GitHub Actions `if:` / `needs.job.result` expression) has no realistic unit-testable surface outside a real workflow run — use `[no-test: ci-yaml conditional logic, not unit-testable outside a real run]` ONLY when the workflow file already carries its own self-check step (a `run:` block asserting the exact condition, so the regression guard IS running on every future push — just not as a `#[test]`/`def test_`-shaped unit test). This is deliberately a documented bypass category, not a new pattern-matcher: this repo has shipped a wrong CLASSIFIER fix three times already (#80, #91, #96) — widening the hook's own test-detection regex to recognize YAML self-checks would be a fourth surface for the same class of bug, for a case that already has a safe, honest, logged escape hatch (#41).
 
-#### Completion-report evidence (required for bug-fix PRs)
+#### Completion report
 
-When the PR fixes a bug, the completion report MUST include:
-
-```
-✅ Regression test: <test_path>:<line> — RED on <test_commit_sha>, GREEN on <fix_commit_sha>
-```
-
-Stop hook enforces this — completion reports for bug-fix PRs missing this line are blocked.
+The report no longer carries a regression-test line (#1137): the RED→GREEN commit order is enforced at push time by `hooks/pre-push-test-check.sh`.
 
 #### Anti-patterns (all rewordings apply)
 

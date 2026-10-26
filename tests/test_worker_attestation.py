@@ -54,8 +54,8 @@ class TestPlanCheckIsNoLongerAnUnbackedAttestation(unittest.TestCase):
         # The supervisor's SKILL.md text must say it RELAYS the worker's
         # plan: field, never that it independently re-runs a plan-check
         # skill call itself -- that was the exact unbacked-attestation bug.
-        idx = self.skill_text.find("/plan-check")
-        self.assertNotEqual(idx, -1, "SKILL.md no longer mentions /plan-check")
+        idx = self.skill_text.find("plan N/N")  # #1137: the Overené token
+        self.assertNotEqual(idx, -1, "SKILL.md no longer mentions plan N/N")
         window = self.skill_text[idx:idx + 500]
         self.assertIn("RELAYS", window)
         self.assertIn("plan:", window)
@@ -75,8 +75,10 @@ class TestPlaybookEnforcementClaimIsHonest(unittest.TestCase):
             "MUST carry the `\U0001F4D4 Playbook:` line (enforced by the "
             "Stop gate `stop-check-playbook-review.sh`)", self.text)
 
+    ANCHOR = "stop-check-prose-violations.sh` checks"  # #1137: playbook proof moved here
+
     def test_the_corrected_text_names_the_real_firing_surface(self):
-        idx = self.text.find("stop-check-playbook-review.sh")
+        idx = self.text.find(self.ANCHOR)
         self.assertNotEqual(idx, -1,
                             "the hook should still be named, just accurately")
         window = self.text[max(0, idx - 400):idx + 400]
@@ -87,7 +89,7 @@ class TestPlaybookEnforcementClaimIsHonest(unittest.TestCase):
         self.assertIn("Stop", window)
 
     def test_the_corrected_text_states_the_workers_real_obligation(self):
-        idx = self.text.find("stop-check-playbook-review.sh")
+        idx = self.text.find(self.ANCHOR)
         self.assertNotEqual(idx, -1)
         window = self.text[idx:idx + 400]
         self.assertRegex(window, r"[Ss]kill call")

@@ -182,10 +182,10 @@ class TestCompletionReportConversion(TestCase):
         self.assertIn("Hard rules", combined)
 
     def test_compact_template_reference(self):
-        # #940: the module names the compact template (~7 lines) and
-        # delegates the full skeleton to the DEEP companion.
-        self.assertIn("#940", self.module)
-        self.assertIn("compact template", self.module)
+        # #940 compact template -> #1137 (issue 1233) 4-line template: the
+        # module names it and delegates the hard rules to the DEEP companion.
+        self.assertIn("#1137", self.module)
+        self.assertIn("4-line template", self.module)
 
     def test_boundary_trigger_doctrine_removed(self):
         # #1084: --self trigger REMOVED — no Y1 "deliberately SKIPS", no "gates apply"
@@ -195,7 +195,9 @@ class TestCompletionReportConversion(TestCase):
         self.assertIn("REMOVED (#1084", combined)
 
     def test_pointer_exists(self):
-        self.assertIn("completion-report-history.md", self.module)
+        # #1137: the pointer sits in the auto-loaded DEEP companion
+        deep = _read("skills/completion-report-deep/DEEP.md")
+        self.assertIn("completion-report-history.md", self.module + deep)
 
 
 class TestAutonomousVerificationConversion(TestCase):
