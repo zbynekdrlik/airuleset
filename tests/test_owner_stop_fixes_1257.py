@@ -841,5 +841,54 @@ class AnUnclaimedSessionKeepsItsOwnFacts(_CwdSessions):
         self.assertIsNone(_os().pane_latch("%B"))
 
 
+class AnNpmClaudeResolvesItsOwnSession(AnNpmClaudeIsAClaude):
+    """Review 4, findings 2 and 3: the claude-start reader behind the #645
+    resolver (`_pane_claude_start_epoch` → `_pane_claude_pid`) matched the
+    process NAME only, so an npm Claude never resolved its own session and
+    failed closed on any stop of its cwd's newest sessions; and one process
+    on the box with a non-UTF-8 name made the /proc walk raise, dropping every
+    node/bun pane from the map for that sweep (fail open). Real processes,
+    no start-epoch patch for the npm pane."""
+    test_a_paused_claude_beside_an_npm_claude_stays_latched = None
+    test_an_npm_claude_keeps_its_cwd_live_for_the_exit_scan = None
+
+    def test_the_npm_pane_reads_its_own_session(self):
+        base_t = base.wd._proc_start_epoch(self.NPM)
+        self.assertIsNotNone(base_t)
+        self._session("SOLD", [_u("sprav ticket 1", base_t - 2 * DAY),
+                               _u("pauza", base_t - 2 * DAY + 60)],
+                      base_t - 2 * DAY + 60)
+        self._session("SA", [_u("sprav ticket 5", base_t - 900),
+                             base._a("robím", base_t - 50)], base_t - 50)
+        self._session("SN", [_u("sprav ticket 6", base_t + 20),
+                             base._a("robím", base_t + 30)], base_t + 30)
+        inv = "\n".join(["%%A\tclaude\t%s\t111" % self.CWD,
+                          "%%N\tnode\t%s\t%s" % (self.CWD, self.NPM)])
+
+        def run(argv, timeout=8):
+            if "list-panes" in argv:
+                return inv
+            return self.NPM if "display-message" in argv and "%N" in argv else ""
+        real = base.wd._pane_claude_start_epoch
+        with m.patch.object(base.wd, "_pane_claude_start_epoch",
+                            side_effect=lambda pid, run=None: base_t - 950
+                            if pid == "%A" else real(pid, run=run)):
+            _os().refresh({}, [("%A", self.CWD)], self.proj, base_t + 60, run=run)
+        self.assertIsNone(_os().pane_latch("%N"))
+        self.assertIsNone(_os().pane_latch("%A"))
+
+    def test_a_badly_named_process_never_unmaps_the_node_panes(self):
+        _spawn(self, [sys.executable, "-c",
+                      "import ctypes, time; ctypes.CDLL(None).prctl("
+                      "15, b'bad\\xff\\xfe', 0, 0, 0); time.sleep(60)"])
+        time.sleep(0.5)                   # let the child rename itself
+        self._session("SN", [_u("pauza", NOW - 300)], NOW - 300)
+        inv = "%%N\tnode\t%s\t%s" % (self.CWD, self.NPM)
+        logs = _os().refresh({}, [], self.proj, NOW, run=lambda argv, timeout=8:
+                             inv if "list-panes" in argv else "")
+        self.assertFalse(any("unreadable" in ln for ln in logs), logs)
+        self.assertEqual((_os().pane_latch("%N") or {}).get("fact"), "pause")
+
+
 if __name__ == "__main__":
     unittest.main()
