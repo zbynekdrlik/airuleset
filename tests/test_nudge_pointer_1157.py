@@ -546,8 +546,7 @@ class CallersTypeOnlyThePointer(_Base):
                             PID, "sid-1", "loc", self.tpath, fake, state, NOW,
                             set(), None, lambda _s: None, logs, None)
         composed = nudge_gate.compose_batch(
-            [("partition-audit", text.split("] ", 1)[1])],
-            max_chars=nudge_gate.BATCH_MAX_CHARS)[0]
+            [("partition-audit", text.split("] ", 1)[1])])[0]
         self.assertEqual(len(fake.literals()), 1, logs)
         line = fake.literals()[0]
         self.assertTrue(_nf().is_pointer_line(line, require_file=True), line)

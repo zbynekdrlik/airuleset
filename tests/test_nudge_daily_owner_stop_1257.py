@@ -137,8 +137,7 @@ class DailyCapAcrossKinds(unittest.TestCase):
         state = {}
         due = ng.batch_eligible(state, "s", NOW)
         self.assertEqual(set(due), set(ng.GATED_CATEGORIES))
-        text, incl = ng.compose_batch([(c, "x") for c in due],
-                                      max_chars=ng.BATCH_MAX_CHARS)
+        text, incl = ng.compose_batch([(c, "x") for c in due])
         self.assertEqual(text.count(ng.BATCH_PREFIX), 1)
         ng.mark_batch_sent(state, "s", incl, NOW)
         self.assertEqual(ng.batch_eligible(state, "s", NOW + DAY - 60), [])

@@ -305,14 +305,6 @@ class TestComposeBatch923(unittest.TestCase):
         self.assertEqual(text, "")
         self.assertEqual(included, [])
 
-    def test_max_chars_trims_audit_first(self):
-        items = [("release-gap", "release"),
-                 ("partition-audit", "I5 U0 W0 skip0")]
-        text, included = ng.compose_batch(items, max_chars=50)
-        # Work-driving kept, audit trimmed if needed
-        self.assertIn("[release-gap]", text)
-        self.assertTrue(len(text) <= 50)
-
     def test_batch_prefix_is_machine_recognized(self):
         """BATCH_PREFIX must be 'nudge:' — already in goal.py
         _machine_prefixes, so the transcript classifier handles it."""
@@ -383,17 +375,6 @@ class TestBatchCallerRefactor923(unittest.TestCase):
         self.assertTrue(text.startswith(ng.BATCH_PREFIX))
         self.assertIn("release-gap", included)
         self.assertIn("u-freshness", included)
-
-    def test_compose_batch_trim_excludes_audit(self):
-        """When max_chars trims audit, included_categories omits the trimmed."""
-        items = [("release-gap", "release 3"),
-                 ("partition-audit", "I5 U0 W0 gk0 skip0")]
-        text, included = ng.compose_batch(items, max_chars=50)
-        self.assertIn("release-gap", included)
-        # audit may or may not be trimmed depending on exact lengths,
-        # but included must match what's actually in the text
-        for cat in included:
-            self.assertIn("[%s]" % cat, text)
 
     def test_compose_batch_empty_returns_empty(self):
         """Empty items still returns a 2-tuple."""
