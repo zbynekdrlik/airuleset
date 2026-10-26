@@ -55,6 +55,8 @@ set -euo pipefail
 # Exempt (issue 1137 B1): throwaway helpers under /tmp (the session
 # scratchpad lives in /tmp/claude-*) and ~/.claude/work-products/. Repo files
 # keep both checks. The path is resolved first, so /tmp/../<repo> is checked.
+# In tests/test_*.py a NAMED exception may be ignored (a test expecting it);
+# a bare `except:` or Exception/BaseException still blocks (review B6).
 #
 # Bypass (rare, logged): put '# airuleset:script-ok <reason>' anywhere in
 # the written content.
@@ -75,23 +77,25 @@ PAYLOAD=$(cat 2>/dev/null || echo "")
 RESULT=$(python3 <(cat <<'PYEOF'
 import ast
 import json
+import os
 import re
 import sys
 
-payload_raw = sys.stdin.read()
+payload_raw = sys.stdin.buffer.read().decode("utf-8", "replace")
 try:
     payload = json.loads(payload_raw)
 except Exception:
     sys.exit(0)
 
-ti = payload.get("tool_input", {}) or {}
-file_path = ti.get("file_path", "") or ""
-if not file_path:
+# Issue 1137 B1 review B7: any other payload shape is not a Write/Edit this
+# check can read — exit 0 quietly, never a traceback.
+ti = payload.get("tool_input") if isinstance(payload, dict) else None
+file_path = ti.get("file_path") if isinstance(ti, dict) else None
+if not file_path or not isinstance(file_path, str):
     sys.exit(0)
 
 
 def _throwaway(path):
-    import os
     if not os.path.isabs(path):
         return False
     real = os.path.realpath(path)
@@ -114,7 +118,7 @@ elif is_edit:
 else:
     sys.exit(0)
 
-if not text:
+if not text or not isinstance(text, str):
     sys.exit(0)
 
 BYPASS_RE = re.compile(r'#\s*airuleset:script-ok\s+(.+)')
@@ -216,6 +220,18 @@ def ast_except_pass_hits(text):
     return hits
 
 
+def broad_clause(line):
+    """A bare `except:` or one naming Exception/BaseException (issue 1137 B1
+    review B6: a test may expect a NAMED exception and ignore it)."""
+    m = re.match(r"\s*except\b(.*?):", line)
+    clause = re.sub(r"\s+as\s+\w+\s*$", "", m.group(1)).strip() if m else ""
+    return not clause or bool(re.search(r"\b(?:Base)?Exception\b", clause))
+
+
+TEST_FILE = (os.path.basename(file_path).startswith("test_")
+             and "/tests/" in "/" + file_path)
+
+
 def except_pass_hits(text):
     """AST first (exact); regex fallback only when `text` doesn't parse
     standalone."""
@@ -231,10 +247,12 @@ if file_path.endswith(".py"):
     preexisting_sigs = set()
     if is_edit:
         old_text = ti.get("old_string", "") or ""
-        if old_text:
+        if old_text and isinstance(old_text, str):
             preexisting_sigs = {ln.strip() for _, ln in except_pass_hits(old_text)}
 
     for i, line in new_hits:
+        if TEST_FILE and not broad_clause(line):
+            continue
         if is_edit and line.strip() in preexisting_sigs:
             # This exact except-pass block already existed, verbatim, in
             # old_string — carried as unique-match CONTEXT, not introduced
