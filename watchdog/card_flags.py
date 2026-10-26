@@ -102,7 +102,16 @@ def _nudge_repo_pane(pid, cwd, run, text, dry_run, projects_dir, logs=None,
     sweep. `tpath` is threaded IN by the caller (the exact-sid transcript of
     the pane); a falsy `tpath` refuses to send rather than type blind.
     `user_authored` (granted by `discord_replies` for a verified owner action —
-    a ❓-flag, a card reopen) is forwarded on BOTH routes (B9 fix)."""
+    a ❓-flag, a card reopen) is forwarded on BOTH routes (B9 fix). The pane
+    here is picked by the MACHINE, so the grant never passes the #1257
+    owner-stop latch: a paused session gets nothing (journalled)."""
+    from watchdog import owner_stop
+    latch = owner_stop.pane_latch(pid)
+    if latch:
+        if isinstance(logs, list):
+            logs.append("repo-pane %s -> hold:owner-stop (%s): not typed"
+                        % (pid, latch.get("fact")))
+        return False
     captured = watchdog.capture_pane(pid, run)
     if watchdog.pane_in_mode(pid, run):
         return False
