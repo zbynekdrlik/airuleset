@@ -259,5 +259,134 @@ class AttributeUnit(unittest.TestCase):
                              (qa.TRACKED, frozenset({12})), text)
 
 
+class ReviewRound1(unittest.TestCase):
+    """The two adversarial reviews of the first fix."""
+
+    ROWS = [{"number": 8715, "title": "asked", "createdAt": "", "labels": []},
+            {"number": 100, "title": "other", "createdAt": "", "labels": []}]
+    SOLE = "**Otázka — projekt odoo-erp:** #8715 nasadiť teraz?\n❓ NEEDS YOU: áno?"
+
+    def test_a_sole_unmarked_ref_is_that_tickets_question(self):
+        # #1213 slice 2 (odoo-erp 8715): an unmarked ping naming ONE ticket
+        # with no owner label is that ticket's question: it leaves I for U and
+        # is not counted a second time as a ticketless ping.
+        run = CoreQualsAttribution("test_tracked_entry_lists_only_its_ticket")
+        r = run._run(self.SOLE, self.ROWS, "--waiting")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual([m[0] for m in run._members(r.stdout)], ["8715"],
+                         r.stdout)
+        r = run._run(self.SOLE, self.ROWS, "--count")
+        self.assertEqual(r.stdout.strip(), "1", r.stderr)
+
+    def test_the_marker_must_start_a_word(self):
+        import question_attribution as qa
+        for text in ("nesledované na #12", "backtracking #12"):
+            self.assertNotEqual(qa.attribute({"block": text + " a #13"},
+                                             frozenset())[0], qa.TRACKED, text)
+
+    def test_the_watchdog_primary_ticket_follows_the_marker(self):
+        # job 32 clears the owner-question label of the primary ticket and
+        # must never clear it off the context ticket named first (#515 kept:
+        # an unmarked question still means its FIRST #N).
+        from watchdog import u_labels
+        self.assertEqual(u_labels._first_ticket_num(TRACKED), 9065)
+        self.assertEqual(u_labels._first_ticket_num("Design #4199 vs #4200?"),
+                         4199)
+
+
+class DiscordReplyFallbackFollowsTheMarker(unittest.TestCase):
+    """Job 7's ticket fallback posts the owner's blocked Discord answer on the
+    question's ticket: the TRACKED one, never the context ticket named first."""
+
+    def test_fallback_comment_lands_on_the_tracked_ticket(self):
+        import time
+        import notify
+        import watchdog as wd
+        owner = "773451844110385193"
+        gh_calls = []
+        with TemporaryDirectory() as tmp:
+            qpath = str(Path(tmp) / "q.json")
+            env = {"DISCORD_BOT_TOKEN": "tok", "DISCORD_MENTION_ZBYNEK": owner}
+            with mock.patch.object(notify, "_questions_path", lambda: qpath), \
+                    mock.patch.object(notify, "_cards_path",
+                                      lambda: str(Path(tmp) / "c.json")), \
+                    mock.patch.object(notify, "_read_env", lambda: dict(env)):
+                notify.record_question("888001", "777001", "sid-abc", "/repo/x",
+                                       now=time.time(), path=qpath,
+                                       question=TRACKED)
+                now = time.time()
+                state = {"dreply_blocked": {
+                    "repX": now - wd.DREPLY_TICKET_FALLBACK_S - 5}}
+                busy = ("✻ Waiting for 2 background agents to finish\n"
+                        "──────────── ultracode ─\n❯\xa0nech to tak\n"
+                        "────────────\n  ctx ██░░  caveman\n")
+
+                def run(argv, timeout=8):
+                    j = " ".join(argv)
+                    return "0" if "pane_in_mode" in j else (
+                        busy if "capture-pane" in j else "")
+
+                reply = {"id": "repX", "author": {"id": owner},
+                         "message_reference": {"message_id": "888001"},
+                         "content": "1"}
+                wd.deliver_discord_replies(
+                    now, run, state, {"sid-abc": ("%1", busy)}, dry_run=False,
+                    discord_fetch=lambda ch, token: [reply],
+                    gh_comment=lambda cwd, num, text, **kw: gh_calls.append(
+                        num) or True)
+        self.assertEqual(gh_calls, ["9065"])
+
+
+class CoreFooterAttribution(unittest.TestCase):
+    """The incident box is the core gk FLOW: its refresh writes the cover and
+    the render attributes the live pings by it (both review rounds)."""
+
+    def _render(self, block, rows):
+        with TemporaryDirectory() as home, TemporaryDirectory() as repo, \
+                TemporaryDirectory() as bindir:
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+            _gh(bindir, rows)
+            _seed_map(home, repo, block)
+            r = subprocess.run(
+                [sys.executable, str(airuleset.REPO_DIR / "airuleset.py"),
+                 "tickets-status", "--refresh", "--cwd", repo],
+                capture_output=True, text=True, env=_env(home, bindir))
+            self.assertEqual(r.returncode, 0, r.stderr)
+            return _plain(statusbar.tickets_segment(repo, home=home,
+                                                    spawn=False))
+
+    def test_context_only_ping_counts_once_on_the_core_box(self):
+        seg = self._render(CONTEXT_ONLY, CoreQualsAttribution.TWO_CONTEXT)
+        self.assertIn("I 2", seg)
+        self.assertIn("U 1", seg)
+
+    def test_a_ping_naming_a_labelled_ticket_is_that_ticket_on_the_core_box(self):
+        block = ("**Otázka — projekt odoo-erp:** #9065 po nasadení #8952?\n"
+                 "❓ NEEDS YOU: A či B?")
+        seg = self._render(block, CoreQualsAttribution.ROWS)
+        self.assertIn("I 1", seg)
+        self.assertIn("U 1", seg)
+
+
+class RoleWindows(unittest.TestCase):
+    """The cover is taken BEFORE the role filter: a FLOW ping naming the INFRA
+    window's labelled ticket is that ticket's question, counted once (#1065)."""
+
+    ROWS = [{"number": 7, "title": "infra q", "createdAt": "",
+             "labels": _labels("infra", "needs-answer")},
+            {"number": 8, "title": "flow", "createdAt": "", "labels": []}]
+    BLOCK = "**Otázka — projekt odoo-erp:** #7 a #8 spolu?\n❓ NEEDS YOU: áno?"
+
+    def test_the_question_shows_in_exactly_one_window(self):
+        run = CoreQualsAttribution("test_tracked_entry_lists_only_its_ticket")
+        flow = run._run(self.BLOCK, self.ROWS, "--waiting", "--role", "review")
+        infra = run._run(self.BLOCK, self.ROWS, "--waiting", "--role", "infra")
+        self.assertEqual(flow.returncode, 0, flow.stderr)
+        self.assertEqual(infra.returncode, 0, infra.stderr)
+        self.assertEqual(run._members(flow.stdout), [], flow.stdout)
+        self.assertEqual([m[0] for m in run._members(infra.stdout)], ["7"],
+                         infra.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()
