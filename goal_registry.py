@@ -404,6 +404,11 @@ _LEGACY_BOUNCE = (
     ("tickets go first, oldest-first (never preempting running work)",
      "tickets fill each FREE lane oldest-first (never preempting a running one)"),
 )
+# #1137 review round: the stream report pointer moved to the DEEP companion.
+_LEGACY_POINTER = tuple(
+    ("(the %s variant, `skills/completion-report-deep/DEEP.md`)" % v,
+     "(the %s variant, `completion-report.md`)" % v)
+    for v in ("branch-merge", "fork-no-merge"))
 _LEGACY_REVIEW = (
     (("h, stav release", "h, lanes N/cap, stav release"),
      (_REVIEW_D, "(d) lanes plním DISPATCHOVATEĽNÝMI jednotkami vždy keď existuje "
@@ -423,7 +428,7 @@ def legacy_goal_line_variants():
         line = render_goal_line(authority, role)
         for i, sat in enumerate(_LEGACY_SATURATION):
             old = line.replace(_BUNDLE, sat + " " + _LEGACY_DELIVERY[authority], 1)
-            for new, legacy in _LEGACY_BOUNCE:
+            for new, legacy in _LEGACY_BOUNCE + _LEGACY_POINTER:
                 old = old.replace(new, legacy, 1)
             if role == "review":
                 for new, legacy in _LEGACY_REVIEW[i]:

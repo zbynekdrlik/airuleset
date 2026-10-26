@@ -176,14 +176,15 @@ class TestReviewRoleVariant1000(TestCase):
     # change moves every hash). History: #1084, #1066 lane B, #1128 and
     # #1137 (owner ROZHODNUTÉ 2026-09-30) re-goldened the mode-keyed table;
     # #1137 (owner 25.10.2026) removed the mode axis and replaced the mode
-    # clauses with the bundling sentence — every variant changed.
+    # clauses with the bundling sentence — every variant changed. The #1137
+    # review round pointed the two stream report clauses at the DEEP companion.
     _GOLDEN = {
         "full/None": "50d0bc6877013e6cd04e4b23",
         "full/infra": "80d411270fb48c2d3634ac89",
-        "branch-merge/None": "fdff8185079b95ed76ba7cb8",
-        "branch-merge/infra": "f227e7add3dbb98c8eb05fc2",
-        "fork-no-merge/None": "a4694ecd24c94588381211c9",
-        "fork-no-merge/infra": "5777f7f0c6608352acd7f041",
+        "branch-merge/None": "a00596f8e7f82dff5e746f35",
+        "branch-merge/infra": "757aab945455df84488c5509",
+        "fork-no-merge/None": "232880b1afc95a7ec739ca48",
+        "fork-no-merge/infra": "f3895c2c19171366d27ce959",
     }
 
     def test_nonreview_variants_byte_identical_snapshot(self):
