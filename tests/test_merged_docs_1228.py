@@ -172,5 +172,137 @@ class ConsumerReadsTheSameSet(unittest.TestCase):
         self.assertEqual(set(got), {853})
 
 
+class ReviewRound1(unittest.TestCase):
+    """The two adversarial reviews of the first fix."""
+
+    def setUp(self):
+        rs._reset_memo()
+
+    def test_an_open_docs_pr_still_links_its_ticket(self):
+        # P and the C veto are NOT M: an open linked PR keeps today's
+        # behaviour, so a docs PR in CI never turns a live fix into "close it".
+        import cli_ticket_facts
+        payload = {"data": {"repository": {"pullRequests": {
+            "pageInfo": {"hasNextPage": False},
+            "nodes": [{"number": 8900, "isDraft": False, "body": "",
+                       "title": "docs(#7421): gk Prevencia batch 16",
+                       "commits": {"nodes": [{"commit": {
+                           "statusCheckRollup": {"state": "PENDING"}}}]},
+                       "closingIssuesReferences": {"nodes": []}}]}}}}
+        self.assertEqual(cli_ticket_facts.open_pr_states(payload), {7421: True})
+
+    def test_a_body_marker_never_drops_a_bundled_pr(self):
+        git = _git_fn({"origin/main..origin/develop": [
+            ("a", "Guard GPS float() cast (#2131) + fix stale doc (#2118) (#2157)")]})
+        meta = {2157: ("Guard GPS float() cast (#2131) + fix stale doc (#2118)",
+                       "Two commits.\n[no-test: docs only] for the doc one")}
+        with TemporaryDirectory() as d:
+            got = rs.merged_unreleased_issues(
+                "/repo", git_fn=git, pr_meta_fn=lambda pr: meta.get(pr),
+                cache_path=str(Path(d) / "c.json"), slug="o/r")
+        self.assertEqual(set(got), {2131, 2118})
+
+    def test_marker_and_scope_edges(self):
+        with TemporaryDirectory() as repo:
+            _two_branch(repo, [
+                ("fix: wording (#5)", "[no-test: docstring wording]"),
+                ("ci(x) more (#6): y",),
+                ("fix: y (#7)", "[no-test: documentation only]")])
+            got = rs.merged_unreleased_issues(repo)
+        self.assertEqual(set(got), {5, 6})
+
+
+class LegacyMigrationRound1(unittest.TestCase):
+    """The migration is judged by the commit git CAN read, stamped only after
+    a read, written back by both readers, and never re-judged after that."""
+
+    def setUp(self):
+        rs._reset_memo()
+        import cli_commit_kind
+        self.ck = cli_commit_kind
+        self.reads = []
+        real = cli_commit_kind._commit_message
+        patcher = __import__("unittest.mock").mock.patch.object(
+            cli_commit_kind, "_commit_message",
+            side_effect=lambda root, oid: self.reads.append(oid) or real(root, oid))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _repo(self, repo):
+        subprocess.run(["git", "init", "-q", "-b", "main", repo], check=True,
+                       env=_GENV, capture_output=True)
+        return (_commit(repo, "docs(#7421): gk Prevencia batch 15 (#7662)"),
+                _commit(repo, "#7644 (M1): hardening (#7660)"))
+
+    def _sweep(self, repo, cache, docs, fix):
+        git = _git_fn({"origin/main..origin/develop": [
+            (docs, "docs(#7421): gk Prevencia batch 15 (#7662)"),
+            (fix, "#7644 (M1): hardening (#7660)")]})
+        rs._reset_memo()
+        return rs.merged_unreleased_issues(
+            repo, git_fn=git, cache_path=cache, slug="o/r",
+            pr_meta_fn=lambda pr: self.fail("a cached PR is never re-read"))
+
+    def test_judged_by_the_in_range_commit_and_never_twice(self):
+        with TemporaryDirectory() as repo, TemporaryDirectory() as d:
+            docs, fix = self._repo(repo)
+            cache = str(Path(d) / "c.json")
+            Path(cache).write_text(json.dumps({
+                "7662": {"issues": [7421], "oid": "0" * 40},   # unreadable
+                "7660": {"issues": [7644], "oid": fix}}))
+            first = self._sweep(repo, cache, docs, fix)
+            saved = json.loads(Path(cache).read_text())
+            self.reads.clear()
+            second = self._sweep(repo, cache, docs, fix)
+        self.assertEqual(set(first), {7644})
+        self.assertEqual(set(second), {7644})
+        self.assertEqual({k: v.get("v") for k, v in saved.items()},
+                         {"7662": 2, "7660": 2})
+        self.assertEqual(self.reads, [], "a stamped entry is never re-judged")
+
+    def test_an_unreadable_commit_is_not_stamped(self):
+        with TemporaryDirectory() as repo, TemporaryDirectory() as d:
+            docs, fix = self._repo(repo)
+            cache = str(Path(d) / "c.json")
+            Path(cache).write_text(json.dumps({
+                "7662": {"issues": [7421], "oid": "0" * 40}}))
+            git = _git_fn({"origin/main..origin/develop": [
+                ("1" * 40, "docs(#7421): gk Prevencia batch 15 (#7662)")]})
+            got = rs.merged_unreleased_issues(
+                repo, git_fn=git, cache_path=cache, slug="o/r",
+                pr_meta_fn=lambda pr: None)
+            saved = json.loads(Path(cache).read_text())
+        self.assertEqual(set(got), {7421}, "unknown keeps the old refs")
+        self.assertNotIn("v", saved["7662"], "retried next refresh")
+
+    def test_released_legacy_entries_are_stamped_once(self):
+        with TemporaryDirectory() as repo, TemporaryDirectory() as d:
+            docs, fix = self._repo(repo)
+            cache = str(Path(d) / "c.json")
+            Path(cache).write_text(json.dumps({
+                "7662": {"issues": [7421], "oid": docs},
+                "7660": {"issues": [7644], "oid": fix}}))
+            kw = dict(is_ancestor_fn=lambda oid, root: True, cache_path=cache,
+                      slug="o/r")
+            first = rs.merged_released_oids(repo, {7421, 7644}, **kw)
+            self.reads.clear()
+            second = rs.merged_released_oids(repo, {7421, 7644}, **kw)
+            saved = json.loads(Path(cache).read_text())
+        self.assertEqual(first, {7644: [fix]})
+        self.assertEqual(second, {7644: [fix]})
+        self.assertEqual(self.reads, [])
+        self.assertEqual(saved["7662"], {"issues": [], "oid": docs, "v": 2})
+
+    def test_a_malformed_oid_never_reaches_git(self):
+        calls = []
+        with __import__("unittest.mock").mock.patch.object(
+                self.ck.subprocess, "run",
+                side_effect=lambda *a, **k: calls.append(a) or None):
+            for oid in (12345, "--output=/tmp/x", "abc", None):
+                self.assertIsNone(
+                    self.ck.introducing_commit_implements_nothing("/r", oid))
+        self.assertEqual(calls, [])
+
+
 if __name__ == "__main__":
     unittest.main()
