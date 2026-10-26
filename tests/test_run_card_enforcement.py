@@ -958,8 +958,9 @@ class TestCardReconcile(unittest.TestCase):
         src = inspect.getsource(wd.run_once)
         self.assertIn("make_owned_closed_filter()", src,
                       "run_once must build the real owner-scoping filter")
-        self.assertEqual(1, src.count("owned_closed=_owned_scope"),  # #1137: one job
-                         "card_reconcile must receive the real filter")
+        self.assertEqual(2, src.count("owned_closed=_owned_scope"),
+                         "both jobs (card_reconcile + report_reconcile) must "
+                         "receive the real filter, not the identity default")
 
 
 class TestCardReconcile_NoOverlapWithJob24(unittest.TestCase):
