@@ -11,10 +11,13 @@ SET from STRUCTURED facts, never pane prose (`classify`, `_exits`):
   goal-cleared  a `Goal cleared:` that is not the watchdog's own #522 disarm
                 (`state["goal_disarmed_q"]`, MACHINE_CLEAR_WINDOW_S);
   interrupt     `[Request interrupted by user…]`;
-  pause         a SHORT (PAUSE_MAX_WORDS) genuine owner prompt matching the
-                word-bounded Slovak/English `PAUSE_RX` (a long task text that
-                mentions "stop" is a task, not an instruction).
-CLEARED only by a later OWNER act: a genuine non-stop prompt
+  pause         a genuine owner prompt that is EXACTLY one `STOP_PHRASES` entry
+                once lowercased, de-accented, stripped of punctuation and of
+                the `_FILLERS` ("pauzni sa keď môžeš", "Stop!", "skonči na
+                dnes"). A prompt that merely CONTAINS a stop word
+                (`STOP_WORD_RX`: "prestaň sa pýtať a pokračuj", "oprav stop
+                button") is NEUTRAL: it neither sets nor clears.
+CLEARED only by a later OWNER act: any other genuine prompt
 (`questions._is_genuine_human_prompt` — a machine prompt, `continue`, a nudge
 pointer, a task notification never counts), any other owner slash command, or
 the owner's own `Goal set:` arm. While latched no machine keystroke can type a
@@ -37,8 +40,13 @@ TAIL_BYTES = 1024 * 1024
 TAIL_ENTRIES = 400
 RECORD_TTL_S = 7 * 24 * 3600
 MACHINE_CLEAR_WINDOW_S = 600
-PAUSE_MAX_WORDS = 12
-PAUSE_RX = re.compile(   # the Stop HOOK / a stop CONDITION is vocabulary, no pause
+STOP_PHRASES = frozenset((   # de-accented: "skonči" reads "skonci"
+    "stop", "stop here", "stop now", "pause", "halt", "pauza", "pauzni",
+    "pauzni sa", "zastav", "zastav sa", "stoj", "skonci", "koniec",
+    "nepokracuj", "skonci na dnes"))
+_FILLERS = ("ked mozes", "na dnes", "for today", "for now", "prosim", "teraz",
+            "zatial", "please")
+STOP_WORD_RX = re.compile(   # the Stop HOOK / a stop CONDITION is vocabulary
     r"(?<![\w-])(?:pauzni(?:te)?|pauz[au]|zastav(?:te)?|stopni(?:te)?|"
     r"stop(?!\s*(?:hook|condition|podmien))|nepokra[cč]uj(?:te)?|skon[cč]i(?:te)?|"
     r"presta[nň](?:te)?|pause|halt|don'?t continue|do not continue)(?![\w-])",
@@ -84,6 +92,16 @@ def _text(entry):
     return ""
 
 
+def _is_stop_phrase(text):
+    """True iff `text` is EXACTLY one STOP_PHRASES entry once lowercased,
+    de-accented, stripped of punctuation and of the politeness/time fillers."""
+    import unicodedata
+    t = unicodedata.normalize("NFKD", text.lower())
+    t = re.sub(r"[^\w\s]", " ", "".join(c for c in t if not unicodedata.combining(c)))
+    t = re.sub(r"\b(?:%s)\b" % "|".join(_FILLERS), " ", t)
+    return " ".join(t.split()) in STOP_PHRASES
+
+
 def classify(entry, machine_clears=()):
     """("stop", fact) | ("clear", why) | None for ONE transcript entry."""
     if not isinstance(entry, dict) or entry.get("type") not in ("user", "system"):
@@ -119,9 +137,9 @@ def classify(entry, machine_clears=()):
     from watchdog import questions
     if not questions._is_genuine_human_prompt(entry):
         return None
-    if len(text.split()) <= PAUSE_MAX_WORDS and PAUSE_RX.search(text):
+    if _is_stop_phrase(text):
         return ("stop", "pause")
-    return ("clear", "prompt")
+    return None if STOP_WORD_RX.search(text) else ("clear", "prompt")
 
 
 def scan(entries, rec=None, machine_clears=()):
