@@ -261,11 +261,13 @@ class LatchFacts(unittest.TestCase):
             self.assertEqual(latch["fact"], fact)
 
     def test_pause_words_slovak_and_english(self):
-        for text in ("pauzni", "Pauza, idem preč", "zastav sa", "stop",
-                     "nepokračuj, zajtra", "nepokracuj", "skonči na dnes",
-                     "Please stop now", "pause the loop", "prestaň"):
+        for text in ("pauzni", "zastav sa", "stop", "nepokracuj",
+                     "skonči na dnes", "Please stop now", "pause", "halt"):
             latch = _latch(OWNER_WORK + [_u(text, T0 + 10)])
             self.assertEqual((latch or {}).get("fact"), "pause", text)
+        for text in ("Pauza, idem preč", "nepokračuj, zajtra",
+                     "pause the loop", "prestaň"):   # not EXACTLY a stop phrase
+            self.assertIsNone(_latch(OWNER_WORK + [_u(text, T0 + 10)]), text)
 
     def test_stop_words_inside_other_words_never_latch(self):
         for text in ("zastavenie servera oprav prosím", "pozri stopky",
