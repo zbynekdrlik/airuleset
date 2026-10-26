@@ -4888,6 +4888,13 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
             continue
         if _one_glance.is_informative(glance):
             logs.append(gline)
+        _latch = _owner_stop.pane_latch(pid)
+        if _latch:   # #1257: the owner stopped it -- no rider collects or types
+            if _nudge_gate.first_hold(state, pid, "owner-stop", _latch.get("ts"), now):
+                logs.append("lane-sweep %s -> hold:owner-stop (%s): no rider runs, "
+                            "every baseline kept" % (loc, _latch.get("fact")))
+            state.get("nudge_batch", {}).pop(sid, None)
+            continue
         if glance.goal_armed is not True:
             # #662 -- a DEFINITE goal-clear (armed is False, not the transient
             # `None` can't-tell) ENDS any stuck episode, so a later re-arm starts

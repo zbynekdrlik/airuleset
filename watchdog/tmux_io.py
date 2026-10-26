@@ -1301,8 +1301,12 @@ def send_verified(pane_id, text, run=None, tpath=None, sleep_fn=None, logs=None,
     if not tpath or (not user_authored and _thrash.held(tpath)):   # #1260
         _log("send-verified abort: " + ("thrash-held session (#1260)" if tpath else "no transcript path"))
         return _so.OUT_NOT_TYPED
-    if not user_authored and _ostop.pane_latch(pane_id):   # #1257 owner-stop latch
-        _log("send-verified abort: owner-stop latch (#1257), not typed")
+    _latch = None if user_authored else _ostop.pane_latch(pane_id)
+    if _latch:   # #1257 owner-stop latch: journalled once per latch episode
+        from watchdog import nudge_gate as _ngl
+        if _ngl.first_hold(state, pane_id, "owner-stop", _latch.get("ts"),
+                           now if now is not None else time.time()):
+            _log("send-verified abort: owner-stop latch (#1257), not typed")
         return _so.OUT_NOT_TYPED
     # A FRESH capture right before typing (the sibling helpers' own race guard).
     cap = watchdog.capture_pane(pane_id, run, lines=40)
