@@ -378,12 +378,9 @@ def variant_specs():
     return specs
 
 
-# #1137 transition: the pre-removal sequential/parallel clause texts, kept ONLY
-# so the stash janitor still recognises a stranded old `/goal` in a box (never
-# rendered for arming). `legacy_goal_line_variants` rebuilds every old variant by
-# swapping these back into the current render; the 12 old variants are locked by
-# sha256 prefix (tests/fixtures/pre_1137_mode_goals.json). Delete after the
-# transition, together with that fixture.
+# #1137 transition, recognition ONLY (a stranded old `/goal`, never armed; delete
+# with its fixture after the transition): `legacy_goal_line_variants` swaps these
+# texts back into the current render (sha256-locked: tests/fixtures/pre_1137_mode_goals.json).
 _LEGACY_SATURATION = (
     "CONTINUOUS REFILL, never one ticket per turn: keep `isolation:worktree` "
     "autopilot-worker lanes live — refill ONLY with a DISPATCHABLE unit "
@@ -404,7 +401,8 @@ _LEGACY_BOUNCE = (
     ("tickets go first, oldest-first (never preempting running work)",
      "tickets fill each FREE lane oldest-first (never preempting a running one)"),
 )
-# #1137 review round: the stream report pointer moved to the DEEP companion.
+# #1137 review round: the stream report pointer moved to the DEEP companion;
+# the old pointer is swapped back into the legacy AND the current renders.
 _LEGACY_POINTER = tuple(
     ("(the %s variant, `skills/completion-report-deep/DEEP.md`)" % v,
      "(the %s variant, `completion-report.md`)" % v)
@@ -440,23 +438,25 @@ def legacy_goal_line_variants():
 def all_goal_line_variants():
     """#1113 recurrence — every rendered `/goal ...` line the janitor may find
     stranded in a box: every (authority, role) variant `variant_specs()` locks,
-    PLUS the pre-#1137 mode variants (`legacy_goal_line_variants`). Deduped,
-    order-stable.
+    each ALSO with the pre-review-round report pointer (`_LEGACY_POINTER`, the
+    lines deployed before it), PLUS the pre-#1137 mode variants
+    (`legacy_goal_line_variants`). Deduped, order-stable.
 
     The janitor matches a stranded box against these (verbatim template text is
     un-forgeable by a human draft) so it recognises + clears its OWN leftover
     even when the request payload it was handed is a DIFFERENT variant than the
-    one actually in the box — the exact 22.9/23.9 david1-3 regression, where a
-    fork-no-merge tail matched no clean substring of the current rearm payload.
-    Pure string renders; a render that raises is skipped, so the caller always
-    gets the valid variants."""
-    seen, out = set(), []
-    lines = []
+    one actually in the box (the 22.9/23.9 david1-3 fork-no-merge regression).
+    A render that raises is skipped, so the caller gets the valid variants."""
+    seen, out, lines = set(), [], []
     for authority, role in variant_specs():
         try:
-            lines.append(render_goal_line(authority, role))
+            line = render_goal_line(authority, role)
         except Exception:  # noqa: BLE001 — a nonsensical combo is simply skipped
             continue
+        lines.append(line)
+        for new, legacy in _LEGACY_POINTER:
+            line = line.replace(new, legacy, 1)
+        lines.append(line)
     try:
         lines += legacy_goal_line_variants()
     except Exception:  # noqa: BLE001 — never lose the current variants

@@ -3076,9 +3076,9 @@ def cmd_notify(args):
         # (notify.OWNER_PING_ALLOW, zbynek), so a ❓/✅ ping to it is suppressed?
         # Prints "1" / "0", always exit 0. hooks/notify-discord-send.sh asks it
         # PER TARGET (primary + each mirror, via --owner-name "$T") before the
-        # emit loop; david stays "0". An explicit --owner-name is used verbatim,
-        # and an EMPTY one is the shared channel, i.e. zbynek (#1137 review R3);
-        # only an absent flag falls back to the tmux-resolved owner.
+        # emit loop; david stays "0". An explicit --owner-name is used verbatim;
+        # an EMPTY one resolves the account, then the shared channel (zbynek), in
+        # notify._policy_owner; an absent flag falls back to resolve_owner().
         _on = getattr(args, "owner_name", None)
         owner = _on.strip() if isinstance(_on, str) else resolve_owner()
         sys.stdout.write("1" if question_ping_off(owner) else "0")

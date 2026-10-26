@@ -1528,12 +1528,14 @@ IS_COMPLETION_HEADING=$(msg_has "$MSG" -qE "^## ✅ Work Complete|^✅ Work Comp
 HAS_PR_URL=$(msg_has "$MSG" -qE "https?://github\.com/[^[:space:]]+/pull/[0-9]+" && echo 1 || echo 0)
 HAS_COMPLETION_PHRASE=$(msg_has "$MSG" -qiE "awaiting[^.]{0,40}(merge|your merge|merge it)|mergeable[, ]+clean|all [0-9]+/[0-9]+ checks (are )?(green|passing)|all checks (are )?green|mergeStateStatus=CLEAN|mergeable=MERGEABLE|ready to merge|Plan steps \([0-9]+/[0-9]+ done\)|✅ Work Complete|work complete[: ]|per pr-merge-policy|merged (to|into) (main|master)|auto-?merged" && echo 1 || echo 0)
 # Goal/outcome pair: `**Úloha:**`/`**Riešenie:**` (#1137) — only as a BOLD
-# label at line start, so a ❓ message that merely says "Úloha: …" is never
-# forced into the template — or the old `**Goal:**`/`**What changed:**`.
-# Alternation, never a bracket class, for the multibyte letters (a [] class
-# matches per BYTE under a bare C locale).
-GOAL_RX='^[[:space:]]*\*\*(ú|u)loha:?\*\*|\*\*goal:?\*\*|^goal:'
-OUTCOME_RX='^[[:space:]]*\*\*rie(š|s)enie:?\*\*|\*\*(what changed|outcome):?\*\*|^(what changed|outcome):'
+# label at line start (after the `- `/`* `/`+ `/`> ` prefixes the Overené line
+# also takes), so a ❓ message that merely says "Úloha: …" is never forced into
+# the template — or the old `**Goal:**`/`**What changed:**`. Alternation, never
+# a bracket class, for the multibyte letters (a [] class matches per BYTE under
+# a bare C locale).
+LBL_PFX='^[[:space:]]*((>|[-*+][[:space:]])[[:space:]]*)*'
+GOAL_RX="${LBL_PFX}"'\*\*(ú|u)loha:?\*\*|\*\*goal:?\*\*|^goal:'
+OUTCOME_RX="${LBL_PFX}"'\*\*rie(š|s)enie:?\*\*|\*\*(what changed|outcome):?\*\*|^(what changed|outcome):'
 HAS_GOAL_AND_OUTCOME=0
 if LC_ALL=C.UTF-8 msg_has "$MSG" -qiE "$GOAL_RX" && LC_ALL=C.UTF-8 msg_has "$MSG" -qiE "$OUTCOME_RX"; then
     HAS_GOAL_AND_OUTCOME=1
@@ -1753,7 +1755,7 @@ if [ "$IS_COMPLETION" = "1" ]; then
             # 'n/a' claims no user-facing output; a 🌐/📱 URL in the same report
             # contradicts it. Fires only on a POSITIVE sighting (msg_missing's
             # unknown skips).
-            if ! msg_missing "$MSG" -qE "^[[:space:]]*(🌐|📱)|[[:space:]](🌐|📱)[[:space:]]*https?://"; then
+            if ! msg_missing "$MSG" -qE "^[[:space:]]*(🌐|📱)|[[:space:](](🌐|📱)[[:space:]]*https?://"; then
                 echo "VIOLATION: 'Výstup: n/a' contradicts this report's own 🌐/📱 URL — the work HAS a user-facing output. Open it and cite values read from it (page content, UI values, the version label)." >&2
                 add_hard "Výstup: n/a while the report lists a 🌐/📱 user-facing surface — read real observed values from that live surface instead"
             fi
@@ -1770,13 +1772,14 @@ fi
 # HARD: a UI deploy with no clickable 🌐 URL (restored by the #1137 review, owner
 # rule #595: a message that names something openable carries its URL). Armed only
 # by a completion report or an explicit `✅ Deploy:` line, so casual "deployed to
-# dev1+dev2" chat never trips it; `nasaden` covers the Slovak report. The 🌐 URL
-# may sit inline on the Riešenie line. An unanswerable count (`?`) or an
-# unanswerable UI probe never accuses (#194). The multi-environment ">= 2 🌐
-# lines" variant stays removed (#1137).
+# dev1+dev2" chat never trips it; the deploy and UI detection is main's, word for
+# word (a Slovak `nasaden` widening matched "nenasadené"/"nasadenie" and was
+# dropped). The 🌐 URL may sit inline on the Riešenie line. An unanswerable count
+# (`?`) or an unanswerable UI probe never accuses (#194). The multi-environment
+# ">= 2 🌐 lines" variant stays removed (#1137).
 HAS_DEPLOY_LINE=$(msg_has "$MSG" -qE "✅ Deploy:" && echo 1 || echo 0)
 if { [ "$IS_COMPLETION" = "1" ] || [ "$HAS_DEPLOY_LINE" = "1" ]; } \
-   && LC_ALL=C.UTF-8 msg_has "$MSG" -qiE "✅ Deploy:|deploy.*(verified|complete|done|success|redeploy|auto.?redeploy)|verified.*deploy|deployed.*(to|successfully)|nasaden"; then
+   && msg_has "$MSG" -qiE "✅ Deploy:|deploy.*(verified|complete|done|success|redeploy|auto.?redeploy)|verified.*deploy|deployed.*(to|successfully)"; then
     GLOBE_COUNT=$(msg_count "$MSG" -E "🌐.*https?://")
     if [ "$GLOBE_COUNT" != "?" ] && [ "$GLOBE_COUNT" -lt 1 ] \
        && ! msg_missing "$MSG" -qiE "frontend|dashboard|\bui\b|web app|browser|admin panel"; then

@@ -119,8 +119,8 @@ if [ -f "$ENVF" ]; then
 fi
 
 # Emit ONE message per DISTINCT target thread. The PRIMARY target emits unless the
-# #1137 owner policy suppresses it (an empty/unknown owner = the shared channel,
-# which the policy reads as zbynek). Mirrors are EXTRA and only fire
+# #1137 owner policy suppresses it (an owner still empty after resolve_owner = the
+# shared channel, which the policy reads as zbynek). Mirrors are EXTRA and only fire
 # when DISCORD_MIRROR_<OWNER> lists them; a target whose thread was ALREADY delivered
 # to (the primary's, OR an earlier mirror's — e.g. two owners sharing the fallback
 # channel) is skipped, so a misconfig can't double-post into one thread. The same
@@ -318,11 +318,11 @@ fi
 # PER TARGET. This shell transport carries only ❓ and ✅, neither of which is ever
 # an allowed class for a restricted owner (zbynek: only the needs-a-human alarms
 # reach Discord), so every target whose owner is on the policy — the primary, each
-# DISCORD_MIRROR_<OWNER> mirror, and an EMPTY owner (the shared channel, read by
-# zbynek unless AIRULESET_SHARED_CHANNEL_OWNER names another)
+# DISCORD_MIRROR_<OWNER> mirror, and an owner still EMPTY after resolve_owner (the
+# shared channel, read by zbynek unless AIRULESET_SHARED_CHANNEL_OWNER names another)
 # — is skipped and logged `suppressed` (never a silent drop); the rest are
 # delivered. `--question-ping-off --owner-name "$T"` answers "is this target's
-# owner on the policy" (an explicit empty name is the shared channel; a failed
+# owner on the policy" (an empty name resolves the account first; a failed
 # call reads "0" = deliver). david (david1-4 -> david) keeps FULL delivery.
 # `_delivery_log` self-gates on dry-run. When EVERY target is suppressed: exit 0,
 # so the confirm paths record LASTQ/LASTOK instead of retrying every turn. The

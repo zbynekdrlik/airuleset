@@ -355,11 +355,11 @@ def stream_redirect(raw_owner):
 # run-card, gk*/bounce/handoff/orphan, `waiting:`, keyless `--body` …) POSTs
 # nothing and logs `suppressed` (send(); the shell ❓/✅ path in
 # hooks/notify-discord-send.sh). It is applied PER TARGET: each
-# DISCORD_MIRROR_<OWNER> recipient by its own owner's policy, and an EMPTY owner
-# (the shared DISCORD_NOTIFICATION_CHANNEL_ID, e.g. a TMUX-less systemd watchdog
-# on newlevel/gatekeeper) as the shared channel's reader — zbynek, unless
-# AIRULESET_SHARED_CHANNEL_OWNER names another (empty = the shared channel has
-# no policy owner; the ownerless delivery tests pin that). A suppressed keyed
+# DISCORD_MIRROR_<OWNER> recipient by its own owner's policy. An EMPTY owner first
+# resolves the account (`resolve_owner`: david1-4 -> david without tmux); only a
+# still-empty one (the shared DISCORD_NOTIFICATION_CHANNEL_ID, e.g. a TMUX-less
+# watchdog on an unmapped account) is the shared channel's reader — zbynek, unless
+# AIRULESET_SHARED_CHANNEL_OWNER names another (empty = no policy owner). A suppressed keyed
 # send writes its marker as `suppressed`, which `marker_delivered` counts as
 # delivered, so no gate loops. david (david1-4) is not listed: unchanged.
 OWNER_PING_ALLOW = {
@@ -370,10 +370,10 @@ OWNER_PING_ALLOW = {
 
 def _policy_owner(owner):
     """`owner` via `stream_redirect` (personas routing into claude-zbynek count
-    as zbynek; an empty owner is the shared channel's reader) when on the
-    policy, else ""."""
-    o = (stream_redirect(str(owner or "").strip().lower())
-         or os.environ.get("AIRULESET_SHARED_CHANNEL_OWNER", "zbynek").strip().lower())
+    as zbynek; an empty owner is this account's `resolve_owner()`, and only a
+    still-empty one the shared channel's reader) when on the policy, else ""."""
+    o = stream_redirect(str(owner or "").strip().lower()) or resolve_owner()
+    o = o or os.environ.get("AIRULESET_SHARED_CHANNEL_OWNER", "zbynek").strip().lower()
     return o if o in OWNER_PING_ALLOW else ""
 
 
@@ -2378,16 +2378,11 @@ def record_suppressed_question(session, cwd, question, path=None):
     watchdog's `waiting:` ping) into the footer `U` via the #716 Discord-less
     `suppressed:<session>` entry. When the session's own ❓ already recorded
     that entry, it is left as is — never a second entry, never an overwrite of
-    the richer block. Under pytest it never writes the REAL home's map (a
-    run_once test with a suppressing fake send must not leave a phantom footer
-    U — the #1195/#1196 real-home rule). Returns True when it recorded. Never
+    the richer block. The map is `path` or `_questions_path()` (the seam a test
+    patches to keep the real home clean). Returns True when it recorded. Never
     raises."""
     try:
-        if path is None and os.environ.get("PYTEST_CURRENT_TEST"):
-            import pwd
-            real = os.path.join(pwd.getpwuid(os.getuid()).pw_dir, ".claude")
-            if os.path.realpath(_claude_dir()) == os.path.realpath(real):
-                return False
+        path = path or _questions_path()
         if ("suppressed:%s" % str(session or "").strip()) in load_questions(path):
             return False
         return bool(record_question("", "", session, cwd, path=path,
