@@ -186,6 +186,26 @@ class DiskGuardSevere(unittest.TestCase):
             self.assertEqual(sev(96, 5240.0, exhausted=True), 0)
             self.assertEqual(sev(96, 5240.0 + 86400, exhausted=True), 1, "next day")
 
+    # verification round: a recovery re-arms the line for the next episode
+    def test_recovery_rearms_the_line(self):
+        with tempfile.TemporaryDirectory() as home:
+            def sev(pct, now):
+                return len(dg.severe_journal({"worst_pct": pct, "dim": "bytes"}, home, now,
+                                             [], box_class="workstation", critical_pct=90))
+            self.assertEqual(sev(96, 5000.0), 1)
+            self.assertEqual(sev(60, 6000.0), 0)
+            self.assertEqual(sev(96, 9000.0), 1, "a new episode the same day")
+
+    def test_clear_stamp_keeps_it_on_dry_run(self):
+        with tempfile.TemporaryDirectory() as home:
+            dg.severe_journal({"worst_pct": 96, "dim": "bytes"}, home, 5000.0, [],
+                              box_class="workstation", critical_pct=90)
+            stamp = Path(home) / ".claude" / dg.DISK_GUARD_DIRNAME / dg.SEVERE_STAMP_NAME
+            dg.clear_severe_stamp(home, dry_run=True)
+            self.assertTrue(stamp.exists())
+            dg.clear_severe_stamp(home)
+            self.assertFalse(stamp.exists())
+
     def test_second_poll_same_day_is_silent(self):
         def poll(home, now):
             return dg.run_disk_guard(
@@ -323,12 +343,31 @@ class MdreviewNoCreate(unittest.TestCase):
         self.assertTrue(any("#999" in ln and "CLOSED" in ln for ln in logs), logs)
         self.assertGreater(after["last_eval_ts"], 0, "a definite CLOSED waits a day")
 
-    # Review round A2: a gh error is not an answer -- retry on the next sweep.
-    def test_unreadable_ticket_retries_next_sweep(self):
-        logs, calls, after = self._job({"ticket": 999, "last_eval_ts": 0}, {}, view_rc=1)
+    def _retry_in_an_hour(self, after):
+        wait = time.time() - after.get("last_eval_ts", 0)
+        self.assertLess(abs(wait - (mc.DAILY_TTL_S - mc.RETRY_S)), 120, after)
+
+    # Review rounds: a gh error is not an answer -- retry in an hour, never every sweep.
+    def test_gh_error_retries_in_an_hour(self):
+        logs, calls, after = self._job({"ticket": 999, "last_eval_ts": 0}, {}, view_rc=1,
+                                       listing="", listing_rc=1)
         self.assertTrue(any("unreadable" in ln for ln in logs), logs)
-        self.assertEqual(after.get("last_eval_ts", 0), 0, after)
+        self._retry_in_an_hour(after)
         self.assertFalse(any("comment" in c or "reopen" in c for c in calls), calls)
+
+    def test_a_deleted_ticket_is_re_adopted(self):
+        listing = json.dumps([{"number": 875, "title": mc.TRACKING_TITLE}])
+        logs, _calls, after = self._job({"ticket": 999, "last_eval_ts": 0}, {}, view_rc=1,
+                                        listing=listing)
+        self.assertEqual(after.get("ticket"), 875, logs)
+        self.assertTrue(any("target-governance" in ln for ln in logs), logs)
+
+    def test_a_replaced_closed_ticket_is_re_adopted(self):
+        listing = json.dumps([{"number": 875, "title": mc.TRACKING_TITLE}])
+        logs, calls, after = self._job({"ticket": 999, "last_eval_ts": 0},
+                                       {"state": "CLOSED"}, listing=listing)
+        self.assertEqual(after.get("ticket"), 875, logs)
+        self.assertFalse(any("reopen" in c for c in calls), calls)
 
     # Review round A3: the open tracking ticket is adopted by its title, read-only.
     def test_adopts_the_open_ticket_by_title(self):
@@ -345,29 +384,18 @@ class MdreviewNoCreate(unittest.TestCase):
         _logs, _calls, after = self._job(None, {"state": "OPEN"}, listing=listing)
         self.assertNotIn("ticket", after)
 
-    def test_lookup_error_retries_next_sweep(self):
+    def test_lookup_error_retries_in_an_hour(self):
         _logs, calls, after = self._job(None, {}, listing="", listing_rc=1)
         self.assertNotIn("ticket", after)
-        self.assertEqual(after.get("last_eval_ts", 0), 0, after)
+        self._retry_in_an_hour(after)
         self.assertFalse(any("create" in c for c in calls), calls)
 
-    # Review round A4: a MODEL_TIERS change is ONE journal line (mdreview Step 5c).
-    def test_model_generation_change_is_one_line(self):
-        logs, _calls, after = self._job(
-            {"ticket": 999, "last_eval_ts": 0, "model_tiers_hash": "stale"},
-            {"state": "OPEN"})
-        gen = [ln for ln in logs if "model-generation" in ln]
-        self.assertEqual(len(gen), 1, logs)
-        self.assertEqual(after["model_tiers_hash"], mc._model_tiers_hash())
-        after["last_eval_ts"] = 0
-        logs2, _c, _a = self._job(after, {"state": "OPEN"})
-        self.assertFalse(any("model-generation" in ln for ln in logs2), logs2)
-
-    def test_first_hash_is_recorded_silently(self):
-        logs, _calls, after = self._job({"ticket": 999, "last_eval_ts": 0},
-                                        {"state": "OPEN"})
-        self.assertFalse(any("model-generation" in ln for ln in logs), logs)
-        self.assertEqual(after["model_tiers_hash"], mc._model_tiers_hash())
+    # verification round: the model-tiers hash had no reader; Step 5c runs every pass
+    def test_no_model_tiers_state(self):
+        _logs, _calls, after = self._job({"ticket": 999, "last_eval_ts": 0},
+                                         {"state": "OPEN"})
+        self.assertNotIn("model_tiers_hash", after)
+        self.assertFalse(hasattr(mc, "_model_tiers_hash"))
 
     def test_open_ticket_keeps_the_daily_delta(self):
         logs, calls, after = self._job({"ticket": 999, "last_eval_ts": 0}, {"state": "OPEN"})
