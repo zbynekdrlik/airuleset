@@ -446,6 +446,12 @@ if [ "$RC" -eq 0 ]; then
     exit 0
 fi
 
+if [ "$RC" -eq 3 ]; then
+    # A payload the matcher could not understand (not JSON, not an object, a
+    # non-string command): one quiet line, no traceback (issue 1137 B1 B7).
+    echo "🚫 BLOCKED (fail-closed): block-vault-store-read.sh could not read this payload —$(printf '%s' "$VIOLATION" | tr -s '\n ' ' ')" >&2
+    exit 2
+fi
 if [ "$RC" -ne 2 ]; then
     fail_closed "python3 exited $RC instead of running the check. $VIOLATION"
 fi
