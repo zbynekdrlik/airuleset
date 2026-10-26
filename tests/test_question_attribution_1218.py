@@ -9,7 +9,8 @@ the ticketless count and counted nowhere.
 
 Attribution order: an explicit tracking marker → that ticket only; else the
 referenced tickets that are U by their OWN labels cover the entry (it adds
-nothing); else the entry counts ONCE as a ticketless ping.
+nothing); else a sole ref to a ticket the box counts is that ticket's; else
+the entry counts ONCE as a ticketless ping.
 """
 import json
 import os
