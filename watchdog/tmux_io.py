@@ -102,28 +102,22 @@ MACHINE_NUDGE_KINDS = frozenset({
     # armed /goal loop. A GATED priority kind (default OFF, owner stages it);
     # the `nudges` CLI kind list derives from THIS set.
     "bounce-verdict",
-    # goal auto-arm / dying-subagent stuck-check
-    "goal-sweep", "subagent-stuck",
+    # goal auto-arm / dying-subagent stuck-check / job 4's working-stall
+    # stuck-check (B9 fix: a liveness question, not a revival — gk + stream)
+    "goal-sweep", "subagent-stuck", "working-stall",
     # idle-pane backstops + report-owed card (jobs 8/11 + cards)
     "bounce", "gk-request", "card",
     # #1036 Job 49 — Odoo task-hygiene overseer nudge (per-kind staged, OFF by
     # default; NOT a nudge_gate GATED_CATEGORY — its cadence is decided by
     # gate_ok("task-hygiene") directly, like bounce/card/goal-sweep).
     "task-hygiene",
-    # #1109 — a RELEASE-BLOCKING infra hand-off (a STOP:/GATEKEEPER-ACTION (INFRA)
-    # comment, or an infra ticket carrying prio:*/release-block) delivered into
-    # the gk-infra window. A GATED priority kind (default OFF, the supervisor
-    # stages it on the gk box `nudges on --kind infra-priority`); the `nudges`
-    # CLI list derives from THIS set. It is EXEMPT from the #913/#1023 cross-kind
-    # total cap (so a release block never sits 3 h behind the owner's anti-spam
-    # cap) but KEEPS its own 15-min per-kind floor + every idle/busy/recent-human/
-    # transcript-liveness gate (nudge_gate.PRIORITY_CAP_EXEMPT_KINDS). NOT a
-    # RECOVERY kind (it IS a prompt interruption — staged + floored) and NOT a
-    # nudge_gate GATED_CATEGORY (its floor is 15 min, below the 60-min GATED floor
-    # lock) — its cadence is decided by gate_ok("infra-priority") directly.
+    # #1109 — a RELEASE-BLOCKING infra hand-off into the gk-infra window, staged
+    # like every priority kind; since 26.10.2026 bound by the daily cap like them
+    # (it joins the queue-arrival batch, nudge_gate.PRIORITY_CAP_EXEMPT_KINDS no
+    # longer lists it).
     "infra-priority",
-    # #1163 Job 52 — a DECLARED watch trigger slot (steer=watch window), staged
-    # like infra-priority and cap-exempt with it (nudge_gate), 60-min floor kept.
+    # #1163 Job 52 — a DECLARED watch trigger slot (steer=watch window), staged,
+    # exempt from the daily cap (the owner's schedule is its bound), 60-min floor.
     "watch-trigger", "checkout-lag",  # + #1176 Job 53 rule-lag notice (stream profile)
 })
 
@@ -311,13 +305,12 @@ def _suppress_nudge(kind, text, logs):
 # kinds (a control key that is PART of such a delivery carries the delivery's
 # kind, so the whole delivery gates as a unit). RECOVERY_KINDS are NOT machine
 # nudges -- janitor cleanup, undo backspaces, the session-limit user-draft
-# submit, the prompt-wedge submit of the OWNER's own wedged draft, and the
-# resurrect relaunch (its own `AIRULESET_RESURRECT_ACTION` opt-in + recent-human
-# veto is its gate, per its docstring) -- and they run regardless of the switch.
+# submit and the prompt-wedge submit of the OWNER's own wedged draft -- and they
+# run regardless of the switch.
 # A new machine-nudge kind = ONE line added to GATED_KINDS.
 # --------------------------------------------------------------------------- #
 GATED_KINDS = frozenset({"continue", "send", "goal", "draft", "stash", "type"})
-RECOVERY_KINDS = frozenset({"janitor", "undo", "user-draft", "wedge", "resurrect"})
+RECOVERY_KINDS = frozenset({"janitor", "undo", "user-draft", "wedge"})
 
 
 def _keystroke_suppressed(kind, user_authored, nudge=None):
@@ -356,7 +349,12 @@ def keys(pane_id, *keystrokes, kind, nudge=None, user_authored=False, run=None,
     `discord_replies`) BYPASSES the gate. `journal_text` overrides the
     suppression-journal snippet (a literal-type caller passes its full text so
     the journal reads the payload, not `-l -- ...`); default derives a snippet
-    from the non-flag keystrokes."""
+    from the non-flag keystrokes. #1257: a pane under the owner-stop latch gets
+    NO keystroke of any kind (recovery and cap-exempt included); only the
+    owner's own reply passes (`owner_stop.withhold`, ONE journal line/pane/sweep)."""
+    from watchdog import owner_stop
+    if not user_authored and owner_stop.withhold(pane_id, logs):
+        return False
     if watchdog._keystroke_suppressed(kind, user_authored, nudge):
         snippet = (journal_text if journal_text is not None
                    else " ".join(str(k) for k in keystrokes
@@ -375,24 +373,23 @@ def relaunch_pane(pane_id, run=None, launcher="claude-continue"):
     `tmux respawn-pane -k -t <pane> <launcher>`. Returns True iff the respawn
     command was issued without raising.
 
-    Distinct from the two existing relaunch shapes on purpose:
-      * `keys` sends into a LIVE Claude Code input box (a `continue` nudge) — a
-        stuck process would just 401 the nudge, which is the whole miva1 bug;
-      * `resurrect.relaunch` types a launch command into a pane that ALREADY
-        dropped to a BARE SHELL (the session exited) — here the process is still
-        RUNNING and occupying the pane, so nothing can be typed; `respawn-pane
-        -k` replaces it.
+    Distinct from `keys`, which sends into a LIVE Claude Code input box (a
+    `continue` nudge) — a stuck process would just 401 the nudge, which is the
+    whole miva1 bug; here the process is still RUNNING and occupying the pane,
+    so nothing can be typed; `respawn-pane -k` replaces it. A pane already at a
+    bare shell is a session the owner stopped and is never respawned.
 
     `respawn-pane` is a tmux MANAGEMENT command, not a CC keystroke, so it is
     outside the `keys` per-kind kill-switch gate — it is a `resume`-class RECOVERY
     action, which #1023 keeps ALWAYS-ON precisely for a login/limit death like
     this (a nudges-OFF box must still come back from a dead credential). The
     CALLER owns every safety gate (the recent-human veto + the bare-shell /
-    stopped-session check + a once-per-episode latch). Like `resurrect.relaunch`,
-    the send is `delivered_unconfirmed`: the STRUCTURAL confirmation is the NEXT
+    stopped-session check + a once-per-episode latch). The send is
+    `delivered_unconfirmed`: the STRUCTURAL confirmation is the NEXT
     sweep (the session comes back live → its 401 episode clears). Never raises."""
+    from watchdog import owner_stop
     run = run or watchdog._default_run
-    if not pane_id or not launcher:
+    if not pane_id or not launcher or owner_stop.pane_latch(pane_id):   # #1257
         return False
     try:
         run(["tmux", "respawn-pane", "-k", "-t", str(pane_id), launcher])
@@ -401,7 +398,8 @@ def relaunch_pane(pane_id, run=None, launcher="claude-continue"):
         return False
 
 
-def impl_window_presence(marker, run=None, logs=None, dry_run=False):
+def impl_window_presence(marker, run=None, logs=None, dry_run=False,
+                         projects_dir=None):
     """#1060 L3b item 8 — keep the dual-agent IMPLEMENTER window alive.
 
     On a model-backend MARKER box the managed tmux session carries window 0
@@ -429,6 +427,9 @@ def impl_window_presence(marker, run=None, logs=None, dry_run=False):
                                   attach the window to — never guesses a foreign
                                   session;
       * ``"present"``          — the impl window already exists;
+      * ``"owner-stop"``       — missing, but the impl cwd's session is under
+                                  the #1257 owner-stop latch (the owner stopped
+                                  it), so it is NOT recreated;
       * ``"relaunched"``       — it was missing and got created;
       * ``"would-relaunch"``   — missing, but ``dry_run`` so nothing was created.
     ``logs``, if a list, gets ONE decision line. Never raises."""
@@ -438,8 +439,8 @@ def impl_window_presence(marker, run=None, logs=None, dry_run=False):
         return None
     run = run or watchdog._default_run
     out = run(["tmux", "list-windows", "-a", "-F",
-               "#{session_name}\t#{window_index}\t#{window_name}"]) or ""
-    sessions = {}
+               "#{session_name}\t#{window_index}\t#{window_name}\t#{pane_id}"]) or ""
+    sessions, impl_pane = {}, {}
     for line in out.splitlines():
         parts = line.split("\t")
         if len(parts) < 3:
@@ -447,6 +448,8 @@ def impl_window_presence(marker, run=None, logs=None, dry_run=False):
         sess, name = parts[0].strip(), parts[2].strip()
         if sess:
             sessions.setdefault(sess, []).append(name)
+        if sess and name == "impl" and len(parts) > 3:
+            impl_pane[sess] = parts[3].strip()
     if not sessions:
         return "no-session"
     # The session-created hook renames window 0 to the box name (== session
@@ -464,9 +467,19 @@ def impl_window_presence(marker, run=None, logs=None, dry_run=False):
             break
     if target is None:
         return "no-managed-session"
+    from watchdog import owner_stop     # #1257: the owner stopped it = stays stopped
     if "impl" in sessions[target]:
+        owner_stop.note_window("%s:impl" % target, impl_pane.get(target), dry_run)
         logs.append("dual: impl window present on %s" % target)
         return "present"
+    cwd = (marker.get("cwd") or "").strip() if isinstance(marker, dict) else ""
+    pdir = projects_dir or owner_stop._SWEEP.get("projects_dir")
+    latch = owner_stop.window_latch("%s:impl" % target, pdir, os.path.expanduser(
+        cwd)) if cwd and pdir else None
+    if latch:
+        logs.append("dual: impl window missing on %s — owner-stop latch (%s), not "
+                    "relaunched" % (target, latch.get("fact")))
+        return "owner-stop"
     if dry_run:
         logs.append("dual: impl window missing on %s — would relaunch (dry-run)"
                     % target)
@@ -480,7 +493,6 @@ def impl_window_presence(marker, run=None, logs=None, dry_run=False):
     except Exception:
         launcher = os.path.expanduser("~/.claude/airuleset-claude-impl.sh")
     argv = ["tmux", "new-window", "-d", "-t", target, "-n", "impl"]
-    cwd = (marker.get("cwd") or "").strip() if isinstance(marker, dict) else ""
     if cwd:
         ecwd = os.path.expanduser(cwd)
         if os.path.isdir(ecwd):
@@ -529,11 +541,20 @@ def _default_run(argv, timeout=8):
 
 
 def _proc_read(path):
-    try:
-        with open(path) as h:
+    try:   # a process name may be any bytes: never let one abort a /proc walk
+        with open(path, encoding="utf-8", errors="replace") as h:
             return h.read()
     except OSError:
         return ""                # process exited mid-walk — expected race
+
+
+def _proc_is_claude(pid):
+    """True when process `pid` IS the Claude CLI in either fleet launch shape
+    (issue 959): its name is `claude`, or its command line is the npm `node
+    …/claude-code/cli.js` (`erp_heartbeat._cmdline_is_claude_cli`)."""
+    from watchdog.erp_heartbeat import _cmdline_is_claude_cli
+    return "claude" in _proc_read("/proc/%s/comm" % pid) or _cmdline_is_claude_cli(
+        _proc_read("/proc/%s/cmdline" % pid).replace("\x00", " "))
 
 
 def _pane_hosted_claude_pid(pane_pid):
@@ -552,11 +573,14 @@ def _pane_hosted_claude_pid(pane_pid):
                 continue
             ppid = stat.rsplit(") ", 1)[-1].split()[1]
             children.setdefault(ppid, []).append(p)
-        frontier = [str(int(pane_pid))]
+        frontier, seen = [str(int(pane_pid))], set()
         while frontier:
             cur = frontier.pop()
             for ch in children.get(cur, []):
-                if "claude" in _proc_read("/proc/%s/comm" % ch):
+                if ch in seen:            # a pid reused mid-walk never loops
+                    continue
+                seen.add(ch)
+                if _proc_is_claude(ch):
                     return ch
                 frontier.append(ch)
     except Exception:
@@ -629,11 +653,13 @@ def _pane_claude_pid(pane_pid):
     """The `claude` PID for a pane: `pane_pid` itself when it IS claude (an
     `exec claude` launch), else the claude descendant in its process tree (the
     normal shell-forks-claude launch — reuses `_pane_hosted_claude_pid`). None if
-    neither. Fail-safe None on a bad pane_pid."""
+    neither. Fail-safe None on a bad pane_pid. Both launch shapes count
+    (`_proc_is_claude`: the name `claude`, or the npm `node …/claude-code/cli.js`
+    command line — B9 fix, so `_pane_claude_start_epoch` resolves an npm pane)."""
     p = str(pane_pid).strip()
     if not p.isdigit():
         return None
-    if "claude" in _proc_read("/proc/%s/comm" % p):
+    if _proc_is_claude(p):
         return p
     return watchdog._pane_hosted_claude_pid(p)
 
@@ -843,8 +869,8 @@ def list_claude_panes(run=None, logs=None, dry_run=False):
             # SAME pane_pid->claude-child walk the sudo/su-hosted shape uses — the
             # gk-quality pane stays visible even without a `set -m` respawn, and
             # any future wrapper shape is covered. A genuine bare shell (no claude
-            # child -> _pane_hosted_claude_pid None -> continue) stays invisible
-            # (the #804 resurrect contract). The sudo/su handling is unchanged.
+            # child -> _pane_hosted_claude_pid None -> continue) stays invisible.
+            # The sudo/su handling is unchanged.
             if cmd not in ("sudo", "su", "bash", "sh", "-bash") or not ppid:
                 continue
             cpid = watchdog._pane_hosted_claude_pid(ppid)
@@ -1125,6 +1151,14 @@ def _nudge_dying_subagent(state, logs, send_fn, pid, run, captured, project, own
         logs.append("subagent-%s-resolved %s [%s] — supervisor acknowledged"
                     % (dedup_prefix, project, wid))
         return
+    # #1257 -- the owner stopped this pane: held, never a nudge, never a ping.
+    from watchdog import nudge_gate as _ng
+    _hold = _ng.pre_send_hold(state, pid, wkey, now, budget=False)
+    if _hold:
+        if _hold[1]:
+            logs.append("subagent-%s-held %s [%s] %s" % (dedup_prefix, project,
+                                                         wid, _hold[0]))
+        return
     if not watchdog.pane_at_idle_prompt(captured):
         bkey = "subagent-busypane:%s:%s" % (dedup_prefix, wid)
         b = state.get(bkey) or {"first_seen": int(now - sub_idle), "pinged": False}
@@ -1141,11 +1175,16 @@ def _nudge_dying_subagent(state, logs, send_fn, pid, run, captured, project, own
         else:
             logs.append("skip busy-pane (subagent-%s) %s [%s]" % (dedup_prefix, project, wid))
         return
-    # (#287) A worker whose own transcript is provably unsalvageable earns
-    # AT MOST ONE typed nudge, never the full retry cycle — see
-    # _subagent_transcript_unsalvageable's own docstring. (`wkey` and the
-    # resolution short-circuit are handled at the top, before the busy/idle
-    # branch, so a resolved worker never reaches here.)
+    # B9 (owner 26.10.2026) -- the pane's ONE daily nudge is spent: hold BEFORE
+    # decide_working, so a budget hold never counts as a nudge (no false give-up).
+    _hold = _ng.pre_send_hold(state, pid, wkey, now)
+    if _hold:
+        if _hold[1]:
+            logs.append("subagent-%s-held %s [%s] %s" % (dedup_prefix, project,
+                                                         wid, _hold[0]))
+        return
+    # (#287) An unsalvageable worker earns AT MOST ONE typed nudge
+    # (`_subagent_transcript_unsalvageable`).
     unsalvageable = _subagent_transcript_unsalvageable(sub_path)
     effective_max_nudges = 1 if unsalvageable else max_nudges
     action, entry = watchdog.decide_working(state, wkey, now, sub_idle,
@@ -1269,7 +1308,7 @@ def send_verified(pane_id, text, run=None, tpath=None, sleep_fn=None, logs=None,
     rescued and the send aborted. `user_authored` (#994): True ONLY for the
     owner's own Discord reply; it bypasses the nudge kill switch, which is
     enforced at the `keys` primitive (#1002)."""
-    from watchdog import send_outcome as _so, thrash as _thrash
+    from watchdog import send_outcome as _so, thrash as _thrash, owner_stop as _ostop
     run = run or watchdog._default_run
     sleep_fn = sleep_fn or time.sleep
 
@@ -1280,9 +1319,14 @@ def send_verified(pane_id, text, run=None, tpath=None, sleep_fn=None, logs=None,
     if not tpath or (not user_authored and _thrash.held(tpath)):   # #1260
         _log("send-verified abort: " + ("thrash-held session (#1260)" if tpath else "no transcript path"))
         return _so.OUT_NOT_TYPED
-    # A FRESH capture right before typing (the sibling helpers' own race
-    # guard): the caller proved the box bare a moment ago, but round-trips pass
-    # before the real keystroke lands.
+    _latch = None if user_authored else _ostop.pane_latch(pane_id)
+    if _latch:   # #1257 owner-stop latch: journalled once per latch episode
+        from watchdog import nudge_gate as _ngl
+        if _ngl.first_hold(state, pane_id, "owner-stop", _latch.get("ts"),
+                           now if now is not None else time.time()):
+            _log("send-verified abort: owner-stop latch (#1257), not typed")
+        return _so.OUT_NOT_TYPED
+    # A FRESH capture right before typing (the sibling helpers' own race guard).
     cap = watchdog.capture_pane(pane_id, run, lines=40)
     if watchdog._input_line_text(cap) != "":
         watchdog._draft_rescue_persist(pane_id, cap, logs=logs)
@@ -1292,39 +1336,26 @@ def send_verified(pane_id, text, run=None, tpath=None, sleep_fn=None, logs=None,
             pane_id, run, cap, sleep_fn, state, now, _log))
         return _so.OUT_NOT_TYPED
     _so.note_bare(state, pane_id)
-    # #1092 (c) -- the PER-PANE typing-attempt BUDGET, consulted BEFORE any
-    # keystroke. A GATED machine nudge (a threaded `nudge=` that is not a RECOVERY
-    # revival kind, with `state` to read/write, and NOT the owner's own reply) is
-    # refused when the pane has already had `PANE_ATTEMPT_BUDGET` typing attempts
-    # this rolling hour, across ALL kinds -- the belt on top of the per-kind floor
-    # + total cap that makes any future escape (the #1092 swallowed-batch storm was
-    # exactly that) harmless by construction. A REVIVAL of a dead session (resume/
-    # compact/wake-parked -> RECOVERY_NUDGE_KINDS) and the owner's OWN reply
-    # (`user_authored`) are NEVER gated here: "the owner's problem is typing INTO
-    # an active/human pane, not recovery itself" (#1092 addendum), and stranding a
-    # limit/401-dead session for an hour is the #520 harm. Placed AFTER the bare
-    # check so a box-busy abort (no keystroke) never burns the budget, and BEFORE
-    # the strip-Escape (the first keystroke). The goal RE-ARM family's own pane
-    # budget is enforced in `deliver_goal` (it delivers via `_send_goal_verified`,
-    # not this primitive) -- #1092 item (e).
-    # #1092 F1 fix — use the CALLER's sweep `now` when threaded, so the pane-budget
-    # stamp shares ONE clock with the end-of-sweep prune (`_prune_pane_attempts`,
-    # run at the sweep `now`) and with the re-arm path (`deliver_goal`, which stamps
-    # at `now`). A `time.time()` stamp (later than the sweep `now`) used to be
-    # reaped by that same-sweep prune as "future", so the budget never accumulated
-    # (Review 2 F1). Callers that thread no `now` (card/bounce) fall back to
-    # `time.time()`, and the prune's future-keep direction covers that skew.
+    # #1092 (c) / B9 (owner 26.10.2026) -- the PER-PANE daily typing budget,
+    # consulted BEFORE any keystroke for a budgeted kind (`nudge_gate.pane_budgeted`:
+    # not a RECOVERY revival, not the owner's watch-trigger schedule, not the
+    # owner's own reply) when `state` is threaded: ONE typing attempt per pane per
+    # day across ALL kinds. After the bare check (a busy abort never burns it),
+    # before the strip-Escape. The goal RE-ARM family checks it in `deliver_goal`.
+    # #1092 F1: stamp on the CALLER's sweep `now` (one clock with the end-of-sweep
+    # prune); a caller without `now` falls back to `time.time()`.
+    from watchdog import nudge_gate as _ng
     _pane_now = now if now is not None else time.time()
     _gated_nudge = (state is not None and nudge is not None
                     and nudge not in RECOVERY_NUDGE_KINDS and not user_authored)
-    if _gated_nudge:
-        from watchdog import nudge_gate as _ng
-        if not _ng.pane_budget_ok(state, pane_id, _pane_now):
-            _log("send-verified " + _ng.pane_budget_hold_reason(
-                state, pane_id, _pane_now))
-            if isinstance(out, dict):
-                out["pane_budget_held"] = True
-            return _so.OUT_NOT_TYPED
+    _budgeted = state is not None and _ng.pane_budgeted(nudge, user_authored)
+    if _budgeted and not _ng.pane_budget_ok(state, pane_id, _pane_now):
+        quiet = not _ng.first_pane_hold(state, pane_id, nudge, _pane_now)
+        if not quiet:      # once per (pane, kind) day episode (B9 fix)
+            _log("send-verified " + _ng.pane_budget_hold_reason(state, pane_id, _pane_now))
+        if isinstance(out, dict):
+            out.update(pane_budget_held=True, hold_quiet=quiet)
+        return _so.OUT_NOT_TYPED
     # #1157 slice 3 -- a MACHINE nudge goes to a file; ONE pointer row is typed.
     # Decided before the first keystroke: a failed write sends none at all.
     ptr = _so.machine_pointer(pane_id, run, text, nudge, user_authored, _log)
@@ -1388,8 +1419,7 @@ def send_verified(pane_id, text, run=None, tpath=None, sleep_fn=None, logs=None,
     # or not: stamp the per-pane budget (only for a gated machine nudge) so a pane
     # whose verify keeps failing is not re-typed every sweep. A no-keystroke abort
     # above never burns the budget.
-    if _gated_nudge and (typed_ok or tv.get("typed")):
-        from watchdog import nudge_gate as _ng
+    if _budgeted and (typed_ok or tv.get("typed")):
         _ng.mark_pane_attempt(state, pane_id, _pane_now)
         if isinstance(out, dict):
             out["attempted"] = True
@@ -1448,7 +1478,6 @@ def send_verified(pane_id, text, run=None, tpath=None, sleep_fn=None, logs=None,
             if isinstance(out, dict):
                 out["swallowed"] = True
             if _gated_nudge:
-                from watchdog import nudge_gate as _ng
                 _sid = os.path.splitext(os.path.basename(str(tpath)))[0] or None
                 if _sid:
                     _ng.mark_sent(state, _sid, nudge, _pane_now)

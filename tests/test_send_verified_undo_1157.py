@@ -61,8 +61,7 @@ def partition_batch_text():
     flags) wrapped by the #923 batch composer -> 722 chars."""
     w = [{"number": n, "labels": ["ops-wait"]} for n in range(100, 112)]
     t = owr._nudge_text(7, w, deploy_window=[1], release_landed=[5, 6, 7, 8])
-    text, _inc = nudge_gate.compose_batch([("partition-audit", t)],
-                                          max_chars=nudge_gate.BATCH_MAX_CHARS)
+    text, _inc = nudge_gate.compose_batch([("partition-audit", t)])
     return text
 
 

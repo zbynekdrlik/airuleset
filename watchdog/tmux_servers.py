@@ -30,7 +30,8 @@ def default_socket_path(env=None):
 def listening_inodes(path, proc_root="/proc"):
     found = set()
     try:
-        with open(os.path.join(proc_root, "net", "unix")) as f:
+        with open(os.path.join(proc_root, "net", "unix"), encoding="utf-8",
+                  errors="replace") as f:   # any user may bind any socket name
             for line in f:
                 p = line.split()
                 if len(p) >= 8 and p[7] == path and p[3] == LISTENING:
@@ -78,8 +79,9 @@ def _parent_and_comm(proc_root):
     itself contain spaces or parentheses, so split on the LAST ')'."""
     table = {}
     for pid in _pids(proc_root):
-        try:
-            with open(os.path.join(proc_root, str(pid), "stat")) as f:
+        try:   # a process name may be any bytes (never abort the scan)
+            with open(os.path.join(proc_root, str(pid), "stat"),
+                      encoding="utf-8", errors="replace") as f:
                 raw = f.read()
         except OSError:
             continue
@@ -90,15 +92,31 @@ def _parent_and_comm(proc_root):
     return table
 
 
+def _is_claude(proc_root, pid, comm):
+    """The Claude CLI in either launch shape (issue 959): the name `claude`, or
+    a `node` running the npm Claude CLI (`erp_heartbeat._cmdline_is_claude_cli`)."""
+    if comm == "claude":
+        return True
+    if comm not in ("node", "nodejs"):
+        return False
+    from watchdog.erp_heartbeat import _cmdline_is_claude_cli
+    try:
+        with open(os.path.join(proc_root, str(pid), "cmdline"),
+                  encoding="utf-8", errors="replace") as f:
+            return _cmdline_is_claude_cli(f.read().replace("\x00", " "))
+    except OSError:
+        return False
+
+
 def claude_hosts(server_pids, proc_root="/proc"):
-    """The servers among `server_pids` that are an ancestor of a `claude`."""
+    """The servers among `server_pids` that are an ancestor of a Claude CLI."""
     servers = set(server_pids)
     if not servers:
         return set()
     table = _parent_and_comm(proc_root)
     hosts = set()
     for pid, (_ppid, comm) in table.items():
-        if comm != "claude":
+        if not _is_claude(proc_root, pid, comm):
             continue
         cur, seen = pid, set()
         while cur in table and cur not in seen and cur > 1:
@@ -162,7 +180,8 @@ def _signal(target, kill, proc_root, logs, head):
         return None
 
     try:
-        with open(os.path.join(proc_root, str(target), "comm")) as f:
+        with open(os.path.join(proc_root, str(target), "comm"),
+                  encoding="utf-8", errors="replace") as f:
             comm = f.read().strip()
     except OSError:
         comm = ""

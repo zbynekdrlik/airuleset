@@ -1339,9 +1339,10 @@ def goal_ops_wait_recheck(now, run, wrecs, sid, cwd, pid, tpath, loc,
                         "agents — deferred to next idle tick)" % loc)
             return logs
         if not _nudge_gate.gate_ok(state, sid, "partition-audit", now):
-            logs.append("ops-wait-recheck %s -> %s; retry next sweep, "
-                        "partition %s" % (loc, _nudge_gate.floor_hold_reason(
-                            state, sid, "partition-audit", now), sig))
+            if _nudge_gate.first_gate_hold(state, sid, "partition-audit", now):
+                logs.append("ops-wait-recheck %s -> %s; retry next sweep, partition "
+                            "%s" % (loc, _nudge_gate.floor_hold_reason(
+                                state, sid, "partition-audit", now), sig))
             return logs
     if dry_run:
         logs.append("ops-wait-recheck %s -> WOULD-NUDGE partition %s" % (loc, sig))
@@ -1466,8 +1467,9 @@ def goal_ops_wait_recheck(now, run, wrecs, sid, cwd, pid, tpath, loc,
         # #1092 (c) F6 — a per-pane budget REFUSAL typed nothing: not a swallow,
         # never book a give-up; retry once the budget frees.
         if send_out.get("pane_budget_held"):
-            logs.append("ops-wait-recheck %s -> held (pane-budget, not typed; "
-                        "retry next sweep)" % loc)
+            if not send_out.get("hold_quiet"):
+                logs.append("ops-wait-recheck %s -> held (pane-budget, not typed; "
+                            "retry next sweep)" % loc)
             return logs
         # #714 BOUNDED RETRY: a genuine swallow leaves last_nudge unadvanced so it
         # retries next sweep — but a PERSISTENTLY-swallowing NON-busy pane would

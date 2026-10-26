@@ -95,8 +95,8 @@ REMOTE_HOSTS = [
         # (cli_concurrency.resolve_role), idempotent reboot-safe window
         # creation (cli_tmux_provisioning._managed_windows_create_body, wired
         # into the session-created hook + provisioning-time live-apply, #998
-        # item 1(a)), resurrect relaunch (watchdog/resurrect), the infra clone
-        # as a managed checkout (session-start-fetch.sh). #1137 (owner
+        # item 1(a)), the infra clone as a managed checkout
+        # (session-start-fetch.sh). #1137 (owner
         # 25.10.2026) removed the window `mode`: Claude Code decides its own
         # dispatch, the windows keep their names and roles.
         "windows": [
@@ -117,8 +117,8 @@ REMOTE_HOSTS = [
             # mechanical guard, fresh-prod-copy + E2E evidence at hand-off, a
             # read-only prod fact source). Provisioned by the SAME data-driven
             # declared-window mechanism as gk-infra (session-created create
-            # body, session-start-fetch FF of its own cwd, resurrect relaunch
-            # by cwd) — no hardcoded install step.
+            # body, session-start-fetch FF of its own cwd) — no hardcoded
+            # install step.
             # #1163 — steered by a WATCH (Job 52, watchdog/watch_triggers.py),
             # never a /goal: scheduled work, owner cadence 25.9. (odoo-erp 7924).
             {"name": "gk-quality", "cwd": "~/devel/odoo/odoo-erp-quality",
@@ -677,9 +677,12 @@ def box_paused_reason(user, hostname=None):
 # cli_nudge_profiles resolves a box's profile (an entry's `nudge_profile` wins).
 _NUDGE_CORE = ("goal-guard", "partition-audit", "queue-arrival", "release-gap",
                "task-hygiene", "u-freshness")
+# B9 fix (26.10.2026): job 4's `working-stall` stuck-check joins gk + stream.
 NUDGE_PROFILES = {
-    "gk": frozenset(_NUDGE_CORE + ("infra-priority", "watch-trigger")),
-    "stream": frozenset(_NUDGE_CORE + ("bounce", "checkout-lag")),   # + #1176 census
+    "gk": frozenset(_NUDGE_CORE + ("infra-priority", "watch-trigger",
+                                   "working-stall")),
+    "stream": frozenset(_NUDGE_CORE + ("bounce", "checkout-lag",   # + #1176 census
+                                       "working-stall")),
     "controller": frozenset({"queue-arrival"}),
     "workstation": frozenset(),
 }

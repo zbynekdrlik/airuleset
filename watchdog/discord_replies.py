@@ -618,13 +618,15 @@ def deliver_discord_replies(now, run, state, panes_by_sid, dry_run=False,
                                 ok = watchdog._deliver_flag_prompt_to_exact_session(
                                     d_pid, run, prompt, dry_run, logs=logs,
                                     tpath=d_tpath, state=state, now=now,
-                                    sleep_fn=sleep_fn)
+                                    sleep_fn=sleep_fn,
+                                    user_authored=True)   # the owner's ❓ flag (B9)
                             else:
                                 ok = watchdog._nudge_repo_pane(d_pid, d_cwd, run, prompt,
                                                       dry_run, projects_dir,
                                                       logs=logs, tpath=d_tpath,
                                                       state=state, now=now,
-                                                      sleep_fn=sleep_fn)
+                                                      sleep_fn=sleep_fn,
+                                                      user_authored=True)
                             if ok and not dry_run:
                                 react_done_set.add(mid)
                                 react_done.append(mid)
@@ -637,6 +639,8 @@ def deliver_discord_replies(now, run, state, panes_by_sid, dry_run=False,
                                 logs.append("flag-react (dry-run)→%s [%s]"
                                             % (watchdog.project_label(d_cwd),
                                                d_sid[:12] if d_sid else "-"))
+                            elif ok is None:
+                                pass   # #1257 latch: journalled once by the helper
                             else:
                                 logs.append("flag-react pending (busy) %s"
                                             % mid[-8:])
@@ -687,7 +691,8 @@ def deliver_discord_replies(now, run, state, panes_by_sid, dry_run=False,
                             c_pid, c_cwd, run,
                             watchdog.compose_card_reopen_nudge(cr["issue"]),
                             dry_run, projects_dir, logs=logs, tpath=c_tpath,
-                            state=state, now=now, sleep_fn=sleep_fn)
+                            state=state, now=now, sleep_fn=sleep_fn,
+                            user_authored=True)   # the owner's card reply (B9)
                 elif reopened:
                     logs.append("card-reopen (dry-run) #%s (%s)"
                                 % (cr["issue"], cr["repo"]))

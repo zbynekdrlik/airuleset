@@ -34,7 +34,7 @@ owner-filed ticket never entered — see `queue_arrival_own`). The
 signal is a SET DELTA, not presence or cadence: the FIRST observation seeds a
 baseline (no nudge — we don't know what was already there); a LATER snapshot that
 ADDS a member (`cur − base ≠ ∅`) delivers ONE verified `stuck-check:` nudge
-naming the new arrival(s) — SUBJECT TO the shared per-pane-per-KIND 60-min floor
+naming the new arrival(s) — SUBJECT TO the shared per-pane daily floor + cap
 (#1023, `nudge_gate.gate_ok(state, sid, "queue-arrival", now)`): a delta inside
 the floor window is HELD (no keystroke, `hold:floor`) and its members ACCUMULATE
 into the next post-floor nudge, so multiple waves within one window fold into a
@@ -70,8 +70,8 @@ injectable seams the sibling jobs use, and `dry_run` mutates nothing.
 
 CADENCE (#1023): arrival DETECTION is bounded by the FETCH cache TTL
 (QUEUE_ARRIVAL_FETCH_TTL_S, ~5 min, env-tunable, floored at 60s), but the NUDGE
-KEYSTROKE is bounded by the SHARED per-pane-per-KIND 60-min floor in `nudge_gate`
-(the #1023 owner rule "raz za hodinu"), consulted via `gate_ok` in the delivery
+KEYSTROKE is bounded by the SHARED per-pane DAILY floor + cap in `nudge_gate`
+(owner 26.10.2026 "len raz denne", superseding #1023), consulted via `gate_ok` in the delivery
 branch. The pre-#1023 per-JOB 30-min floor (`QUEUE_ARRIVAL_NUDGE_FLOOR_S`) is
 DELETED — it sat below the owner's 1 h rule and is subsumed by the ONE shared
 floor, so the rule lives in exactly one place. The floor rate-limits DELIVERY
@@ -96,7 +96,7 @@ from watchdog import queue_arrival_own as _own     # #1178 own-set / ended pane 
 # hand-off is EITHER a tagged STOP:/GATEKEEPER-ACTION (INFRA) COMMENT (the
 # `_watchdog_infra_queue_fetch` records with kind=="comment" carry exactly these
 # two tags), OR an infra TICKET carrying a prio:*/release-block label. Delivered
-# under the `infra-priority` nudge kind (cap-exempt, 15-min floor).
+# under the `infra-priority` nudge kind (daily cap since 26.10.2026).
 INFRA_PRIORITY_NUDGE = "infra-priority"
 _PRIORITY_COMMENT_TAGS = frozenset({"GATEKEEPER-ACTION (INFRA)", "STOP:"})
 # `prio:*` (the design's literal set) OR any `release-block` family label
@@ -249,7 +249,7 @@ def _persist(persist, logs=None):
 
 # #1023 — the per-JOB 30-min nudge floor (`QUEUE_ARRIVAL_NUDGE_FLOOR_S`) is
 # DELETED: it sat BELOW the owner's 1 h rule and is subsumed by the ONE
-# per-pane-per-KIND 60-min floor in `nudge_gate` (consulted via
+# per-pane daily floor in `nudge_gate` (consulted via
 # `gate_ok(state, sid, "queue-arrival", now)` below). Delta ACCUMULATION is
 # preserved without a per-job floor: `_queue_decision` returns "nudge" with `base`
 # kept OLD, and when `gate_ok` holds the keystroke the orchestrator returns before
@@ -322,7 +322,7 @@ def _queue_decision(rec, cur, now, classify_fn=None):
     already been told about. A NEW member (`cur - base`) is an arrival the parked
     session is blind to → a `nudge` verdict. #1023: the per-JOB 30-min floor is
     gone; the decider keeps the OLD base for a `nudge`, and the ORCHESTRATOR's
-    shared per-kind `gate_ok` (60 min) holds the keystroke when the floor has not
+    shared per-kind `gate_ok` (a day) holds the keystroke when the floor has not
     elapsed — so a swallowed send re-detects the arrival AND members arriving
     inside the floor window keep growing `cur - base`, so the next post-floor
     nudge names ALL of them (accumulation preserved without a per-job floor). The
@@ -794,16 +794,15 @@ def goal_queue_arrival_recheck(now, run, qrecs, sid, cwd, pid, tpath, loc,
 
     # #1109 — a wave carrying a RELEASE-BLOCKING infra arrival (a STOP:/
     # GATEKEEPER-ACTION (INFRA) comment, or a prio:*/release-block infra ticket)
-    # is delivered under the `infra-priority` nudge kind: cap-EXEMPT (never sits
-    # 3 h behind the owner's cross-kind anti-spam cap) but with its own 15-min
-    # floor + every idle/busy/liveness gate. Only the INFRA role can be priority
-    # (the review union has no id_map). A priority wave ALWAYS takes the DIRECT
-    # delivery path (never the batch path, whose single `queue-arrival` identity
-    # is capped), so `infra-priority` reaches the pane on its own gate.
+    # is delivered under the `infra-priority` nudge kind (INFRA role only — the
+    # review union has no id_map). B9 (owner 26.10.2026): it is bound by the
+    # pane's daily cap like every kind, so when the day's batch is open it rides
+    # that ONE batch (the `queue-arrival` section, admitted only while the
+    # owner's `infra-priority` switch is on, its hub receipt posted by the batch
+    # delivery callback); otherwise the direct path's `gate_ok("infra-priority")`
+    # holds it for the day.
     priority = role == "infra" and _wave_has_priority(arrivals, id_map)
     nudge_kind = INFRA_PRIORITY_NUDGE if priority else "queue-arrival"
-    if priority:
-        batch_collect = None
 
     if action == "skip":
         logs.append("queue-arrival %s -> skip:%s (state unchanged)"
@@ -858,11 +857,11 @@ def goal_queue_arrival_recheck(now, run, qrecs, sid, cwd, pid, tpath, loc,
         logs.append("queue-arrival %s -> hold:%s (%d new, base kept; delivers "
                     "when the pane is idle and human-quiet)" % (loc, _held, len(arrivals)))
         return logs
+    if not watchdog.nudges_enabled(nudge_kind):   # #1023/#1109 switch, batch too
+        logs.append("queue-arrival %s -> skip:kind-off (%s, %d new)"
+                    % (loc, nudge_kind, len(arrivals)))
+        return logs
     if batch_collect is None:
-        if not watchdog.nudges_enabled(nudge_kind):   # #1023/#1109 per-kind switch
-            logs.append("queue-arrival %s -> skip:kind-off (%s, %d new)"
-                        % (loc, nudge_kind, len(arrivals)))
-            return logs
         from watchdog import compact as _compact
         if _compact.pending_compact_hold(sid, now):   # #848 bounded
             logs.append("queue-arrival %s -> hold:compact-pending (pending /compact; "
@@ -885,9 +884,10 @@ def goal_queue_arrival_recheck(now, run, qrecs, sid, cwd, pid, tpath, loc,
                         % (loc, len(arrivals)))
             return logs
         if not _nudge_gate.gate_ok(state, sid, nudge_kind, now):
-            logs.append("queue-arrival %s -> %s; retry next sweep, "
-                        "%d new" % (loc, _nudge_gate.floor_hold_reason(
-                            state, sid, nudge_kind, now), len(arrivals)))
+            if _nudge_gate.first_gate_hold(state, sid, nudge_kind, now):
+                logs.append("queue-arrival %s -> %s; retry next sweep, %d new" % (
+                    loc, _nudge_gate.floor_hold_reason(state, sid, nudge_kind, now),
+                    len(arrivals)))
             return logs
     if dry_run:
         logs.append("queue-arrival %s -> WOULD-NUDGE (%d new: %s)"
@@ -911,6 +911,10 @@ def goal_queue_arrival_recheck(now, run, qrecs, sid, cwd, pid, tpath, loc,
             _q[_s] = _nr
             if _h is not None:
                 _h.add(_s)
+            # #1109 req 3 -- the batch delivery is CONFIRMED here: the priority
+            # wave's hub receipts, journalled by `_deliver_batch`.
+            return (_post_receipts_for_wave(_st, _ar, id_map, _n, loc,
+                                            receipt_post_fn) if priority else [])
         batch_collect.append(("queue-arrival", text, _on_deliver))
         logs.append("queue-arrival %s -> batch-collected (%d new)"
                     % (loc, len(arrivals)))
@@ -956,8 +960,9 @@ def goal_queue_arrival_recheck(now, run, qrecs, sid, cwd, pid, tpath, loc,
         # #1092 (c) F6 — a per-pane budget REFUSAL typed nothing: not a swallow,
         # never book a give-up; retry once the budget frees.
         if send_out.get("pane_budget_held"):
-            logs.append("queue-arrival %s -> held (pane-budget, not typed; retry "
-                        "next sweep, %d new)" % (loc, len(arrivals)))
+            if not send_out.get("hold_quiet"):
+                logs.append("queue-arrival %s -> held (pane-budget, not typed; "
+                            "retry next sweep, %d new)" % (loc, len(arrivals)))
             return logs
         # A genuine swallow leaves base unadvanced -> retries next sweep; bounded
         # so a persistently-swallowing NON-busy pane backs off after

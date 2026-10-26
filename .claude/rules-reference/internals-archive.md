@@ -2580,3 +2580,106 @@ Lessons reusable for any future per-box aggregation over these caches:
 ### #1137 Job 46 removal (2026-10-26)
 
 - **Job 46 SESSION-HEALTH-OBSERVATION is DELETED** (`watchdog/session_health_observe.py` + its `run_once` registration; the (46) docstring paragraph stays as a REMOVED tombstone). Nothing read its `session-health:` journal line once the owner deleted the action path (see "#947 REVERSED" above). `tests/test_947_reversal_locks.py` now pins ABSENCE (no module, no `session_restart` / `session_health` registry label, no exit/relaunch executor); the install drop-in cleanup and its tests stay.
+
+### Moved from `watchdog/nudge_gate.py` at the B9 daily cap (owner 26.10.2026)
+
+The owner's 26.10. ruling ("mali by sa nudges zgrupovať a volať napr. len raz denne") superseded the 1 h per-kind floor and the 3 h total cap. The module docstring that explained them, verbatim:
+
+```text
+"""Shared per-session / per-category nudge CADENCE GATE (#797).
+
+Two problems this fixes, both reported by the owner:
+
+1. **Footer `U` goes stale.** Since #795 retired the daily question re-ask, the
+   footer `U N` is the owner's ONLY question surface, so a phantom `U` (a
+   `needs-answer`/`needs-decision` label or question-map entry a session forgot
+   to clear after the question was answered/obsoleted) directly LIES to him. The
+   new `u_freshness` rider forces an armed session to re-audit its own U members —
+   but the owner's hard contract is "raz za hodinu skontroluje… NIE častejšie ako
+   raz za hodinu". This gate is where that 1×/hour STROP lives (floor-clamped so
+   an env units-error can never lower it).
+
+2. **Nudges arrive too often ("chodia jak besne po sebe").** Every job-20
+   keystroke rider (partition-audit / release-gap / queue-arrival)
+   keeps its OWN ad-hoc timer namespace. The per-sweep `handled` set bounds
+   delivery to one keystroke per pane per SWEEP, but sweeps are 60s apart, so a
+   kind whose per-JOB floor was below one hour (queue-arrival's 30-min floor) could
+   re-fire the SAME kind into the same session inside the hour — the owner's #1023
+   regression ("takyto nudge by nemal chodit castejsie nez raz za hodinu!"). This
+   gate is where the owner's "raz za hodinu" rule lives, in TWO complementary
+   bounds (both owner directives, restored honestly after the #1023 fix-forward
+   integration finding of 2026-09-14):
+
+     - PER-KIND FLOOR (#1023, owner 2026-09-14) — a per-pane-per-KIND 60-min
+       floor (`NUDGE_MIN_INTERVAL_S`): a SECOND delivery of the SAME kind defers
+       until an hour after the last SEND (a DELIVERED keystroke, confirmed OR
+       delivered-unconfirmed; #1023 reopen).
+     - CROSS-KIND TOTAL CAP (#913, owner 2026-09-06, verbatim: "nikdy viac ako
+       raz za hodinu!!!! a ani iny nudge do promptu!!!") — at most ONE PRIORITY
+       nudge per pane per `NUDGE_TOTAL_GAP_S` in TOTAL, across ALL kinds — 1 h
+       until 2026-09-17, then 3 h (owner "3" on #1023: two gk panes made the
+       hourly cap read as two interruptions an hour).
+       The #1023 lane DELETED this on the inference "per-kind staging bounds the
+       total" — but that is not the owner's word: with two kinds staged on, two
+       nudges per hour reach one pane (a kind whose condition isn't met at the
+       shared batch delivers later in the hour). So the cap is RESTORED, under a
+       NEW name (the old `NUDGE_FAMILY_GAP_S`/`_family_gap` stay deleted).
+
+   RECOVERY identities (`RECOVERY_NUDGE_KINDS` = resume/compact/goal-arm/wake-parked/goal-disarm/model-restore) are EXEMPT from
+   BOTH bounds and never count as "another kind delivered" for the cap — a
+   revival into a dead/blocked session is not a prompt interruption.
+
+   #1109/#1163 — PRIORITY_CAP_EXEMPT_KINDS (`infra-priority`, `watch-trigger`) are
+   exempt from the cross-kind TOTAL cap ONLY (neither block via it nor count) but
+   KEEP their own per-kind floor (15 min / 60 min) — a release-blocking hand-off must
+   reach the gk-infra window even while an ordinary priority kind holds the 3 h
+   cap, yet is still a floored, staged prompt interruption (NOT a recovery kind).
+
+DESIGN — a pure helper over ONE state namespace, no new I/O, no new job:
+
+  state["nudge_cadence"] = {sid: {category: last_delivered_ts}}
+
+persisted in the ONE existing `~/.claude/api-watchdog-state.json` (run_once's
+`state`). `gate_ok(state, sid, category, now)` returns True iff a recovery kind,
+OR BOTH bounds hold (checked via the shared `_total_cap_block` predicate that
+`batch_eligible` also uses — one gate, two sites):
+
+  PER-KIND FLOOR (#1023) — at least `_category_floor(category)` since THIS kind's
+  last DELIVERED nudge to this sid. EVERY gated kind carries `_min_interval()`
+  (>= 1 h); `u-freshness` the owner's `_u_cadence()` strop and `goal-guard` a 24 h
+  floor keep their LONGER intent via `max()`.
+
+  CROSS-KIND TOTAL CAP (#913, restored; #1023 fix-forward 2) — NO priority kind
+  of ANY identity, INCLUDING the deciding kind's own last send, delivered to this
+  sid within `_total_gap()` (>= 3 h). The cap counts the SAME kind too: a pane
+  dominated by one kind (gk-infra, `queue-arrival`) was otherwise bounded only by
+  the 60-min per-kind floor and delivered up to once an hour — the owner's word is
+  "in TOTAL, across ALL kinds" (ROZHODNUTÉ "3", 2026-09-17), so self-repeats count.
+  Recovery kinds are excluded from the scan. The batch path (`batch_eligible`)
+  is the SIBLING gate: it returns [] while
+  the cap is closed, so a second batch never leaks a second interruption; when the
+  cap is open it composes every floor-eligible kind into ONE keystroke — batching
+  is how multiple due kinds SHARE the single hourly interruption.
+
+#923 BATCHING (owner ROZHODNUTÉ): instead of individual delivery, ALL eligible
+families compose into ONE combined prompt per 1h slot. `batch_eligible()` returns
+the ordered list (WORK_DRIVING first, AUDIT second); `compose_batch()` formats them
+into a single `BATCH_PREFIX`-headed message; `mark_batch_sent()` stamps all at once.
+The classification (WORK_DRIVING vs AUDIT) determines section ORDER within the batch
+and the TRIM ORDER when the batch exceeds max_chars (audit trimmed first).
+
+`mark_sent` is written on any DELIVERED send — a keystroke that reached the pane,
+confirmed OR `delivered-unconfirmed` (#1023 reopen: "raz za hodinu" is about the
+nudge REACHING the pane, not the session's reaction); a genuine SWALLOW (text
+backed out) never advances the clock (the #714 MAX_SEND_FAILS bound stays each
+rider's storm limiter). `prune` is the standard #519/#531 orphan reaper shape
+(visited_sids PRIMARY, a TTL SECONDARY). Fail-safe: a malformed/corrupt gate entry
+reads as "no prior nudge" → `gate_ok` ALLOWS (the safe direction — never SUPPRESS a
+legit nudge; u-freshness additionally has its own last_nudge backstop in the rider,
+so it can't burst even on a corrupt gate).
+"""
+```
+
+### Moved from internals-watchdog.md at the B9 review-6 cap (2026-10-26)
+
+- **#1113 — never type a machine `/goal` into an ACTIVE loop; the janitor recognises its OWN truncated payload by provenance+tail, not only a clean substring.** The #623 `stale-rearm` path typed a 3.7 kB REPLACE into david1–3's LIVE armed loops after a template change (>10× owner regression); the submit was swallowed and the janitor DECLINED the stranded payload because a grid-wrapped box does not reconstruct as a contiguous substring (a mid-token wrap boundary inserts a spurious row-join space, `origin/main`→`origin/ main`). FIX (Approach 1, net goal.py LOC DOWN): (1) `_stale_rearm_decide` is observe-only — one `stale-drift … waits for the next natural arm` journal line deduped per (sid, template hash) via the existing `goal_stale_rearm_tmpl` stamp, NEVER records/types; `_GOAL_STALE_REARM_ORIGIN` leaves `_GOAL_WATCHDOG_REARM_ORIGINS`+`_GOAL_ATTEMPTS_STATE_KEYS` (kept only to recognise a leftover request, the ONE partition-tuple exception, fail-safe to preserve the #400 anchor); a leftover on-disk request drops `drop:stale-rearm-retired` before any gate. (2) `deliver_goal`'s `armed is True` → unconditional `drop:already-armed` for every origin (the #623 carve-out + `drop:already-current` deleted). (3) `stash._box_is_own_leftover(..., provenance=)` gains a truncated-render proof (`_box_tail_row_norm`): with a live `_janitor_watch_seen` mark, accept when the box TAIL row is a SUFFIX of the payload AND the whitespace-STRIPPED box body is a substring of the whitespace-stripped payload (≥80 chars) — whitespace-stripping absorbs the spurious/missing wrap spaces the #737 clean-substring proof misses; consumed by `_log_arm_confirm_fail` + `_janitor_recover`, a foreign draft matches neither. GOTCHAS: a clean WORD-wrap scroll IS a clean substring (own=True today) — the RED fixture MUST character-grid wrap + scroll (hide the `/goal ` head) to reproduce the non-substring `cleanup=declined`. `_janitor_clear_box` convergence on a synthetic grid fixture is FRAGILE (naive grid math leaves 1-char tail rows wasting iters) — assert recognition + never-submit, not the exact backspace count. Design item-3 "tail EQUALS payload tail" is implemented as `endswith` (wrap width unknown at read time). Re-lock every #623/#1092(e)/#675/#1104 stale-rearm-typing test to the removal (the #1096 false-pass class: a leftover-stale-rearm attempt-cap test false-passes post-retirement because the request drops before the cap — re-lock it to the retired-drop; the pane-budget booking re-exercises via a DARK-rearm keystroke into a DARK pane).

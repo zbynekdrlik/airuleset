@@ -191,8 +191,8 @@ class TestOrchestrator(_OrchBase):
         self.assertIn(self.sid, urecs)
 
     def test_u_past_cadence_is_nudged_and_marks_gate(self):
-        urecs = {self.sid: {"first_seen": NOW - 2 * HOUR, "last_nudge": None}}
-        tmux = self._tmux()
+        urecs = {self.sid: {"first_seen": NOW - DAY - HOUR, "last_nudge": None}}
+        tmux = self._tmux()   # B9: the U strop is a day, so seed past it
         state = {}
         self._run(urecs, lambda cwd: (5, FRESH_TS), tmux, handled=set(),
                   state=state)

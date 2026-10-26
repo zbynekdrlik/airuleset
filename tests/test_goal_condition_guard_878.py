@@ -100,12 +100,12 @@ class TestGoalGuardDeliver(unittest.TestCase):
         self.sent = []
 
     def _fake_send(self, pid, text, run, captured=None, sleep_fn=None,
-                   logs=None, verify_armed=True, nudge=None):
-        self.sent.append(text)
+                   logs=None, verify_armed=True, nudge=None, out=None):
+        self.sent.append(text)   # B9: `out` tells the pane budget a key was typed
         return True
 
     def _fake_send_fail(self, pid, text, run, captured=None, sleep_fn=None,
-                        logs=None, verify_armed=True, nudge=None):
+                        logs=None, verify_armed=True, nudge=None, out=None):
         self.sent.append(text)
         return False
 

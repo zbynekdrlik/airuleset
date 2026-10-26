@@ -50,8 +50,7 @@ def _next_batch_text():
     """A DIFFERENT, later batch (other counts) — what the next sweep sends."""
     w = [{"number": n, "labels": ["ops-wait"]} for n in range(100, 105)]
     t = owr._nudge_text(3, w, deploy_window=[], release_landed=[])
-    return nudge_gate.compose_batch([("partition-audit", t)],
-                                    max_chars=nudge_gate.BATCH_MAX_CHARS)[0]
+    return nudge_gate.compose_batch([("partition-audit", t)])[0]
 
 
 class PreSendOwnLeftoverOnRealTmux(unittest.TestCase):

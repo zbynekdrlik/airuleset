@@ -430,7 +430,8 @@ def _presend_own(pid, cap, state, now):
       * the existing own recogniser `_looks_like_own_stuck_content` on the HEAD
         row, narrowed to the one shape a human never types: the batch composer's
         own head `nudge: [<known category>] ` (#923, registered machine-only) on
-        a box no longer than a batch (`BATCH_MAX_CHARS`), or (slice 3) a box
+        a box no longer than a pre-#1157 typed batch (`BATCH_MAX_CHARS`), or
+        (slice 3) a box
         that is exactly one of our pointer lines whose file exists
         (`nudge_file.is_pointer_line`: the whole line must match, so words
         appended after it never pass). `/goal ` and

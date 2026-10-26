@@ -1,125 +1,68 @@
-"""Shared per-session / per-category nudge CADENCE GATE (#797).
+"""Shared per-session / per-pane machine-nudge CADENCE GATE (#797, #1023, #1092).
 
-Two problems this fixes, both reported by the owner:
+DOCTRINE (owner 26.10.2026, bundle B9, supersedes the #1023 1 h per-kind floor
+and the #913/#1023 3 h total cap — their history is in
+`.claude/rules-reference/internals-archive.md`, grep "B9 daily cap"): "vidím
+chodiť často nudges do claudes … mali by sa nudges zgrupovať a volať napr. len
+raz denne". Every nudge is a whole turn, so every NON-recovery keystroke kind
+reaches a pane AT MOST ONCE PER 24 h, and everything due at that moment rides
+ONE `nudge:` batch. Two bounds carry it:
 
-1. **Footer `U` goes stale.** Since #795 retired the daily question re-ask, the
-   footer `U N` is the owner's ONLY question surface, so a phantom `U` (a
-   `needs-answer`/`needs-decision` label or question-map entry a session forgot
-   to clear after the question was answered/obsoleted) directly LIES to him. The
-   new `u_freshness` rider forces an armed session to re-audit its own U members —
-   but the owner's hard contract is "raz za hodinu skontroluje… NIE častejšie ako
-   raz za hodinu". This gate is where that 1×/hour STROP lives (floor-clamped so
-   an env units-error can never lower it).
+  PER-SESSION (`gate_ok` / `batch_eligible`, `state["nudge_cadence"] = {sid:
+  {category: last_delivered_ts}}`): a per-kind floor of a day (`_category_floor`)
+  plus the cross-kind TOTAL cap of a day (`_total_cap_block`, counting the same
+  kind too). While the cap is open, `batch_eligible` names every due GATED
+  category so the job-20 riders compose ONE batch (`compose_batch`,
+  `mark_batch_sent` stamps every member).
 
-2. **Nudges arrive too often ("chodia jak besne po sebe").** Every job-20
-   keystroke rider (partition-audit / release-gap / queue-arrival)
-   keeps its OWN ad-hoc timer namespace. The per-sweep `handled` set bounds
-   delivery to one keystroke per pane per SWEEP, but sweeps are 60s apart, so a
-   kind whose per-JOB floor was below one hour (queue-arrival's 30-min floor) could
-   re-fire the SAME kind into the same session inside the hour — the owner's #1023
-   regression ("takyto nudge by nemal chodit castejsie nez raz za hodinu!"). This
-   gate is where the owner's "raz za hodinu" rule lives, in TWO complementary
-   bounds (both owner directives, restored honestly after the #1023 fix-forward
-   integration finding of 2026-09-14):
+  PER-PANE (`pane_budget_ok` / `mark_pane_attempt`, `state["nudge_pane_attempts"]
+  = {pid: [ts]}`): ONE typing attempt per pane per day, consulted BEFORE the first
+  keystroke by every delivery primitive that types into an active pane
+  (`send_verified`, the stash route `deliver_with_stash`, the goal re-arm in
+  `deliver_goal`, the goal-guard direct send) and pre-checked by riders that would
+  otherwise read a hold as a failed delivery (report-owed, dying-subagent).
+  `pane_budgeted` says which kinds it binds. A pane, not a session: a restarted
+  claude in the same pane gets no fresh slot. Every machine delivery threads
+  `state` (job 49 task-hygiene since B9), so no budgeted path skips it.
 
-     - PER-KIND FLOOR (#1023, owner 2026-09-14) — a per-pane-per-KIND 60-min
-       floor (`NUDGE_MIN_INTERVAL_S`): a SECOND delivery of the SAME kind defers
-       until an hour after the last SEND (a DELIVERED keystroke, confirmed OR
-       delivered-unconfirmed; #1023 reopen).
-     - CROSS-KIND TOTAL CAP (#913, owner 2026-09-06, verbatim: "nikdy viac ako
-       raz za hodinu!!!! a ani iny nudge do promptu!!!") — at most ONE PRIORITY
-       nudge per pane per `NUDGE_TOTAL_GAP_S` in TOTAL, across ALL kinds — 1 h
-       until 2026-09-17, then 3 h (owner "3" on #1023: two gk panes made the
-       hourly cap read as two interruptions an hour).
-       The #1023 lane DELETED this on the inference "per-kind staging bounds the
-       total" — but that is not the owner's word: with two kinds staged on, two
-       nudges per hour reach one pane (a kind whose condition isn't met at the
-       shared batch delivers later in the hour). So the cap is RESTORED, under a
-       NEW name (the old `NUDGE_FAMILY_GAP_S`/`_family_gap` stay deleted).
+EXEMPT: RECOVERY identities (`RECOVERY_NUDGE_KINDS`: resume/`continue` after an
+API error, oauth-resume, compact, the owner's own `/autopilot` goal-arm,
+wake-parked, goal-disarm, model-restore) skip both bounds and never count — a
+revival of a dead session is not a prompt interruption; a re-arm spends the
+day only for a budgeted WORK origin (`deliver_goal`'s `_rearm_budgeted`).
+A liveness question is NOT a revival: job 4's stuck-check is the capped
+`working-stall` kind. An OWNER-authored delivery (`user_authored`, granted only
+in `discord_replies`: the owner's reply, ❓-flag prompt, card reopen) passes
+both bounds. The owner's DECLARED schedule (`watch-trigger`, Job 52) is the one
+`PRIORITY_CAP_EXEMPT_KINDS` member: it keeps its own hourly floor (its slots ARE
+the owner's schedule), never blocks or counts toward the day. The #1257
+owner-stop latch (`watchdog/owner_stop.py`) sits ABOVE all of this: a latched
+pane gets no machine keystroke of any kind.
 
-   RECOVERY identities (`RECOVERY_NUDGE_KINDS` = resume/compact/goal-arm/wake-parked/goal-disarm/model-restore) are EXEMPT from
-   BOTH bounds and never count as "another kind delivered" for the cap — a
-   revival into a dead/blocked session is not a prompt interruption.
+The daily batch is NEVER trimmed (its body goes to a nudge file, #1157), so
+every due kind rides it; an `infra-priority` wave rides it only while its own
+switch is on, its hub receipt posted by the batch callback. A HELD send is
+journalled ONCE per (pane|sid, kind) episode (`first_hold`), never per sweep;
+`end_hold_log` settles that journal at the end of every sweep (a dry run
+restores it). `pre_send_hold` is the ONE latch + spent-day pre-check for a
+caller that would otherwise book a withheld send as a swallow or a nudge.
 
-   #1109/#1163 — PRIORITY_CAP_EXEMPT_KINDS (`infra-priority`, `watch-trigger`) are
-   exempt from the cross-kind TOTAL cap ONLY (neither block via it nor count) but
-   KEEP their own per-kind floor (15 min / 60 min) — a release-blocking hand-off must
-   reach the gk-infra window even while an ordinary priority kind holds the 3 h
-   cap, yet is still a floored, staged prompt interruption (NOT a recovery kind).
-
-DESIGN — a pure helper over ONE state namespace, no new I/O, no new job:
-
-  state["nudge_cadence"] = {sid: {category: last_delivered_ts}}
-
-persisted in the ONE existing `~/.claude/api-watchdog-state.json` (run_once's
-`state`). `gate_ok(state, sid, category, now)` returns True iff a recovery kind,
-OR BOTH bounds hold (checked via the shared `_total_cap_block` predicate that
-`batch_eligible` also uses — one gate, two sites):
-
-  PER-KIND FLOOR (#1023) — at least `_category_floor(category)` since THIS kind's
-  last DELIVERED nudge to this sid. EVERY gated kind carries `_min_interval()`
-  (>= 1 h); `u-freshness` the owner's `_u_cadence()` strop and `goal-guard` a 24 h
-  floor keep their LONGER intent via `max()`.
-
-  CROSS-KIND TOTAL CAP (#913, restored; #1023 fix-forward 2) — NO priority kind
-  of ANY identity, INCLUDING the deciding kind's own last send, delivered to this
-  sid within `_total_gap()` (>= 3 h). The cap counts the SAME kind too: a pane
-  dominated by one kind (gk-infra, `queue-arrival`) was otherwise bounded only by
-  the 60-min per-kind floor and delivered up to once an hour — the owner's word is
-  "in TOTAL, across ALL kinds" (ROZHODNUTÉ "3", 2026-09-17), so self-repeats count.
-  Recovery kinds are excluded from the scan. The batch path (`batch_eligible`)
-  is the SIBLING gate: it returns [] while
-  the cap is closed, so a second batch never leaks a second interruption; when the
-  cap is open it composes every floor-eligible kind into ONE keystroke — batching
-  is how multiple due kinds SHARE the single hourly interruption.
-
-#923 BATCHING (owner ROZHODNUTÉ): instead of individual delivery, ALL eligible
-families compose into ONE combined prompt per 1h slot. `batch_eligible()` returns
-the ordered list (WORK_DRIVING first, AUDIT second); `compose_batch()` formats them
-into a single `BATCH_PREFIX`-headed message; `mark_batch_sent()` stamps all at once.
-The classification (WORK_DRIVING vs AUDIT) determines section ORDER within the batch
-and the TRIM ORDER when the batch exceeds max_chars (audit trimmed first).
-
-`mark_sent` is written on any DELIVERED send — a keystroke that reached the pane,
-confirmed OR `delivered-unconfirmed` (#1023 reopen: "raz za hodinu" is about the
-nudge REACHING the pane, not the session's reaction); a genuine SWALLOW (text
-backed out) never advances the clock (the #714 MAX_SEND_FAILS bound stays each
-rider's storm limiter). `prune` is the standard #519/#531 orphan reaper shape
-(visited_sids PRIMARY, a TTL SECONDARY). Fail-safe: a malformed/corrupt gate entry
-reads as "no prior nudge" → `gate_ok` ALLOWS (the safe direction — never SUPPRESS a
-legit nudge; u-freshness additionally has its own last_nudge backstop in the rider,
-so it can't burst even on a corrupt gate).
+`mark_sent` stamps any DELIVERED or typed attempt (confirmed, delivered-
+unconfirmed, swallowed — #1023 reopen, #1092 (a)). Fail-safe: a malformed or
+future-skewed entry reads as "no prior nudge" → ALLOW (never a permanent mute).
+`prune` reaps gone sessions (visited_sids PRIMARY, a TTL SECONDARY, #519/#531).
 """
 import os
 import time
 
-# The gated keystroke-rider family. Jobs 8/11 (bounce / gk-request backstops) are
-# deliberately OUT — a different lane (idle-pane queue backstops with their own
-# staged schedules), not footer/partition nudges into an armed loop.
-#
-# #1023-review 🔵8 — goal-sweep / compact / subagent-stuck are ALSO deliberately
-# OUT: recovery/arming/compact lanes, not the footer-nudge family, each with its
-# OWN bound (goal-sweep = 1-pending-request lifecycle + #731 cap; compact = 30-min
-# cooldown + #855 vetoes, and its #848 per-integration supersede would BREAK under
-# a 1h floor; subagent-stuck = decide_working interval + max_nudges cap + #491 ACK).
-#
-# #923 CLASSIFICATION — families split into two classes:
-#
-#   WORK_DRIVING — families whose nudge directly DRIVES new work output
-#   (starting releases, processing arrivals, acting on a bounce verdict).
-#   These have PRIORITY within the shared 1h slot.
-#
-#   AUDIT — families that CHECK state but don't drive new work (footer partition
-#   correctness, U badge freshness, foreign goal condition). These DEFER to a
-#   due work-driving candidate, so the work motor is never starved.
-#
-# Every new gated category MUST be added to exactly ONE of these frozensets.
+# The gated job-20 rider categories (the batch members). Jobs 8/11 (bounce /
+# gk-request backstops), card, goal-sweep and subagent-stuck stay OUT of the
+# batch (own lanes with their own bounds) but are bound by the per-pane day.
+# #923 CLASSIFICATION: WORK_DRIVING sections lead the batch, AUDIT sections
+# follow. Every new gated category joins exactly ONE of the two sets.
 WORK_DRIVING_CATEGORIES = frozenset({
     "release-gap", "queue-arrival",
-    # #1066 lane B — a fresh gk BOUNCE verdict on a reduced-authority stream's
-    # own ticket DRIVES work (ACK + dispatch a lane); the goal-lane rider
-    # `bounce_verdict_recheck` delivers it under this per-kind 60-min floor.
-    "bounce-verdict",
+    "bounce-verdict",   # #1066 lane B: a fresh gk BOUNCE verdict drives work
 })
 
 AUDIT_CATEGORIES = frozenset({
@@ -128,127 +71,43 @@ AUDIT_CATEGORIES = frozenset({
 
 GATED_CATEGORIES = WORK_DRIVING_CATEGORIES | AUDIT_CATEGORIES
 
-# The owner's hard 1×/hour U-reconcile strop. Env AIRULESET_U_RECONCILE_CADENCE_S
-# can only RAISE it (floor-clamped at U_RECONCILE_CADENCE_MIN_S == the strop) —
-# the #504/#543 floor-clamp lesson: a units-error / accidental sub-hour value
-# must never turn the reconcile into spam.
-U_RECONCILE_CADENCE_S = 3600
-U_RECONCILE_CADENCE_MIN_S = 3600
+DAY_S = 24 * 3600
 
-# #1023 (owner directive 2026-09-14) — the GLOBAL per-pane-per-KIND floor: NO
-# machine nudge of a given kind reaches a session's prompt more often than once
-# per hour. This is the ONE place the "raz za hodinu" rule lives — every gated
-# category carries it (`_category_floor` below), so the pre-#1023 per-JOB floors
-# (queue-arrival's 30-min `QUEUE_ARRIVAL_NUDGE_FLOOR_S`, and the sibling `_cadence`
-# re-check windows that are already >= 1 h) no longer need their own sub-hour
-# constants. Env AIRULESET_NUDGE_MIN_INTERVAL_S can only RAISE it (floor-clamped
-# at NUDGE_MIN_INTERVAL_MIN_S == the owner's hard 1 h strop, the #504/#543 lesson):
-# a units-error / accidental sub-hour value must never re-open the burst this fixes.
-#
-NUDGE_MIN_INTERVAL_S = 3600
-NUDGE_MIN_INTERVAL_MIN_S = 3600
+# Every bound below is ONE DAY (owner 26.10.2026). Env overrides can only RAISE
+# a bound — each is floor-clamped at its `_MIN_S` (the #504/#543 lesson: a units
+# error must never re-open the burst).
+U_RECONCILE_CADENCE_S = DAY_S        # #797 U-reconcile strop (u-freshness)
+U_RECONCILE_CADENCE_MIN_S = DAY_S
+NUDGE_MIN_INTERVAL_S = DAY_S         # #1023 per-pane-per-KIND floor
+NUDGE_MIN_INTERVAL_MIN_S = DAY_S
+NUDGE_TOTAL_GAP_S = DAY_S            # #913/#1023 cross-kind TOTAL cap
+NUDGE_TOTAL_GAP_MIN_S = DAY_S
 
-# #1023 fix-forward (integration finding, 2026-09-14) — the CROSS-KIND TOTAL cap
-# (#913, owner 2026-09-06, verbatim: "nikdy viac ako raz za hodinu!!!! a ani iny
-# nudge do promptu!!!"): at most ONE PRIORITY nudge per pane per hour in TOTAL,
-# across ALL kinds. The #1023 lane DELETED this (as `NUDGE_FAMILY_GAP_S`) on the
-# inference "per-kind staging bounds the total" — but with two kinds staged on,
-# two nudges per hour reach one pane (a kind whose condition is not met at the
-# shared batch delivers later in the hour, via the batch path). So the cap is
-# RESTORED, under a NEW name (the old `NUDGE_FAMILY_GAP_S`/`_family_gap` stay
-# deleted). Env AIRULESET_NUDGE_TOTAL_GAP_S can only RAISE it (floor-clamped at
-# NUDGE_TOTAL_GAP_MIN_S == the owner's hard strop, the #504/#543 lesson): a
-# units-error / accidental low value must never re-open the burst.
-# Owner decision 2026-09-17 07:1x CEST ("3" on #1023): 1 h -> 3 h per pane
-# EVERYWHERE — gk runs two Fable panes, so the 1 h per-pane cap read as ~2
-# interruptions an hour (14 batch-nudges / 24 h measured); the hard floor moves
-# with the default so env can still only RAISE.
-NUDGE_TOTAL_GAP_S = 3 * 3600
-NUDGE_TOTAL_GAP_MIN_S = 3 * 3600
-
-# #1023 addendum (owner, 2026-09-14) — RECOVERY revival identities: a nudge that
-# REVIVES a dead/blocked session (401/limit resume, /compact) is NOT a prompt
-# interruption, so it is exempt from BOTH the per-kind floor and the cross-kind
-# total cap, and never counts as "another kind delivered" for the cap. This set
-# MUST mirror tmux_io.RECOVERY_NUDGE_KINDS (the canonical staging set) — a
-# drift-lock test asserts they are identical. It is duplicated here rather than
-# imported so nudge_gate stays a LEAF module: several modules rely on
-# `from watchdog import nudge_gate` being import-safe, and tmux_io pulls in the
-# whole watchdog package.
-# #1038/#1181/#1260 — `goal-arm` (the owner's own `/autopilot` self-callback arm
-# and the owner-authorized `stream-migrate` watcher; #1260 retired its #1038
-# declared-window use together with the virgin arm) joins the recovery set here
-# in lockstep with tmux_io (the drift-lock test asserts identity). Exempting it
-# from the cadence gate adds no unbounded keystorm: the owner's arm is one human
-# action, and `stream-migrate` keeps its OWN bound — the per-request
-# `GOAL_DELIVERY_ATTEMPT_CAP` plus its `*_attempts` rate state — exactly like
-# the other recovery kinds.
-# #1063 — `goal-disarm` (the `/goal clear` #522 question-repoke backstop) is a
-# session recovery / damage-control action too, so it joins the recovery set here
-# in lockstep with tmux_io (the drift-lock test asserts identity). Its OWN bounds
-# (a proven 5-streak, the recent-human veto, the 24h/2 attempt cap in
-# `goal_question_repoke_watch`) keep it storm-safe — exactly like the others.
-# #1084: machine `/compact` is removed for good (producer deleted, nothing emits
-# `nudge="compact"`); the inert `compact` identity is left here in lockstep with
-# tmux_io only to keep the drift-lock + the hardcoding test files stable — not a
-# placeholder for a comeback.
+# RECOVERY revival identities (#1023 addendum; #1038/#1181/#1260 goal-arm =
+# the owner's own `/autopilot` arm + the owner-authorized stream-migrate
+# watcher; #1063 goal-disarm; #1084 the inert `compact`; #1203 model-restore).
+# MUST mirror tmux_io.RECOVERY_NUDGE_KINDS (a drift-lock test asserts identity);
+# duplicated so nudge_gate stays an import-safe LEAF module.
 RECOVERY_NUDGE_KINDS = frozenset(  # #1203 model-restore: watchdog/model_restore.py
     {"resume", "compact", "goal-arm", "wake-parked", "goal-disarm", "model-restore"})
 
-# #1109 — PRIORITY kinds that are EXEMPT from the cross-kind TOTAL cap while
-# KEEPING their own per-kind floor. UNLIKE a RECOVERY kind (which is a session
-# revival and skips BOTH the floor AND the total cap AND the per-kind staging
-# switch), an `infra-priority` nudge IS a prompt interruption — it is a stageable
-# MACHINE_NUDGE_KIND (default OFF, staged on gk) and it obeys its own per-kind
-# floor + every idle/busy/liveness gate; it is exempt ONLY from the #913/#1023
-# TOTAL cap, so a RELEASE-BLOCKING infra hand-off can never sit for 3 h behind the
-# owner's anti-spam cross-kind cap (the 22.9.2026 odoo-erp 2.318 incident). The
-# exemption is two-sided: an infra-priority send is neither BLOCKED by the cap
-# (`gate_ok` skips the cap check for it) nor COUNTS toward the cap for any other
-# kind (`_total_cap_block` skips it in the scan) — exactly like the recovery
-# kinds are skipped in the scan, but WITHOUT the floor exemption. This set MUST
-# be disjoint from RECOVERY_NUDGE_KINDS (a kind is one OR the other, never both).
-PRIORITY_CAP_EXEMPT_KINDS = frozenset({"infra-priority", "watch-trigger"})  # #1163 Job 52 slot: schedule = its bound
+# #1163 — the owner's DECLARED watch-trigger slots (Job 52) are exempt from the
+# day: they neither block nor count toward the total cap or the pane budget and
+# keep their own hourly floor. Disjoint from RECOVERY_NUDGE_KINDS. #1109's
+# `infra-priority` LEFT this set on 26.10.2026: a release-blocking infra hand-off
+# now waits for the pane's one daily batch like every other work signal.
+PRIORITY_CAP_EXEMPT_KINDS = frozenset({"watch-trigger"})
+WATCH_TRIGGER_FLOOR_S = 3600   # == watch_triggers.MIN_SLOT_GAP_S (drift-locked)
 
-# #1109 — the `infra-priority` per-kind floor: a release-blocking infra hand-off
-# may reach the pane at most once every 15 min (well under the owner's default
-# 1 h floor for ordinary priority kinds — a release block is time-critical, the
-# owner's „do 5 min" directive), never a keystorm.
-INFRA_PRIORITY_FLOOR_S = 15 * 60
-
-# orphan-reaper TTL for a per-sid cadence rec whose session is gone (mirrors the
-# #519/#531 per-sid-leak reaper): the `visited_sids` gate is PRIMARY (a live pane
-# is never reaped regardless of age), this is only the SECONDARY safety for a
-# budget-deferred pane.
+# orphan-reaper TTL for a per-sid cadence rec whose session is gone (#519/#531):
+# `visited_sids` is PRIMARY (a live pane is never reaped), this only SECONDARY.
 NUDGE_CADENCE_ORPHAN_TTL_S = 24 * 3600
 
-# #1092 (owner incident 2026-09-20) — the PER-PANE typing-attempt BUDGET. A brake
-# INDEPENDENT of the per-kind floor + cross-kind total cap, keyed on the PANE
-# (pid) not the session (sid): at most PANE_ATTEMPT_BUDGET machine typing attempts
-# per pane per rolling PANE_ATTEMPT_WINDOW_S, across all GATED kinds. It is the
-# belt on top of the per-kind/total-cap gates: even if a delivery outcome ESCAPES
-# the per-kind floor stamp (the #1092 swallowed-batch storm — 10 typing attempts
-# in 12 min because a swallowed batch stamped nothing), a GATED-nudge pane cannot
-# receive more than two GATED typing attempts an hour, so any such escape is
-# harmless by construction. Consulted BEFORE a keystroke + stamped AFTER any
-# typing attempt (delivered, delivered-unconfirmed, OR swallowed) by every
-# delivery path that TYPES INTO AN ACTIVE PANE and threads `state`: the #923
-# batch, the single-nudge riders (both via `send_verified`), and the goal RE-ARM
-# family (`deliver_goal`, #1092 item e). A REVIVAL into a DEAD session
-# (resume/compact/wake-parked via send_verified) is NOT gated — "the owner's
-# problem is typing INTO an active/human pane, not recovery itself" (#1092
-# addendum, Approach-2 rejection); gating a revival would strand a limit/401-dead
-# session for up to an hour (#520). SCOPE NOTE (Review 2 F4): the gate binds a
-# caller that threads `state` + a non-recovery `nudge`; the rare `task-hygiene`
-# delivery (Job 49, threads no `state`) is out of scope here and stays bounded by
-# its own ~2 h job cadence, so this is not a fleet-absolute "no pane ever gets a
-# 3rd keystroke", it is the storm-shape brake for the gated footer/re-arm paths.
-# Kept a LEAF helper over ONE state namespace, no new I/O, no new job (mirrors the
-# #797 cadence gate):
-#
-#   state["nudge_pane_attempts"] = {pid: [ts, ts, ...]}   # windowed on write
-PANE_ATTEMPT_BUDGET = 2
-PANE_ATTEMPT_WINDOW_S = 3600
+# #1092 — the PER-PANE typing-attempt BUDGET (see the module docstring): ONE
+# machine typing attempt per pane per rolling day across every budgeted kind,
+# stamped AFTER any typing attempt (delivered, unconfirmed OR swallowed).
+PANE_ATTEMPT_BUDGET = 1
+PANE_ATTEMPT_WINDOW_S = DAY_S
 
 
 def _env_int(key, default_s):
@@ -260,24 +119,21 @@ def _env_int(key, default_s):
 
 def _u_cadence():
     """The effective U-reconcile floor: the env override, floored at
-    U_RECONCILE_CADENCE_MIN_S so a units-error / accidental sub-hour value can
-    never lower the owner's hard 1×/hour strop (#504/#543). Env can only RAISE."""
+    U_RECONCILE_CADENCE_MIN_S (a day). Env can only RAISE (#504/#543)."""
     return max(_env_int("AIRULESET_U_RECONCILE_CADENCE_S", U_RECONCILE_CADENCE_S),
                U_RECONCILE_CADENCE_MIN_S)
 
 
 def _min_interval():
-    """The effective per-pane-per-kind floor (#1023), the env override floored at
-    NUDGE_MIN_INTERVAL_MIN_S (the owner's hard 1 h strop) so a units error can't
-    lower it below one hour (#504/#543)."""
+    """The effective per-pane-per-kind floor, floored at NUDGE_MIN_INTERVAL_MIN_S
+    (a day). Env can only RAISE (#504/#543)."""
     return max(_env_int("AIRULESET_NUDGE_MIN_INTERVAL_S", NUDGE_MIN_INTERVAL_S),
                NUDGE_MIN_INTERVAL_MIN_S)
 
 
 def _total_gap():
-    """The effective cross-kind TOTAL cap gap (#1023 fix-forward / #913), the env
-    override floored at NUDGE_TOTAL_GAP_MIN_S (the owner's hard strop — 3 h since
-    2026-09-17) so a units error can't lower it (#504/#543). Env can only RAISE."""
+    """The effective cross-kind TOTAL cap gap, floored at NUDGE_TOTAL_GAP_MIN_S
+    (a day). Env can only RAISE (#504/#543)."""
     return max(_env_int("AIRULESET_NUDGE_TOTAL_GAP_S", NUDGE_TOTAL_GAP_S),
                NUDGE_TOTAL_GAP_MIN_S)
 
@@ -286,25 +142,28 @@ GOAL_GUARD_FLOOR_S = 24 * 3600
 
 
 def _category_floor(category):
-    """The per-category (== per-kind) floor (#1023): EVERY gated kind carries the
-    global `_min_interval()` (>= 1 h) so no kind reaches a session's prompt more
-    than once per hour. Kinds with a LONGER intent keep it via `max()`: `goal-guard`
-    at least 24 h (#878), `u-freshness` the owner's `_u_cadence()` strop (>= 1 h,
-    env-raisable). No kind is exempt (the pre-#1023 default of 0 for most kinds is
-    exactly what let queue-arrival re-fire below the hour)."""
+    """The per-kind floor: a day for every kind (`_min_interval()`), the longer
+    of it and `_u_cadence()` / GOAL_GUARD_FLOOR_S for u-freshness / goal-guard
+    (env-raisable), and the owner's own hourly slot floor for `watch-trigger`
+    (its declared schedule is its bound, #1163)."""
+    if category == "watch-trigger":
+        return WATCH_TRIGGER_FLOOR_S
     if category == "u-freshness":
         return max(_min_interval(), _u_cadence())
     if category == "goal-guard":
         return max(_min_interval(), GOAL_GUARD_FLOOR_S)
-    # #1109 — infra-priority is the ONE kind with a SHORTER floor than the global
-    # 1 h: a release-blocking hand-off is time-critical (owner „do 5 min"), so it
-    # deliberately does NOT max() up to `_min_interval()`. It is not a GATED
-    # category, so the #1023 "every gated kind carries the 60-min floor" lock does
-    # not cover it — the shorter floor is intentional, paired with the cap
-    # exemption in `gate_ok`.
-    if category == "infra-priority":
-        return INFRA_PRIORITY_FLOOR_S
     return _min_interval()
+
+
+def pane_budgeted(nudge, user_authored=False):
+    """True iff a keystroke delivery of `nudge` is bound by the per-pane daily
+    budget: a machine nudge identity that is neither a RECOVERY revival nor the
+    owner's declared watch-trigger schedule, and not the owner's own Discord reply
+    (`user_authored`). None (an un-threaded delivery) is not budgeted here — the
+    #1023 kill switch already withholds it."""
+    return (nudge is not None and not user_authored
+            and nudge not in RECOVERY_NUDGE_KINDS
+            and nudge not in PRIORITY_CAP_EXEMPT_KINDS)
 
 
 def _session(state, sid):
@@ -348,32 +207,16 @@ def _gate_ts(v, now):
 
 
 def _total_cap_block(sess, now):
-    """The cross-kind TOTAL cap (#913, restored #1023 fix-forward; counts the
-    SAME kind since fix-forward 2): return the `(category, ts)` of the MOST-RECENT
-    priority kind delivered to this session within `_total_gap()`, or None when
-    the cap is open. Every priority kind counts, INCLUDING the kind being decided
-    — the owner's ruling is "at most ONE priority nudge per pane per 3 h in TOTAL,
-    across ALL kinds" (ROZHODNUTÉ "3", 2026-09-17). The former `exclude_category`
-    skip (a kind never blocked itself) was a hole once the total gap became 3 h
-    while the per-kind floor stayed 1 h: a pane dominated by one kind delivered
-    hourly. `gate_ok` still checks the per-kind floor FIRST, so a sub-60-min
-    same-kind repeat is reported as `hold:floor`, not `hold:total-cap`.
-    RECOVERY kinds AND PRIORITY_CAP_EXEMPT_KINDS (infra-priority, watch-trigger) are
-    skipped: a recovery revival is not a prompt interruption and never counts
-    toward the cap (recovery kinds never call `mark_sent` in production either, so
-    that is a defensive belt on top of that), and a release-blocking infra-priority
-    wake must never consume the shared 3 h anti-spam budget (its own 15-min
-    per-kind floor still applies via `gate_ok`). A FUTURE-skewed / non-numeric ts is
-    ignored by `_gate_ts`, so a corrupt entry can never mute a session via the
-    cap (the same fail-safe direction as the per-kind floor)."""
+    """The cross-kind TOTAL cap (#913/#1023, a day since 26.10.2026): the
+    `(category, ts)` of the MOST-RECENT budgeted kind delivered to this session
+    within `_total_gap()`, or None when the cap is open. The deciding kind's own
+    last send counts too. RECOVERY kinds and PRIORITY_CAP_EXEMPT_KINDS
+    (watch-trigger) are skipped — they never count. A future-skewed / non-numeric
+    ts is ignored by `_gate_ts` (a corrupt entry never mutes a session)."""
     gap = _total_gap()
     blocker = None
     for cat, raw in sess.items():
         if cat in RECOVERY_NUDGE_KINDS or cat in PRIORITY_CAP_EXEMPT_KINDS:
-            # #1109 — an infra-priority send never counts toward the cross-kind
-            # cap for ANY other kind, exactly like a recovery revival: a
-            # release-blocking wake must not consume the owner's 3 h anti-spam
-            # budget that ordinary priority kinds share.
             continue
         ts = _gate_ts(raw, now)
         if ts is not None and now - ts < gap and (blocker is None or ts > blocker[1]):
@@ -382,22 +225,12 @@ def _total_cap_block(sess, now):
 
 
 def gate_ok(state, sid, category, now):
-    """True iff a nudge of `category` (== nudge KIND) to `sid` is allowed at `now`.
-    A RECOVERY kind (resume/compact) is ALWAYS allowed — a revival into a
-    dead/blocked session is not a prompt interruption, exempt from both bounds.
-    A PRIORITY kind is allowed iff BOTH hold:
-      - PER-KIND FLOOR (#1023): the last SEND of THIS kind (a DELIVERED keystroke,
-        confirmed OR delivered-unconfirmed) is at least `_category_floor(category)`
-        old (or absent);
-      - CROSS-KIND TOTAL CAP (#913, restored; counts the SAME kind since fix-
-        forward 2): NO priority kind of ANY identity — including this kind's own
-        last send — was delivered to this sid within `_total_gap()`
-        (`_total_cap_block`). The per-kind floor is checked FIRST, so a sub-60-min
-        same-kind repeat is `hold:floor`; the cap catches the 60-179 min band.
-    Used by individual riders; the batch path (`batch_eligible()`) is the sibling
-    gate that applies the SAME total cap. Fail-safe ALLOWS on any malformed state
-    (never suppress a legit nudge) — including a FUTURE-skewed / corrupt-huge
-    numeric ts, which `_gate_ts` ignores so it can never mute a session."""
+    """True iff a nudge of `category` (== nudge KIND) to `sid` is allowed at `now`:
+    a RECOVERY kind always; else THIS kind's last send is older than its
+    `_category_floor` (checked FIRST, `hold:floor`) AND — for every kind but the
+    cap-exempt watch-trigger — no budgeted kind reached this sid within the
+    day (`_total_cap_block`, `hold:total-cap`). The batch path (`batch_eligible`)
+    applies the SAME cap. Fail-safe ALLOWS on malformed / future-skewed state."""
     if category in RECOVERY_NUDGE_KINDS:
         return True
     sess = _session(state, sid)
@@ -405,37 +238,24 @@ def gate_ok(state, sid, category, now):
     if last_cat is not None and now - last_cat < _category_floor(category):
         return False                              # per-kind floor
     if category in PRIORITY_CAP_EXEMPT_KINDS:
-        # #1109/#1163 — a cap-exempt kind (infra-priority, watch-trigger) KEEPS its floor
-        # (checked above) but is EXEMPT from the cross-kind total cap, so it can
-        # reach the pane even while an ordinary priority kind holds the cap.
-        return True
+        return True                               # #1163: its schedule is its bound
     if _total_cap_block(sess, now) is not None:
         return False                              # cross-kind total cap
     return True
 
 
 def floor_hold_reason(state, sid, category, now):
-    """The honest journal clause for a nudge the gate HELD — distinguishing the
-    two bounds (#1023 + #913 fix-forward), matching `gate_ok`'s check order:
-      - `"hold:floor (<kind>, <mm> min since last send)"` — THIS kind's own
-        per-kind floor. "last SEND" not "confirmed" (#1023 reopen): the mark
-        fires on any DELIVERED keystroke (confirmed OR delivered-unconfirmed);
-      - `"hold:total-cap (<kind> delivered <mm> min ago)"` — the MOST-RECENT
-        priority kind delivered within the total gap; since fix-forward 2 this
-        MAY be THIS kind's OWN last send (a same-kind repeat in the 60-179 min
-        band the floor has already elapsed for), not only a DIFFERENT kind.
-    Riders render this verbatim (`-> %s`), so the journal token is the gate's, not
-    a hardcoded one. Fail-safe `"hold:floor (<kind>, floor not elapsed)"` when no
-    ts is readable (never claim a number we cannot compute). A recovery kind is
-    never held, so it is never asked for a reason in production."""
+    """The honest journal clause for a nudge the gate HELD, in `gate_ok`'s order:
+    `hold:floor (<kind>, <mm> min since last send)` for THIS kind's own floor, or
+    `hold:total-cap (<kind> delivered <mm> min ago)` for the most recent budgeted
+    kind in the day (possibly THIS kind). Riders render it verbatim. Fail-safe
+    `hold:floor (<kind>, floor not elapsed)` when no ts is readable."""
     sess = _session(state, sid)
     last = _gate_ts(sess.get(category), now)
     if last is not None and now - last < _category_floor(category):
         return "hold:floor (%s, %d min since last send)" % (
             category, int((now - last) // 60))
     if category in PRIORITY_CAP_EXEMPT_KINDS:
-        # #1109 — a cap-exempt kind is only ever held by its own floor (above);
-        # it is never held by the total cap, so never report `hold:total-cap`.
         return "hold:floor (%s, floor not elapsed)" % category
     blocker = _total_cap_block(sess, now)
     if blocker is not None:
@@ -446,18 +266,11 @@ def floor_hold_reason(state, sid, category, now):
 
 
 def mark_sent(state, sid, category, now):
-    """Record a DELIVERED nudge of `category` to `sid` at `now` — a keystroke
-    that reached the pane. Called on a confirmed send, a delivered-unconfirmed
-    send, AND (since #1092 (a)) a GENUINE SWALLOW: a swallowed attempt IS a
-    delivery attempt (the text reached the pane before it was backed out), so it
-    stamps the per-kind floor too — the SAME kind then cannot re-fire on the next
-    ~70s sweep (the #1092 storm shape). (Pre-#1092 a swallow deliberately did NOT
-    advance the clock and relied on each rider's MAX_SEND_FAILS bound; #1092
-    tightened that to one attempt per kind per hour.) The recorded per-kind
-    timestamps are what BOTH the per-kind floor and the cross-kind total cap
-    (`_total_cap_block`) read. Never raises on a pre-existing malformed namespace
-    — it is replaced with a fresh dict for this sid rather than crashing the
-    sweep."""
+    """Record a nudge of `category` to `sid` at `now` that reached the pane:
+    confirmed, delivered-unconfirmed, or (#1092 (a)) a GENUINE SWALLOW — the text
+    reached the pane, so the SAME kind cannot re-fire on the next sweep. Both
+    the per-kind floor and the total cap read these stamps. A malformed
+    namespace is replaced for this sid, never a crash."""
     if not isinstance(state, dict):
         return
     cad = state.get("nudge_cadence")
@@ -472,7 +285,7 @@ def mark_sent(state, sid, category, now):
 
 
 # --------------------------------------------------------------------------- #
-# #923 BATCHING — compose all eligible families into ONE prompt per 1h slot.
+# #923 BATCHING — compose all eligible families into ONE prompt per daily slot.
 # --------------------------------------------------------------------------- #
 
 # The batch message leads with this prefix — a recognized machine-nudge prefix
@@ -480,26 +293,21 @@ def mark_sent(state, sid, category, now):
 # `_JANITOR_OWN_PREFIXES` for stranded-nudge cleanup.
 BATCH_PREFIX = "nudge:"
 
-# The max-chars hard cap for a BATCHED delivery (#923). Individual riders cap
-# their own text at 700; the batch adds a prefix + per-section headers, so the
-# batch cap must be > 700 to fit at least one full rider section. Set to 1400
-# (two full riders). send_verified's _type_literal chunk-typing handles texts
-# up to several KB (CC's input box accepts them) — the limit is readability.
+# B9 fix (owner 26.10.2026): the daily batch is NEVER trimmed — since #1157 its
+# body goes to a nudge file and ONE pointer row is typed, so every due kind rides
+# the pane's one daily batch. 1400 was the pre-#1157 TYPED-batch cap; it stays
+# only as the bound `send_outcome._presend_own` uses to recognise such a typed
+# batch still sitting in a box.
 BATCH_MAX_CHARS = 1400
 
 
 def batch_eligible(state, sid, now):
     """Return the list of categories eligible for batched delivery at `now`.
 
-    #1023 fix-forward — the batch path is the SIBLING gate of `gate_ok` and
-    applies the SAME cross-kind TOTAL cap (#913, restored): if ANY priority kind
-    was delivered to this sid within `_total_gap()`, return [] — a new batch is a
-    new prompt interruption, forbidden inside the hour. This closes the batch-path
-    hole (a kind whose condition was not met at the shared batch would otherwise
-    become floor-eligible and deliver a SECOND nudge later in the hour). When the
-    cap is open, a category is eligible when its OWN per-kind floor
-    (`_category_floor`, >= 1 h) has expired — batching then composes every due
-    kind into ONE keystroke, so multiple kinds SHARE the single hourly slot.
+    The SIBLING gate of `gate_ok`, applying the SAME total cap: any budgeted
+    kind delivered to this sid within the day → [] (a second batch would be a
+    second interruption). When the cap is open every category whose own floor
+    expired is eligible, so every due kind SHARES the pane's one daily slot.
 
     The per-kind switch is enforced upstream: a DISABLED kind's rider logs
     `skip:kind-off` and never contributes to `batch_collect`, so a disabled kind
@@ -526,53 +334,26 @@ def batch_eligible(state, sid, now):
     return wd + au
 
 
-def compose_batch(items, max_chars=None):
-    """Compose a batch message from `[(category, text), ...]`.
-
-    Orders WORK_DRIVING sections first, AUDIT second. Each section is formatted
-    as `[category] text`. The message leads with `BATCH_PREFIX` so machine-prefix
-    recognition classifies it as a machine nudge.
-
-    When `max_chars` is given and the composed message exceeds it, AUDIT sections
-    are trimmed from the end first (the priority taxonomy's trim order), then
-    WORK_DRIVING from the end — work-driving is never trimmed while audit
-    sections remain.
-
-    Returns `(composed_text, included_categories)` — a 2-tuple so callers know
-    which families survived trimming and can mark only those (#923 caller-refactor).
-    Empty items returns `('', [])`."""
-    if not items:
+def compose_batch(items):
+    """Compose ONE batch message from `[(category, text), ...]`: WORK_DRIVING
+    sections first, AUDIT second, each `[category] text`, led by `BATCH_PREFIX`
+    so machine-prefix recognition classifies it as a machine nudge. Nothing is
+    trimmed (the body goes to a nudge file, #1157). Returns `(composed_text,
+    included_categories)` — every known gated category in `items`, in order;
+    `('', [])` when none."""
+    sections = ([(c, t) for c, t in items if c in WORK_DRIVING_CATEGORIES]
+                + [(c, t) for c, t in items if c in AUDIT_CATEGORIES])
+    if not sections:
         return "", []
-    wd = [(c, t) for c, t in items if c in WORK_DRIVING_CATEGORIES]
-    au = [(c, t) for c, t in items if c in AUDIT_CATEGORIES]
-
-    def _build(sections):
-        parts = [BATCH_PREFIX]
-        for cat, text in sections:
-            parts.append(" [%s] %s" % (cat, text))
-        return "".join(parts)
-
-    result = _build(wd + au)
-    if max_chars is not None and len(result) > max_chars:
-        # Trim audit from the end, then work-driving if still over.
-        while au and len(result) > max_chars:
-            au.pop()
-            result = _build(wd + au)
-        while wd and len(result) > max_chars:
-            wd.pop()
-            result = _build(wd + au)
-    included = [c for c, _ in wd + au]
-    if not included:
-        return "", []   # every section trimmed — nothing to deliver
-    return result, included
+    return (BATCH_PREFIX + "".join(" [%s] %s" % s for s in sections),
+            [c for c, _t in sections])
 
 
 def mark_batch_sent(state, sid, categories, now):
     """Mark ALL `categories` as sent at `now` in one call.
 
-    Used after a batched delivery: every category in the batch gets the SAME
-    timestamp, so each member's own per-kind floor (#1023) blocks that kind's
-    next delivery for an hour. Delegates to `mark_sent` per category."""
+    Used after a batched delivery: every member gets the SAME timestamp, so each
+    member's own floor and the total cap hold for a day."""
     for cat in categories:
         mark_sent(state, sid, cat, now)
 
@@ -601,8 +382,8 @@ def _pane_attempts(state, pid, now):
 def pane_budget_ok(state, pid, now):
     """True iff FEWER than `PANE_ATTEMPT_BUDGET` typing attempts have been made
     into `pid` within the rolling `PANE_ATTEMPT_WINDOW_S`. The keystroke brake
-    every active-pane delivery path consults BEFORE typing; the 3rd attempt in the
-    hour is refused. Fail-safe ALLOWS on malformed state (never suppress a legit
+    every active-pane delivery path consults BEFORE typing; a 2nd attempt in the
+    day is refused. Fail-safe ALLOWS on malformed state (never suppress a legit
     delivery by accident — mirrors `gate_ok`)."""
     return len(_pane_attempts(state, pid, now)) < PANE_ATTEMPT_BUDGET
 
@@ -618,6 +399,90 @@ def pane_budget_hold_reason(state, pid, now):
         return "hold:pane-budget (budget exhausted)"
     hhmm = time.strftime("%H:%M", time.localtime(attempts[0]))
     return "hold:pane-budget (%d attempts since %s)" % (len(attempts), hhmm)
+
+
+# B9 fix (review 15): a HELD nudge is journalled ONCE per (pane|sid, kind)
+# episode — the stamp that blocks it — never on every 60-s sweep (~2.9k lines
+# per pane per day). `{"<key>|<kind>": [since, logged_at]}`, settled at the end
+# of EVERY sweep by `end_hold_log` (aged out live, untouched by a dry run).
+HOLD_LOG_KEY = "nudge_hold_logged"
+HOLD_LOG_TTL_S = 7 * DAY_S
+
+
+def first_hold(state, key, kind, since, now):
+    """True the first time a hold of `kind` at `key` (a pane id or a sid) is seen
+    for the blocking stamp `since` — the caller journals then — and False for the
+    rest of that episode. No `since` / no `state` always journals (a hold is
+    never silent by accident)."""
+    if not isinstance(state, dict) or since is None:
+        return True
+    rec = state.get(HOLD_LOG_KEY)
+    if not isinstance(rec, dict):
+        rec = state[HOLD_LOG_KEY] = {}
+    k = "%s|%s" % (key, kind)
+    prev = rec.get(k)
+    if isinstance(prev, list) and prev[:1] == [since]:
+        return False
+    rec[k] = [since, now]
+    return True
+
+
+def end_hold_log(state, now, before, dry_run):
+    """End of a sweep (run_once): a DRY run leaves the hold journal exactly as
+    the sweep found it (`before`, a copy) — its holds never use up the live
+    sweep's one line of an episode; a live sweep ages entries out after
+    HOLD_LOG_TTL_S on every box, goal jobs or not."""
+    if not isinstance(state, dict):
+        return
+    if dry_run:
+        if before is None:
+            state.pop(HOLD_LOG_KEY, None)
+        else:
+            state[HOLD_LOG_KEY] = before
+        return
+    held = state.get(HOLD_LOG_KEY)
+    if isinstance(held, dict):
+        for k in [k for k, v in held.items() if not isinstance(v, list)
+                  or len(v) < 2 or _ts(v[1]) is None or now - v[1] > HOLD_LOG_TTL_S]:
+            held.pop(k, None)
+    if not held:
+        state.pop(HOLD_LOG_KEY, None)
+
+
+def pre_send_hold(state, pid, kind, now, budget=True):
+    """`(why, journal)` when a machine delivery of `kind` into `pid` must not
+    type now — the #1257 owner-stop latch, else (`budget`) the pane's spent
+    day — or None; `journal` is True once per (pane, kind) episode. A caller
+    that would book a withheld send as a swallow or a nudge (report-owed,
+    dying-subagent, job 4, the goal-lane riders) asks THIS first, so a hold
+    is never counted, escalated or pinged."""
+    from watchdog import owner_stop    # lazy: this module stays an import leaf
+    latch = owner_stop.pane_latch(pid) if pid else None
+    if latch:
+        return ("owner-stop latch: %s" % latch.get("fact"),
+                first_hold(state, pid, "%s@latch" % kind, latch.get("ts"), now))
+    if budget and pid and not pane_budget_ok(state, pid, now):
+        return (pane_budget_hold_reason(state, pid, now),
+                first_pane_hold(state, pid, kind, now))
+    return None
+
+
+def first_pane_hold(state, pid, kind, now):
+    """`first_hold` for a per-pane budget hold: the episode is the day's oldest
+    typing attempt into the pane."""
+    attempts = sorted(_pane_attempts(state, pid, now))
+    return first_hold(state, pid, kind, attempts[0] if attempts else None, now)
+
+
+def first_gate_hold(state, sid, category, now):
+    """`first_hold` for a `gate_ok` hold: the episode is the stamp that blocks
+    it (this kind's own floor first, else the total cap's)."""
+    sess = _session(state, sid)
+    last = _gate_ts(sess.get(category), now)
+    if last is None or now - last >= _category_floor(category):
+        blocker = _total_cap_block(sess, now)
+        last = blocker[1] if blocker else None
+    return first_hold(state, sid, category, last, now)
 
 
 def mark_pane_attempt(state, pid, now):

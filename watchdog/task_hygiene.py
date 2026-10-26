@@ -17,7 +17,7 @@ DESIGN (the Job-48/41 template): MACHINE-CHANNEL only (never pings the owner),
 dependency-injected for a tmux/network-free test; the keystroke path reuses
 `send_verified(nudge="task-hygiene")` (a `MACHINE_NUDGE_KINDS` member, OFF by
 default — staged with `nudges on --kind task-hygiene`), bounded by `nudge_gate`'s
-1×/hour per-kind floor + total cap via `gate_ok` directly (not `GATED_CATEGORIES`).
+daily per-kind floor + total cap via `gate_ok` directly (not `GATED_CATEGORIES`).
 """
 import os
 

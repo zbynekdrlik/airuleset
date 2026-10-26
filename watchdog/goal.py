@@ -200,13 +200,13 @@ from watchdog import bounce_verdict_recheck as _bounce_verdict  # #1066 (bounce)
 from watchdog import u_freshness as _u_freshness             # #797 (U reconcile)
 from watchdog import nudge_gate as _nudge_gate               # #797 (cadence gate)
 from watchdog import roster as _roster                       # #804 (armed roster)
-from watchdog import resurrect as _resurrect                 # #804 (mode-5 relaunch)
 from watchdog import goal_turn_liveness as _turn_liveness     # #1110 (transcript liveness)
 from watchdog import gk_stall_notice as _gk_stall_notice      # #1109 (gk role-pane stall notice)
 from watchdog import stream_migrate as _stream_migrate        # #1143 (dark stream loop re-arm)
 from watchdog import send_outcome as _send_outcome            # #1157 (delivery outcome)
 from watchdog import goal_arm_failure as _arm_failure         # #1181 (visible failed arm)
 from watchdog import watch_triggers as _wt                    # #1163 (steer=watch windows)
+from watchdog import owner_stop as _owner_stop                # #1257 (owner-stop latch)
 from watchdog.send_outcome import (  # noqa: E402 -- #1157: moved, ONE shared undo
     janitor_undo_if_own_stranded as _janitor_undo_if_own_stranded)
 
@@ -1627,6 +1627,7 @@ _GOAL_TERMINAL_WORDS = frozenset((
                                  # sweep. (The #623 `drop:already-current` word is
                                  # removed with the stale-rearm REPLACE path.)
     "drop:declared-virgin-retired",  # #1260 -- the same for a leftover #1038 request
+    "drop:owner-stop",    # #1257 -- the owner stopped/paused/left this session
 ))
 
 
@@ -1751,13 +1752,8 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
     projects_dir = projects_dir or watchdog.PROJECTS_DIR
     sleep_fn = sleep_fn or time.sleep
 
-    # #1113 -- the stale-rearm typing path is REMOVED: a machine /goal keystroke
-    # NEVER reaches an ACTIVE, armed loop (the >10x david1-3 regression). A
-    # leftover on-disk `stale-rearm` request (recorded before the retire) is
-    # dropped TERMINALLY here, before any pane resolution / keystroke, so
-    # goal_sweep clears it and it is never typed. `goal_dark_watch` no longer
-    # records this origin, so on a settled fleet this is only ever a one-sweep
-    # cleanup of a pre-#1113 request.
+    # #1113 -- a leftover on-disk `stale-rearm` request (the typing path is
+    # REMOVED) is dropped TERMINALLY before any pane work, never typed.
     if origin == _GOAL_STALE_REARM_ORIGIN:
         _log_goal_sync("DROP stale-rearm-retired sid=%s cwd=%s" % (sid, cwd))
         return "drop:stale-rearm-retired"
@@ -1766,6 +1762,12 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
     if origin == _GOAL_DECLARED_VIRGIN_ORIGIN:
         _log_goal_sync("DROP declared-virgin-retired sid=%s cwd=%s" % (sid, cwd))
         return "drop:declared-virgin-retired"
+    # #1257 -- a session the owner stopped/paused/left is NEVER armed, any origin.
+    _ostop = _owner_stop.sid_latch(projects_dir, cwd, sid, state)
+    if _ostop:
+        _log_goal_sync("DROP owner-stop sid=%s cwd=%s origin=%s fact=%s"
+                       % (sid, cwd, origin, _ostop.get("fact")))
+        return "drop:owner-stop"
 
     # #1113 RECURRENCE -- STRUCTURED-armed refusal, before ANY pane work or
     # keystroke. The >10x david1-3 regression (23.9): a `dark-rearm` typed a
@@ -1985,23 +1987,19 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
         if _cskip:
             return _cskip
 
-    # #1092 (e) -- a watchdog RE-ARM types into an ACTIVE (idle) stream pane, so it
-    # goes through the SAME per-pane typing budget as a nudge: at most
-    # PANE_ATTEMPT_BUDGET typing attempts into this pane per rolling hour, across
-    # ALL kinds. deliver_goal delivers via _send_goal_verified / deliver_with_stash
-    # (not send_verified), so the budget is enforced HERE, right before the
-    # keystroke and after the human-active guards above. Refused BEFORE any
-    # keystroke -> a zero-keystroke, non-terminal defer (retry next sweep once the
-    # rolling hour frees a slot, or the 30-min age cap expires it silently). The
-    # user's OWN `self-callback` arm is NOT a watchdog re-arm and is never gated
-    # here (the owner at the keyboard). This is the second writer the addendum
-    # names: a template change can no longer storm a pane's prompt via re-arms.
-    if origin in _GOAL_WATCHDOG_REARM_ORIGINS:
-        if not _nudge_gate.pane_budget_ok(state, pid, now):
-            _log_goal_sync("SKIP pane-budget(%s) sid=%s cwd=%s" % (origin, sid, cwd))
-            if out is not None:
-                out["detail"] = _nudge_gate.pane_budget_hold_reason(state, pid, now)
-            return "skip:pane-budget"
+    # #1092 (e) / B9 -- a watchdog WORK re-arm spends the pane's ONE daily typing
+    # attempt (shared with every nudge), checked here before any keystroke: a
+    # zero-keystroke, non-terminal defer. The owner's self-callback, a recovery
+    # origin (auth-rearm = the API-error resume of a loop, answer-rearm) and a
+    # recovery identity (stream-migrate's goal-arm) never count.
+    _rearm_budgeted = (origin in _GOAL_WATCHDOG_REARM_ORIGINS
+                       and origin not in _GOAL_RECOVERY_ORIGINS
+                       and _nudge_gate.pane_budgeted(_nudge))
+    if _rearm_budgeted and not _nudge_gate.pane_budget_ok(state, pid, now):
+        _log_goal_sync("SKIP pane-budget(%s) sid=%s cwd=%s" % (origin, sid, cwd))
+        if out is not None:
+            out["detail"] = _nudge_gate.pane_budget_hold_reason(state, pid, now)
+        return "skip:pane-budget"
 
     # #1110 -- TRANSCRIPT-LIVENESS gate, evaluated BEFORE the render gate. A
     # live turn renders a bare `❯` box between tool rounds, byte-identical to a
@@ -2062,8 +2060,9 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
                                      run, state, now, sleep_fn, logs,
                                      nudge=_nudge):
             # #1092 (e) -- recovering our OWN stranded /goal was a keystroke into
-            # the pane; count it against the per-pane budget for a watchdog re-arm.
-            if origin in _GOAL_WATCHDOG_REARM_ORIGINS:
+            # the pane; it spends the day for a budgeted WORK re-arm only (the
+            # same `_rearm_budgeted` the bare-box path uses, never a recovery).
+            if _rearm_budgeted:
                 _nudge_gate.mark_pane_attempt(state, pid, now)
             watchdog._janitor_clear_watch(state, pid)
             if not _await_goal_armed(pid, run, sleep_fn):   # #720 same arm-confirm
@@ -2134,18 +2133,10 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
     ok = _send_goal_verified(pid, text, run, captured=captured,
                              sleep_fn=sleep_fn, logs=logs,
                              nudge=_nudge, out=_send_out)   # #1038 declared-window -> goal-arm
-    # #1092 (e) -- the type keystroke into the (empty) box was a typing attempt
-    # into an active pane; count it against the per-pane budget for a watchdog
-    # re-arm -- but ONLY when a keystroke was ACTUALLY sent (#1104). A swallowed
-    # re-arm (typed, submit unconfirmed) DID keystroke and still counts (`typed`
-    # set); an OFF-suppressed re-arm (`_send_goal_verified` bailed keystroke-free
-    # through the #1002 kill switch) OR a raced-abort (box no longer bare) typed
-    # NOTHING (`typed` unset) and must NOT consume the pane budget -- else
-    # switching the kind ON later inherits a spent budget with zero real
-    # keystrokes (the montalu1 16:04 `hold:pane-budget` with no keystrokes).
-    # `out["typed"]` is the real "a keystroke was emitted" signal, not the
-    # kill-switch proxy (#1104-review: the proxy over-books on a raced abort).
-    if origin in _GOAL_WATCHDOG_REARM_ORIGINS and _send_out.get("typed"):
+    # #1092 (e) -- count a budgeted re-arm ONLY when a keystroke was ACTUALLY
+    # sent (`out["typed"]`, #1104): an OFF-suppressed or raced-abort re-arm typed
+    # nothing and must not spend the budget (the montalu1 16:04 phantom hold).
+    if _rearm_budgeted and _send_out.get("typed"):
         _nudge_gate.mark_pane_attempt(state, pid, now)
 
     if ok:
@@ -3181,10 +3172,9 @@ _GOAL_GUARD_TEXT = (
 
 def _goal_guard_deliver(sid, pid, captured, cwd, state, now, loc, run,
                         sleep_fn, dry_run, projects_dir, batch_collect=None):
-    """#878 — delivery half of the goal-guard rider. Called when
-    `_goal_guard_decide` returned a truthy decision. Handles nudge_gate,
-    recent-human, boundary classification, keystroke delivery, and mark_sent.
-    Returns a list of decision-log lines (may be empty)."""
+    """#878 — delivery half of the goal-guard rider (after a truthy decide):
+    nudge_gate + the pane's daily budget, recent-human, boundary, keystroke,
+    mark_sent. Returns the decision-log lines."""
     logs = []
     # #923 BATCH MODE: gate_ok is handled once by the caller.
     if batch_collect is None:
@@ -3193,9 +3183,14 @@ def _goal_guard_deliver(sid, pid, captured, cwd, state, now, loc, run,
                         % (loc, sid))
             return logs
         if not _nudge_gate.gate_ok(state, sid, "goal-guard", now):
-            logs.append("goal-guard %s sid=%s -> %s"
-                        % (loc, sid,
-                           _nudge_gate.floor_hold_reason(state, sid, "goal-guard", now)))
+            if _nudge_gate.first_gate_hold(state, sid, "goal-guard", now):
+                logs.append("goal-guard %s sid=%s -> %s" % (loc, sid, (
+                    _nudge_gate.floor_hold_reason(state, sid, "goal-guard", now))))
+            return logs
+        if not _nudge_gate.pane_budget_ok(state, pid, now):   # B9: one per pane/day
+            if _nudge_gate.first_pane_hold(state, pid, "goal-guard", now):
+                logs.append("goal-guard %s sid=%s -> %s" % (
+                    loc, sid, _nudge_gate.pane_budget_hold_reason(state, pid, now)))
             return logs
     if dry_run:
         logs.append("goal-guard %s sid=%s -> would-send (dry-run)"
@@ -3232,9 +3227,12 @@ def _goal_guard_deliver(sid, pid, captured, cwd, state, now, loc, run,
         batch_collect.append(("goal-guard", _GOAL_GUARD_TEXT, None))
         logs.append("goal-guard %s sid=%s -> batch-collected" % (loc, sid))
         return logs
+    _gout = {}
     ok = _send_goal_verified(pid, _GOAL_GUARD_TEXT, run,
                              captured=captured, sleep_fn=sleep_fn,
-                             verify_armed=False, nudge="goal-guard")
+                             verify_armed=False, nudge="goal-guard", out=_gout)
+    if _gout.get("typed"):
+        _nudge_gate.mark_pane_attempt(state, pid, now)
     if ok:
         _nudge_gate.mark_sent(state, sid, "goal-guard", now)
         logs.append("goal-guard %s sid=%s -> sent" % (loc, sid))
@@ -4397,64 +4395,9 @@ def _roster_age_desc(now, ts):
     return ("%dh%02dm" % (h, m)) if h else ("%dm" % m)
 
 
-def _resurrect_dead_entry(dcwd, dentry, dloc, now, run, projects_dir, dry_run):
-    """#804 mode-5 -- evaluate + (opt-in) fire a RESURRECT for ONE dead roster
-    entry. Returns `(log_lines, dirty)`; mutates `dentry`'s resurrect anchors
-    (rgts/ratt/rfails). Extracted from goal_lane_sweep's census loop to keep it
-    under the function-line cap (#502/#511) and to isolate the irreversible
-    keystroke path into one place; the decision semantics live in `resurrect.py`.
-
-    A relaunch fires ONLY behind the opt-in AIRULESET_RESURRECT_ACTION flag AND
-    all of decide()'s gates (a bare-idle shell pane, no recent human, not
-    dry-run). The live keystroke is opt-in-until the supervisor verifies it live
-    (design M5); `rgts` bounds an attempt to once per RESURRECT_CADENCE_S so a
-    persistent no-pane/disabled/veto state never floods the journal."""
-    rdue, _ = _resurrect.due(dentry, now)
-    if not rdue:
-        return [], False
-    logs = []
-    # #805 interface -- a relaunch that fired last due-cycle (`ratt`) yet the
-    # stream is STILL dead now is a FAILED attempt; count it so launch_cmd
-    # escalates --continue -> fresh after RESURRECT_MAX_FAILS (a ballooned-context
-    # session that dies straight after --continue never livelocks). A cwd that
-    # came back live resets rfails/ratt (the sweep's visited-cwd loop).
-    if dentry.get("ratt"):
-        rf = dentry.get("rfails", 0)
-        dentry["rfails"] = (rf if isinstance(rf, (int, float)) else 0) + 1
-    rpane = _resurrect.find_pane(dcwd, run)
-    # mode-4 -- the HARD recent-human veto (all 3 signals: presence marker for the
-    # dead sid, its last transcript human prompt, and the attached tmux client's
-    # input on this pane's SESSION -- max client_activity across attached
-    # clients). A dead session's transcript is static, so signal 3 (a human at the
-    # shell pane NOW) is the operative one; signals 1/2 are threaded for
-    # completeness. `pane_is_bare_idle` is the SEPARATE structural guard against a
-    # stale half-typed command the 5-min signal-3 window no longer sees. Both are
-    # evaluated only when a relaunch pane exists.
-    rhuman, rreason, rbare = (False, "", False)
-    if rpane is not None:
-        rbare = _resurrect.pane_is_bare_idle(rpane, run)
-        rtinfo = watchdog.find_active_transcript(projects_dir, dcwd)
-        rhuman, rreason = watchdog._goal_autoarm_recent_human_activity(
-            dentry.get("sid", ""), rtinfo[0] if rtinfo else None, now,
-            pane_target=rpane, run=run)
-    rlog, ract = _resurrect.decide(
-        dentry, dloc, rpane, rbare, rhuman, rreason,
-        _resurrect.action_enabled(), dry_run)
-    logs.append(rlog)
-    dentry["rgts"] = now
-    dentry["ratt"] = bool(ract)   # did we fire a relaunch THIS cycle?
-    if ract and not _resurrect.relaunch(
-            rpane, _resurrect.launch_cmd(dentry), run):
-        logs.append("resurrect %s -> relaunch send FAILED (retry next cadence "
-                    "window)" % dloc)
-    return logs, True
-
-
-# #531 -- orphan-reap TTL for state["goal_lane"] per-sid records. Same 24h
-# magnitude as GOAL_MARK_ORPHAN_TTL_S, deliberately well above the 1h nudge
-# interval, so a live armed pane -- whose rec is re-stamped (`lts`) on every ~60s
-# sweep it is visited-and-armed -- is never reaped by the SECONDARY age gate; only
-# a genuinely gone session's aged, not-visited entry is.
+# #531 -- orphan-reap TTL for state["goal_lane"] per-sid records (24h, like
+# GOAL_MARK_ORPHAN_TTL_S): a live armed pane re-stamps `lts` every sweep, so only
+# a genuinely gone session's aged, not-visited entry is reaped.
 GOAL_LANE_ORPHAN_TTL_S = 24 * 3600
 
 
@@ -4733,8 +4676,7 @@ def _deliver_batch(collect, pid, sid, loc, tpath, run, state, now, handled,
     journal the REAL outcome (#486): delivered / held / a typed attempt named by
     its `send_outcome` kind (typed-undone, typed-stranded, swallowed, ...) /
     `deferred (not typed ...)` only when no keystroke was typed."""
-    _bt, _incl = _nudge_gate.compose_batch(
-        [(c, t) for c, t, _ in collect], max_chars=_nudge_gate.BATCH_MAX_CHARS)
+    _bt, _incl = _nudge_gate.compose_batch([(c, t) for c, t, _ in collect])
     if not _bt:
         return
     watchdog._janitor_mark_watch(state, pid, now)
@@ -4774,7 +4716,9 @@ def _deliver_batch(collect, pid, sid, loc, tpath, run, state, now, handled,
                 continue
             if _bc == "queue-arrival" and not _bok:
                 continue   # #1023 🔵6: non-terminal on unconfirmed
-            _bfn()
+            _blines = _bfn()          # a rider may journal its delivery (#1109)
+            if isinstance(_blines, list):
+                logs.extend(_blines)
         # #1023 timeout-race — WRITE-THROUGH: the batch floor mark + every advanced
         # baseline are durable before a later systemd kill can un-record them.
         _queue_arrival._persist(persist, logs)
@@ -4788,8 +4732,10 @@ def _deliver_batch(collect, pid, sid, loc, tpath, run, state, now, handled,
                                           state=state)
     elif send_out.get("pane_budget_held"):
         # #1092 (c) -- the per-pane budget refused this BEFORE any keystroke: never
-        # stamp the floor or run the undo (the storm brake).
-        logs.append("batch-nudge %s -> held (pane-budget, not typed)" % loc)
+        # stamp the floor or run the undo (the storm brake); journalled once per
+        # day episode, like send_verified's own hold line (B9 fix).
+        if not send_out.get("hold_quiet"):
+            logs.append("batch-nudge %s -> held (pane-budget, not typed)" % loc)
     elif _kind in _send_outcome.TYPED_NOT_DELIVERED:
         # #1092 (a)+(b) / #1157 -- a TYPED attempt that was not delivered (a swallow,
         # or a verify-failed type send_verified already undid / reported stranded)
@@ -4942,6 +4888,12 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
             continue
         if _one_glance.is_informative(glance):
             logs.append(gline)
+        # #1257: the owner stopped this pane -- its RIDERS neither collect nor
+        # type (every baseline kept); the bookkeeping below still runs.
+        _hold = _nudge_gate.pre_send_hold(state, pid, "lane-sweep", now, budget=False)
+        if _hold and _hold[1]:
+            logs.append("lane-sweep %s -> hold:%s: no rider runs, every baseline "
+                        "kept" % (loc, _hold[0]))
         if glance.goal_armed is not True:
             # #662 -- a DEFINITE goal-clear (armed is False, not the transient
             # `None` can't-tell) ENDS any stuck episode, so a later re-arm starts
@@ -4962,7 +4914,7 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
                 # False, not the transient None) means this stream is no longer
                 # EXPECTED-armed -- drop it from the roster so a deliberately
                 # retired / cleared stream is NOT falsely flagged dead once its
-                # session later exits (and never mis-drives a future resurrect).
+                # session later exits.
                 # A transient None (armed-unknown) does NOT drop (the roster entry
                 # rides until a definite clear or a mode-5 death while armed).
                 if _roster.drop(roster_reg, cwd):
@@ -4983,7 +4935,7 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
                     _pane_role = resolve_role_fn(cwd)
                 except Exception:  # noqa: BLE001 — resolver fault => skip (safe)
                     _pane_role = "unresolved"
-                if _pane_role == "infra":
+                if _pane_role == "infra" and not _hold:
                     logs += _queue_arrival.goal_queue_arrival_recheck(
                         now, run, qrecs, sid, cwd, pid, tpath, loc, dry_run,
                         handled, queue_fetch=queue_fetch,
@@ -4995,7 +4947,7 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
             # #1178 (b) — a supervisor whose /goal ENDED (cleared, last turn ✅)
             # learns of new tickets in its own I; delivery held unless idle +
             # human-quiet. A resolver fault never guesses (skip).
-            if _pane_role != "infra":   # role re-checked in ended_pane_recheck
+            if _pane_role != "infra" and not _hold:   # role re-checked in ended_pane_recheck
                 logs += _queue_own.ended_pane_recheck(
                     glance, now, run, qrecs, sid, cwd, pid, tpath, loc, dry_run,
                     handled, queue_fetch, state, captured=captured,
@@ -5005,7 +4957,7 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
             continue
         # #804 -- this stream is CONFIRMED armed this sweep (the STRUCTURED
         # one-glance verdict, not a render guess): refresh its durable roster
-        # entry so the DEAD-SESSION census + resurrect ladder have an accurate
+        # entry so the DEAD-SESSION census has an accurate
         # "expected-armed" fact. armed_ts is preserved (a re-observation is not a
         # re-arm); sid/authority/last_seen refresh (a resurrected session's id
         # changes). resolve_authority fails toward "full" (#478 direction).
@@ -5055,7 +5007,14 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
         # conflicts with a `handled` keystroke and is authority-agnostic; `rec`'s
         # `soa` streak persists via `recs`. `stuck_seen` guards the #645
         # two-panes-one-cwd double-advance (same sid twice per sweep).
-        if sid not in stuck_seen:
+        # #1257: a pause OF `sid` (the cwd's newest) ENDS its stuck / gk-stall
+        # episodes; a pane held by another session's latch touches none.
+        _mine = _owner_stop.latch_sid(pid) == sid
+        _own_stop = bool(_hold) and _mine
+        if _own_stop and not dry_run:
+            for _k in ("soa", "soalert", "soa_ts", "gks_ts", "gks_alert"):
+                rec.pop(_k, None)
+        if sid not in stuck_seen and not _own_stop:
             stuck_seen.add(sid)
             logs += _lane_stuck_owner_alert(now, run, rec, glance, sid, cwd, pid,
                                             loc, send_fn, dry_run)
@@ -5067,6 +5026,10 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
             logs += _gk_stall_notice.gk_stall_notice(
                 now, rec, glance, captured, cwd, sid, pid, loc, send_fn, dry_run,
                 run=run)
+        if _hold:      # #1257: the riders below hold; the pane's batch entry goes
+            if _mine:
+                state.get("nudge_batch", {}).pop(sid, None)
+            continue
         # #547 W→I + #552 I→W/U -- partition-audit re-check for this armed pane.
         if ops_wait_fetch is not None:
             logs += _ops_wait_recheck.goal_ops_wait_recheck(
@@ -5138,14 +5101,6 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
     for _dcwd, _dentry in ([] if sweep_budget_broke
                            else _roster.dead_entries(roster_reg, visited_cwds)):
         _dloc = watchdog.project_label(_dcwd)
-        # #804 mode-5 -- evaluate + (opt-in) fire a RESURRECT for this dead entry
-        # (own RESURRECT_CADENCE_S, independent of the hourly census line);
-        # extracted to a helper to keep goal_lane_sweep under its function cap.
-        _rlogs, _rdirty = _resurrect_dead_entry(
-            _dcwd, _dentry, _dloc, now, run, projects_dir, dry_run)
-        logs.extend(_rlogs)
-        if _rdirty:
-            roster_dirty = True
         _last = _dentry.get("census_ts")
         if isinstance(_last, (int, float)) and (now - _last) < GOAL_ROSTER_CENSUS_S:
             continue
@@ -5159,21 +5114,20 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
                _roster_age_desc(now, _dentry.get("armed_ts"))))
     for _lcwd in visited_cwds:
         _e = roster_reg.get(_lcwd)
-        # A cwd that is live again clears its census-flood latch AND its resurrect
-        # state (rgts/rfails/ratt) so a FUTURE death re-surfaces + re-resurrects
-        # from a clean slate (a resurrect that brought it back must never leave a
-        # stale fail count behind -- #805 escalation resets on success).
+        # A cwd that is live again clears its census-flood latch so a FUTURE
+        # death re-surfaces (rgts/rfails/ratt: the deleted relaunch's legacy
+        # anchors, cleaned off old entries).
         if isinstance(_e, dict) and any(
                 k in _e for k in ("census_ts", "rgts", "rfails", "ratt")):
             for _k in ("census_ts", "rgts", "rfails", "ratt"):
                 _e.pop(_k, None)
             roster_dirty = True
     if roster_dirty and not dry_run and not _roster.save_roster(roster_reg):
-        # A persistently-failing save loses the rgts/census_ts anchors each
-        # reload -> the 30-min resurrect cadence + hourly census would degrade to
-        # every sweep; surface it (machine-channel) instead of silently churning.
-        logs.append("roster save FAILED (unwritable ~/.claude?) -- resurrect/"
-                    "census cadence not persisted this sweep")
+        # A persistently-failing save loses the census_ts anchor each reload ->
+        # the hourly census would degrade to every sweep; surface it
+        # (machine-channel) instead of silently churning.
+        logs.append("roster save FAILED (unwritable ~/.claude?) -- census "
+                    "cadence not persisted this sweep")
     if not dry_run:   # #531 -- prune each rider namespace for gone+aged sessions
         _prune_goal_lane_orphans(recs, visited_sids, now)
         _ops_wait_recheck._prune_ops_wait_orphans(wrecs, visited_sids, now)   # #547

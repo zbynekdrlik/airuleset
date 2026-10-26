@@ -383,7 +383,7 @@ def _cache_repo_roots(home=None, max_age_s=None):
 
 
 def _try_stash_nudge(pid, captured, text, run, dry_run, logs=None, nudge=None,
-                     state=None):
+                     state=None, user_authored=False):
     """Shared bounce/gk-request helper (issue #35): attempt a stash-around
     delivery of `text` for a pane that already passed the live-work / armed
     -loop / already-nudged guards but isn't bare-idle — i.e. it holds a
@@ -401,10 +401,11 @@ def _try_stash_nudge(pid, captured, text, run, dry_run, logs=None, nudge=None,
     make `--dry-run` accuse a repo whose real sweep would have succeeded."""
     if dry_run:
         return False
-    text = _send_outcome.stash_pointer(pid, run, text, nudge, logs)  # #1157 s3
-    return text is not None and watchdog.deliver_with_stash(pid, text, run, captured=captured,
-                                       logs=logs, nudge=nudge,
-                                       state=state)  # #1022: record for the wedge
+    if not user_authored:      # the owner's own action types as it is (B9 fix)
+        text = _send_outcome.stash_pointer(pid, run, text, nudge, logs)  # #1157 s3
+    return text is not None and watchdog.deliver_with_stash(
+        pid, text, run, captured=captured, logs=logs, nudge=nudge,
+        state=state, user_authored=user_authored)  # #1022: record for the wedge
 
 
 def _send_bare_nudge_verified(state, pid, root, text, run, now, projects_dir,

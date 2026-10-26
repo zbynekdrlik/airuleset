@@ -11,8 +11,9 @@ This locks Approach 1 (main design comment 5783661178):
   1. a priority classification in the infra queue-arrival path (a
      STOP:/GATEKEEPER-ACTION (INFRA) comment, or an infra ticket carrying
      prio:*/release-block) delivered under a NEW `infra-priority` nudge kind;
-  2. the ONE nudge gate exempts `infra-priority` from the cross-kind total cap
-     while KEEPING a 15-min per-kind floor + every idle/busy/liveness gate;
+  2. (RETIRED by B9, owner 26.10.2026 "len raz denne": `infra-priority` is
+     bound by the daily cap like every kind — the exemption tests were retired
+     and the gate/rider locks re-locked to the daily hold);
   3. a hub receipt on a VERIFIED delivery (deduped per arrival id);
   4. a per-episode owner stall notice for a declared gk role pane stuck ≥ 20 min
      at ≥ 90 % of the 5 h window.
@@ -48,13 +49,13 @@ INFRA = "infra-priority"
 
 
 # --------------------------------------------------------------------------- #
-# 1. the nudge gate: infra-priority is cap-EXEMPT but KEEPS a 15-min floor
+# 1. the nudge gate: infra-priority is bound by the daily cap (B9)
 # --------------------------------------------------------------------------- #
 class TestInfraPriorityGate(unittest.TestCase):
     def test_kind_registered_stageable_not_recovery_not_gated_category(self):
         # a MACHINE (stageable, default-OFF) kind, so the `nudges` CLI list
-        # derives it; NOT a recovery revival; NOT a GATED_CATEGORY (its floor is
-        # 15 min, below the 60-min GATED floor lock).
+        # derives it; NOT a recovery revival; NOT a GATED_CATEGORY (it rides the
+        # queue-arrival batch section since B9).
         self.assertIn(INFRA, tio.MACHINE_NUDGE_KINDS)
         self.assertNotIn(INFRA, tio.RECOVERY_NUDGE_KINDS)
         self.assertNotIn(INFRA, ng.RECOVERY_NUDGE_KINDS)
@@ -69,45 +70,19 @@ class TestInfraPriorityGate(unittest.TestCase):
                 self.assertFalse(wd.nudges_enabled(INFRA, home=home),
                                  "infra-priority must be OFF by default (staged on gk)")
 
-    def test_fifteen_minute_floor(self):
-        self.assertEqual(ng._category_floor(INFRA), 15 * MIN)
-
-    def test_delivered_under_an_active_total_cap(self):
-        # RED against merged main: a queue-arrival sent 60 min ago holds the 3 h
-        # total cap; a release-blocking infra-priority arrival must be delivered
-        # (today it read hold:total-cap and sat for 3 h).
+    def test_infra_priority_is_bound_by_the_daily_cap(self):
+        # B9 re-lock: a queue-arrival sent 60 min ago holds infra-priority for
+        # the day (the #1109 exemption is reversed), and an infra-priority send
+        # counts toward the cap for every other kind.
         st = {}
         ng.mark_sent(st, "s", "queue-arrival", NOW)
-        self.assertTrue(ng.gate_ok(st, "s", INFRA, NOW + 60 * MIN),
-                        "infra-priority must be exempt from the cross-kind cap")
-
-    def test_own_fifteen_minute_floor_holds_a_burst(self):
-        st = {}
-        ng.mark_sent(st, "s", INFRA, NOW)
-        self.assertFalse(ng.gate_ok(st, "s", INFRA, NOW + 5 * MIN),
-                         "a second infra-priority within 15 min is held by its floor")
-        reason = ng.floor_hold_reason(st, "s", INFRA, NOW + 5 * MIN)
-        self.assertIn("hold:floor", reason)
-        self.assertNotIn("hold:total-cap", reason)
-        self.assertTrue(ng.gate_ok(st, "s", INFRA, NOW + 16 * MIN),
-                        "past its 15-min floor infra-priority is allowed again")
-
-    def test_a_non_priority_kind_still_held_by_the_total_cap(self):
-        # the exemption is NARROW: a plain queue-arrival still obeys the 3 h cap.
-        st = {}
-        ng.mark_sent(st, "s", "queue-arrival", NOW)
-        self.assertFalse(ng.gate_ok(st, "s", "queue-arrival", NOW + 65 * MIN),
-                         "a non-priority queue-arrival stays capped")
+        self.assertFalse(ng.gate_ok(st, "s", INFRA, NOW + 60 * MIN))
         self.assertIn("hold:total-cap",
-                      ng.floor_hold_reason(st, "s", "queue-arrival", NOW + 65 * MIN))
-
-    def test_an_infra_priority_send_does_not_consume_the_cap_for_others(self):
-        # a delivered infra-priority must NOT block a later queue-arrival via the
-        # cross-kind cap (it is skipped in _total_cap_block, like recovery kinds).
+                      ng.floor_hold_reason(st, "s", INFRA, NOW + 60 * MIN))
         st = {}
         ng.mark_sent(st, "s", INFRA, NOW)
-        self.assertTrue(ng.gate_ok(st, "s", "queue-arrival", NOW + 5 * MIN),
-                        "an infra-priority delivery never counts toward the cap")
+        self.assertFalse(ng.gate_ok(st, "s", "queue-arrival", NOW + 5 * MIN))
+        self.assertTrue(ng.gate_ok(st, "s", "queue-arrival", NOW + DAY + MIN))
 
 
 # --------------------------------------------------------------------------- #
@@ -227,10 +202,10 @@ class TestRiderPriorityDelivery(_RiderBase):
                 "tag": "GATEKEEPER-ACTION (INFRA)",
                 "permalink": "https://github.com/zbynekdrlik/odoo-erp/issues/6883"}
 
-    def test_priority_arrival_delivered_though_total_cap_active(self):
-        # a queue-arrival stamped 60 min ago holds the cap for a plain arrival;
-        # a GATEKEEPER-ACTION (INFRA) arrival must still be delivered as
-        # infra-priority and stamp THAT kind's floor.
+    def test_priority_arrival_waits_for_the_daily_slot(self):
+        # B9 re-lock (owner 26.10.2026): a queue-arrival stamped 60 min ago holds
+        # the day's slot, so a GATEKEEPER-ACTION (INFRA) arrival is HELD (nothing
+        # typed) by the total cap instead of bypassing it.
         state = {}
         ng.mark_sent(state, self.sid, "queue-arrival", NOW - 60 * MIN)
         qrecs = {self.sid: {"base": [1], "first_seen": NOW - DAY}}
@@ -238,11 +213,9 @@ class TestRiderPriorityDelivery(_RiderBase):
         logs = self._run(qrecs, [{"id": 1, "kind": "ticket", "num": 1,
                                   "tag": "infra"}, self._prio(5771)],
                          tmux, state=state, handled=set())
-        typed = "".join(tmux.typed_texts())
-        self.assertIn("stuck-check:", typed)
-        self.assertFalse(any("hold:total-cap" in ln for ln in logs), logs)
-        # the infra-priority floor is now stamped (not the queue-arrival one).
-        self.assertIn(INFRA, ng._session(state, self.sid))
+        self.assertEqual(tmux.typed_texts(), [])
+        self.assertTrue(any("hold:total-cap" in ln for ln in logs), logs)
+        self.assertNotIn(INFRA, ng._session(state, self.sid))
 
     def test_hub_receipt_posted_on_verified_delivery(self):
         posts = []

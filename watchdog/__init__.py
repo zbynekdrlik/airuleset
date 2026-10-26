@@ -33,7 +33,10 @@
       MAX_WORKING_NUDGES retries (the Claude process itself is wedged) does it ESCALATE
       to ONE Discord ping ("auto-recovery failed — needs you"). So the common case is
       ZERO user-facing pings (it just un-sticks itself); a ping fires only when the
-      automated fix genuinely failed. Safety gates: copy-mode + ambiguous-pane skips
+      automated fix genuinely failed. B9 fix (owner 26.10.2026): it types as the
+      capped `working-stall` kind — at most once per pane per day, held (never
+      counted) under the owner-stop latch / its switch / a spent day
+      (`_working_stall_hold`). Safety gates: copy-mode + ambiguous-pane skips
       (never type into the wrong/scrolled pane), an advancing-subagent check (a live
       worker writing its transcript is progress, not silence → skip), idle-reset
       self-dedup. THRESHOLD is 30 min — the user's explicitly chosen cadence: they said
@@ -159,6 +162,7 @@ This module is PURE logic + thin tmux shims. The I/O (`run` = tmux exec, `send_f
 no network.
 """
 
+import copy
 import hashlib
 import os
 import re
@@ -451,8 +455,7 @@ def _write_auth_badge_cache(state_path, first_401_ts, now):
 def _authdead_action_enabled():
     """The #1075 opt-in for the destructive credential-dead RELAUNCH keystroke
     (`tmux respawn-pane -k`): fires ONLY when `AIRULESET_AUTHDEAD_ACTION` is
-    truthy. Default OFF — the exact sibling of `resurrect.action_enabled()`
-    (`AIRULESET_RESURRECT_ACTION`, #804): a worktree worker cannot do the
+    truthy. Default OFF: a worktree worker cannot do the
     design-mandated live kill->comeback verification, and #947 (owner, 2026-09-10)
     REVERSED an unattended-restart action, so the relaunch DECISION is journalled
     every sweep but the live keystroke waits for the supervisor to enable this
@@ -591,8 +594,8 @@ def _handle_authdead_episode(state, key, cred_mtime_fn, now, idle, project, pid,
                         "(stopped session — never touched) [%s]"
                         % (pid, project or key))
         elif not _authdead_action_enabled():
-            # the destructive respawn keystroke is opt-in (#947 / resurrect.py
-            # precedent): journal the decision, do not fire. (The badge + owner
+            # the destructive respawn keystroke is opt-in (#947): journal the
+            # decision, do not fire. (The badge + owner
             # ping above already surfaced the dead session regardless of the flag.)
             logs.append("auth: would relaunch %s (%s) after fresh credentials "
                         "(401 persisted through continue) -- disabled "
@@ -1910,6 +1913,38 @@ def _apierr_escalation_ping(send_fn, project, pid, run, key, err_hash, fs,
     return logs
 
 
+WORKING_STALL_NUDGE = "working-stall"
+
+
+def _working_stall_hold(state, pid, now):
+    """`(why, journal)` when job 4's working-stall stuck-check must NOT type now,
+    else None (B9 fix, owner 26.10.2026: nudges once a day, only recovery
+    immediate). A liveness question is a capped work nudge: held under the
+    #1257 owner-stop latch, its kind switch or the pane's spent day, BEFORE
+    `decide_working`, so a hold is never counted toward the give-up escalation;
+    `journal` is True once per (pane, episode)."""
+    from watchdog import nudge_gate as _ng
+    hold = _ng.pre_send_hold(state, pid, WORKING_STALL_NUDGE, now, budget=False)
+    if hold is None and not nudges_enabled(WORKING_STALL_NUDGE):
+        hold = ("kind %s off" % WORKING_STALL_NUDGE,
+                _ng.first_hold(state, pid, WORKING_STALL_NUDGE + "@off",
+                               int(now // _ng.DAY_S), now))
+    return hold or _ng.pre_send_hold(state, pid, WORKING_STALL_NUDGE, now)
+
+
+def _latched_hold(state, pid, now, logs, what, job):
+    """#1257 -- True when the owner stopped the pane: a RECOVERY job (job 1's
+    api-error resume, job 4a's stuck-check, job 6's session-limit resume)
+    types nothing AND books nothing — no attempt, no swallow, no nudge count,
+    no give-up / escalation ping; one `held (owner-stop …)` line per (job,
+    latch episode)."""
+    from watchdog import nudge_gate as _ng
+    hold = _ng.pre_send_hold(state, pid, job, now, budget=False)
+    if hold and hold[1]:
+        logs.append("%s held (%s)" % (what, hold[0]))
+    return bool(hold)
+
+
 def _send_stuckcheck_verified(state, pid, text, run, tpath, now, sleep_fn, logs,
                               nudge="resume"):
     """#497 batch 3 — the shared janitor-marked transcript-proof send for the
@@ -1929,7 +1964,7 @@ def _send_stuckcheck_verified(state, pid, text, run, tpath, now, sleep_fn, logs,
     swallow), it only logs the delivery result honestly."""
     _janitor_mark_watch(state, pid, now)
     if send_verified(pid, text, run, tpath, sleep_fn=sleep_fn, logs=logs,
-                     nudge=nudge):
+                     nudge=nudge, state=state):
         _janitor_clear_watch(state, pid)
         return True
     return False
@@ -3551,6 +3586,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
         from notify import send as send_fn
 
     state = load_state(state_path)
+    from watchdog import nudge_gate as _ng_hold   # B9: the hold journal's sweep copy
+    _hold_before = copy.deepcopy(state.get(_ng_hold.HOLD_LOG_KEY))
     # #1055 P3 (a) — snapshot the urgency-relevant state entries BEFORE the pane
     # loop mutates `state`. `sweep_urgent` reads this snapshot so a stall/park/
     # goal-lane entry a PRIOR sweep left forces a full sweep, while a FRESH stall
@@ -3610,10 +3647,10 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
     # basenames; a box without them is identity. Still ONE list_claude_panes call
     # (job 41 reuses this reordered list).
     panes = limit_dialog.prioritize_panes(panes)
-    # #1060 L3b item 8 — dual-agent IMPLEMENTER window presence, marker-gated,
-    # folded into the sweep body (NOT a new numbered job). See
-    # `impl_window_presence` / `_impl_marker` for the full rationale; a non-marker
-    # box is a single cheap file read (None) with no tmux call.
+    from watchdog import owner_stop     # #1257: map the latch BEFORE any keystroke job
+    logs.extend(owner_stop.refresh(state, panes, projects_dir, now, dry_run, run))
+    # #1060 L3b item 8 — dual-agent IMPLEMENTER window presence, marker-gated
+    # (`impl_window_presence` / `_impl_marker`; a non-marker box reads one file).
     _impl_mk = _impl_marker()
     if _impl_mk:
         impl_window_presence(_impl_mk, run=run, logs=logs, dry_run=dry_run)
@@ -3890,6 +3927,10 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
                         logs.append("skip retry-wait (session-limit resume) %s" % (project or pid))
                     elif pane_in_mode(pid, run):        # never type into a scrolled pane
                         logs.append("skip in-mode (session-limit resume) %s" % (project or pid))
+                    elif _latched_hold(state, pid, now, logs,
+                                       "session-limit resume %s" % project,
+                                       "sesslimit"):
+                        pass                            # #1257: nothing booked
                     else:
                         draft = _input_line_text(captured)
                         if draft:
@@ -4220,6 +4261,10 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
                                        "hlášky — obnov session prosím ručne po resete)")
                     send_fn(compose_api_error_alert(project, err_text) + resume_note,
                             owner=owner, dedup_key="apierr:%s:%s:%s" % (key, err_hash, fs), dry_run=dry_run)
+                elif action == "nudge" and _latched_hold(
+                        state, pid, now, logs, "api-error %s [%s]" % (project, key),
+                        "apierr"):
+                    pass                       # #1257: state[key] untouched, no ping
                 elif action == "nudge":
                     n = len(entry["nudges"])
                     # #1075: the OAuth-rotation 401 REVOKED class (#602) is now
@@ -4437,6 +4482,10 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
                 if not pane_at_idle_prompt(captured):
                     logs.append("skip busy-pane (textcall-stall) %s" % (project or pid))
                     continue
+                if _latched_hold(state, pid, now, logs,
+                                 "textcall-stall %s [%s]" % (project, key),
+                                 "textcall"):
+                    continue
                 wkey = "textcall:" + key
                 action, entry = decide_working(state, wkey, now, idle,
                                                interval=working_interval,
@@ -4609,6 +4658,12 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
                     else:
                         logs.append("skip busy-pane (working-stall) %s" % (project or pid))
                     continue
+                _whold = _working_stall_hold(state, pid, now)
+                if _whold:
+                    if _whold[1]:
+                        logs.append("working-held %s [%s] (%s)"
+                                    % (project, key, _whold[0]))
+                    continue
                 wkey = "working:" + key
                 # responded = the transcript advanced AFTER the last nudge (the
                 # session answered the check and is merely waiting again) —
@@ -4629,7 +4684,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
                     if not dry_run:
                         ok = _send_stuckcheck_verified(
                             state, pid, WORKING_NUDGE_TEXT, run, tpath, now,
-                            sleep_fn, logs)
+                            sleep_fn, logs, nudge=WORKING_STALL_NUDGE)
                     logs.append("working-nudge#%d %s [%s] idle=%dm%s"
                                 % (n, project, key, int(idle // 60),
                                    "" if ok else " (submit-unverified)"))
@@ -5721,8 +5776,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
             return _th.compute_hygiene(client.call, c)
 
         def _deliver(pid, tpath, text):
-            return send_verified(pid, text, run, tpath, sleep_fn=sleep_fn,
-                                 logs=None, nudge=task_hygiene.NUDGE_KIND)
+            return send_verified(pid, text, run, tpath, sleep_fn=sleep_fn, logs=None,
+                                 nudge=task_hygiene.NUDGE_KIND, state=state, now=now)
 
         def _recent_human(sid, cwd, tpath, pid):
             from watchdog import goal as _goal_mod   # deferred: avoid import cycle
@@ -5993,5 +6048,6 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
                 % (_sp["n"], _sp["wall"], _top))
     end_sweep_memo()
 
+    _ng_hold.end_hold_log(state, now, _hold_before, dry_run)
     save_state(state_path, state)
     return logs

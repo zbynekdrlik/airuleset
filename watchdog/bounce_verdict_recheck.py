@@ -28,7 +28,7 @@ one nudge, while an unchanged verdict tracks silently. Delivery reuses the share
 `stuck-check: ` machine-nudge prefix, `watchdog.send_verified` (transcript-proof
 submit), the `_janitor_mark_watch`/`_janitor_clear_watch` reclaim path, the
 per-sweep `handled` set (at most ONE keystroke per pane per sweep), and the
-shared per-pane-per-KIND 60-min floor `nudge_gate.gate_ok(state, sid,
+shared per-pane daily floor + cap `nudge_gate.gate_ok(state, sid,
 "bounce-verdict", now)` (a delta inside the floor is HELD and its members
 ACCUMULATE into the next post-floor nudge). `dry_run` mutates nothing.
 """
@@ -265,9 +265,10 @@ def goal_bounce_verdict_recheck(now, run, brecs, sid, cwd, pid, tpath, loc,
                     % (loc, len(arrivals)))
         return logs
     if not _nudge_gate.gate_ok(state, sid, "bounce-verdict", now):
-        logs.append("bounce-verdict %s -> %s; retry next sweep, %d new"
-                    % (loc, _nudge_gate.floor_hold_reason(
-                        state, sid, "bounce-verdict", now), len(arrivals)))
+        if _nudge_gate.first_gate_hold(state, sid, "bounce-verdict", now):
+            logs.append("bounce-verdict %s -> %s; retry next sweep, %d new" % (
+                loc, _nudge_gate.floor_hold_reason(state, sid, "bounce-verdict", now),
+                len(arrivals)))
         return logs
     if dry_run:
         logs.append("bounce-verdict %s -> WOULD-NUDGE (%d new: %s)"
@@ -297,8 +298,9 @@ def goal_bounce_verdict_recheck(now, run, brecs, sid, cwd, pid, tpath, loc,
                         % (loc, len(arrivals)))
             return logs
         if send_out.get("pane_budget_held"):
-            logs.append("bounce-verdict %s -> held (pane-budget, not typed; "
-                        "retry next sweep, %d new)" % (loc, len(arrivals)))
+            if not send_out.get("hold_quiet"):
+                logs.append("bounce-verdict %s -> held (pane-budget, not typed; "
+                            "retry next sweep, %d new)" % (loc, len(arrivals)))
             return logs
         logs.append(_book_unverified_bounce_send(rec, new_rec, cur_sorted, loc,
                                                  len(arrivals)))
