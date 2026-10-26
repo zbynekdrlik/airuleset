@@ -148,6 +148,61 @@ class APausedPaneBesideAWorkingOne(_Stuck):
         self.assertIn(sid, state.get("nudge_batch", {}), state.get("nudge_batch"))
 
 
+class TheLanesOwnSessionPausedUnderUnresolvedPanes(_Stuck):
+    """Review 7, finding 1: two panes share the cwd and NEITHER resolves to its
+    own session (no claude start). The owner paused the cwd's newest session,
+    which is the lane's `sid`; both panes hold on that session's own latch.
+    The fix for review 6 keyed the episode end on the pane resolving its own
+    session, so here the stall alert pinged the owner about her own pause
+    and a held pane kept the newest session's batch for after the release."""
+
+    T9, T8 = APausedPaneBesideAWorkingOne.T9, APausedPaneBesideAWorkingOne.T8
+
+    def _two_panes(self):
+        proj, sid, cap, fake = APausedPaneBesideAWorkingOne._two_panes(self)
+        t = proj / wd.encode_project_dir(self.h.CWD) / (sid + ".jsonl")
+        aged = os.path.getmtime(t)
+        with open(t, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(_u("pauza", self.T9 + 10)) + "\n")
+        os.utime(t, (aged, aged))
+        return proj, sid, cap, fake
+
+    def _sweep(self, proj, sid, now, state, panes, tmux, send_fn):
+        self.h._heartbeat(sid, age_s=self.goal.GOAL_LANE_IDLE_S + 600, now=now,
+                          goal_armed=True)
+        with m.patch.object(wd, "_pane_claude_start_epoch",
+                            side_effect=lambda pid, run=None: None):
+            owner_stop.refresh(state, [("%9", self.h.CWD), ("%8", self.h.CWD)],
+                               proj, now, run=lambda argv, timeout=8: "")
+        for pid in ("%9", "%8"):
+            latch = owner_stop.pane_latch(pid) or {}
+            self.assertEqual((latch.get("fact"), latch.get("via")), ("pause", None))
+        self.goal.goal_lane_sweep(now, run=tmux(panes), projects_dir=proj,
+                                  state=state, backlog_fetch=lambda cwd: 40,
+                                  send_fn=send_fn)
+
+    def test_no_stuck_alert_about_her_own_pause(self):
+        proj, sid, cap, fake = self._two_panes()
+        state, sends = {}, []
+
+        def spy(*a, **k):
+            sends.append(k.get("dedup_key"))
+            return "sent"
+        panes = [("%9", "claude", self.h.CWD, "111"), ("%8", "claude", self.h.CWD, "112")]
+        for i in range(self.goal.GOAL_LANE_STUCK_ALERT_STREAK + 3):
+            self._sweep(proj, sid, 1_000_000 + 60 * i, state, panes,
+                        lambda p: fake(p, cap), spy)
+        self.assertEqual([k for k in sends if k and k.startswith("stuckalert:")], [])
+
+    def test_a_held_pane_drops_the_lanes_batch(self):
+        proj, sid, cap, fake = self._two_panes()
+        state = {"nudge_batch": {sid: [["goal-guard", "a queued goal-guard line"]]}}
+        self._sweep(proj, sid, 1_000_000, state,
+                    [("%8", "claude", self.h.CWD, "112")], lambda p: fake(p, cap),
+                    lambda *a, **k: "sent")
+        self.assertNotIn(sid, state.get("nudge_batch", {}))
+
+
 class TheJournalFollowsTheSessionsOwner(unittest.TestCase):
     """Review 6, finding 3: since an unowned session is persisted quietly,
     the journal contradicted the latch when a pane gained or lost a session.
