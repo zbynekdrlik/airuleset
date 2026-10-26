@@ -287,5 +287,36 @@ class OneHoldLinePerEpisode(b1257._Pane):
         self.assertEqual(self._count(logs, "hold:total-cap"), 1, logs)
 
 
+class HoldJournalUpkeep(unittest.TestCase):
+    """Review 2, finding 6: the hold journal (`nudge_hold_logged`) was aged
+    only inside the goal-lane sweep — a box without the goal jobs grew it
+    without bound — and a `--dry-run` sweep wrote it (run_once saves state
+    anyway), consuming the live sweep's one journal line of the episode."""
+    DAY = 24 * 3600
+
+    def _harness(self, seed):
+        return adopt._RunOnceAdoptHarness(
+            self, [adopt._working_row()], mtime_age=2000,
+            capture=adopt.NO_BANNER_IDLE, seed_state=seed, now=time.time())
+
+    def test_every_live_sweep_ages_the_hold_journal(self):
+        old = {"%1|release-gap": [1.0, time.time() - 8 * self.DAY]}
+        _logs, _s, _k, state, _r = self._harness({ng.HOLD_LOG_KEY: old}).run(
+            sv_result=True)
+        self.assertNotIn("%1|release-gap", state.get(ng.HOLD_LOG_KEY, {}))
+
+    def test_a_dry_run_leaves_the_hold_journal_alone(self):
+        h = self._harness({"nudge_pane_attempts": {"%9": [time.time() - 60]}})
+        orig = wd.run_once
+
+        def dry(**kw):
+            kw["dry_run"] = True
+            return orig(**kw)
+        with m.patch.object(wd, "run_once", dry):
+            logs, _s, _k, state, _r = h.run(sv_result=False)
+        self.assertTrue(any("working-held" in ln for ln in logs), logs)
+        self.assertNotIn(ng.HOLD_LOG_KEY, state)
+
+
 if __name__ == "__main__":
     unittest.main()
