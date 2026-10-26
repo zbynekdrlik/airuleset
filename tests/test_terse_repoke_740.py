@@ -104,7 +104,7 @@ class TerseRepokeIsSafe(unittest.TestCase):
                               "cwd": str(self.cwd)})
         env = {**os.environ, "HOME": str(self.home), "PATH": path,
               "ND_BLOCK_SETTLE": "0", "TMUX_PANE": "",
-              "AIRULESET_NOTIFY_OWNER": ""}
+              "AIRULESET_NOTIFY_OWNER": "", "AIRULESET_SHARED_CHANNEL_OWNER": ""}
         env.pop("DISCORD_NOTIFY_DRYRUN", None)
         env.pop("ND_DRYRUN_FILE", None)
         return subprocess.run(["bash", str(PENDING)], input=payload,

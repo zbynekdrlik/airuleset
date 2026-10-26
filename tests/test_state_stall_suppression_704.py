@@ -50,7 +50,7 @@ class _HomeIsolated(unittest.TestCase):
         self._orig_home = os.environ.get("HOME")
         os.environ["HOME"] = str(self.home)
         self.addCleanup(self._restore_home)
-        _pin = mock.patch.dict(os.environ, {"AIRULESET_NOTIFY_OWNER": ""})  # #1137: never zbynek
+        _pin = mock.patch.dict(os.environ, {"AIRULESET_NOTIFY_OWNER": "", "AIRULESET_SHARED_CHANNEL_OWNER": ""})  # #1137: never zbynek
         _pin.start()
         self.addCleanup(_pin.stop)
         # A suppressed send must NEVER touch the network — a spy proves it.

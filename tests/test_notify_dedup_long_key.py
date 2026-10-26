@@ -21,6 +21,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -134,6 +135,12 @@ class TestSendEndToEndWithALongDedupKey(_HomeIsolated):
         orig = notify._post_discord
         notify._post_discord = lambda *a, **k: True
         self.addCleanup(lambda: setattr(notify, "_post_discord", orig))
+        # #1137: an empty owner is the shared channel's reader (zbynek) unless
+        # pinned — this ownerless-delivery test pins no policy owner.
+        pin = unittest.mock.patch.dict(os.environ,
+                                       {"AIRULESET_SHARED_CHANNEL_OWNER": ""})
+        pin.start()
+        self.addCleanup(pin.stop)
 
     def test_send_dedupes_the_second_call_with_a_long_key(self):
         env = {"DISCORD_BOT_TOKEN": "t", "DISCORD_NOTIFICATION_CHANNEL_ID": "c"}

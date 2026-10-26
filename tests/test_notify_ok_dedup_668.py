@@ -88,7 +88,7 @@ class OkDedup(_Base):
     def _fire_idle(self, sid, dryrun_file, cwd):
         env = {**os.environ, "HOME": str(self.home),
                "DISCORD_NOTIFY_DRYRUN": "1", "ND_DRYRUN_FILE": str(dryrun_file),
-               "TMUX_PANE": "", "AIRULESET_NOTIFY_OWNER": ""}
+               "TMUX_PANE": "", "AIRULESET_NOTIFY_OWNER": "", "AIRULESET_SHARED_CHANNEL_OWNER": ""}
         payload = json.dumps({"session_id": sid, "cwd": str(cwd)})
         return subprocess.run(["bash", str(IDLE)], input=payload, text=True,
                               capture_output=True, env=env)
@@ -152,7 +152,7 @@ class OkDedup(_Base):
         cbin = _fake_curl_bin("200")
         self.addCleanup(shutil.rmtree, cbin, True)
         base = {**os.environ, "HOME": str(self.home), "TMUX_PANE": "",
-                "AIRULESET_NOTIFY_OWNER": "",
+                "AIRULESET_NOTIFY_OWNER": "", "AIRULESET_SHARED_CHANNEL_OWNER": "",
                 "PATH": str(cbin) + os.pathsep + os.environ["PATH"]}
         base.pop("DISCORD_NOTIFY_DRYRUN", None)
         base.pop("ND_DRYRUN_FILE", None)
@@ -177,7 +177,7 @@ class ProjectLabelNoUnknown(_Base):
         env = {**os.environ, "HOME": str(self.home), "ND_EMOJI": "✅",
                "ND_TEXT": "hotovo", "ND_CWD": "",
                "DISCORD_NOTIFY_DRYRUN": "1", "ND_DRYRUN_FILE": str(out),
-               "AIRULESET_NOTIFY_OWNER": ""}
+               "AIRULESET_NOTIFY_OWNER": "", "AIRULESET_SHARED_CHANNEL_OWNER": ""}
         r = subprocess.run(["bash", str(SEND)], input="", text=True,
                            capture_output=True, env=env)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
@@ -194,7 +194,7 @@ class ProjectLabelNoUnknown(_Base):
         env = {**os.environ, "HOME": str(self.home), "ND_EMOJI": "✅",
                "ND_TEXT": "hotovo", "ND_CWD": "",
                "DISCORD_NOTIFY_DRYRUN": "1", "ND_DRYRUN_FILE": str(out),
-               "AIRULESET_NOTIFY_OWNER": ""}
+               "AIRULESET_NOTIFY_OWNER": "", "AIRULESET_SHARED_CHANNEL_OWNER": ""}
         subprocess.run(["bash", str(SEND)], input="", text=True,
                        capture_output=True, env=env)
         self.assertEqual(self._dlog(), "",
@@ -211,7 +211,7 @@ class ProjectLabelNoUnknown(_Base):
         env = {**os.environ, "HOME": str(self.home), "ND_EMOJI": "✅",
                "ND_TEXT": "hotovo", "ND_CWD": "",
                "PATH": str(cbin) + os.pathsep + os.environ["PATH"],
-               "AIRULESET_NOTIFY_OWNER": ""}
+               "AIRULESET_NOTIFY_OWNER": "", "AIRULESET_SHARED_CHANNEL_OWNER": ""}
         env.pop("DISCORD_NOTIFY_DRYRUN", None)
         env.pop("ND_DRYRUN_FILE", None)
         r = subprocess.run(["bash", str(SEND)], input="", text=True,
@@ -244,7 +244,7 @@ class PendingCarriesCwd(_Base):
         out = self.home / "dry.txt"
         repo = self._repo_with_origin("mytestproj")
         stop_env = {**os.environ, "HOME": str(self.home), "TMUX_PANE": "",
-                    "AIRULESET_NOTIFY_OWNER": "", "ND_BLOCK_SETTLE": "0"}
+                    "AIRULESET_NOTIFY_OWNER": "", "AIRULESET_SHARED_CHANNEL_OWNER": "", "ND_BLOCK_SETTLE": "0"}
         stop_env.pop("DISCORD_NOTIFY_DRYRUN", None)
         stop_env.pop("ND_DRYRUN_FILE", None)
         stop_payload = json.dumps({
@@ -257,7 +257,7 @@ class PendingCarriesCwd(_Base):
                         "the ✅ must be recorded to a pending file")
         idle_env = {**os.environ, "HOME": str(self.home),
                     "DISCORD_NOTIFY_DRYRUN": "1", "ND_DRYRUN_FILE": str(out),
-                    "TMUX_PANE": "", "AIRULESET_NOTIFY_OWNER": ""}
+                    "TMUX_PANE": "", "AIRULESET_NOTIFY_OWNER": "", "AIRULESET_SHARED_CHANNEL_OWNER": ""}
         idle_payload = json.dumps({"session_id": sid, "cwd": ""})
         ri = subprocess.run(["bash", str(IDLE)], input=idle_payload, text=True,
                             capture_output=True, env=idle_env)

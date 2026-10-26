@@ -34,6 +34,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock as mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -68,10 +69,17 @@ class TestQuestionPingOffPredicate(unittest.TestCase):
         self.assertTrue(notify.question_ping_off("montalu1"))
         self.assertTrue(notify.question_ping_off("simap1"))
 
-    def test_empty_and_unknown_never_off(self):
-        self.assertFalse(notify.question_ping_off(""))
-        self.assertFalse(notify.question_ping_off(None))
+    def test_unknown_never_off_empty_is_the_shared_channel(self):
         self.assertFalse(notify.question_ping_off("someoneelse"))
+        # #1137 review R3 (lock flipped): an EMPTY owner is the shared channel,
+        # read by zbynek, so it is on the policy — unless the shared channel's
+        # reader is pinned empty.
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("AIRULESET_SHARED_CHANNEL_OWNER", None)
+            self.assertTrue(notify.question_ping_off(""))
+            self.assertTrue(notify.question_ping_off(None))
+        with mock.patch.dict(os.environ, {"AIRULESET_SHARED_CHANNEL_OWNER": ""}):
+            self.assertFalse(notify.question_ping_off(""))
 
     def test_owners_off_set_is_exactly_zbynek(self):
         # marek removed #882 (decommissioned); #1137 renamed the set into the

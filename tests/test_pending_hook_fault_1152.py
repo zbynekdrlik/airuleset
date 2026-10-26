@@ -75,7 +75,7 @@ class PendingHookSurvivesOneFailingCall(unittest.TestCase):
     def stop(self, msg=DONE, stdin=None, **env_extra):
         env = {**os.environ, "HOME": str(self.home), "TMUX_PANE": "",
                "PATH": str(self.bin) + os.pathsep + os.environ["PATH"],
-               "AIRULESET_NOTIFY_OWNER": "", "ND_BLOCK_SETTLE": "0",
+               "AIRULESET_NOTIFY_OWNER": "", "AIRULESET_SHARED_CHANNEL_OWNER": "", "ND_BLOCK_SETTLE": "0",
                **env_extra}
         # Not DRYRUN: the delivery-log line is part of the contract, and
         # `_pending_log` writes nothing under DRYRUN. HOME is private and

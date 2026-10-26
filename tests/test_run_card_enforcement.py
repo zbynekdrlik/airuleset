@@ -1038,7 +1038,10 @@ class TestCardReconcileReopenClear(unittest.TestCase):
         """Deliver a REAL marker via the real notify.send() — the same
         primitive `_notify_run_card` actually uses."""
         env = {"DISCORD_BOT_TOKEN": "t", "DISCORD_NOTIFICATION_CHANNEL_ID": "c"}
-        status = notify.send("card body", env=env, owner="", dedup_key=key)
+        # #1137: an empty owner is the shared channel's reader (zbynek) unless
+        # pinned; this setup needs a genuine ownerless delivery.
+        with m.patch.dict(os.environ, {"AIRULESET_SHARED_CHANNEL_OWNER": ""}):
+            status = notify.send("card body", env=env, owner="", dedup_key=key)
         self.assertEqual(status, "sent", "test setup must genuinely deliver")
 
     def reconcile(self, r, **kw):
@@ -1216,7 +1219,7 @@ class TestSuppressionIsConditionalOnDelivery(unittest.TestCase):
 
     def stop(self, msg, pane="◎ /goal   ctx 50K\n", cwd=None):
         env = {**os.environ, "HOME": str(self.home),
-               "DISCORD_NOTIFY_DRYRUN": "1", "AIRULESET_NOTIFY_OWNER": "",
+               "DISCORD_NOTIFY_DRYRUN": "1", "AIRULESET_NOTIFY_OWNER": "", "AIRULESET_SHARED_CHANNEL_OWNER": "",
                "TMUX_PANE": "", "ND_FAKE_PANE_CAPTURE": pane}
         payload = json.dumps({"session_id": self.sid,
                               "last_assistant_message": msg,

@@ -373,7 +373,7 @@ class TestDiscordNotifyHooks(TestCase):
         # coverage of that check.
         env = {**os.environ, "DISCORD_NOTIFY_DRYRUN": "1", "ND_DRYRUN_FILE": sf,
                "AIRULESET_NOTIFY_OWNER": owner, "ND_BLOCK_SETTLE": "0",
-               "TMUX_PANE": ""}
+               "TMUX_PANE": "", "AIRULESET_SHARED_CHANNEL_OWNER": ""}
         if home:
             env["HOME"] = home
         payload = json.dumps({"session_id": sid, "last_assistant_message": msg,
@@ -398,7 +398,7 @@ class TestDiscordNotifyHooks(TestCase):
         return subprocess.run(["bash", str(self.IDLE)], input=payload, text=True,
                               capture_output=True,
                               env={**os.environ, "DISCORD_NOTIFY_DRYRUN": "1",
-                                   "AIRULESET_NOTIFY_OWNER": owner})
+                                   "AIRULESET_NOTIFY_OWNER": owner, "AIRULESET_SHARED_CHANNEL_OWNER": ""})
 
     def test_question_fires_immediately_no_pending(self):
         sid, p = self._sid()
@@ -481,7 +481,7 @@ class TestDiscordNotifyHooks(TestCase):
                        capture_output=True,
                        env={**os.environ, "HOME": home,
                             "DISCORD_NOTIFY_DRYRUN": "0",
-                            "AIRULESET_NOTIFY_OWNER": "", "ND_BLOCK_SETTLE": "0"})
+                            "AIRULESET_NOTIFY_OWNER": "", "AIRULESET_SHARED_CHANNEL_OWNER": "", "ND_BLOCK_SETTLE": "0"})
         self.assertFalse(os.path.exists(f"/tmp/claude-discord-lastq-{sid}"),
                          "a FAILED delivery must NOT be recorded as pinged")
         # the identical re-emit retries — and once delivery works, it pings
@@ -935,30 +935,31 @@ class TestDiscordNotifyHooks(TestCase):
                         f"idle ping not @mention-prefixed: {out!r}")
 
     def _mirror_home(self):
-        # a persona box: owner=david, mirrored to zbynek. Each has its own thread +
-        # @mention so both people get the notification in their OWN thread.
+        # a persona box: owner=david, mirrored to a second person (marek here: a
+        # zbynek mirror is filtered by the #1137 owner policy). Each has its own
+        # thread + @mention so both people get the notification in their OWN thread.
         home = tempfile.mkdtemp()
         d = Path(home) / ".claude" / "channels" / "discord"
         d.mkdir(parents=True)
         (d / ".env").write_text(
-            "DISCORD_MENTION_DAVID=90000\nDISCORD_MENTION_ZBYNEK=10000\n"
+            "DISCORD_MENTION_DAVID=90000\nDISCORD_MENTION_MAREK=10000\n"
             "DISCORD_NOTIFICATION_CHANNEL_DAVID=dthread\n"
-            "DISCORD_NOTIFICATION_CHANNEL_ZBYNEK=zthread\n"
-            "DISCORD_MIRROR_DAVID=zbynek\n")
+            "DISCORD_NOTIFICATION_CHANNEL_MAREK=zthread\n"
+            "DISCORD_MIRROR_DAVID=marek\n")
         return home
 
     def test_shell_send_mirrors_question_to_parallel_owner(self):
         # The shell send path (used by the ❓/✅ hooks) must fan out to the primary
-        # owner AND every DISCORD_MIRROR_<OWNER> — david's ❓ ALSO reaches zbynek's
-        # thread with zbynek's @mention. Two blocks in the dry-run file, primary first.
+        # owner AND every allowed DISCORD_MIRROR_<OWNER> — david's ❓ ALSO reaches
+        # the mirror's thread with its @mention. Two blocks in the dry-run file.
         sid, _p = self._sid()
         self._stop(sid, "❓ NEEDS YOU: reštartovať most?",
                    owner="david", home=self._mirror_home())
         sent = self._sent()
         blocks = [b for b in sent.split("<@") if b.strip()]
-        self.assertEqual(len(blocks), 2, f"expected david + zbynek blocks: {sent!r}")
+        self.assertEqual(len(blocks), 2, f"expected david + mirror blocks: {sent!r}")
         self.assertIn("<@90000> ", sent)    # david's own @mention
-        self.assertIn("<@10000> ", sent)    # zbynek mirror @mention
+        self.assertIn("<@10000> ", sent)    # mirror @mention
         self.assertTrue(sent.startswith("<@90000> "), "primary (david) not first")
 
     def test_governance_no_hand_fired_per_merge_ping(self):
@@ -1036,7 +1037,7 @@ class TestGoalArmedSuppressesIdlePing(TestCase):
 
     def _stop(self, sid, msg, pane_capture=None, cwd=""):
         env = {**os.environ, "DISCORD_NOTIFY_DRYRUN": "1",
-               "AIRULESET_NOTIFY_OWNER": "", "TMUX_PANE": ""}
+               "AIRULESET_NOTIFY_OWNER": "", "AIRULESET_SHARED_CHANNEL_OWNER": "", "TMUX_PANE": ""}
         if pane_capture is not None:
             env["ND_FAKE_PANE_CAPTURE"] = pane_capture
         payload = json.dumps({"session_id": sid, "last_assistant_message": msg,
@@ -8563,7 +8564,8 @@ class TestDiscordAutopilotNotify(TestCase):
         # accepted the message → releasing would duplicate). Retry stays deduped.
         import unittest.mock as m
         with tempfile.TemporaryDirectory() as home:
-            with m.patch.dict(os.environ, {"HOME": home}):
+            with m.patch.dict(os.environ, {"HOME": home,
+                                      "AIRULESET_SHARED_CHANNEL_OWNER": ""}):
                 env = {"DISCORD_BOT_TOKEN": "x",
                        "DISCORD_NOTIFICATION_CHANNEL_ID": "1"}
                 with m.patch("notify.urllib.request.urlopen",
@@ -8623,7 +8625,8 @@ class TestDiscordAutopilotNotify(TestCase):
 
         env = {"DISCORD_BOT_TOKEN": "x", "DISCORD_NOTIFICATION_CHANNEL_ID": "1"}
         with tempfile.TemporaryDirectory() as home:
-            with m.patch.dict(os.environ, {"HOME": home}):
+            with m.patch.dict(os.environ, {"HOME": home,
+                                      "AIRULESET_SHARED_CHANNEL_OWNER": ""}):
                 with m.patch("notify.urllib.request.urlopen",
                              side_effect=fake_urlopen):
                     r = self.notify.send("hi", env=env, owner="", dedup_key=None)
@@ -8672,8 +8675,10 @@ class TestDiscordAutopilotNotify(TestCase):
         self.assertNotIn("shared", captured["url"])
 
     def test_send_mirrors_to_parallel_owner_thread(self):
-        # david's notification must ALSO land in zbynek's thread with zbynek's
-        # @mention — the persona-runs-parallel-to-a-real-person requirement. One
+        # david's notification must ALSO land in the mirror owner's thread with
+        # its @mention (marek here: a zbynek mirror is filtered by the #1137 owner
+        # policy, tests/test_owner_policy_1137.py) — the persona-runs-parallel-to-
+        # a-real-person requirement. One
         # POST per target; the return status reflects the PRIMARY send only.
         import unittest.mock as m
         posts = []
@@ -8688,10 +8693,10 @@ class TestDiscordAutopilotNotify(TestCase):
 
         env = {"DISCORD_BOT_TOKEN": "x",
                "DISCORD_NOTIFICATION_CHANNEL_DAVID": "dthread",
-               "DISCORD_NOTIFICATION_CHANNEL_ZBYNEK": "zthread",
+               "DISCORD_NOTIFICATION_CHANNEL_MAREK": "zthread",
                "DISCORD_MENTION_DAVID": "90000",
-               "DISCORD_MENTION_ZBYNEK": "10000",
-               "DISCORD_MIRROR_DAVID": "zbynek"}
+               "DISCORD_MENTION_MAREK": "10000",
+               "DISCORD_MIRROR_DAVID": "marek"}
         with tempfile.TemporaryDirectory() as home:
             with m.patch.dict(os.environ, {"HOME": home}):
                 with m.patch("notify.urllib.request.urlopen",
@@ -8768,10 +8773,10 @@ class TestDiscordAutopilotNotify(TestCase):
         import io
         import contextlib
         env = {"DISCORD_MENTION_DAVID": "90000",
-               "DISCORD_MENTION_ZBYNEK": "10000",
+               "DISCORD_MENTION_MAREK": "10000",
                "DISCORD_NOTIFICATION_CHANNEL_DAVID": "dthread",
-               "DISCORD_NOTIFICATION_CHANNEL_ZBYNEK": "zthread",
-               "DISCORD_MIRROR_DAVID": "zbynek"}
+               "DISCORD_NOTIFICATION_CHANNEL_MAREK": "zthread",
+               "DISCORD_MIRROR_DAVID": "marek"}
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             r = self.notify.send("BODY", env=env, owner="david", dry_run=True)
@@ -8795,7 +8800,8 @@ class TestDiscordAutopilotNotify(TestCase):
                "DISCORD_NOTIFICATION_CHANNEL_ID": "shared",
                "DISCORD_NOTIFICATION_CHANNEL_ZBYNEK": "zthread"}
         with tempfile.TemporaryDirectory() as home:
-            with m.patch.dict(os.environ, {"HOME": home}):
+            with m.patch.dict(os.environ, {"HOME": home,
+                                      "AIRULESET_SHARED_CHANNEL_OWNER": ""}):
                 with m.patch("notify.urllib.request.urlopen",
                              side_effect=fake_urlopen):
                     self.assertEqual(

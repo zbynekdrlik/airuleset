@@ -118,9 +118,9 @@ if [ -f "$ENVF" ]; then
     BOT_TOKEN=$(grep -E '^DISCORD_BOT_TOKEN=' "$ENVF" 2>/dev/null | cut -d'=' -f2- | tr -d "\"'" | tr -d '\r\n' || true)
 fi
 
-# Emit ONE message per DISTINCT target thread. The PRIMARY target ALWAYS emits — even
-# when the owner is empty/unknown (no @mention, shared-or-no channel) — so a machine
-# with no tmux owner still notifies exactly as before. Mirrors are EXTRA and only fire
+# Emit ONE message per DISTINCT target thread. The PRIMARY target emits unless the
+# #1137 owner policy suppresses it (an empty/unknown owner = the shared channel,
+# which the policy reads as zbynek). Mirrors are EXTRA and only fire
 # when DISCORD_MIRROR_<OWNER> lists them; a target whose thread was ALREADY delivered
 # to (the primary's, OR an earlier mirror's — e.g. two owners sharing the fallback
 # channel) is skipped, so a misconfig can't double-post into one thread. The same
@@ -314,24 +314,41 @@ if [ "${PROJECT_UNRESOLVED:-0}" = "1" ]; then
     _delivery_log "unresolved-project" "no-cwd-or-origin"
 fi
 
-# #710 -> #1137: the owner-level Discord policy (notify.OWNER_PING_ALLOW). This
-# shell transport carries only ❓ and ✅, neither of which is ever an allowed class
-# for a restricted owner (zbynek: only acctblock/credential-dead/healthz-down
-# alarms reach Discord), so a ❓ OR ✅ whose PRIMARY owner is on the policy is
-# SUPPRESSED entirely (primary + mirrors) and logged `suppressed` (never a silent
-# drop). `--question-ping-off` answers "is this owner on the policy". david
-# (david1-4 -> david) keeps FULL delivery. `_delivery_log` self-gates on dry-run.
-# exit 0 so the confirm paths record LASTQ/LASTOK instead of retrying every turn.
-# Only when the PRIMARY owner is non-empty: an empty owner is never on the policy
-# (the CLI would fall back to resolve_owner() and could pick up the box's tmux
-# owner). The reason is a SINGLE field token (the log line ends with `qhash=`).
-if [ -n "$PRIMARY_OWNER" ] \
-   && [ "$(python3 "$AIRULESET_PY" notify --question-ping-off --owner-name "$PRIMARY_OWNER" 2>/dev/null || echo 0)" = "1" ]; then
-    _delivery_log "suppressed" "#710/#1137-owner-policy-owner=${PRIMARY_OWNER}"
+# #710 -> #1137: the owner-level Discord policy (notify.OWNER_PING_ALLOW), applied
+# PER TARGET. This shell transport carries only ❓ and ✅, neither of which is ever
+# an allowed class for a restricted owner (zbynek: only the needs-a-human alarms
+# reach Discord), so every target whose owner is on the policy — the primary, each
+# DISCORD_MIRROR_<OWNER> mirror, and an EMPTY owner (the shared channel, read by
+# zbynek unless AIRULESET_SHARED_CHANNEL_OWNER names another)
+# — is skipped and logged `suppressed` (never a silent drop); the rest are
+# delivered. `--question-ping-off --owner-name "$T"` answers "is this target's
+# owner on the policy" (an explicit empty name is the shared channel; a failed
+# call reads "0" = deliver). david (david1-4 -> david) keeps FULL delivery.
+# `_delivery_log` self-gates on dry-run. When EVERY target is suppressed: exit 0,
+# so the confirm paths record LASTQ/LASTOK instead of retrying every turn. The
+# reason is a SINGLE field token (the log line ends with `qhash=`).
+_policy_off() {
+    [ "$(python3 "$AIRULESET_PY" notify --question-ping-off --owner-name "$1" 2>/dev/null || echo 0)" = "1" ]
+}
+TARGETS=()
+if _policy_off "$PRIMARY_OWNER"; then
+    _delivery_log "suppressed" "#710/#1137-owner-policy-owner=${PRIMARY_OWNER:-shared}"
+else
+    TARGETS+=("$PRIMARY_OWNER")
+fi
+for T in $MIRRORS; do          # mirrors — only when DISCORD_MIRROR_<OWNER> lists them
+    [ -n "$T" ] || continue
+    if _policy_off "$T"; then
+        _delivery_log "suppressed" "#710/#1137-owner-policy-mirror=${T}"
+    else
+        TARGETS+=("$T")
+    fi
+done
+if [ "${#TARGETS[@]}" -eq 0 ]; then
     # #716: the POST is suppressed, but a genuinely-TICKETLESS ❓ from an OFF
-    # owner (zbynek/marek) must still fold into the footer `U N` — the surface
-    # #710 redirected them to. Record a Discord-LESS "suppressed" map entry
-    # (a synthetic non-snowflake key keyed on the session, channel-less) so
+    # owner (zbynek) must still fold into the footer `U N` — the surface #710
+    # redirected them to. Record a Discord-LESS "suppressed" map entry (a
+    # synthetic non-snowflake key keyed on the session, channel-less) so
     # `statusbar.ticketless_question_pings` counts it. Only on the ❓ Stop-hook
     # path (ND_SESSION_ID set); pipe CONTENT_BASE (header + question, no
     # per-target @mention — record_question strips mentions anyway) so the
@@ -341,8 +358,8 @@ if [ -n "$PRIMARY_OWNER" ] \
     # itself, exactly as a delivered one is.
     #
     # #716 review 🟡1: dry-run-GATED — the dry-run early-return lives INSIDE
-    # emit_one, which the #710 block never reaches (it exit-0s first), so
-    # without this guard a DISCORD_NOTIFY_DRYRUN=1 preview would write a real
+    # emit_one, which this block never reaches (it exit-0s first), so without
+    # this guard a DISCORD_NOTIFY_DRYRUN=1 preview would write a real
     # `suppressed:<sid>` entry into the live map (a phantom footer U N from a
     # mere preview). Mirrors the delivered path (records only inside the real
     # HTTP-2xx branch) and notify.send's own "never dry-run-mutating" #710 gate.
@@ -380,9 +397,7 @@ if [ "$EMOJI" = "✅" ] && [ "${DISCORD_NOTIFY_DRYRUN:-0}" != "1" ]; then
     fi
 fi
 
-emit_one "$PRIMARY_OWNER"      # primary — always fires (owner may be empty)
-for T in $MIRRORS; do          # mirrors — only when DISCORD_MIRROR_<OWNER> lists them
-    [ -n "$T" ] || continue
+for T in "${TARGETS[@]}"; do   # the policy-allowed targets, primary first
     emit_one "$T"
 done
 

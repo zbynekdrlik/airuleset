@@ -3072,15 +3072,15 @@ def cmd_notify(args):
         return
 
     if getattr(args, "question_ping_off", False):
-        # #710: read-only predicate — does the resolved owner have ❓ QUESTION
-        # Discord delivery turned OFF (zbynek/marek)? Prints "1" (off) / "0"
-        # (on), always exit 0. hooks/notify-discord-send.sh consults this ONCE
-        # for the PRIMARY owner (passed via --owner-name "$PRIMARY_OWNER"),
-        # before the emit loop, to suppress the interactive ❓ ping for an off
-        # owner while leaving david untouched — primary-owner-scoped, matching
-        # the notify.send(kind="questions") chokepoint. An explicit --owner-name
-        # overrides the tmux-resolved owner (empty falls back to resolve_owner).
-        owner = (getattr(args, "owner_name", "") or "").strip() or resolve_owner()
+        # #710/#1137: read-only predicate — is this owner on the owner policy
+        # (notify.OWNER_PING_ALLOW, zbynek), so a ❓/✅ ping to it is suppressed?
+        # Prints "1" / "0", always exit 0. hooks/notify-discord-send.sh asks it
+        # PER TARGET (primary + each mirror, via --owner-name "$T") before the
+        # emit loop; david stays "0". An explicit --owner-name is used verbatim,
+        # and an EMPTY one is the shared channel, i.e. zbynek (#1137 review R3);
+        # only an absent flag falls back to the tmux-resolved owner.
+        _on = getattr(args, "owner_name", None)
+        owner = _on.strip() if isinstance(_on, str) else resolve_owner()
         sys.stdout.write("1" if question_ping_off(owner) else "0")
         return
 
@@ -6517,7 +6517,7 @@ def _notify_run_card(args, compose_autopilot_card, send):
                       return_message_id=True, project=project)
         status, message_id = result if isinstance(result, tuple) else (result, None)
         print(status)
-        if status in ("sent", "suppressed"):    # #1137: owner policy = delivered
+        if status == "sent" or (status == "suppressed" and not getattr(args, "dry_run", False)):  # #1137: owner policy = delivered; a dry-run preview writes no state
             if message_id:
                 record_card_message(
                     message_id,
@@ -6534,7 +6534,7 @@ def _notify_run_card(args, compose_autopilot_card, send):
             # slice IS their whole population) — always bump.
             _write_autopilot_progress(
                 name, remaining, bump_done=(not is_full or is_core_ticket))
-        elif status not in ("dedup", "dry-run"):
+        elif status not in ("dedup", "dry-run", "suppressed"):
             # #135: a card that never reached Discord must NOT report success.
             # It still never raises and never blocks the work — but the
             # worker's own Bash call now SEES the failure instead of being

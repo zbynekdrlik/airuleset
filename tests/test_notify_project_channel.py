@@ -62,7 +62,7 @@ class _HomeIsolated(unittest.TestCase):
         self.addCleanup(lambda: os.environ.clear() or os.environ.update(self._env))
         # #1137: pin an empty owner (never on the owner policy): a bare box
         # resolves owner=zbynek, whose non-alarm sends are suppressed now.
-        _pin = m.patch.dict(os.environ, {"AIRULESET_NOTIFY_OWNER": ""})
+        _pin = m.patch.dict(os.environ, {"AIRULESET_NOTIFY_OWNER": "", "AIRULESET_SHARED_CHANNEL_OWNER": ""})
         _pin.start()
         self.addCleanup(_pin.stop)
 

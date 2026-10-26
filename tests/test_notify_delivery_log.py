@@ -64,7 +64,7 @@ class _HomeIsolated(unittest.TestCase):
         self.cdedup = self.home / "content-dedup"
         # #1137: pin an empty owner (never on the owner policy): a bare box
         # resolves owner=zbynek, whose non-alarm sends are suppressed now.
-        _pin = mock.patch.dict(os.environ, {"AIRULESET_NOTIFY_OWNER": ""})
+        _pin = mock.patch.dict(os.environ, {"AIRULESET_NOTIFY_OWNER": "", "AIRULESET_SHARED_CHANNEL_OWNER": ""})
         _pin.start()
         self.addCleanup(_pin.stop)
 
@@ -194,7 +194,7 @@ class TestShellSendLogsEveryNonDelivery(_HomeIsolated):
         # empty owner is never suppressed and falls to the shared channel).
         env = {**os.environ, "HOME": str(self.home), "ND_EMOJI": "❓",
                "ND_TEXT": "otazka", "ND_CWD": str(ROOT), "ND_CONFIRM": "1",
-               "AIRULESET_NOTIFY_OWNER": "", "PATH": d}
+               "AIRULESET_NOTIFY_OWNER": "", "AIRULESET_SHARED_CHANNEL_OWNER": "", "PATH": d}
         env.pop("DISCORD_NOTIFY_DRYRUN", None)
         r = subprocess.run(["bash", str(SEND_HOOK)], input="",
                            capture_output=True, text=True, env=env)

@@ -349,22 +349,31 @@ def stream_redirect(raw_owner):
 
 # #710 -> #1137 (issue 1233, "v discorde skoro nič nečítam … mám v pätičke U"):
 # the ONE owner-level Discord policy. A listed owner gets ONLY the dedup-key
-# classes the pattern matches; every other send (❓, ✅, run-card, gk*/bounce/
-# handoff/orphan, `waiting:`, keyless `--body` …) POSTs nothing and logs
-# `suppressed` (send(); the shell ❓/✅ path in hooks/notify-discord-send.sh).
-# Its dedup marker reads `suppressed`, which `marker_delivered` counts as
+# classes the pattern matches — for zbynek the needs-a-human alarms: account
+# blocked, dead credential, a healthz DOWN and its RECOVERY, and the job-35
+# dead-fleet heartbeat (never visible in the footer). Every other send (❓, ✅,
+# run-card, gk*/bounce/handoff/orphan, `waiting:`, keyless `--body` …) POSTs
+# nothing and logs `suppressed` (send(); the shell ❓/✅ path in
+# hooks/notify-discord-send.sh). It is applied PER TARGET: each
+# DISCORD_MIRROR_<OWNER> recipient by its own owner's policy, and an EMPTY owner
+# (the shared DISCORD_NOTIFICATION_CHANNEL_ID, e.g. a TMUX-less systemd watchdog
+# on newlevel/gatekeeper) as the shared channel's reader — zbynek, unless
+# AIRULESET_SHARED_CHANNEL_OWNER names another (empty = the shared channel has
+# no policy owner; the ownerless delivery tests pin that). A suppressed keyed
+# send writes its marker as `suppressed`, which `marker_delivered` counts as
 # delivered, so no gate loops. david (david1-4) is not listed: unchanged.
 OWNER_PING_ALLOW = {
-    "zbynek": re.compile(r"^(acctblock|credential-dead):|^healthz:.*:down:"),
+    "zbynek": re.compile(r"^(acctblock|credential-dead|conformance-hb):"
+                         r"|^healthz:.*:(down|recovery):"),
 }
 
 
 def _policy_owner(owner):
-    """`owner` via `stream_redirect` (personas routing into claude-zbynek
-    count as zbynek) when on the policy, else "" (unknown never suppresses)."""
-    if not owner:
-        return ""
-    o = stream_redirect(str(owner).strip().lower())
+    """`owner` via `stream_redirect` (personas routing into claude-zbynek count
+    as zbynek; an empty owner is the shared channel's reader) when on the
+    policy, else ""."""
+    o = (stream_redirect(str(owner or "").strip().lower())
+         or os.environ.get("AIRULESET_SHARED_CHANNEL_OWNER", "zbynek").strip().lower())
     return o if o in OWNER_PING_ALLOW else ""
 
 
@@ -2364,6 +2373,29 @@ def record_question(message_id, channel, session, cwd, now=None, path=None,
     return _save_questions(d, path)
 
 
+def record_suppressed_question(session, cwd, question, path=None):
+    """#1137 (review R7): fold a ❓ relay the owner policy suppressed (the
+    watchdog's `waiting:` ping) into the footer `U` via the #716 Discord-less
+    `suppressed:<session>` entry. When the session's own ❓ already recorded
+    that entry, it is left as is — never a second entry, never an overwrite of
+    the richer block. Under pytest it never writes the REAL home's map (a
+    run_once test with a suppressing fake send must not leave a phantom footer
+    U — the #1195/#1196 real-home rule). Returns True when it recorded. Never
+    raises."""
+    try:
+        if path is None and os.environ.get("PYTEST_CURRENT_TEST"):
+            import pwd
+            real = os.path.join(pwd.getpwuid(os.getuid()).pw_dir, ".claude")
+            if os.path.realpath(_claude_dir()) == os.path.realpath(real):
+                return False
+        if ("suppressed:%s" % str(session or "").strip()) in load_questions(path):
+            return False
+        return bool(record_question("", "", session, cwd, path=path,
+                                    question=question, suppressed=True))
+    except Exception:
+        return False
+
+
 # (#795: `touch_question` — #716's helper for bumping a suppressed entry's
 # `ts` without re-tracking it, so `reping_stale_questions`'s "suppressed"
 # re-attempt fired at most once per re-ask interval — was DELETED outright.
@@ -3237,18 +3269,23 @@ def send(body, env=None, owner=None, dedup_key=None, dry_run=False,
     if owner is None:
         owner = resolve_owner()
 
-    # #710/#1137: the owner-level policy (OWNER_PING_ALLOW), gated AFTER owner
-    # resolution and BEFORE the keyless-key derivation / channel / network. A
-    # keyed send records its marker as `suppressed` (marker_delivered counts it),
-    # so a run-card or an orphan floor reads it as handled and never re-fires.
-    policy = owner_ping_suppressed(owner, dedup_key)
-    if policy:
+    # #710/#1137: the owner-level policy (OWNER_PING_ALLOW), PER TARGET, gated
+    # AFTER owner resolution and BEFORE the keyless-key derivation / channel /
+    # network. When no target is allowed, a keyed send records its marker as
+    # `suppressed` (marker_delivered counts it), so a run-card or an orphan
+    # floor reads it as handled and never re-fires. Otherwise only the allowed
+    # targets are delivered (the first one carries the returned status) and
+    # each skipped one is logged after the delivery.
+    recipients = [owner] + mirror_owners(env, owner)
+    blocked = {t: owner_ping_suppressed(t, dedup_key) for t in recipients}
+    allowed = [t for t in recipients if not blocked[t]]
+    if not allowed:
         if not dry_run:
             if dedup_key:
                 _dedup_claim(dedup_key)
                 _dedup_mark_status(dedup_key, "suppressed")
             log_delivery("suppressed", kind="owner-policy",
-                         key=dedup_key or "", reason=policy)
+                         key=dedup_key or "", reason=blocked[owner])
         return ("suppressed", None) if return_message_id else "suppressed"
 
     # #559: a keyless send used to bypass dedup AND trace entirely (logged
@@ -3261,15 +3298,15 @@ def send(body, env=None, owner=None, dedup_key=None, dry_run=False,
     if not dedup_key:
         dedup_key = _auto_dedup_key(body, owner)
 
-    # Build the delivery list ONCE: primary owner first, then the parallel mirror
-    # recipients (each gets the SAME body in THEIR OWN thread with THEIR OWN @mention).
-    # The PRIMARY is ALWAYS kept (even with no channel — dry-run previews it, real
-    # delivery reports no-config). A mirror whose channel duplicates one ALREADY in the
+    # Build the delivery list ONCE from the policy-allowed recipients: primary owner
+    # first, then the parallel mirror recipients (each gets the SAME body in THEIR OWN
+    # thread with THEIR OWN @mention). The FIRST allowed target is ALWAYS kept (even
+    # with no channel — dry-run previews it, real delivery reports no-config). A mirror whose channel duplicates one ALREADY in the
     # list is dropped, so no double-post — not just vs the primary, but vs any earlier
     # mirror too (e.g. two owners both falling back to the shared channel). dry-run and
     # real delivery iterate this SAME list, so the preview is faithful.
     targets, seen_channels = [], set()      # targets: list of (owner, channel)
-    for i, t in enumerate([owner] + mirror_owners(env, owner)):
+    for i, t in enumerate(allowed):
         # #368 x #369 merge: questions (kind="questions") stay CENTRALIZED in the
         # owner's -q thread (#369's own design: project is ignored for questions);
         # only default-kind notifications route to the per-project thread.
@@ -3330,4 +3367,10 @@ def send(body, env=None, owner=None, dedup_key=None, dry_run=False,
     _dedup_mark_status(dedup_key, status)
     log_delivery(status, kind="python", key=dedup_key,
                  reason="" if status == "sent" else "post-failed")
+    for t in recipients:
+        if blocked[t]:
+            log_delivery("suppressed", kind="owner-policy", key=dedup_key,
+                         reason="%s-%s=%s" % (blocked[t],
+                                              "mirror" if t != owner else "primary",
+                                              t or "shared"))
     return (status, message_id) if return_message_id else status

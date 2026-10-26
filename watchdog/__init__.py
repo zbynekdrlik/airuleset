@@ -4408,10 +4408,13 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
                     detail = excerpt or ("Session sa zastavila na otázke "
                                          "(AskUserQuestion) — pozri sa naň.")
                     # kind="questions" (#1137): the ❓ relay rides the question
-                    # route — the owner's -q thread and the owner policy.
-                    send_fn("❓ **%s** — čaká na teba\n> %s" % (project, detail),
-                            owner=owner, dedup_key="waiting:%s:%s" % (key, w["first_seen"]),
-                            dry_run=dry_run, kind="questions")
+                    # route — the owner's -q thread and the owner policy; a
+                    # suppressed relay folds into the footer U (#716 entry).
+                    wbody = "❓ **%s** — čaká na teba\n> %s" % (project, detail)
+                    if send_fn(wbody, owner=owner, dedup_key="waiting:%s:%s" % (key, w["first_seen"]),
+                               dry_run=dry_run, kind="questions") == "suppressed" and not dry_run:
+                        from notify import record_suppressed_question
+                        record_suppressed_question(key, cwd, wbody)
                 w["confirmed"] = True          # seen this poll → a LATER poll may ping
                 continue                       # waiting on the user → not a working-stall
 

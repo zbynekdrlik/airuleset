@@ -8,6 +8,7 @@ These tests lock the SECURITY boundary (only a known owner's explicit reply to a
 drop-on-delivery, busy/absent-pane retry, question-map persistence + pruning).
 """
 
+import os
 import sys
 import time
 import unittest
@@ -1297,10 +1298,14 @@ class SendReturnMessageId(unittest.TestCase):
         p = m.patch.object(notify, "_read_env", lambda: dict(self.env))
         p.start()
         self.addCleanup(p.stop)
-        # #1137: empty owner (a bare box resolves zbynek, now suppressed)
+        # #1137: empty owner (a bare box resolves zbynek, now suppressed) on a
+        # shared channel with no policy owner (an empty owner is zbynek otherwise)
         o = m.patch.object(notify, "resolve_owner", lambda: "")
         o.start()
         self.addCleanup(o.stop)
+        sh = m.patch.dict(os.environ, {"AIRULESET_SHARED_CHANNEL_OWNER": ""})
+        sh.start()
+        self.addCleanup(sh.stop)
         # #559: keyless send()s now auto-derive a content-hash dedup key, so
         # repeated identical keyless sends (every test here uses body "hi")
         # would collide via the SHARED dedup dir. Isolate the dedup/delivery

@@ -44,6 +44,7 @@ class _Home(unittest.TestCase):
         p = m.patch.dict(os.environ, {"HOME": str(self.home)})
         p.start()
         self.addCleanup(p.stop)
+        os.environ.pop("AIRULESET_SHARED_CHANNEL_OWNER", None)   # the default
         self.posts = []
         for target, value in (
                 ("_post_discord", lambda *a, **k: self.posts.append(a) or "1137001"),
@@ -358,6 +359,7 @@ class ShellPerTarget(unittest.TestCase):
                "ND_CONFIRM": "1",
                "AIRULESET_CONTENT_DEDUP_DIR": str(Path(tmp) / "cdedup")}
         env.pop("DISCORD_NOTIFY_DRYRUN", None)
+        env.pop("AIRULESET_SHARED_CHANNEL_OWNER", None)          # the default
         r = subprocess.run(["bash", str(SEND_SH)], env=env, text=True,
                            capture_output=True, timeout=120)
         p = home / ".claude" / "notify-delivery.log"
