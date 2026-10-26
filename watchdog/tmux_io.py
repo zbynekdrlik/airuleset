@@ -469,8 +469,7 @@ def impl_window_presence(marker, run=None, logs=None, dry_run=False,
         return "no-managed-session"
     from watchdog import owner_stop     # #1257: the owner stopped it = stays stopped
     if "impl" in sessions[target]:
-        owner_stop.note_window("%s:impl" % target, impl_pane.get(target),
-                               time.time(), dry_run)
+        owner_stop.note_window("%s:impl" % target, impl_pane.get(target), dry_run)
         logs.append("dual: impl window present on %s" % target)
         return "present"
     cwd = (marker.get("cwd") or "").strip() if isinstance(marker, dict) else ""

@@ -321,17 +321,21 @@ def sid_latch(projects_dir, cwd, sid, state=None):
         return None
 
 
-def note_window(key, pane_id, now, dry_run=False):
+def note_window(key, pane_id, dry_run=False):
     """Remember the session of tmux window `key` (the dual-agent impl window,
     #1060) while it exists — it shares its cwd with the main window — so
-    `window_latch` judges THAT session once the window is gone."""
+    `window_latch` judges THAT session once the window is gone. Only a pane
+    resolved to its OWN session is remembered; an unresolved sweep keeps the
+    previous record. Stamped with the sweep's `now`."""
     state = _SWEEP.get("state")
     ctx = _PANES.get(pane_id) if pane_id else None
-    if dry_run or not isinstance(state, dict) or not ctx or not ctx.get("sid"):
+    if dry_run or not isinstance(state, dict) or not ctx or not ctx.get("sid") \
+            or not ctx.get("own", True):
         return
     if not isinstance(state.get(STATE_KEY), dict):
         state[STATE_KEY] = {}
-    state[STATE_KEY]["win:%s" % key] = {"sid": ctx["sid"], "seen": now}
+    state[STATE_KEY]["win:%s" % key] = {"sid": ctx["sid"],
+                                        "seen": _SWEEP.get("now")}
 
 
 def window_latch(key, projects_dir, cwd):
@@ -547,7 +551,7 @@ def refresh(state, panes, projects_dir, now, dry_run=False, run=None):
     logs = []
     if not isinstance(state, dict):
         return logs
-    _SWEEP.update(state=state, projects_dir=projects_dir)
+    _SWEEP.update(state=state, projects_dir=projects_dir, now=now)
     others = []
     if run:
         try:
