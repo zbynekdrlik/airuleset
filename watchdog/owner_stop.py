@@ -246,11 +246,13 @@ def _two_newest(projects_dir, cwd):
 
 
 def _own_session(ctx, pid, n, run, recs, projects_dir):
-    """`n` (>1) panes share the cwd: point `ctx` at the session whose resume
-    boundary matches this pane's claude start (#645). Unresolved (no start, 0
-    or >1 boundary owners), keep the newest and add the other candidates as
-    `alts`, so the pane fails CLOSED. No inheritance: the previous session of
-    a shared cwd is not this pane's."""
+    """`n` (>1) claude panes share the cwd: point `ctx` at the session whose
+    resume boundary matches this pane's claude start (#645). Unresolved (no
+    start, 0 or >1 boundary owners), keep the newest and add the other
+    candidates that were written at or after that start as `alts` (a session
+    that ended before this claude started is not its own), so the pane fails
+    CLOSED. No inheritance: the previous session of a shared cwd is not this
+    pane's."""
     import watchdog
     from watchdog import transcripts
     cands = _sessions(projects_dir, ctx["cwd"])[:n + 1]
@@ -261,7 +263,15 @@ def _own_session(ctx, pid, n, run, recs, projects_dir):
         ctx.update(tpath=own[0], sid=own[0].stem, rec=recs.get(own[0].stem),
                    prev=None, prev_rec=None)
     else:
-        ctx["alts"] = [(t, recs.get(t.stem)) for t in cands if t != ctx["tpath"]]
+        ctx["alts"] = [(t, recs.get(t.stem)) for t in cands if t != ctx["tpath"]
+                       and (start is None or _mtime(t) >= start)]
+
+
+def _mtime(path):
+    try:
+        return os.path.getmtime(path)
+    except OSError:
+        return float("inf")       # unreadable: kept as a candidate (fail closed)
 
 
 def _context(projects_dir, cwd, state, recs=None):
@@ -395,19 +405,27 @@ def _exits(panes, projects_dir, run):
 
 
 def _all_panes(panes, run):
-    """(`panes` + every claude/node/bun pane the job-20 riders iterate,
-    {pane_id: cwd} of every tmux pane) from the sweep's memoized inventory."""
+    """(claude panes, other panes, {pane_id: cwd}) from the sweep's memoized
+    inventory. Claude panes = `panes` + every node/bun pane the job-20 riders
+    iterate that hosts a claude process; the other node/bun panes (a dev
+    server) are still mapped — a rider may type there — but never count as a
+    second Claude of their cwd nor keep the cwd live for the exit scan."""
+    import watchdog
     from watchdog.long_turn import _reconcile_candidate_panes
     from watchdog.tmux_io import _pane_inventory_raw
-    known = {str(p) for p, _c in panes or ()}
-    out = list(panes or ()) + [(p, c) for p, c, _cmd in
-                               _reconcile_candidate_panes(run) if p not in known]
-    cwds = {}
+    cwds, ppids = {}, {}
     for line in (_pane_inventory_raw(run) or "").splitlines():
         parts = line.split("\t")
         if len(parts) >= 3 and parts[0].strip():
             cwds.setdefault(parts[0].strip(), parts[2].strip())
-    return out, cwds
+            ppids.setdefault(parts[0].strip(), parts[3].strip() if len(parts) > 3 else "")
+    known = {str(p) for p, _c in panes or ()}
+    claude, other = list(panes or ()), []
+    for p, c, _cmd in _reconcile_candidate_panes(run):
+        if p not in known:
+            hosts = watchdog._pane_claude_pid(ppids.get(p, ""))
+            (claude if hosts else other).append((p, c))
+    return claude, other, cwds
 
 
 def refresh(state, panes, projects_dir, now, dry_run=False, run=None):
@@ -420,9 +438,10 @@ def refresh(state, panes, projects_dir, now, dry_run=False, run=None):
     if not isinstance(state, dict):
         return logs
     _SWEEP.update(state=state, projects_dir=projects_dir)
+    others = []
     if run:
         try:
-            panes, _SWEEP["cwds"] = _all_panes(panes, run)
+            panes, others, _SWEEP["cwds"] = _all_panes(panes, run)
         except Exception as e:     # noqa: BLE001 -- an inventory fault never stops the sweep
             logs.append("owner-stop latch: pane inventory unreadable (%r), claude "
                         "panes only" % (e,))
@@ -450,10 +469,10 @@ def refresh(state, panes, projects_dir, now, dry_run=False, run=None):
     seen, shared = set(), {}
     for _p, cwd in panes or ():
         shared[cwd] = shared.get(cwd, 0) + 1
-    for pid, cwd in panes or ():
+    for pid, cwd in list(panes or ()) + others:
         try:
             ctx = _context(projects_dir, cwd, state, recs)
-            if ctx["sid"] and shared[cwd] > 1:
+            if ctx["sid"] and shared.get(cwd, 0) > 1 and (pid, cwd) not in others:
                 _own_session(ctx, pid, shared[cwd], run, recs, projects_dir)
             latch, found = _evaluate(ctx) if ctx["sid"] else (None, [])
         except Exception as e:     # noqa: BLE001 -- one bad pane never stops the sweep
