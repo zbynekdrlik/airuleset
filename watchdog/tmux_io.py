@@ -1132,6 +1132,13 @@ def _nudge_dying_subagent(state, logs, send_fn, pid, run, captured, project, own
         logs.append("subagent-%s-resolved %s [%s] — supervisor acknowledged"
                     % (dedup_prefix, project, wid))
         return
+    # #1257 -- the owner stopped this pane: held, never a nudge, never a ping.
+    from watchdog import owner_stop as _ostop
+    _latch = _ostop.pane_latch(pid)
+    if _latch:
+        logs.append("subagent-%s-held %s [%s] owner-stop latch (%s)"
+                    % (dedup_prefix, project, wid, _latch.get("fact")))
+        return
     if not watchdog.pane_at_idle_prompt(captured):
         bkey = "subagent-busypane:%s:%s" % (dedup_prefix, wid)
         b = state.get(bkey) or {"first_seen": int(now - sub_idle), "pinged": False}
