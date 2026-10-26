@@ -19,10 +19,13 @@ These tests pin the fix:
 The behavioural tests run the real rendered bash (with the real `_install`)
 against a temp copy of gk's live logrotate tree; nothing touches /etc.
 """
+import hashlib
 import importlib
+import os
 import subprocess
 import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
 
@@ -31,13 +34,20 @@ sys.path.insert(0, str(ROOT))
 
 import cli_disk_guard_root as g  # noqa: E402
 
-# gk's live /etc/logrotate.d/gk-auth (read 26.10.2026, odoo-erp issue 5872).
-# Its comments mention btmp/wtmp in prose — the parser must not count those.
+# gk's live /etc/logrotate.d/gk-auth, byte for byte (read 26.10.2026, odoo-erp
+# issue 5872; sha256 locked below). Its comments mention btmp/wtmp in prose and
+# a `"su" directive` in quotes — the parser must not count those.
 GK_AUTH = """\
 # /etc/logrotate.d/gk-auth — installed by scripts/deploy-worktree-reaper.sh (#5872).
 # Do not edit on the host; edit deploy-worktree-reaper.sh in the repo and re-deploy.
 #
 # Follow-up to #5872: every stanza below carries an explicit `su root root`.
+# Confirmed live on the real gk box: /var/log there is root:syslog, GROUP-
+# WRITABLE (0775) -- a perfectly ordinary Debian/Ubuntu default so the syslog
+# daemon can write into it -- but a modern logrotate (3.21.0 here) refuses to
+# rotate ANY log whose parent directory is group-writable by a non-root group
+# UNLESS the stanza names an explicit su user/group (its own message: 'parent
+# directory has insecure permissions ... Set "su" directive'). This is
 # ALSO why the pre-#5872 unbounded btmp/wtmp rotation likely never actually
 # ran via cron in the first place, not just why it lacked a size cap.
 /var/log/btmp {
@@ -75,6 +85,7 @@ GK_AUTH = """\
     create 0640 syslog adm
     su root root
 }
+
 """
 
 # gk's live /etc/logrotate.d/rsyslog: a multi-line path list, `{` on its own line.
@@ -162,6 +173,60 @@ class TestPathLineParser(unittest.TestCase):
         self.assertEqual(_detector()["log_patterns"](note), [])
         self.assertIn("/var/log/btmp", note)
 
+    # --- review round 1 (both reviewers): branches no fixture exercised ---- #
+
+    def test_the_gk_auth_fixture_is_the_live_file_byte_for_byte(self):
+        self.assertEqual(hashlib.sha256(GK_AUTH.encode()).hexdigest(),
+                         "3da5eff2c7fcf571e29a173db8f671c7a52316d68d1f0fbe3b6b544a98620583")
+
+    def test_a_brace_inside_a_script_never_ends_the_stanza(self):
+        text = ("/var/log/app.log {\n    postrotate\n"
+                "        [ -f /run/x ] && { kill -HUP 1; }\n"
+                "        /var/log/btmp {\n"
+                "    endscript\n}\n/var/log/later {\n}\n")
+        self.assertEqual(_detector()["log_patterns"](text),
+                         ["/var/log/app.log", "/var/log/later"])
+
+    def test_a_brace_inside_a_comment_opens_nothing(self):
+        text = "# a { in prose\n/var/log/btmp {\n}\n# and } here\n/var/log/wtmp {\n}\n"
+        self.assertEqual(_detector()["log_patterns"](text),
+                         ["/var/log/btmp", "/var/log/wtmp"])
+
+    def test_endscript_with_a_closing_brace_or_a_comment_on_its_line(self):
+        for tail in ("endscript }\n", "endscript # done\n}\n"):
+            text = ("/var/log/app.log {\n    postrotate\n        true\n    "
+                    + tail + "/var/log/btmp {\n}\n")
+            self.assertEqual(_detector()["log_patterns"](text),
+                             ["/var/log/app.log", "/var/log/btmp"], tail)
+
+    def test_the_taboo_list_is_logrotate_3_21s_own(self):
+        # measured with logrotate 3.21.0 (Ubuntu 24.04, every fleet box):
+        # `Ignoring a.bak, because of *.bak pattern match` …
+        files = _detector()["config_files"]
+        with tempfile.TemporaryDirectory() as td:
+            d = Path(td)
+            ignored = ["a.bak", "a.dpkg-old", "a.dpkg-dist", "a.dpkg-new",
+                       "a.dpkg-bak", "a.dpkg-del", "a.dpkg-tmp", "a~", "a.swp",
+                       "a.disabled", "a,v", "a.ucf-old", "a.ucf-new", "a.ucf-dist",
+                       "a.rpmnew", "a.rpmorig", "a.rpmsave", "a.cfsaved",
+                       "a.rhn-cfg-tmp-x"]
+            read = ["a.conf", "a.old", "a.orig", "a.save", ".hidden", "plain"]
+            for name in ignored + read:
+                (d / name).write_text("")
+            self.assertEqual(sorted(Path(p).name for p in files("/nonexistent", td,
+                                                                as_root=False)),
+                             sorted(read))
+
+    def test_as_root_logrotate_skips_unsafe_config_files(self):
+        reads = _detector()["logrotate_reads"]
+        ok = types.SimpleNamespace(st_mode=0o100644, st_uid=0)
+        self.assertTrue(reads(ok, as_root=True))
+        self.assertFalse(reads(types.SimpleNamespace(st_mode=0o100664, st_uid=0), True))
+        self.assertFalse(reads(types.SimpleNamespace(st_mode=0o100646, st_uid=0), True))
+        self.assertFalse(reads(types.SimpleNamespace(st_mode=0o100644, st_uid=1000), True))
+        # not root: logrotate applies no such check, nor does the detector
+        self.assertTrue(reads(types.SimpleNamespace(st_mode=0o100666, st_uid=1000), False))
+
 
 class _Tree(unittest.TestCase):
     """A temp copy of a logrotate tree + the real rendered step, run by bash."""
@@ -181,7 +246,7 @@ class _Tree(unittest.TestCase):
         return [("/var/log/btmp", str(self.btmp), g.render_logrotate_btmp(), "0644"),
                 ("/var/log/wtmp", str(self.wtmp), g.render_logrotate_wtmp(), "0644")]
 
-    def run_step(self, lr_dir=None):
+    def run_step(self, lr_dir=None, cwd=None):
         step = _lr().build_logrotate_step(
             self.logs(), lr_conf=str(self.conf),
             lr_dir=str(lr_dir or self.lr_dir))
@@ -189,7 +254,7 @@ class _Tree(unittest.TestCase):
                   + g.render_install_fn() + "\n" + step
                   + '\necho "LR_FAIL=[$LR_FAIL]"\n')
         r = subprocess.run(["bash", "-c", script], capture_output=True,
-                           text=True, timeout=60)
+                           text=True, timeout=60, cwd=cwd)
         self.assertEqual(r.returncode, 0, r.stderr)
         return r.stdout, r.stderr
 
@@ -265,6 +330,24 @@ class TestStepWithoutAnotherOwner(_Tree):
         self.run_step()
         self.assertEqual(self.btmp.read_text(), g.render_logrotate_btmp())
 
+    def test_a_bak_copy_is_not_an_owner(self):
+        # review round 1 🔴: logrotate 3.21 ignores *.bak; yielding to it would
+        # leave btmp rotated by NOBODY with a green read-back
+        (self.lr_dir / "btmp.bak").write_text(g.render_logrotate_btmp())
+        out, _err = self.run_step()
+        self.assertEqual(self.btmp.read_text(), g.render_logrotate_btmp())
+        self.assertNotIn("yielded", out)
+
+    def test_a_module_in_the_working_directory_is_never_imported(self):
+        # the detector runs as root (sudo from the account's home on dev1/dev2)
+        with tempfile.TemporaryDirectory() as td:
+            for mod in ("shlex", "fnmatch"):
+                Path(td, mod + ".py").write_text("raise SystemExit('poisoned %s')\n" % mod)
+            out, err = self.run_step(cwd=td)
+        self.assertIn("LR_FAIL=[]", out)
+        self.assertNotIn("poisoned", err)
+        self.assertEqual(self.btmp.read_text(), g.render_logrotate_btmp())
+
 
 class TestStepWithAForeignFileAtOurPath(_Tree):
 
@@ -296,6 +379,56 @@ class TestStepDetectionError(_Tree):
         self.assertFalse(self.wtmp.exists())
 
 
+class TestLogrotateReadBack(unittest.TestCase):
+    """Review round 1 🟡: the duplicate grep only catches a MISSED owner. A
+    yield to a stanza logrotate never uses (a tabooext, a file it skips on a
+    parse error or unsafe mode) left btmp rotated by nobody with a green
+    read-back, so every managed log must also be `considering log`-ed."""
+    CONSIDERED = "considering log /var/log/btmp\nconsidering log /var/log/wtmp\n"
+
+    def readback(self, fake_output, rc=0, logrotate=True):
+        with tempfile.TemporaryDirectory() as td:
+            if logrotate:
+                stub = Path(td, "logrotate")
+                stub.write_text('#!/bin/bash\nprintf "%%s" "$FAKE_LR"\nexit %d\n' % rc)
+                stub.chmod(0o755)
+            script = ("set -uo pipefail\nfail=0\n"
+                      + _lr().build_logrotate_readback(["/var/log/btmp", "/var/log/wtmp"])
+                      + '\necho "fail=[$fail]"\n')
+            env = dict(os.environ, PATH="%s:/usr/bin:/bin" % td, FAKE_LR=fake_output)
+            r = subprocess.run(["bash", "-c", script], capture_output=True, text=True,
+                               env=env, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return r.stdout, r.stderr
+
+    def test_a_clean_config_rotating_both_logs_passes(self):
+        out, err = self.readback(self.CONSIDERED + "considering log /var/log/syslog")
+        self.assertIn("fail=[0]", out)
+        self.assertEqual(err, "")
+
+    def test_a_duplicate_entry_fails_even_though_logrotate_exits_1(self):
+        out, err = self.readback(self.CONSIDERED + "error: gk-auth:13 duplicate log "
+                                 "entry for /var/log/btmp\n", rc=1)
+        self.assertIn("fail=[1]", out)
+        self.assertIn("duplicate log entry", err)
+
+    def test_a_log_no_read_stanza_rotates_fails(self):
+        out, err = self.readback("considering log /var/log/wtmp\n"
+                                 "error: found error in file gk-auth, skipping\n", rc=1)
+        self.assertIn("fail=[1]", out)
+        self.assertIn("/var/log/btmp", err)
+        self.assertNotIn("/var/log/wtmp", err)
+
+    def test_a_longer_log_name_is_not_the_managed_log(self):
+        out, _err = self.readback("considering log /var/log/btmp.1\n"
+                                  "considering log /var/log/wtmp\n")
+        self.assertIn("fail=[1]", out)
+
+    def test_no_logrotate_on_the_box_checks_nothing(self):
+        out, _err = self.readback("", logrotate=False)
+        self.assertIn("fail=[0]", out)
+
+
 class TestApplyScriptWiring(unittest.TestCase):
 
     def _logs(self):
@@ -314,6 +447,24 @@ class TestApplyScriptWiring(unittest.TestCase):
             check = s.find("_lr_other %s %s" % (log, conf))
             self.assertNotEqual(check, -1, "no ownership check for %s" % log)
             self.assertGreater(s.index("_install %s " % conf), check, conf)
+
+    def test_btmp_wtmp_are_installed_only_inside_the_ownership_step(self):
+        # review round 1 🟡: a generic `_install <conf>` after the step would
+        # overwrite the yield note and bring the gk duplicate back
+        step = _lr().build_logrotate_step(self._logs())
+        for drain in (True, False):
+            s = g.build_apply_script(drain=drain)
+            for conf in (g.LOGROTATE_BTMP_PATH, g.LOGROTATE_WTMP_PATH):
+                self.assertEqual(step.count("_install %s " % conf), 2, conf)
+                self.assertEqual(s.count("_install %s " % conf), 2, conf)
+
+    def test_the_apply_script_embeds_the_logrotate_read_back(self):
+        rb = _lr().build_logrotate_readback(["/var/log/btmp", "/var/log/wtmp"])
+        for drain in (True, False):
+            s = g.build_apply_script(drain=drain)
+            self.assertIn(rb, s)
+            self.assertGreater(s.index(rb), s.index("fail=0"))
+            self.assertLess(s.index(rb), s.index("exit 4"))
 
     def test_a_detection_error_turns_into_exit_4(self):
         s = g.build_apply_script()
