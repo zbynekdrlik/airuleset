@@ -28,7 +28,7 @@ Checking that a process is running, an API returns 200, or a page loads is NOT v
 - If you fixed a data flow → send data in, verify it arrives at the destination with correct values.
 - If you modified a form → submit it and check the backend received the correct data.
 
-**CONTENT read-back is MANDATORY and hook-enforced:** every `## ✅ Work Complete` report carries `✅ Výstup: <concrete observed values read back from the real artifact>` (or an explicit `n/a — <prečo>`); `stop-check-prose-violations.sh` blocks a report without it, with a value-free line, or with an `n/a` contradicting the report's own 🌐/📱 surface. See `completion-report.md` (Hard rules). History + incident (#446): `.claude/rules-reference/autonomous-verification-history.md` (#859).
+**CONTENT read-back is MANDATORY and hook-enforced:** every `## ✅ Work Complete` report carries the `Výstup:` token on its `✅ Overené:` line — `Výstup: <concrete observed values read back from the real artifact>` or an explicit `n/a — <prečo>` (the old separate `✅ Výstup:` line is still accepted); `stop-check-prose-violations.sh` blocks a report without it, with a value-free line, or with an `n/a` contradicting the report's own 🌐/📱 surface. See `completion-report.md` (Hard rules). History + incident (#446): `.claude/rules-reference/autonomous-verification-history.md` (#859).
 
 #### Verification protocol
 
