@@ -488,20 +488,25 @@ def persist_measured_filedrop_ports(measured, drop_lanes):
     ``drop_lanes``'s keys so a removed/renamed account leaves no stale entry that
     could later mis-target a reused hostname (review finding). ``drop_lanes`` is
     injected (the caller passes cli_drop_gateway.DROP_LANES) so this stays a leaf.
-    Best-effort: any write failure is loud but never fails the push."""
+    Best-effort: any write failure is loud but never fails the push. Returns the
+    sorted lane keys whose port is NEW or CHANGED (#1238: the push re-renders the
+    controller ingress for them in the same run); [] when nothing changed."""
     if not measured:
-        return
+        return []
     try:
-        merged = read_drop_lanes_cache()
+        before = read_drop_lanes_cache()
+        merged = dict(before)
         merged.update(measured)
         valid = {drop_lanes_cache_key(n, u) for (n, u) in drop_lanes}
         pruned = {k: v for k, v in merged.items() if k in valid}
         write_drop_lanes_cache(pruned)
         print("  drop-lanes cache: wrote %d filedrop port(s) to %s"
               % (len(measured), DROP_LANES_CACHE))
+        return sorted(k for k, v in pruned.items() if before.get(k) != v)
     except Exception as e:  # noqa: BLE001 — best-effort; never fail the push
         print("  ⚠ drop-lanes cache write failed (non-fatal): %r" % e,
               file=sys.stderr)
+        return []
 
 
 def harvest_local_controller_filedrop_port(measure_fn=None, drop_lanes=None):
@@ -763,8 +768,8 @@ def drop_ingress_rules_for_controller(drop_lanes, cache=None, access_specs=None)
     rule, so ``share`` deliveries reach the persistent filedrop service while the
     ephemeral upload endpoint keeps the same host's catch-all. Order matters:
     cloudflared matches ingress top-to-bottom, so the path rule MUST precede the
-    no-path drop rule. A lane with ``filedrop_port=None`` emits no ``/s/`` rule
-    (``share`` on it falls back to the private URLs).
+    no-path drop rule. #1238: the ``share_route_probe_rule`` to the same origin
+    precedes it too. ``filedrop_port=None`` -> neither (``share`` refuses).
 
     #1115: the effective filedrop port PREFERS the push-measured cache
     (``~/.claude/drop-lanes.json`` keyed ``<node>/<user>``); the in-code
@@ -805,10 +810,20 @@ def drop_ingress_rules_for_controller(drop_lanes, cache=None, access_specs=None)
         if fd_port is None:
             fd_port = lane.filedrop_port
         if fd_port is not None:                 # #1114: /s/ rule FIRST
-            rules.append((lane.host, "^/s/",
-                          "http://%s:%d" % (lane.origin_host, fd_port)))
+            fd_origin = "http://%s:%d" % (lane.origin_host, fd_port)
+            # #1238: + the share route probe to the SAME origin (share's proof)
+            rules.append((lane.host, share_route_probe_rule(), fd_origin))
+            rules.append((lane.host, "^/s/", fd_origin))
         rules.append((lane.host, svc))
     return rules
+
+
+def share_route_probe_rule():
+    """#1238: the ingress path regex routing `share`'s token-free route probe
+    (under the lane's `/healthz` Access bypass) to the SAME filedrop origin as
+    the lane's `^/s/` rule. The filedrop server owns the path it answers."""
+    from filedrop.server import SHARE_ROUTE_PROBE_PATH  # leaf stays import-pure
+    return "^%s$" % SHARE_ROUTE_PROBE_PATH
 
 
 # ---------------------------------------------------------------------------

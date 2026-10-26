@@ -27,7 +27,10 @@ STUBS = {
     "fail2ban-client": "exit 0\n",
     "du": 'for a; do case "$a" in -*) ;; *) printf "0\\t%s\\n" "$a" ;; esac; done\n',
     "ionice": 'echo "ionice $*" >> "$LOG"; shift; shift; exec "$@"\n',
-    "logrotate": ('if [ -n "${DUP:-}" ]; then echo "error: duplicate log entry for /var/log/btmp"; '
+    # #1244: a real `logrotate --debug` names every log some read stanza rotates
+    "logrotate": ('[ -n "${UNROTATED:-}" ] || echo "considering log /var/log/btmp"\n'
+                  'echo "considering log /var/log/wtmp"\n'
+                  'if [ -n "${DUP:-}" ]; then echo "error: duplicate log entry for /var/log/btmp"; '
                   'exit 1; fi\nexit 0\n'),
 }
 
@@ -86,6 +89,12 @@ class TestApplyScriptRuns(unittest.TestCase):
         r, _calls = self.apply(DUP="1")
         self.assertEqual(r.returncode, 4, r.stdout + r.stderr)
         self.assertIn("duplicate log entry", r.stderr)
+
+    def test_a_managed_log_no_stanza_rotates_fails_the_apply(self):
+        # #1244 review round 1: a yield to a stanza logrotate never reads
+        r, _calls = self.apply(UNROTATED="1")
+        self.assertEqual(r.returncode, 4, r.stdout + r.stderr)
+        self.assertIn("/var/log/btmp", r.stderr)
 
 
 if __name__ == "__main__":

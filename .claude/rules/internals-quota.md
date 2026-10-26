@@ -5,6 +5,8 @@ paths:
   - "gates/owntranscript.py"
   - "hooks/block-own-transcript-read.sh"
   - "cli_question_block.py"
+  - "cli_disk_guard_root.py"
+  - "cli_logrotate_owner.py"
 ---
 
 ### airuleset internals — per-user quota on shared-stream boxes (#950 / #1140)
@@ -21,3 +23,9 @@ paths:
   - **Only a content READER reads (live false positive, 0.1.538).** The first deploy blocked the ticket's own evidence comment. The shell text `cat > c.md <<EOF` held markdown that quoted a `grep … .jsonl` in backticks, and a `gh --body`, `git commit -m` or `echo` naming such a path was blocked too. The guard now looks only at a `READERS` head. It blanks heredoc bodies with `gates.selfservice._capture_heredocs`, except when an interpreter runs them (`python3 - <<EOF`, the songplayer shape). A guard that inspects shell TEXT must test documentation-shaped commands that MENTION its target, not only commands that use it. Also run `test_hook_runner_env_lock_1046` for any new hook test, which needs `hermetic_hook_env(self)`: Pass A refused the first 0.1.538 push on it.
 - **[Moved to `.claude/rules-reference/internals-archive.md` at the #1137 mode / session-scope removal, 2026-10-25 — grep "A launch-time cap never reaches a session that is already running (#1245" there]** the machinery it describes is removed.
 - **[Moved to `.claude/rules-reference/internals-archive.md` at the #1137 mode / session-scope removal, 2026-10-25 — grep "#1256 — the #1224 tool-OOM `BASH_ENV` file recursed" there]** the machinery it describes is removed.
+
+### disk-guard root — logrotate ownership (#1244)
+
+- **A root apply that writes a logrotate stanza must ask the box who else rotates that log.** On gk, odoo-erp's `gk-auth` and airuleset's #841 btmp/wtmp files named the same logs, and logrotate failed nightly with `duplicate log entry`. `cli_logrotate_owner.DETECTOR_PY` is ONE source string: the box runs it (`python3 -I -`; `-I` because the sudo leg runs as root from the account's home) and the tests `exec` it. It parses PATH LINES only. When another file owns the log, airuleset's own file (marker on line 1) becomes a yield note, and a foreign file is never touched.
+- **Mirror logrotate by MEASURING it, never from memory.** Run `logrotate --debug -s <state> <conf>` on a scratch include dir. 3.21 skips `*.bak` (a review 🔴: a yield to an ignored `btmp.bak` left btmp rotated by nobody). As root it also skips non-root-owned and group/other-writable files. A non-root `--debug` never "considers" a stanza with `su root root`, which is an artifact, so verify those as root read-only on the box.
+- **The read-back must work in BOTH directions** (`build_logrotate_readback`): no duplicate entry, AND `considering log <log>` for every managed log. Use a bash `case`, never `| grep -q`, which SIGPIPEs the producer under `pipefail` (#1223).

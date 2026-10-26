@@ -6,7 +6,9 @@ the path IS the authorization. Path-traversal safe. stdlib only.
 The matching client is share.py (copies files in + returns URLs). The server only
 READS, so its systemd unit runs with ProtectHome=read-only and no write paths.
 """
+import hashlib
 import mimetypes
+import os
 import re
 import shutil
 import sys
@@ -37,6 +39,20 @@ _NAME_RE = re.compile(r"\A[A-Za-z0-9._-]{1,128}\Z")
 # untouched — a charset on a binary payload is meaningless and would be an
 # unforced, unrequested behavior change outside this bug's scope.
 _EXTRA_TEXTLIKE_TYPES = ("application/json", "application/javascript")
+
+# #1238: the token-free proof that a public `/s/` route reaches THIS server (the
+# ingress routes it to the `/s/` origin, under the lane's `/healthz` Access
+# bypass); `share` requires 204 + this header carrying its own instance id.
+SHARE_ROUTE_PROBE_PATH = "/healthz/s"
+FILEDROP_ID_HEADER = "X-Airuleset-Filedrop-Id"
+
+
+def instance_id(port):
+    """This account's filedrop on this box, as an opaque id (the port alone
+    collides across boxes: 8788 serves on several). `share` computes the same
+    value in-process and compares it with the route probe's answer."""
+    who = "%s/%d/%d" % (os.uname().nodename, os.getuid(), int(port))
+    return hashlib.sha256(who.encode()).hexdigest()[:16]
 
 
 def _with_charset_if_textual(ctype):
@@ -115,6 +131,12 @@ class Handler(BaseHTTPRequestHandler):
             # user's console stays clean (browser-console-zero-errors) instead of
             # logging a 404 every time they open a shared file.
             self.send_response(204)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        if path == SHARE_ROUTE_PROBE_PATH:          # #1238 /s/ route proof
+            self.send_response(204)
+            self.send_header(FILEDROP_ID_HEADER, instance_id(self.server.server_address[1]))
             self.send_header("Content-Length", "0")
             self.end_headers()
             return

@@ -1338,8 +1338,8 @@ def _deploy_to_all_remotes(failed, auth_failed):
     import subprocess
     import time
     import airuleset  # #433 L-E: REMOTE_HOSTS read via the airuleset facade
-    import cli_drop_gateway  # #1115: the deploy ssh harvests each target's
-    # persisted filedrop port into the controller-side drop-lanes.json cache.
+    import cli_controller_tunnel  # #1238: re-renders the ingress after the harvest
+    import cli_drop_gateway  # #1115: harvests each target's filedrop port (drop-lanes.json)
     import cli_drop_golive  # #1115 slice B: writes each LIVE lane's go-live
     # marker on the target over this same deploy ssh session.
 
@@ -1606,10 +1606,9 @@ def _deploy_to_all_remotes(failed, auth_failed):
                               f"(see #251/#263/#300/#326/#347's own onboarding "
                               f"checklist).", file=sys.stderr)
 
-        # #1115: persist the harvested filedrop ports to the controller cache
-        # (leaf helper; DROP_LANES injected for the stale-key prune).
-        cli_drop_gateway.persist_measured_filedrop_ports(
-            measured_filedrop_ports, cli_drop_gateway.DROP_LANES)
+        # #1115 persists the harvested ports; #1238: a CHANGED one re-renders the ingress NOW.
+        cli_controller_tunnel.reapply_after_harvest(cli_drop_gateway.persist_measured_filedrop_ports(
+            measured_filedrop_ports, cli_drop_gateway.DROP_LANES))
 
         # #347: any shared host that never got a TRUSTWORTHY audit this run
         # (every connection failed before the appended `ls` ever ran, or every

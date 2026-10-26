@@ -34,6 +34,7 @@ import cli_drop_gateway as dg          # noqa: E402
 import cli_filedrop_watchdog as fw     # noqa: E402
 import cli_webterm_tunnel as tun       # noqa: E402
 import filedrop                        # noqa: E402
+import filedrop.server as fserver      # noqa: E402
 import filedrop.share as fshare        # noqa: E402
 from filedrop.server import make_server, safe_resolve  # noqa: E402
 
@@ -248,7 +249,8 @@ class TestLocalSlashSAugmentation(unittest.TestCase):
         twice = dg.render_drop_ingress_augmentation(
             once, self.HOST, 8828, filedrop_port=8788)
         self.assertEqual(once, twice)
-        self.assertEqual(once.count("- hostname: %s" % self.HOST), 2)  # /s/ + drop
+        # #1238 deliberately extended contract: the share route probe + /s/ + drop
+        self.assertEqual(once.count("- hostname: %s" % self.HOST), 3)
 
     def test_drop_ingress_already_present_recognises_s_rule(self):
         once = dg.render_drop_ingress_augmentation(
@@ -292,7 +294,10 @@ class TestCmdSharePublicFirst(unittest.TestCase):
              mock.patch.object(fw, "_filedrop_is_live", fake_live), \
              mock.patch.object(dg, "resolve_public_lane_full",
                                lambda *a, **k: lane_full), \
-             mock.patch.object(fw, "_public_share_status", lambda u, timeout=3: status):
+             mock.patch.object(fw, "_public_share_status", lambda u, timeout=3: status), \
+             mock.patch.object(fw, "_public_share_probe",   # #1238: this account's route
+                               lambda u, timeout=3: (204, fserver.instance_id(8790)),
+                               create=True):
             out, err = io.StringIO(), io.StringIO()
             self.exit_code = None
             with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):

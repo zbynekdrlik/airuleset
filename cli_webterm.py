@@ -1765,81 +1765,22 @@ def _setup_controller_webterm():
     F4c flips one human at a time to "controller".
 
     The shared tunnel uses a SINGLE multi-ingress config with one rule per
-    hosted lane (hostname -> unix:<gateway socket>) and a catch-all 404."""
-    import importlib
-    import cli_webterm_tunnel as tun
-
-    # Compute which lanes are hosted on this controller.
-    hosted_humans = [
-        h for h, box in profiles.LANE_HOST.items()
-        if box == "controller"
-    ]
-
-    # Load each hosted lane's module + spec in ONE pass (Fable review: the
-    # three-loop shape duplicated importlib calls).
-    hosted_lanes = []  # [(human, mod, spec)]
-    for human in hosted_humans:
-        mod_name = _HUMAN_TO_MODULE.get(human)
-        if mod_name is None:
-            continue
-        mod = importlib.import_module(mod_name)
-        setup_fn = "setup_webterm_%s_service" % human
-        if not hasattr(mod, setup_fn) or not hasattr(mod, "_spec"):
-            continue
-        hosted_lanes.append((human, mod, mod._spec()))
+    hosted lane (hostname -> unix:<gateway socket>) and a catch-all 404. Its
+    render lives in `cli_controller_tunnel`, shared with the push's post-harvest
+    re-render (#1238), so install and push can never render it differently."""
+    import cli_controller_tunnel as ct
+    import cli_drop_lanes as _dl
 
     # Provision each hosted lane's gateway + ttyd (prereq-gated inside).
+    hosted_lanes = ct.hosted_lanes()
     for _human, mod, _spec in hosted_lanes:
-        setup_fn = "setup_webterm_%s_service" % _human
-        getattr(mod, setup_fn)()
+        getattr(mod, "setup_webterm_%s_service" % _human)()
 
-    # ALWAYS render + install the ONE shared cloudflared tunnel.
-    creds_path = Path.home() / ".cloudflared" / CONTROLLER_TUNNEL_CREDS_NAME
-    config_path = Path.home() / ".cloudflared" / "controller-webterm.yml"
-    service_dest = (Path.home() / ".config" / "systemd" / "user"
-                    / "webterm-controller-tunnel.service")
-    service_name = "webterm-controller-tunnel.service"
-    cloudflared_bin = str(Path.home() / ".local" / "bin" / "cloudflared")
-
-    # Build ingress rules + After= from the hosted lanes' specs (single pass).
-    ingress_rules = []
-    after_parts = ["network-online.target"]
-    for _human, _mod, spec in hosted_lanes:
-        gw_sock = webterm_runtime_socket_abs(spec.gateway_sock_basename)
-        ingress_rules.append(
-            (spec.tunnel_hostname, "unix:" + gw_sock))
-        after_parts.append(spec.gateway_service_name)
-
-    # #931: add drop-gateway ingress rules for controller-topology lanes.
-    # These proxy drop-<host>.newlevel.media → http://<tailscale>:<port> on
-    # the lane's box, so the drop server is reachable through the controller
-    # tunnel (the per-box tunnel was retired in #870).
-    import cli_drop_gateway as _dg
     # #1115 slice G: the LOCAL controller account's filedrop port is not harvested by the push
     # ssh leg (not a deploy target) — measure + cache it BEFORE the render so drop-controller's
-    # /s/ rule renders this push. #1131: then the declared CONTROLLER_SERVICE_ROUTES rules.
-    import cli_drop_lanes as _dl
+    # /s/ rule renders this push. Then ALWAYS render + install the ONE shared tunnel.
     _dl.harvest_local_controller_filedrop_port()
-    ingress_rules.extend(_dg.drop_ingress_rules_for_controller()
-                         + _dl.controller_service_ingress_rules())
-
-    # #983: claudy dashboard — static ingress rule (origin is the tailscale
-    # bind on this same controller box; claudy.service is NOT touched).
-    ingress_rules.append(
-        ("claudy.newlevel.media", "http://100.101.214.103:8791"))
-
-    config_text = tun.render_cloudflared_multi_ingress_config(
-        CONTROLLER_TUNNEL_UUID, str(creds_path), ingress_rules)
-
-    unit_text = tun.render_cloudflared_tunnel_unit(
-        "airuleset webterm controller tunnel (multi-ingress, #870 F4a)",
-        str(config_path), cloudflared_bin,
-        after=" ".join(after_parts))
-
-    tunnel_ok = tun._provision_managed_tunnel(
-        creds_path, cloudflared_bin, config_path, config_text,
-        service_dest, service_name, unit_text,
-        lane="(controller)")
+    tunnel_ok = ct.apply_tunnel(hosted_lanes)
 
     # #1115 slice B: go-live reconcile — the controller holds both Cloudflare
     # tokens, so it (and only it) reconciles each controller-topology drop lane's
@@ -1869,17 +1810,10 @@ def maybe_setup_webterm():
     systemd. Any other box -> no-op. The developer modules are lazily imported
     to avoid a module-level cycle."""
     from cli_filedrop_watchdog import _whoami
+    import cli_controller_tunnel
     # #870 F4a-live: controller branch BEFORE the existing profile dispatch.
     # Uses pwd-based identity (unspoofable, #869 doctrine), NOT _whoami/getpass.
-    # default_box_class is already fail-open (returns "workstation" on missing
-    # marker), so no try/except needed — a non-controller falls through cleanly.
-    try:
-        from watchdog.reaper import default_box_class
-    except ImportError:
-        default_box_class = lambda: "workstation"  # noqa: E731
-    import pwd as _pwd
-    _ctrl_user = _pwd.getpwuid(os.getuid()).pw_name
-    if default_box_class() == "controller" and _ctrl_user == "airuleset":
+    if cli_controller_tunnel.is_controller_account():
         return _setup_controller_webterm()
     prof = profiles.profile_for_host(os.uname().nodename, account=_whoami())
     if prof == profiles.OWNER:
