@@ -71,6 +71,7 @@ esac
 RC=0
 ROOT=$(python3 - "$CMD" 2>/dev/null <<'PYEOF'
 import os
+import posixpath
 import re
 import shlex
 import sys
@@ -133,10 +134,23 @@ def _is_claude_home_root(t):
     return len(comps) <= 2 or bool(re.search(r"[*?\[]", comps[2]))
 
 
+def _collapse_dots(t):
+    """`.`, `..` and `//` collapsed before any root check (issue 1137 B1
+    review A5: `~/.claude/..` is the home, `~/.claude/./projects` the
+    transcript tree). A relative token is left as it is."""
+    for pfx in ("${HOME}", "$HOME", "${home}", "$home", "~"):
+        if t == pfx or t.startswith(pfx + "/"):
+            rest = posixpath.normpath("/" + t[len(pfx):].lstrip("/"))
+            return pfx if rest == "/" else pfx + rest
+    if t.startswith("/"):
+        return "/" + posixpath.normpath(t).lstrip("/")
+    return t
+
+
 def _norm_root(tok):
     """A path token normalized for blocked-root comparison, or None if it is
     obviously not a bare root (contains an inner path component)."""
-    t = tok
+    t = _collapse_dots(tok)
     # A `/*`-style glob of a root is a root scan (the shell expands it to
     # every entry): `/*` -> `/`, `/home/*` -> `/home`, `~/*` -> `~`.
     if t.endswith("/*"):
