@@ -217,5 +217,38 @@ class TheJournalFollowsTheSessionsOwner(unittest.TestCase):
         self.assertEqual(sum("cleared" in ln for ln in logs), 1, logs)
 
 
+class TheTmuxServerScanReadsAnyProcBytes(unittest.TestCase):
+    """Review 6, finding 2 (already on main since the issue 1256 scan): the
+    duplicate-server check decoded /proc/net/unix and the target's `comm`
+    strictly and caught only OSError. Any local user can bind an abstract
+    socket whose name is not UTF-8; `list_claude_panes`, and so every
+    watchdog sweep in that network namespace, then raised
+    UnicodeDecodeError."""
+    PATH = "/tmp/tmux-1000/default"
+
+    def setUp(self):
+        import test_tmux_servers_1256 as t1256
+        from watchdog import tmux_servers
+        self.ts = tmux_servers
+        self.p = t1256.FakeProc()
+        self.addCleanup(self.p.close)
+
+    def test_a_non_utf8_socket_name_in_net_unix(self):
+        self.p.proc(100, "tmux: server")
+        self.p.listen(100, self.PATH)
+        with open(os.path.join(self.p.root, "net", "unix"), "ab") as fh:
+            fh.write(b"0000: 00000002 00000000 00010000 0001 01 9999 @probe\xff\xfe\n")
+        self.assertEqual(self.ts.servers_bound_to(self.PATH, proc_root=self.p.root),
+                         [100])
+
+    def test_a_non_utf8_target_name_is_a_changed_target(self):
+        self.p.proc(100, "tmux: server")
+        Path(self.p.root, "100", "comm").write_bytes(b"bad\xff\xfe\n")
+        logs = []
+        self.assertEqual(self.ts._signal(100, lambda pid, sig: None, self.p.root,
+                                         logs, "head"), "changed")
+        self.assertEqual(len(logs), 1, logs)
+
+
 if __name__ == "__main__":
     unittest.main()
