@@ -1038,9 +1038,9 @@ class TestCardReconcileReopenClear(unittest.TestCase):
         """Deliver a REAL marker via the real notify.send() — the same
         primitive `_notify_run_card` actually uses."""
         env = {"DISCORD_BOT_TOKEN": "t", "DISCORD_NOTIFICATION_CHANNEL_ID": "c"}
-        # #1137: an empty owner is the shared channel's reader (zbynek) unless
-        # pinned; this setup needs a genuine ownerless delivery.
-        with m.patch.dict(os.environ, {"AIRULESET_SHARED_CHANNEL_OWNER": ""}):
+        # #1137: an empty owner resolves the account, then the shared channel's
+        # reader (zbynek); this setup needs a genuine ownerless delivery.
+        with m.patch.dict(os.environ, {"AIRULESET_NOTIFY_OWNER": "", "AIRULESET_SHARED_CHANNEL_OWNER": ""}):
             status = notify.send("card body", env=env, owner="", dedup_key=key)
         self.assertEqual(status, "sent", "test setup must genuinely deliver")
 

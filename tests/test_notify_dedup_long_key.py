@@ -135,10 +135,10 @@ class TestSendEndToEndWithALongDedupKey(_HomeIsolated):
         orig = notify._post_discord
         notify._post_discord = lambda *a, **k: True
         self.addCleanup(lambda: setattr(notify, "_post_discord", orig))
-        # #1137: an empty owner is the shared channel's reader (zbynek) unless
-        # pinned — this ownerless-delivery test pins no policy owner.
-        pin = unittest.mock.patch.dict(os.environ,
-                                       {"AIRULESET_SHARED_CHANNEL_OWNER": ""})
+        # #1137: an empty owner resolves the account, then the shared channel's
+        # reader (zbynek) — this ownerless-delivery test pins both empty.
+        pin = unittest.mock.patch.dict(os.environ, {"AIRULESET_NOTIFY_OWNER": "",
+                                                    "AIRULESET_SHARED_CHANNEL_OWNER": ""})
         pin.start()
         self.addCleanup(pin.stop)
 

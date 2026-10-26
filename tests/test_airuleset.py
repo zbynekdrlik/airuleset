@@ -8564,7 +8564,7 @@ class TestDiscordAutopilotNotify(TestCase):
         # accepted the message → releasing would duplicate). Retry stays deduped.
         import unittest.mock as m
         with tempfile.TemporaryDirectory() as home:
-            with m.patch.dict(os.environ, {"HOME": home,
+            with m.patch.dict(os.environ, {"HOME": home, "AIRULESET_NOTIFY_OWNER": "",
                                       "AIRULESET_SHARED_CHANNEL_OWNER": ""}):
                 env = {"DISCORD_BOT_TOKEN": "x",
                        "DISCORD_NOTIFICATION_CHANNEL_ID": "1"}
@@ -8625,7 +8625,7 @@ class TestDiscordAutopilotNotify(TestCase):
 
         env = {"DISCORD_BOT_TOKEN": "x", "DISCORD_NOTIFICATION_CHANNEL_ID": "1"}
         with tempfile.TemporaryDirectory() as home:
-            with m.patch.dict(os.environ, {"HOME": home,
+            with m.patch.dict(os.environ, {"HOME": home, "AIRULESET_NOTIFY_OWNER": "",
                                       "AIRULESET_SHARED_CHANNEL_OWNER": ""}):
                 with m.patch("notify.urllib.request.urlopen",
                              side_effect=fake_urlopen):
@@ -8800,7 +8800,7 @@ class TestDiscordAutopilotNotify(TestCase):
                "DISCORD_NOTIFICATION_CHANNEL_ID": "shared",
                "DISCORD_NOTIFICATION_CHANNEL_ZBYNEK": "zthread"}
         with tempfile.TemporaryDirectory() as home:
-            with m.patch.dict(os.environ, {"HOME": home,
+            with m.patch.dict(os.environ, {"HOME": home, "AIRULESET_NOTIFY_OWNER": "",
                                       "AIRULESET_SHARED_CHANNEL_OWNER": ""}):
                 with m.patch("notify.urllib.request.urlopen",
                              side_effect=fake_urlopen):

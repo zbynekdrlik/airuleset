@@ -71,14 +71,14 @@ class TestQuestionPingOffPredicate(unittest.TestCase):
 
     def test_unknown_never_off_empty_is_the_shared_channel(self):
         self.assertFalse(notify.question_ping_off("someoneelse"))
-        # #1137 review R3 (lock flipped): an EMPTY owner is the shared channel,
-        # read by zbynek, so it is on the policy — unless the shared channel's
-        # reader is pinned empty.
-        with mock.patch.dict(os.environ, {}, clear=False):
+        # #1137 review R3 (lock flipped): an EMPTY owner that resolves to no
+        # account (pinned) is the shared channel, read by zbynek, so it is on the
+        # policy — unless the shared channel's reader is pinned empty.
+        with mock.patch.dict(os.environ, {"AIRULESET_NOTIFY_OWNER": ""}):
             os.environ.pop("AIRULESET_SHARED_CHANNEL_OWNER", None)
             self.assertTrue(notify.question_ping_off(""))
             self.assertTrue(notify.question_ping_off(None))
-        with mock.patch.dict(os.environ, {"AIRULESET_SHARED_CHANNEL_OWNER": ""}):
+        with mock.patch.dict(os.environ, {"AIRULESET_NOTIFY_OWNER": "", "AIRULESET_SHARED_CHANNEL_OWNER": ""}):
             self.assertFalse(notify.question_ping_off(""))
 
     def test_owners_off_set_is_exactly_zbynek(self):
