@@ -84,5 +84,69 @@ class AnOwnPauseEndsEveryStallEpisode(_Stuck):
         self.assertEqual([k for k in EPISODE_KEYS if k in rec], list(EPISODE_KEYS), rec)
 
 
+class APausedPaneBesideAWorkingOne(_Stuck):
+    """Review 6, finding 1: the goal-lane `sid` is the cwd's NEWEST session,
+    but a pause is a fact about one pane. Pane %8 (resolved to its own older
+    session, paused) shares the cwd with pane %9 (no latch, its session is
+    the newest and stuck). Every sweep %8 ended %9's stall episodes, so %9's
+    stuck alert never fired; and %8's hold discarded the newest session's
+    nudge batch, which %9 runs."""
+    T9, T8 = 900_000, 800_000
+
+    def _two_panes(self):
+        from _goal_arm_helpers import DeliverGoalFakeTmux, _write_marker_transcript
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        proj = Path(d.name)
+        tpath = _write_marker_transcript(proj, self.h.CWD, "sess-662")
+        aged = os.path.getmtime(tpath)
+        with open(tpath, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(_u("sprav ticket 9", self.T9)) + "\n")
+        os.utime(tpath, (aged, aged))
+        own = tpath.parent / "sess-b.jsonl"
+        own.write_text("".join(json.dumps(r) + "\n" for r in (
+            _u("sprav ticket 8", self.T8), _u("pauza", self.T8 + 10))),
+            encoding="utf-8")
+        os.utime(own, (1000, 1000))
+        cap = "● Predošlá práca hotová.\n❯ \n  ctx ███░  caveman:lite  ◎ /goal active\n"
+        return proj, tpath.stem, cap, DeliverGoalFakeTmux
+
+    def _sweep(self, proj, sid, now, state, panes, tmux, send_fn):
+        self.h._heartbeat(sid, age_s=self.goal.GOAL_LANE_IDLE_S + 600, now=now,
+                          goal_armed=True)
+        starts = {"%9": self.T9 - 5, "%8": self.T8 - 5}
+        with m.patch.object(wd, "_pane_claude_start_epoch",
+                            side_effect=lambda pid, run=None: starts.get(pid)):
+            owner_stop.refresh(state, [("%9", self.h.CWD), ("%8", self.h.CWD)],
+                               proj, now, run=lambda argv, timeout=8: "")
+        self.assertEqual((owner_stop.pane_latch("%8") or {}).get("fact"), "pause")
+        self.assertIsNone(owner_stop.pane_latch("%9"))
+        self.goal.goal_lane_sweep(now, run=tmux(panes), projects_dir=proj,
+                                  state=state, backlog_fetch=lambda cwd: 40,
+                                  send_fn=send_fn)
+
+    def test_the_working_panes_stuck_alert_still_fires(self):
+        proj, sid, cap, fake = self._two_panes()
+        state, sends = {}, []
+
+        def spy(*a, **k):
+            sends.append(k.get("dedup_key"))
+            return "sent"
+        panes = [("%9", "claude", self.h.CWD, "111"), ("%8", "claude", self.h.CWD, "112")]
+        for i in range(self.goal.GOAL_LANE_STUCK_ALERT_STREAK + 3):
+            self._sweep(proj, sid, 1_000_000 + 60 * i, state, panes,
+                        lambda p: fake(p, cap), spy)
+        self.assertEqual(len([k for k in sends if k and k.startswith("stuckalert:")]),
+                         1, sends)
+
+    def test_the_paused_pane_keeps_the_newest_sessions_batch(self):
+        proj, sid, cap, fake = self._two_panes()
+        state = {"nudge_batch": {sid: [["goal-guard", "a queued goal-guard line"]]}}
+        self._sweep(proj, sid, 1_000_000, state,
+                    [("%8", "claude", self.h.CWD, "112")], lambda p: fake(p, cap),
+                    lambda *a, **k: "sent")
+        self.assertIn(sid, state.get("nudge_batch", {}), state.get("nudge_batch"))
+
+
 if __name__ == "__main__":
     unittest.main()
