@@ -227,14 +227,16 @@ class PaneBudgetDaily(_Pane):
         import test_report_owed_kind_off_1092 as ro
         now = int(time.time())
         state = {"nudge_pane_attempts": {"%42": [now - 60]}}
-        pings = []
+        pings, logs = [], []
         for _ in range(4):
-            logs, vs = ro.run(now, state, {7: now - 9999},
-                              nudges_enabled=lambda k: True, vs_result=False,
-                              send_fn=lambda *a, **k: pings.append(a))
-            self.assertEqual(vs.calls, [], logs)
+            lg, vs = ro.run(now, state, {7: now - 9999},
+                            nudges_enabled=lambda k: True, vs_result=False,
+                            send_fn=lambda *a, **k: pings.append(a))
+            logs += lg
+            self.assertEqual(vs.calls, [], lg)
         self.assertEqual(pings, [], "a budget hold never escalates to the owner")
-        self.assertTrue(any("pane-budget" in ln for ln in logs), logs)
+        # journalled ONCE for the day's episode, not on every sweep
+        self.assertEqual(sum("pane-budget" in ln for ln in logs), 1, logs)
 
     def test_dying_subagent_hold_does_not_count_a_nudge(self):
         sub = self.proj / "agent-x.jsonl"
