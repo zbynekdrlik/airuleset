@@ -451,8 +451,7 @@ def _write_auth_badge_cache(state_path, first_401_ts, now):
 def _authdead_action_enabled():
     """The #1075 opt-in for the destructive credential-dead RELAUNCH keystroke
     (`tmux respawn-pane -k`): fires ONLY when `AIRULESET_AUTHDEAD_ACTION` is
-    truthy. Default OFF — the exact sibling of `resurrect.action_enabled()`
-    (`AIRULESET_RESURRECT_ACTION`, #804): a worktree worker cannot do the
+    truthy. Default OFF: a worktree worker cannot do the
     design-mandated live kill->comeback verification, and #947 (owner, 2026-09-10)
     REVERSED an unattended-restart action, so the relaunch DECISION is journalled
     every sweep but the live keystroke waits for the supervisor to enable this
@@ -591,8 +590,8 @@ def _handle_authdead_episode(state, key, cred_mtime_fn, now, idle, project, pid,
                         "(stopped session — never touched) [%s]"
                         % (pid, project or key))
         elif not _authdead_action_enabled():
-            # the destructive respawn keystroke is opt-in (#947 / resurrect.py
-            # precedent): journal the decision, do not fire. (The badge + owner
+            # the destructive respawn keystroke is opt-in (#947): journal the
+            # decision, do not fire. (The badge + owner
             # ping above already surfaced the dead session regardless of the flag.)
             logs.append("auth: would relaunch %s (%s) after fresh credentials "
                         "(401 persisted through continue) -- disabled "

@@ -34,7 +34,8 @@ by `sid` (`sid_latch`).
 
 ENFORCED at the ONE send-keys builder `tmux_io.keys` (`withhold`: every kind,
 recovery and cap-exempt included; only the owner's own Discord reply passes),
-and on the paths that bypass it: `relaunch_pane`, resurrect, `deliver_goal`.
+and on the paths that bypass it: `relaunch_pane`, `impl_window_presence`,
+`deliver_goal`.
 `refresh` (top of every sweep) maps panes to transcripts, persists
 `state[STATE_KEY]` per session and journals ONE line per episode. A leaf."""
 import os

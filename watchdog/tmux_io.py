@@ -304,13 +304,12 @@ def _suppress_nudge(kind, text, logs):
 # kinds (a control key that is PART of such a delivery carries the delivery's
 # kind, so the whole delivery gates as a unit). RECOVERY_KINDS are NOT machine
 # nudges -- janitor cleanup, undo backspaces, the session-limit user-draft
-# submit, the prompt-wedge submit of the OWNER's own wedged draft, and the
-# resurrect relaunch (its own `AIRULESET_RESURRECT_ACTION` opt-in + recent-human
-# veto is its gate, per its docstring) -- and they run regardless of the switch.
+# submit and the prompt-wedge submit of the OWNER's own wedged draft -- and they
+# run regardless of the switch.
 # A new machine-nudge kind = ONE line added to GATED_KINDS.
 # --------------------------------------------------------------------------- #
 GATED_KINDS = frozenset({"continue", "send", "goal", "draft", "stash", "type"})
-RECOVERY_KINDS = frozenset({"janitor", "undo", "user-draft", "wedge", "resurrect"})
+RECOVERY_KINDS = frozenset({"janitor", "undo", "user-draft", "wedge"})
 
 
 def _keystroke_suppressed(kind, user_authored, nudge=None):
@@ -373,21 +372,19 @@ def relaunch_pane(pane_id, run=None, launcher="claude-continue"):
     `tmux respawn-pane -k -t <pane> <launcher>`. Returns True iff the respawn
     command was issued without raising.
 
-    Distinct from the two existing relaunch shapes on purpose:
-      * `keys` sends into a LIVE Claude Code input box (a `continue` nudge) — a
-        stuck process would just 401 the nudge, which is the whole miva1 bug;
-      * `resurrect.relaunch` types a launch command into a pane that ALREADY
-        dropped to a BARE SHELL (the session exited) — here the process is still
-        RUNNING and occupying the pane, so nothing can be typed; `respawn-pane
-        -k` replaces it.
+    Distinct from `keys`, which sends into a LIVE Claude Code input box (a
+    `continue` nudge) — a stuck process would just 401 the nudge, which is the
+    whole miva1 bug; here the process is still RUNNING and occupying the pane,
+    so nothing can be typed; `respawn-pane -k` replaces it. A pane already at a
+    bare shell is a session the owner stopped and is never respawned.
 
     `respawn-pane` is a tmux MANAGEMENT command, not a CC keystroke, so it is
     outside the `keys` per-kind kill-switch gate — it is a `resume`-class RECOVERY
     action, which #1023 keeps ALWAYS-ON precisely for a login/limit death like
     this (a nudges-OFF box must still come back from a dead credential). The
     CALLER owns every safety gate (the recent-human veto + the bare-shell /
-    stopped-session check + a once-per-episode latch). Like `resurrect.relaunch`,
-    the send is `delivered_unconfirmed`: the STRUCTURAL confirmation is the NEXT
+    stopped-session check + a once-per-episode latch). The send is
+    `delivered_unconfirmed`: the STRUCTURAL confirmation is the NEXT
     sweep (the session comes back live → its 401 episode clears). Never raises."""
     from watchdog import owner_stop
     run = run or watchdog._default_run
@@ -853,8 +850,8 @@ def list_claude_panes(run=None, logs=None, dry_run=False):
             # SAME pane_pid->claude-child walk the sudo/su-hosted shape uses — the
             # gk-quality pane stays visible even without a `set -m` respawn, and
             # any future wrapper shape is covered. A genuine bare shell (no claude
-            # child -> _pane_hosted_claude_pid None -> continue) stays invisible
-            # (the #804 resurrect contract). The sudo/su handling is unchanged.
+            # child -> _pane_hosted_claude_pid None -> continue) stays invisible.
+            # The sudo/su handling is unchanged.
             if cmd not in ("sudo", "su", "bash", "sh", "-bash") or not ppid:
                 continue
             cpid = watchdog._pane_hosted_claude_pid(ppid)

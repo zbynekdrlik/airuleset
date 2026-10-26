@@ -1756,7 +1756,6 @@ def _run_pass_a(repo_dir):
             Path(_lock_a) / "goal-roster.json")
         base["AIRULESET_MDREVIEW_STATE_PATH"] = str(
             Path(_lock_a) / "mdreview-cadence.json")
-        base["AIRULESET_RESURRECT_ACTION"] = ""
         base["TMPDIR"] = str(_suite_a)
         env = _runner_shape_env(base, repo_dir, _home_a)
         # Build the CI argv from the deny-list.
@@ -1933,10 +1932,6 @@ def cmd_push(args):
         # goal-roster isolation above.
         test_env["AIRULESET_MDREVIEW_STATE_PATH"] = str(
             Path(_lock_tmp) / "mdreview-cadence.json")
-        # #804 mode-5: the resurrect ACTION opt-in flag OFF for the push-gate
-        # suite (conftest is pytest-only), so the mode-5 test stays deterministic
-        # even if the LIVE box running the gate has enabled it fleet-wide.
-        test_env["AIRULESET_RESURRECT_ACTION"] = ""
         # #1012 (dual-coverage): the exec-marker STATE dir seam. conftest.py's
         # per-run redirect is pytest-only and NEVER read by `unittest discover`,
         # so this is the single place the discover-gate run is isolated off the
