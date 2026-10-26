@@ -140,6 +140,18 @@ class VaultHeredoc(unittest.TestCase):
         r = _bash(self, self.HOOK, command)
         self.assertEqual(r.returncode, 0, r.stderr)
 
+    def test_escaped_quote_keeps_next_command(self):
+        # A backslash-escaped `\"` outside quotes opened a phantom string that
+        # swallowed the sanctioned `secret exec` after it (david1 sample).
+        command = ("cd %s && grep -n -A2 'id=\"group_rozvoz_manager\"' addons/x/security/*.xml"
+                   " | grep name=\\\"name\\\"; python3 ~/devel/airuleset/airuleset.py secret exec"
+                   " --file %s/slovnormal-handover-api-key.env --env KEY -- python3 /tmp/s/grp.py"
+                   " 2>&1 | tail -3" % (ODOO_REPO, KEYS))
+        r = _bash(self, self.HOOK, command)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        r = _bash(self, self.HOOK, "echo name=\\\"x; cat %s/k.env; echo \\\"" % KEYS)
+        self.assertEqual(r.returncode, 2, r.stderr)
+
     def test_executed_bodies_still_blocked(self):
         for command in (
                 "python3 - <<'EOF'\nkey = open('%s/k.env').read()\nEOF" % KEYS,
