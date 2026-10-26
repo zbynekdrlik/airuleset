@@ -100,8 +100,8 @@ until the ratchet cap, then the oldest move to `.claude/rules-reference/internal
     reusing `gates.navody._read_stream_file` — the #1073 stream-fact pattern), the four gate token
     classifiers (`filing_spec_block_reason`, `classify_spec_design`, `classify_spec_check`), the
     settled-question overlap (`parse_settled_questions`/`content_tokens`/`settled_conflict`/
-    `check_question_against_cache`) and the renderers (`spec_status_line`,
-    `spec_partition_audit_clause`). STDLIB-only at import; `gates.navody`/`gates.spec` imported
+    `check_question_against_cache`) and the renderer
+    `spec_partition_audit_clause` (#1137 retired `spec_status_line`). STDLIB-only at import; `gates.navody`/`gates.spec` imported
     lazily inside the fns so the classifiers.py review-gate change never circular-imports.
   - Wiring: FILING = a `spec_reason` tier in `gates/filing/__main__.py::classify_command` next to
     `stream_reason` (needs `_explicit_stream_labels` imported from `gates.filing.parse`). DESIGN =

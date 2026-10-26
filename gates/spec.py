@@ -389,17 +389,9 @@ def check_question_against_cache(block_text, slug, *, home=None, load_cache=None
 
 
 # --------------------------------------------------------------------------- #
-# (f) RECONCILIATION -- the Step-5 line + the partition-audit nudge clause.
+# (f) RECONCILIATION -- the partition-audit nudge clause (#1137 dropped the
+# report's `Spec-status` line and with it its renderer).
 # --------------------------------------------------------------------------- #
-def spec_status_line(spec_number, done, pending, deviations):
-    """The Step-5 reconciliation line: `Spec-status #N: done §..., pending §...,
-    deviations ...`. Empty lists render `—`."""
-    def _j(xs):
-        return " ".join(xs) if xs else "—"
-    return ("Spec-status #%d: done %s, pending %s, deviations %s"
-            % (spec_number, _j(done), _j(pending), _j(deviations)))
-
-
 def spec_partition_audit_clause(spec_open, missing_count, *, max_chars=700):
     """The OPTIONAL partition-audit nudge clause, or None. Fires only when there
     IS an open `spec` ticket AND >= 1 open stream ticket carries no `Spec:`

@@ -452,21 +452,12 @@ class TestSpecChangeCLI(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
-# (f) RECONCILIATION — the Step-5 line renderer + partition-audit clause.
+# (f) RECONCILIATION — the partition-audit clause (#1137 dropped the report's
+# `Spec-status` line, so its renderer and the two renderer tests are gone).
 # --------------------------------------------------------------------------- #
 class TestReconciliation(unittest.TestCase):
-    def test_spec_status_line(self):
-        line = spec.spec_status_line(
-            501, done=["§1", "§2"], pending=["§3"], deviations=["§4 (#123)"])
-        self.assertTrue(line.startswith("Spec-status #501:"))
-        self.assertIn("done §1 §2", line)
-        self.assertIn("pending §3", line)
-        self.assertIn("§4 (#123)", line)
-
-    def test_spec_status_line_no_deviations(self):
-        line = spec.spec_status_line(7, done=["§1"], pending=[], deviations=[])
-        self.assertIn("Spec-status #7:", line)
-        self.assertIn("deviations", line)  # explicit "deviations none"/"—"
+    def test_spec_status_renderer_is_gone(self):
+        self.assertFalse(hasattr(spec, "spec_status_line"))
 
     def test_partition_audit_clause_present_when_missing(self):
         clause = spec.spec_partition_audit_clause([501], 3)
