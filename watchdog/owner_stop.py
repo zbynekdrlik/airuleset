@@ -398,12 +398,14 @@ def pane_latch(pane_id):
     return _MEMO[key]
 
 
-def pane_sid(pane_id):
-    """The session `pane_id` runs this sweep (its cwd's newest when refresh
-    did not map it); None when the pane is not resolved to its own session
-    (an unresolved pane of a shared cwd, a dev server) or nothing maps it."""
-    ctx = _PANES.get(pane_id) or _unmapped(pane_id)
-    return ctx.get("sid") if ctx and ctx.get("own", True) else None
+def latch_sid(pane_id):
+    """The session whose latch holds `pane_id` this sweep: the pane's own
+    session, or its cwd's newest when the pane is unresolved or unmapped.
+    None when nothing holds the pane, or when a sibling's `via` latch holds
+    it."""
+    latch = pane_latch(pane_id)
+    ctx = _PANES.get(pane_id)
+    return ctx.get("sid") if ctx and latch and not latch.get("via") else None
 
 
 def withhold(pane_id, logs=None):
