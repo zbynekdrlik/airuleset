@@ -975,10 +975,11 @@ def _question_map_u_supplement(rows, root, runner):
     is the ``_union_open_issues`` / ``_slice_mine_and_handed`` result dict.
 
     #1218: ONE map entry is at most ONE U member. Only the tickets an entry can
-    be attributed to are fetched (a tracked entry's ticket; every ref of an
-    unmarked one), and a fetched ticket joins U only when an entry IS attributed
-    to it against the label-U cover of ``rows`` + the fetched rows — never a
-    label-U ticket the question names only as context."""
+    be attributed to are fetched (``question_map_ticket_refs`` with no cover: a
+    tracked entry's ticket, every ref of an unmarked one), so a label-U ticket a
+    tracked question names only as CONTEXT is never fetched; a fetched ticket
+    joins U by its own labels. Every fetched label-U ticket is then also the
+    attribution's rule-2 ticket of the entry naming it."""
     import airuleset
     import cli_ticket_route
     import statusbar as _sb
@@ -1012,19 +1013,11 @@ def _question_map_u_supplement(rows, root, runner):
         fetched[qn] = {"labels": obj.get("labels"),
                        "title": obj.get("title", ""),
                        "createdAt": obj.get("createdAt", "")}
-    if not fetched:
-        return {}
     # #1141 slice 2: U exactly when this slice box's own classifier puts it
     # there by its labels (a sent acceptance is W, a foreign question is #654
-    # action-only here) — the label-U cover, also rule 2 of the attribution.
+    # action-only here) — the label-U cover (#1218).
     cover = cli_ticket_route.question_cover(fetched, own)
-    try:
-        attached = _sb.question_map_ticket_refs(
-            root, cover=cover | cli_ticket_route.question_cover(rows, own))
-    except Exception:
-        return {}
-    return {n: row for n, row in fetched.items()
-            if n in cover and n in (attached or ())}
+    return {n: row for n, row in fetched.items() if n in cover}
 
 
 # #539: the repo's OWN ask-flow markers — the shape a genuine owner-question

@@ -74,22 +74,20 @@ U_RECONCILE_TTL_S = 24 * 3600
 # pathological burst, mirroring the question map's own `_QUESTIONS_MAX`.
 U_RECONCILE_MAX = 200
 
-# The FIRST ticket reference in a question's stored text. Same shape as
-# discord_replies._TICKET_NUM_RX; the FIRST match is the question's primary
-# ticket (a passing mention of a second #M must not trigger clearing #M off
-# an unrelated answer). 1-6 digits, matching the repo's convention.
+# A ticket reference in a question's stored text. Same shape as
+# discord_replies._TICKET_NUM_RX; without a tracking marker the FIRST match is
+# the question's primary ticket (a passing mention of a second #M must not
+# trigger clearing #M off an unrelated answer). 1-6 digits, the repo convention.
 _TICKET_NUM_RX = re.compile(r"#(\d{1,6})")
 
 
 def _first_ticket_num(text):
-    """The FIRST `#N` in `text` as an int, or None. Fail-safe on garbage."""
-    m = _TICKET_NUM_RX.search(str(text or ""))
-    if not m:
-        return None
-    try:
-        return int(m.group(1))
-    except (TypeError, ValueError):
-        return None
+    """The question's PRIMARY ticket (int) or None: an explicit tracking
+    marker's ticket (`(sledované na #N)`, #1218 — the FIRST `#N` is often a
+    context ticket), else the FIRST `#N`. Fail-safe on garbage."""
+    tracked = __import__("question_attribution").tracked_ticket(text)
+    m = None if tracked is not None else _TICKET_NUM_RX.search(str(text or ""))
+    return tracked if tracked is not None else (int(m.group(1)) if m else None)
 
 
 def capture_answered_ticket(state, reply, now):

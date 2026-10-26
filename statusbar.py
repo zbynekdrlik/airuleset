@@ -901,8 +901,8 @@ def _question_entries(cwd, home=None):
 def ticketless_question_pings(cwd, home=None, cover=None):
     """The ❓ pings scoped to `cwd` that count in `U N` ON THEIR OWN (#512: the
     standalone `Q` badge folded into U) — the entries `question_attribution`
-    attributes to NO ticket (#1218: no tracking marker and no referenced ticket
-    in `cover`, the label-U set of this box). `cover=None` (rows unknown) keeps
+    attributes to NO ticket (#1218: no tracking marker, no referenced ticket in
+    `cover` — the label-U set of this box — and not exactly one `#N`). `cover=None` (rows unknown) keeps
     the #512 dedup: any `#N` reference excludes the entry. A list of the map
     ENTRIES, so the footer count and `--waiting`'s ping rows share it."""
     return [v for v in _question_entries(cwd, home) or []
@@ -919,7 +919,8 @@ def question_ping_count(cwd, home=None, cover=None):
 def question_map_ticket_refs(cwd, home=None, cover=None):
     """The SET of issue numbers (int) the ❓ pings scoped to `cwd` are
     ATTRIBUTED to (`question_attribution.attribute`, #1218): a tracked entry's
-    ticket, a covered entry's label-U tickets (`cover`), never a context ref.
+    ticket, a covered entry's label-U tickets (`cover`), a single-ref entry's
+    ticket — never a context ref.
     It is the DELIVERED-question signal of the #539/#622 display flags, the
     #1213 asked refs and the #948 supplement. `cover=None` (rows unknown)
     collects every referenced `#N` of an unmarked entry (the pre-#1218 set).

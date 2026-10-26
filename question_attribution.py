@@ -9,40 +9,57 @@ ticket its question lives on, and reading every `#N` as "the question is about
 U=2 for one question). So ONE entry is at most ONE U member:
 
 1. an explicit tracking marker (`sledované na #N` and its inflections,
-   `tracked on #N`, `tracking #N`, any case; the LAST one wins) → ticket N only;
+   `tracked on #N`, `tracking #N`, any case, starting a word; the LAST one
+   wins) → ticket N only;
 2. else every referenced ticket in `cover` — the tickets that are U members by
    their OWN labels on this box (`cli_ticket_route.question_cover`) — covers the
-   entry, which then adds nothing to U;
-3. else the entry counts ONCE as a ticketless ping, never as its context tickets.
+   entry: it adds no ping, those tickets count by their own labels;
+3. else an entry naming exactly ONE ticket is that ticket's question (the
+   #1213 asked case, odoo-erp 8715: it leaves I for U);
+4. else the entry counts ONCE as a ticketless ping, never as its context tickets.
 
 `cover=None` means the label state is unknown (no rows read: a legacy footer
 cache, a direct call): rule 2 then treats every reference as covering — the
 pre-#1218 #512 dedup — so a caller without rows keeps the old numbers.
 
 Pure, stdlib only, no I/O: the readers that scope and load the map live in
-`statusbar`.
+`statusbar`; the watchdog's primary-ticket readers use `tracked_ticket`.
 """
 import re
 
-TRACKED, COVERED, TICKETLESS = "tracked", "covered", "ticketless"
+TRACKED, COVERED, SOLE, TICKETLESS = "tracked", "covered", "sole", "ticketless"
 
 TICKET_REF_RE = re.compile(r"#(\d+)")
-TRACKING_RE = re.compile(r"(?:sledovan\w*\s+na|tracked\s+on|tracking)\s*#(\d+)",
-                         re.IGNORECASE)
+TRACKING_RE = re.compile(
+    r"(?<!\w)(?:sledovan\w*\s+na|tracked\s+on|tracking)\s*#(\d+)", re.IGNORECASE)
+
+
+def _text(entry):
+    return "%s %s" % (entry.get("block") or "", entry.get("question") or "")
+
+
+def tracked_ticket(text):
+    """The ticket an explicit tracking marker in `text` names (the LAST
+    marker), or None."""
+    marks = TRACKING_RE.findall(str(text or ""))
+    return int(marks[-1]) if marks else None
 
 
 def attribute(entry, cover=None):
     """`(kind, tickets)` for one question-map `entry` (a dict with `block` and/or
-    `question` text): `(TRACKED, {N})`, `(COVERED, {the label-U refs})` or
-    `(TICKETLESS, ∅)` — the order in the module docstring. `tickets` is a
-    frozenset of ints; a COVERED entry names every label-U ticket it mentions
-    (one family acceptance draft delivers each member, #755) yet adds none."""
-    text = "%s %s" % (entry.get("block") or "", entry.get("question") or "")
-    marks = TRACKING_RE.findall(text)
-    if marks:
-        return TRACKED, frozenset({int(marks[-1])})
+    `question` text): `(TRACKED, {N})`, `(COVERED, {the label-U refs})`,
+    `(SOLE, {N})` or `(TICKETLESS, ∅)` — the order in the module docstring.
+    `tickets` is a frozenset of ints; a COVERED entry names every label-U
+    ticket it mentions (one family acceptance draft delivers each member,
+    #755)."""
+    text = _text(entry)
+    tracked = tracked_ticket(text)
+    if tracked is not None:
+        return TRACKED, frozenset({tracked})
     refs = {int(n) for n in TICKET_REF_RE.findall(text)}
     hit = refs if cover is None else refs & set(cover)
     if hit:
         return COVERED, frozenset(hit)
+    if len(refs) == 1:
+        return SOLE, frozenset(refs)
     return TICKETLESS, frozenset()
