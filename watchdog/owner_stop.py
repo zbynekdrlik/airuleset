@@ -18,7 +18,8 @@ SET from STRUCTURED facts, never pane prose (`classify`, `_exits`):
                 the `_FILLERS` ("pauzni sa keď môžeš", "Stop!", "skonči na
                 dnes"). A prompt that merely CONTAINS a stop word
                 (`STOP_WORD_RX`: "prestaň sa pýtať a pokračuj", "oprav stop
-                button") is NEUTRAL: it neither sets nor clears.
+                button") is NEUTRAL: it neither sets nor clears (it still
+                is an owner act, so its session inherits nothing).
 CLEARED only by a later OWNER act: any other genuine prompt
 (`questions._is_genuine_human_prompt` — a machine prompt, `continue`, a nudge
 pointer, a task notification never counts), any other owner slash command, or
@@ -116,8 +117,8 @@ def _is_stop_phrase(text):
 
 
 def classify(entry, machine_clears=(), known=()):
-    """("stop", fact) | ("clear", why) | ("machine", ts) | None for ONE
-    transcript entry. `machine_clears` are live #522 disarm times; `known` are
+    """("stop", fact) | ("clear", why) | ("machine", ts) | ("neutral", why) |
+    None for ONE transcript entry. `machine_clears` are live #522 disarm times; `known` are
     the exact times of clears an earlier `refresh` matched to one."""
     if not isinstance(entry, dict) or entry.get("type") not in ("user", "system"):
         return None
@@ -154,7 +155,7 @@ def classify(entry, machine_clears=(), known=()):
         return None
     if _is_stop_phrase(text):
         return ("stop", "pause")
-    return None if STOP_WORD_RX.search(text) else ("clear", "prompt")
+    return ("neutral", "stop-word") if STOP_WORD_RX.search(text) else ("clear", "prompt")
 
 
 def scan(entries, rec=None, machine_clears=()):
@@ -176,8 +177,9 @@ def scan(entries, rec=None, machine_clears=()):
         if c is None or c[0] == "machine":
             found += [c[1]] if c else []
             continue
-        saw = True
-        latch = {"fact": c[1], "ts": ts or 0} if c[0] == "stop" else None
+        saw = True              # an owner act, a neutral prompt included
+        if c[0] != "neutral":   # ... which neither sets nor clears
+            latch = {"fact": c[1], "ts": ts or 0} if c[0] == "stop" else None
     return latch, saw, found
 
 
