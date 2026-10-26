@@ -4,11 +4,11 @@ Owner, verbatim: "david1-4 nechce pouzivat projekty a tasky v odoo a claude v
 tychto projektoch sa stale snazia nieco robit v taskoch co podla mna zerie
 zbytocne tokeny, chcem to mat odstavene pre slovnormal".
 
-The Stop hook's Check 7 (task URL required) and Check 9 (attachments required)
-forced every david owner question into a project.task lookup. A per-user fact
-in `cli_odoo_board` drives an install-written marker
-`~/.claude/airuleset-client-board` = `off`; both checks and the task-hygiene
-config loader honour it.
+The Stop hook's Check 9 (attachments required) forced a david owner question
+into a project.task lookup. A per-user fact in `cli_odoo_board` drives an
+install-written marker `~/.claude/airuleset-client-board` = `off`; the check
+and the task-hygiene config loader honour it. (Check 7, the task URL
+requirement, was deleted on every box: owner 26.10.2026, #1137.)
 """
 
 import json
@@ -29,17 +29,6 @@ import cli_odoo_board  # noqa: E402
 import cli_odoo_ro  # noqa: E402
 
 HOOK = ROOT / "hooks" / "stop-check-question-quality.sh"
-
-ODOO_NO_TASK = (
-    "**Otázka — projekt odoo-erp (Odoo ERP pre slovnormal):** Pre platobný "
-    "terminál je hotový vyplnený dokument pre Worldline. Treba rozhodnúť, "
-    "či ho pošleš ty alebo počkáme na ich ďalšiu odpoveď.\n"
-    "\n"
-    "• Pošleš ho ty (odporúčam)\n"
-    "• Počkáme na ich odpoveď\n"
-    "\n"
-    "❓ NEEDS YOU: pošleš dokument Worldline ty, alebo počkáme?\n"
-)
 
 ODOO_TASK_NO_ATTACH = (
     "**Otázka — projekt odoo-erp (Odoo ERP pre slovnormal):** Pre platobný "
@@ -76,12 +65,6 @@ class TestQuestionGateHonoursNoBoard(unittest.TestCase):
             capture_output=True, text=True, timeout=30, env=env)
         return json.loads(r.stdout)["reason"] if '"block"' in r.stdout else ""
 
-    def test_check7_still_blocks_on_a_board_box(self):
-        self.assertIn("Odoo task reference", self._run(ODOO_NO_TASK))
-
-    def test_check7_skipped_when_the_board_is_off(self):
-        self.assertEqual(self._run(ODOO_NO_TASK, marker="off\n"), "")
-
     def test_check9_still_blocks_on_a_board_box(self):
         self.assertIn("ATTACHMENTS", self._run(ODOO_TASK_NO_ATTACH))
 
@@ -89,7 +72,7 @@ class TestQuestionGateHonoursNoBoard(unittest.TestCase):
         self.assertEqual(self._run(ODOO_TASK_NO_ATTACH, marker="off\n"), "")
 
     def test_any_other_marker_value_keeps_the_checks(self):
-        self.assertIn("Odoo task reference", self._run(ODOO_NO_TASK, marker="on\n"))
+        self.assertIn("ATTACHMENTS", self._run(ODOO_TASK_NO_ATTACH, marker="on\n"))
 
 
 class TestBoardFact(unittest.TestCase):
