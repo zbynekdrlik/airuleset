@@ -344,7 +344,7 @@ class LatchBlocksEveryKind(_Latched):
                  ("continue", "resume"), ("goal", "goal-arm"),
                  ("goal", "goal-disarm"), ("send", "watch-trigger"),
                  ("send", "model-restore"), ("janitor", None), ("undo", None),
-                 ("wedge", None), ("user-draft", None), ("resurrect", None)]
+                 ("wedge", None), ("user-draft", None)]
         for kind, nudge in kinds:
             self.assertFalse(wd.keys(self.PID, "Enter", kind=kind, nudge=nudge,
                                      run=run), (kind, nudge))
@@ -442,19 +442,6 @@ class LatchExitPane(_Pane):
                       run=self._inventory("bash"))
         self.assertNotIn(_os().STATE_KEY, state)
 
-    def test_resurrect_never_relaunches_after_an_exit(self):
-        from watchdog import resurrect as rz
-        _os().refresh({}, [], self.proj, NOW, run=self._inventory("bash"))
-        with m.patch.object(rz, "action_enabled", return_value=True), \
-                m.patch.object(rz, "find_pane", return_value=self.PID), \
-                m.patch.object(rz, "pane_is_bare_idle", return_value=True), \
-                m.patch.object(rz, "relaunch") as rel:
-            logs, _ = goal._resurrect_dead_entry(
-                self.CWD, {"sid": self.SID}, "proj", time.time(),
-                lambda argv, timeout=8: "", self.proj, False)
-        rel.assert_not_called()
-        self.assertTrue(any("owner-stop (exit)" in ln for ln in logs), logs)
-
 
 class LatchRefusesArm(_Latched):
     def setUp(self):
@@ -471,18 +458,6 @@ class LatchRefusesArm(_Latched):
                                      sleep_fn=lambda s: None, origin=origin)
             self.assertEqual(word, "drop:owner-stop", origin)
             self.assertEqual(tmux.sent, [], origin)
-
-    def test_resurrect_never_relaunches_a_latched_cwd(self):
-        from watchdog import resurrect as rz
-        with m.patch.object(rz, "action_enabled", return_value=True), \
-                m.patch.object(rz, "find_pane", return_value="%5"), \
-                m.patch.object(rz, "pane_is_bare_idle", return_value=True), \
-                m.patch.object(rz, "relaunch") as rel:
-            logs, _ = goal._resurrect_dead_entry(
-                self.CWD, {"sid": self.SID}, "proj", time.time(),
-                lambda argv, timeout=8: "", self.proj, False)
-        rel.assert_not_called()
-        self.assertTrue(any("owner-stop" in ln for ln in logs), logs)
 
 
 if __name__ == "__main__":

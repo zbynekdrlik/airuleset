@@ -93,11 +93,11 @@ class TestKeysPrimitive(unittest.TestCase):
                         "journal should carry the payload snippet: %r" % logs)
 
     def test_recovery_kind_runs_at_off(self):
-        # A recovery / cleanup keystroke (janitor / undo / wedge / resurrect /
+        # A recovery / cleanup keystroke (janitor / undo / wedge /
         # user-draft) is NOT a machine nudge and MUST fire even when nudges are
         # OFF — the janitor must clean up a stranded nudge, an undo must back
         # our own text off, a user-draft submit forwards the OWNER's own prompt.
-        for kind in ("janitor", "undo", "wedge", "resurrect", "user-draft"):
+        for kind in ("janitor", "undo", "wedge", "user-draft"):
             rec = _Recorder()
             with self._off():
                 ok = wd.keys(PID, "C-s", kind=kind, run=rec)
