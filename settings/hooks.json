@@ -300,16 +300,6 @@
           },
           {
             "type": "command",
-            "command": "bash ~/devel/airuleset/hooks/block-dispatch-over-wdrain.sh",
-            "timeout": 5
-          },
-          {
-            "type": "command",
-            "command": "bash ~/devel/airuleset/hooks/block-dispatch-without-main-design.sh",
-            "timeout": 60
-          },
-          {
-            "type": "command",
             "command": "bash ~/devel/airuleset/hooks/block-meeting-analysis-delegation.sh",
             "timeout": 5
           },
@@ -415,16 +405,6 @@
       {
         "matcher": "Task",
         "hooks": [
-          {
-            "type": "command",
-            "command": "bash ~/devel/airuleset/hooks/block-dispatch-over-wdrain.sh",
-            "timeout": 5
-          },
-          {
-            "type": "command",
-            "command": "bash ~/devel/airuleset/hooks/block-dispatch-without-main-design.sh",
-            "timeout": 60
-          },
           {
             "type": "command",
             "command": "bash ~/devel/airuleset/hooks/block-meeting-analysis-delegation.sh",
