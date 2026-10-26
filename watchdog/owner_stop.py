@@ -43,9 +43,10 @@ hold instead (report-owed, dying-subagent, job 4 working-stall).
 claude/node/bun pane to its transcripts (a node/bun pane hosting no claude is
 mapped but never shares a cwd; an unmapped pane answers from its cwd: fail
 CLOSED), persists `state[STATE_KEY]` (per session `fact`/`ts` + matched
-`mclears`, per pane `pane:<pid>` sibling holds, per window `win:<key>` the
-impl window's session; 7-day TTL), seeds the memo and journals ONE line per
-episode. A leaf."""
+`mclears` — written ONLY by the pane that owns the session; per pane
+`pane:<pid>` what a pane derives from another session; per window
+`win:<key>` the impl window's own session; 7-day TTL), seeds the memo and
+journals ONE line per episode. A leaf."""
 import os
 import re
 from pathlib import Path
