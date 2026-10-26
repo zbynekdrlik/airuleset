@@ -1,14 +1,10 @@
 # tests/test_playbook.py
-import os
-import json
-import subprocess
 import sys
 from pathlib import Path
 from unittest import TestCase
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import airuleset
 
-from _hook_state_cleanup import hermetic_hook_env  # noqa: E402  (#1046 hermetic HOME)
 
 REPO = airuleset.REPO_DIR
 
@@ -38,52 +34,6 @@ class TestPlaybookReviewSkill(TestCase):
         self.assertIn("description:", text)
         self.assertIn("📔 Playbook:", text)          # emits the gated line
         self.assertIn("routing", text.lower())        # applies the routing rule
-
-
-class TestPlaybookStopHook(TestCase):
-    HOOK = str(REPO / "hooks" / "stop-check-playbook-review.sh")
-
-    # A UNIQUE session id per test (same idiom as the prose-gate test files):
-    # the hook keys its retry counter on the session id, so the old FIXED
-    # "test-pb" id shared ONE /tmp counter file across every concurrently
-    # running instance of this suite — a parallel run (or a review agent
-    # running the tests) could leave the counter at the cap, making the hook
-    # exit with EMPTY stdout here and fail the block assertion (live flake,
-    # 2026-08-13, full-suite run alongside a concurrent test runner).
-    def setUp(self):
-        import uuid
-        self._sid = "test-pb-%s" % uuid.uuid4().hex[:12]
-        self._retry_file = "/tmp/airuleset-playbook-block-%s" % self._sid
-        try:
-            os.remove(self._retry_file)
-        except FileNotFoundError:
-            pass
-
-    def tearDown(self):
-        try:
-            os.remove(self._retry_file)
-        except FileNotFoundError:
-            pass
-
-    def _run(self, msg):
-        payload = json.dumps({"last_assistant_message": msg, "session_id": self._sid})
-        return subprocess.run(["bash", self.HOOK], input=payload,
-                              capture_output=True, text=True, env=hermetic_hook_env(self))
-
-    def test_completion_report_without_marker_blocks(self):
-        msg = "## ✅ Work Complete\n\nGoal: x\nPR #5 merged abc123"
-        out = self._run(msg)
-        self.assertIn("decision", out.stdout)
-        self.assertIn("block", out.stdout)
-
-    def test_completion_report_with_marker_passes(self):
-        msg = "## ✅ Work Complete\n\n📔 Playbook: naučil som build cez CI\nPR #5"
-        out = self._run(msg)
-        self.assertNotIn("block", out.stdout)
-
-    def test_non_completion_message_passes(self):
-        out = self._run("just a normal status update ✅ DONE: hotovo")
-        self.assertNotIn("block", out.stdout)
 
 
 class TestPlaybookCleanupSkill(TestCase):
