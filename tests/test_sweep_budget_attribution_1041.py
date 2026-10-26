@@ -66,7 +66,7 @@ class TestJobStartAttribution(unittest.TestCase):
             "run_once must journal a `job start:` line before each registered "
             "job so a mid-job systemd kill names the culprit\n" + "\n".join(logs))
         self.assertTrue(
-            any("job start: session_health_observe" in ln for ln in starts),
+            any("job start: parked_wake_job" in ln for ln in starts),
             "the LAST always-on job must also get a job-start line\n"
             + "\n".join(logs))
         # each job-start line carries the elapsed anchor

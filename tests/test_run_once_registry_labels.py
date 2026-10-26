@@ -87,7 +87,6 @@ EXPECTED_STANDALONE = [
     "mdreview_cadence",                 # (43) — #858 mdreview recurring cadence
     "priority_policy",                  # (44) — #885 priority policy enforcer
     "orphan_poll_reaper",               # (45) — #885 orphan bg-poll-loop reaper
-    "session_health_observe",            # (46) — #947 session-health-observation (REVERSED 2026-09-10)
     "healthz_probe",                    # (47) — #1005 presenter /healthz.ai external health-check
     "parked_wake_job",                  # (48) — #1034 wake a parked session after a claudy account switch
     "task_hygiene_job",                 # (49) — #1036 Odoo task-hygiene overseer

@@ -195,8 +195,8 @@ class TestNoSessionEndingKeystroke(unittest.TestCase):
         # (the cluster-G review's 🔵 finding: this scan lagged the split).
         for py in sorted((REPO / "watchdog").glob("*.py")):
             # #947 reversal (2026-09-10): the session_restart.py exemption
-            # is REMOVED — the action path is deleted, the replacement
-            # session_health_observe.py has no /exit, so ALL watchdog
+            # is REMOVED — the action path is deleted (its passive successor
+            # session_health_observe.py went too, #1137), so ALL watchdog
             # modules are now under this guard.
             tree = ast.parse(py.read_text(encoding="utf-8"))
             docstring_nodes = set()

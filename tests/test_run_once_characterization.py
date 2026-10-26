@@ -219,8 +219,8 @@ CANONICAL_SWEEP = [
     # (True in cmd_watchdog, left False in run_once unit tests).
     JobSpec("nice_check", "wd.nice_check", "nice_check_job",
             "nice_check_enabled", True, "list", "nice-check error"),
-    # Jobs 43-46 (mdreview_cadence / priority_policy / orphan_poll_reaper /
-    # session_health_observe), 47 (#1005 healthz_probe), 49 (#1036
+    # Jobs 43-45 (mdreview_cadence / priority_policy / orphan_poll_reaper;
+    # 46 was removed in #1137), 47 (#1005 healthz_probe), 49 (#1036
     # task_hygiene_job) and 50 (#1056 L2 bounce_flip_revert) are DELIBERATELY not
     # pinned in this order/gate/isolation spec — this file locks the SUBSET
     # through job 42; the FULL registry-label set (incl. 43-47, 49-50) is locked
