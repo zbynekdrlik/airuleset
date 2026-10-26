@@ -1932,14 +1932,14 @@ def _working_stall_hold(state, pid, now):
     return hold or _ng.pre_send_hold(state, pid, WORKING_STALL_NUDGE, now)
 
 
-def _latched_hold(state, pid, now, logs, what):
+def _latched_hold(state, pid, now, logs, what, job):
     """#1257 -- True when the owner stopped the pane: a RECOVERY job (job 1's
     api-error resume, job 4a's stuck-check, job 6's session-limit resume)
     types nothing AND books nothing — no attempt, no swallow, no nudge count,
-    no give-up / escalation ping; one `held (owner-stop …)` line per latch
-    episode."""
+    no give-up / escalation ping; one `held (owner-stop …)` line per (job,
+    latch episode)."""
     from watchdog import nudge_gate as _ng
-    hold = _ng.pre_send_hold(state, pid, "resume", now, budget=False)
+    hold = _ng.pre_send_hold(state, pid, job, now, budget=False)
     if hold and hold[1]:
         logs.append("%s held (%s)" % (what, hold[0]))
     return bool(hold)
@@ -3928,7 +3928,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
                     elif pane_in_mode(pid, run):        # never type into a scrolled pane
                         logs.append("skip in-mode (session-limit resume) %s" % (project or pid))
                     elif _latched_hold(state, pid, now, logs,
-                                       "session-limit resume %s" % project):
+                                       "session-limit resume %s" % project,
+                                       "sesslimit"):
                         pass                            # #1257: nothing booked
                     else:
                         draft = _input_line_text(captured)
@@ -4261,7 +4262,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
                     send_fn(compose_api_error_alert(project, err_text) + resume_note,
                             owner=owner, dedup_key="apierr:%s:%s:%s" % (key, err_hash, fs), dry_run=dry_run)
                 elif action == "nudge" and _latched_hold(
-                        state, pid, now, logs, "api-error %s [%s]" % (project, key)):
+                        state, pid, now, logs, "api-error %s [%s]" % (project, key),
+                        "apierr"):
                     pass                       # #1257: state[key] untouched, no ping
                 elif action == "nudge":
                     n = len(entry["nudges"])
@@ -4481,7 +4483,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
                     logs.append("skip busy-pane (textcall-stall) %s" % (project or pid))
                     continue
                 if _latched_hold(state, pid, now, logs,
-                                 "textcall-stall %s [%s]" % (project, key)):
+                                 "textcall-stall %s [%s]" % (project, key),
+                                 "textcall"):
                     continue
                 wkey = "textcall:" + key
                 action, entry = decide_working(state, wkey, now, idle,
