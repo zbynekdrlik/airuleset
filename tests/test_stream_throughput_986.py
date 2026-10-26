@@ -1,7 +1,7 @@
 """RED tests for #986 items 1, 3, 5 — stream throughput.
 
 Item 1: block-ci-poll-repeat.sh allows autopilot-worker ONE long foreground wait.
-Item 3: block-dispatch-over-wdrain.sh gates on stale W count, not total W.
+Item 3 (the W-drain dispatch gate) was retired by issue 1137 B1.
 Item 5: cmd_handoff validates shas in Closes-finding lines.
 """
 import json
@@ -14,9 +14,10 @@ import unittest
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 CI_POLL_HOOK = REPO / "hooks" / "block-ci-poll-repeat.sh"
-WDRAIN_HOOK = REPO / "hooks" / "block-dispatch-over-wdrain.sh"
 
 sys.path.insert(0, str(REPO))
+sys.path.insert(0, str(REPO / "tests"))
+from _hook_state_cleanup import hermetic_hook_env  # noqa: E402  (#1046 hermetic HOME)
 
 RUN_A = "30326991380"
 
@@ -77,8 +78,7 @@ class TestWorkerLongForegroundWait(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
 
     def _run_ci_hook(self, command, **kw):
-        env = dict(os.environ)
-        env["AIRULESET_CIPOLL_STATE_DIR"] = self.state
+        env = hermetic_hook_env(self, AIRULESET_CIPOLL_STATE_DIR=self.state)
         return subprocess.run(
             ["bash", str(CI_POLL_HOOK)],
             input=_ci_poll_payload(command, **kw), text=True, env=env,
@@ -146,41 +146,6 @@ class TestWorkerLongForegroundWait(unittest.TestCase):
             agent_id="agent-123", agent_type="autopilot-worker",
             background=True)
         self.assertEqual(r.returncode, 0)
-
-
-# ---------- Item 3: W-drain gate — stale W only --------------------------
-
-def _cwd_key(cwd):
-    sys.path.insert(0, str(REPO))
-    try:
-        import statusbar
-        return statusbar.cwd_key(cwd)
-    finally:
-        sys.path.pop(0)
-
-
-def _wdrain_payload(cwd, subagent_type="autopilot-worker"):
-    return {
-        "tool_name": "Agent",
-        "tool_input": {
-            "subagent_type": subagent_type,
-            "prompt": "work issue #1",
-        },
-        "cwd": str(cwd),
-    }
-
-
-def _run_wdrain_hook(payload, env_extra=None):
-    env = dict(os.environ)
-    if env_extra:
-        env.update(env_extra)
-    p = subprocess.run(
-        ["bash", str(WDRAIN_HOOK)],
-        input=json.dumps(payload),
-        capture_output=True, text=True, timeout=10,
-        env=env,
-    )
-    return p.returncode, p.stderr
 
 
 # ---------- Item 5: Closes-finding sha validation -------------------------
