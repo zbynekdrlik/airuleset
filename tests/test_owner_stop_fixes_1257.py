@@ -710,5 +710,39 @@ class OnlyAPaneOwnSessionIsPersisted(_CwdSessions):
         self.assertNotIn("fact", state.get(_os().STATE_KEY, {}).get("SA", {}))
 
 
+class ImplWindowRemembersOnlyAResolvedSession(_CwdSessions):
+    """Review 3, finding 3: while the impl window existed `note_window`
+    remembered whatever its pane mapped to — for an UNRESOLVED impl pane the
+    cwd's newest session, often the main window's — overwriting the impl
+    window's real session; the missing window was then judged by the main
+    session. Only a resolved (own) session is remembered."""
+    CWD = "/home/miva1/devel/odoo/odoo-erp"
+
+    def _sweep(self, state, starts, windows):
+        from watchdog import tmux_io
+        with m.patch.object(base.wd, "_pane_claude_start_epoch",
+                            side_effect=lambda pid, run=None: starts.get(pid)):
+            _os().refresh(state, [("%M", self.CWD), ("%I", self.CWD)], self.proj,
+                          NOW, run=lambda argv, timeout=8: "")
+        logs = []
+        rc = tmux_io.impl_window_presence(
+            {"cwd": self.CWD}, logs=logs, run=lambda argv, timeout=8: windows
+            if argv[:2] == ["tmux", "list-windows"] else "")
+        return rc, logs
+
+    def test_an_unresolved_sweep_keeps_the_remembered_impl_session(self):
+        self._session("SMAIN", [_u("sprav ticket 5", NOW - 900),
+                                base._a("robím", NOW - 5)], NOW - 5)
+        self._session("SIMPL", [_u("pauza", NOW - 600)], NOW - 600)
+        present = "miva1\t0\tmiva1\t%M\nmiva1\t1\timpl\t%I\n"
+        state = {}
+        self.assertEqual(self._sweep(state, {"%M": NOW - 950, "%I": NOW - 620},
+                                     present)[0], "present")   # SIMPL remembered
+        self.assertEqual(self._sweep(state, {"%M": NOW - 950}, present)[0],
+                         "present")                            # %I unresolved
+        rc, logs = self._sweep(state, {"%M": NOW - 950}, "miva1\t0\tmiva1\t%M\n")
+        self.assertEqual(rc, "owner-stop", logs)
+
+
 if __name__ == "__main__":
     unittest.main()
