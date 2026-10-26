@@ -906,5 +906,46 @@ class EachRecoveryJobJournalsItsHold(base._Latched):
         self.assertEqual(sum("session-limit x held" in ln for ln in logs), 1, logs)
 
 
+def _paused_lane(testcase, goal_mod, cwd, sid, logs):
+    """A `goal_lane_sweep` stand-in that, before each real sweep, adds the
+    owner's `pauza` to the harness's transcript (kept at its age) and runs
+    `owner_stop.refresh`, so the pane is latched exactly as in `run_once`."""
+    orig = goal_mod.goal_lane_sweep
+
+    def sweep(now, **kw):
+        tpath = (Path(kw["projects_dir"]) / base.wd.encode_project_dir(cwd)
+                 / (sid + ".jsonl"))
+        if "pauza" not in tpath.read_text(encoding="utf-8"):
+            aged = os.path.getmtime(tpath)
+            with open(tpath, "a", encoding="utf-8") as fh:
+                fh.write(base.json.dumps(_u("pauza", now - 600)) + "\n")
+            os.utime(tpath, (aged, aged))
+        _os().refresh(kw["state"], [("%9", cwd)], kw["projects_dir"], now)
+        out = orig(now, **kw)
+        logs.extend(out)
+        return out
+    testcase.addCleanup(lambda: _os().reset())
+    return m.patch.object(goal_mod, "goal_lane_sweep", sweep)
+
+
+class APausedArmedLoopRaisesNoStuckAlert(unittest.TestCase):
+    """Review 4, finding 7: with the latch hold moved below the bookkeeping,
+    an armed /goal loop the owner paused read `stuck` and fired the stuck
+    owner alert (and could fire the gk stall notice) about a stall the owner
+    caused. Those alerts are about a session the owner did NOT stop."""
+
+    def test_no_stuck_alert_for_a_paused_loop(self):
+        import test_oauth_stuck_alert_662 as sa
+        h = sa.SweepStuckOwnerAlert("run")
+        h.setUp()
+        self.addCleanup(h.doCleanups)
+        logs = []
+        with _paused_lane(self, sa.goal, h.CWD, "sess-662", logs):
+            sends, _state, _sid = h._run(h._stuck(sa.goal.GOAL_LANE_STUCK_ALERT_STREAK + 3))
+        self.assertEqual(h._alerts(sends), [], sends)
+        self.assertEqual(sum("lane-sweep" in ln and "owner-stop" in ln
+                             for ln in logs), 1, logs)
+
+
 if __name__ == "__main__":
     unittest.main()
