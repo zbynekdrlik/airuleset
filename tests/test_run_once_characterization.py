@@ -223,7 +223,7 @@ CANONICAL_SWEEP = [
     # 46 was removed in #1137), 47 (#1005 healthz_probe), 49 (#1036
     # task_hygiene_job) and 50 (#1056 L2 bounce_flip_revert) are DELIBERATELY not
     # pinned in this order/gate/isolation spec — this file locks the SUBSET
-    # through job 42; the FULL registry-label set (incl. 43-47, 49-50) is locked
+    # through job 42; the FULL registry-label set (incl. 43-45, 47, 49-50) is locked
     # by test_run_once_registry_labels.py's EXPECTED_STANDALONE. Each is gated
     # OFF by default here (its gate kwarg / declaration is not in
     # `_all_open_kwargs`, so run_once never invokes it — Job 50's `bounceflip_fetch`

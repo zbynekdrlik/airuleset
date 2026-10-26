@@ -3343,7 +3343,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
           Max 3 gh API calls/cycle. Never Discord (#546).
           `watchdog/priority_policy.py`'s docstring is the SSOT.
       (46) SESSION-HEALTH-OBSERVATION — REMOVED (#1137, 2026-10-26). Journaled
-          RSS+Swap / uptime of every claude process; nothing read the line
+          claude processes over the RSS+Swap / uptime limits; nothing read the line
           once the #947 /exit + `claude --continue` action path was deleted
           (owner, 2026-09-10). Number retained (not reused) for historical
           addressability.
