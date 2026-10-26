@@ -228,5 +228,28 @@ class AnUnclaimedSessionJournalsQuietly(unittest.TestCase):
         self.assertEqual((owner_stop.pane_latch("%B") or {}).get("fact"), "pause")
 
 
+class TheTmuxServerScanSeesTheSameClaude(unittest.TestCase):
+    """Review 5, finding 8: the issue 1256 duplicate-server check
+    (`tmux_servers.claude_hosts`) decoded /proc stat strictly and matched only
+    the process name `claude`: a process with a non-UTF-8 name aborted it and
+    a server hosting an npm Claude read as Claude-less (the wrong server could
+    win the socket)."""
+
+    def test_an_npm_claude_host_and_a_badly_named_process(self):
+        import test_tmux_servers_1256 as t1256
+        from watchdog import tmux_servers as ts
+        fp = t1256.FakeProc()
+        self.addCleanup(fp.close)
+        for srv in (100, 200):
+            fp.proc(srv, "tmux: server")
+            fp.proc(srv + 1, "bash", ppid=srv)
+        fp.proc(202, "node", ppid=201)
+        Path(fp.root, "202", "cmdline").write_bytes(
+            b"node\x00" + CLI.encode() + b"\x00")
+        os.makedirs(os.path.join(fp.root, "300"))
+        Path(fp.root, "300", "stat").write_bytes(b"300 (bad\xff\xfe) S 1 0 0 0\n")
+        self.assertEqual(ts.claude_hosts([100, 200], proc_root=fp.root), {200})
+
+
 if __name__ == "__main__":
     unittest.main()
