@@ -400,7 +400,8 @@ def relaunch_pane(pane_id, run=None, launcher="claude-continue"):
         return False
 
 
-def impl_window_presence(marker, run=None, logs=None, dry_run=False):
+def impl_window_presence(marker, run=None, logs=None, dry_run=False,
+                         projects_dir=None):
     """#1060 L3b item 8 — keep the dual-agent IMPLEMENTER window alive.
 
     On a model-backend MARKER box the managed tmux session carries window 0
@@ -428,6 +429,9 @@ def impl_window_presence(marker, run=None, logs=None, dry_run=False):
                                   attach the window to — never guesses a foreign
                                   session;
       * ``"present"``          — the impl window already exists;
+      * ``"owner-stop"``       — missing, but the impl cwd's session is under
+                                  the #1257 owner-stop latch (the owner stopped
+                                  it), so it is NOT recreated;
       * ``"relaunched"``       — it was missing and got created;
       * ``"would-relaunch"``   — missing, but ``dry_run`` so nothing was created.
     ``logs``, if a list, gets ONE decision line. Never raises."""
@@ -466,6 +470,14 @@ def impl_window_presence(marker, run=None, logs=None, dry_run=False):
     if "impl" in sessions[target]:
         logs.append("dual: impl window present on %s" % target)
         return "present"
+    cwd = (marker.get("cwd") or "").strip() if isinstance(marker, dict) else ""
+    from watchdog import owner_stop     # #1257: the owner stopped it = stays stopped
+    pdir = projects_dir or owner_stop._SWEEP.get("projects_dir")
+    latch = owner_stop.cwd_latch(pdir, os.path.expanduser(cwd)) if cwd and pdir else None
+    if latch:
+        logs.append("dual: impl window missing on %s — owner-stop latch (%s), not "
+                    "relaunched" % (target, latch.get("fact")))
+        return "owner-stop"
     if dry_run:
         logs.append("dual: impl window missing on %s — would relaunch (dry-run)"
                     % target)
@@ -479,7 +491,6 @@ def impl_window_presence(marker, run=None, logs=None, dry_run=False):
     except Exception:
         launcher = os.path.expanduser("~/.claude/airuleset-claude-impl.sh")
     argv = ["tmux", "new-window", "-d", "-t", target, "-n", "impl"]
-    cwd = (marker.get("cwd") or "").strip() if isinstance(marker, dict) else ""
     if cwd:
         ecwd = os.path.expanduser(cwd)
         if os.path.isdir(ecwd):
