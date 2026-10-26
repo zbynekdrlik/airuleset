@@ -324,5 +324,63 @@ class LegacyMigrationRound1(unittest.TestCase):
         self.assertEqual(calls, [])
 
 
+class ReviewRound2(unittest.TestCase):
+    """The delta review: the docs rule decides whether a ticket ENTERS M (or
+    C), never whether another change is still pending (the C veto, #1141)."""
+
+    def setUp(self):
+        rs._reset_memo()
+
+    def test_a_merged_docs_pr_still_keeps_a_live_fix_open(self):
+        import cli_ticket_facts
+        import cli_ticket_state as ts
+        git = _git_fn({"origin/main..origin/develop": [
+            ("a", "docs(#7421): gk Prevencia batch 15 (#7700)")]})
+        meta = {7700: ("docs(#7421): gk Prevencia batch 15", "")}
+        with TemporaryDirectory() as d:
+            merged = rs.merged_unreleased_issues(
+                "/repo", git_fn=git, pr_meta_fn=lambda pr: meta.get(pr),
+                cache_path=str(Path(d) / "c.json"), slug="o/r")
+        self.assertNotIn(7421, merged, "a docs PR never puts a ticket into M")
+        facts = cli_ticket_facts._facts(merged, {}, {}, {7421: ts.RELEASED})
+        bucket, reason = ts.classify({"labels": []}, facts.of(7421), ts.Box(),
+                                     number=7421)
+        self.assertNotEqual(bucket, "C", reason)
+
+    def test_a_released_docs_oid_joins_only_an_implemented_tickets_list(self):
+        with TemporaryDirectory() as repo, TemporaryDirectory() as d:
+            subprocess.run(["git", "init", "-q", "-b", "main", repo],
+                           check=True, env=_GENV, capture_output=True)
+            fix = _commit(repo, "#7644 (M1): hardening (#7660)")
+            notes = _commit(repo, "docs(#7644): operator notes (#7701)")
+            spec = _commit(repo, "docs(#7421): epic spec (#7662)")
+            cache = str(Path(d) / "c.json")
+            git = _git_fn({"origin/main..origin/develop": [
+                (fix, "#7644 (M1): hardening (#7660)"),
+                (notes, "docs(#7644): operator notes (#7701)"),
+                (spec, "docs(#7421): epic spec (#7662)")]})
+            meta = {7660: ("#7644 (M1): hardening", ""),
+                    7701: ("docs(#7644): operator notes", ""),
+                    7662: ("docs(#7421): epic spec", "")}
+            rs.merged_unreleased_issues(repo, git_fn=git, cache_path=cache,
+                                        slug="o/r",
+                                        pr_meta_fn=lambda pr: meta.get(pr))
+            got = rs.merged_released_oids(
+                repo, {7644, 7421}, is_ancestor_fn=lambda oid, root: True,
+                cache_path=cache, slug="o/r")
+        self.assertEqual({k: set(v) for k, v in got.items()},
+                         {7644: {fix, notes}},
+                         "a released docs oid must be live too before C; a "
+                         "docs-only ticket gets no on-main fact")
+
+    def test_the_two_branch_set_names_the_docs_tickets(self):
+        with TemporaryDirectory() as repo:
+            _two_branch(repo, [("docs(spec): epic (#850)",),
+                               ("fix: regression (#853)",)])
+            got = rs.merged_unreleased_issues(repo)
+        self.assertEqual(set(got), {853})
+        self.assertEqual(set(getattr(got, "docs", ()) or ()), {850})
+
+
 if __name__ == "__main__":
     unittest.main()
