@@ -148,5 +148,74 @@ class APausedPaneBesideAWorkingOne(_Stuck):
         self.assertIn(sid, state.get("nudge_batch", {}), state.get("nudge_batch"))
 
 
+class TheJournalFollowsTheSessionsOwner(unittest.TestCase):
+    """Review 6, finding 3: since an unowned session is persisted quietly,
+    the journal contradicted the latch when a pane gained or lost a session.
+    (a) An unresolved pane that resolves to its paused session journalled
+    only `pane %B -> cleared` while the latch still held, and no SET. (b) A
+    resolved pane whose SET was journalled, then unresolved in the sweep the
+    owner typed again, journalled no clear at all."""
+    CWD = "/home/newlevel/devel/quietunclaimed"
+    NOW = 1_800_000_000
+
+    def setUp(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        self.addCleanup(owner_stop.reset)
+        self.proj = Path(d.name)
+        self.sd = self.proj / wd.encode_project_dir(self.CWD)
+        self.sd.mkdir(parents=True)
+        now = self.NOW
+        for sid, rows, mt in (("SA", [_u("sprav ticket 5", now - 900),
+                                      _a("robím", now - 800)], now - 800),
+                              ("SB", [_u("sprav ticket 6", now - 600),
+                                      _u("pauza", now - 550)], now - 600)):
+            self._write(sid, rows, mt)
+        self.state = {}
+
+    def _write(self, sid, rows, mtime, append=False):
+        f = self.sd / (sid + ".jsonl")
+        with open(f, "a" if append else "w", encoding="utf-8") as fh:
+            fh.write("".join(json.dumps(r) + "\n" for r in rows))
+        os.utime(f, (mtime, mtime))
+
+    def _sweep(self, i, starts):
+        with m.patch.object(wd, "_pane_claude_start_epoch",
+                            side_effect=lambda pid, run=None: starts.get(pid)):
+            return owner_stop.refresh(self.state, [("%A", self.CWD), ("%B", self.CWD)],
+                                      self.proj, self.NOW + 60 * i,
+                                      run=lambda argv, timeout=8: "")
+
+    def test_a_pane_that_resolves_its_paused_session_journals_set(self):
+        both = {"%A": self.NOW - 950, "%B": self.NOW - 605}
+        first = self._sweep(0, {"%A": self.NOW - 950})
+        self.assertEqual(sum("SET" in ln for ln in first), 1, first)
+        logs = self._sweep(1, both)
+        self.assertEqual((owner_stop.pane_latch("%B") or {}).get("fact"), "pause")
+        self.assertFalse(any("cleared" in ln for ln in logs), logs)
+        self.assertEqual(len(logs), 1, logs)
+        self.assertIn("sid=SB -> SET (pause", logs[0])
+        self.assertEqual(self._sweep(2, both), [])
+
+    def test_a_clear_after_the_pane_lost_its_session_is_journalled(self):
+        logs = self._sweep(0, {"%A": self.NOW - 950, "%B": self.NOW - 605})
+        self.assertEqual(sum("SET" in ln and "sid=SB" in ln for ln in logs), 1, logs)
+        self._write("SB", [_u("pokračuj s ticketom 7", self.NOW + 30)],
+                    self.NOW - 600, append=True)
+        logs = self._sweep(1, {"%A": self.NOW - 950})
+        self.assertIsNone(owner_stop.pane_latch("%B"))
+        self.assertEqual(sum("cleared" in ln and "SB" in ln for ln in logs), 1, logs)
+
+    def test_one_clear_line_when_the_owner_types_in_an_unowned_session(self):
+        self._sweep(0, {"%A": self.NOW - 950, "%B": self.NOW - 605})
+        logs = self._sweep(1, {"%A": self.NOW - 950})       # %B lost its session
+        self.assertEqual((owner_stop.pane_latch("%B") or {}).get("fact"), "pause")
+        self._write("SB", [_u("pokračuj s ticketom 7", self.NOW + 90)],
+                    self.NOW - 600, append=True)
+        logs = self._sweep(2, {"%A": self.NOW - 950})
+        self.assertIsNone(owner_stop.pane_latch("%B"))
+        self.assertEqual(sum("cleared" in ln for ln in logs), 1, logs)
+
+
 if __name__ == "__main__":
     unittest.main()
