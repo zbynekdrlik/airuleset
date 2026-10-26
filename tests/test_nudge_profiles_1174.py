@@ -38,13 +38,16 @@ import watchdog as wd  # noqa: E402
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
 # The LIVE sets read on 28.9.2026 (ticket #1174 body, verbatim lists), minus
-# lane-occupancy / lane-reconcile, which #1137 removed (owner 25.10.2026).
+# lane-occupancy / lane-reconcile, which #1137 removed (owner 25.10.2026), plus
+# working-stall (B9 fix 26.10.2026: job 4's stuck-check left the recovery set
+# and keeps firing, once a day, where the autonomous loops run).
 LIVE_GK = {"goal-guard", "infra-priority",
            "partition-audit", "queue-arrival", "release-gap", "task-hygiene",
-           "u-freshness", "watch-trigger"}
+           "u-freshness", "watch-trigger", "working-stall"}
 LIVE_STREAM = {"bounce", "goal-guard",
                "partition-audit", "queue-arrival", "release-gap", "task-hygiene",
-               "u-freshness", "checkout-lag"}   # + checkout-lag: #1176 census 30.9.
+               "u-freshness", "checkout-lag",   # + checkout-lag: #1176 census 30.9.
+               "working-stall"}
 LIVE_CONTROLLER = {"queue-arrival"}
 LIVE_WORKSTATION = set()
 
