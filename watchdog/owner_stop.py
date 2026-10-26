@@ -38,10 +38,11 @@ TAIL_ENTRIES = 400
 RECORD_TTL_S = 7 * 24 * 3600
 MACHINE_CLEAR_WINDOW_S = 600
 PAUSE_MAX_WORDS = 12
-PAUSE_RX = re.compile(
-    r"(?<![\w-])(?:pauzni(?:te)?|pauz[au]|zastav(?:te)?|stopni(?:te)?|stop|"
-    r"nepokra[cč]uj(?:te)?|skon[cč]i(?:te)?|presta[nň](?:te)?|pause|halt|"
-    r"don'?t continue|do not continue)(?![\w-])", re.IGNORECASE)
+PAUSE_RX = re.compile(   # the Stop HOOK / a stop CONDITION is vocabulary, no pause
+    r"(?<![\w-])(?:pauzni(?:te)?|pauz[au]|zastav(?:te)?|stopni(?:te)?|"
+    r"stop(?!\s*(?:hook|condition|podmien))|nepokra[cč]uj(?:te)?|skon[cč]i(?:te)?|"
+    r"presta[nň](?:te)?|pause|halt|don'?t continue|do not continue)(?![\w-])",
+    re.IGNORECASE)
 _STOP_COMMANDS = ("exit", "quit")
 _CMD_RX = re.compile(r"<command-name>/?([^<\s]+)</command-name>")
 _INTERRUPT = "[Request interrupted by user"
@@ -52,8 +53,7 @@ _MEMO = {}         # (pane_id, file stamps) -> latch
 _WITHHELD = set()  # pane ids already journalled by `withhold` this sweep
 
 
-def reset():
-    """Forget this process's pane map (a new sweep, or a test)."""
+def reset():   # a new sweep, or a test
     _PANES.clear()
     _SWEEP.clear()
     _MEMO.clear()
