@@ -31,8 +31,9 @@ import time
 from pathlib import Path
 
 import burn
+import question_attribution
 
-TICKETS_TTL_S = 120                 # refresh the open-issues count at most this often
+TICKETS_TTL_S = 120                # refresh the open-issues count at most this often
 SPAWN_GUARD_S = 30                  # min seconds between background refresh spawns
 AUTOPILOT_RUN_WINDOW_S = 6 * 3600   # a run-card younger than this = active run
 STALE_CACHE_MAX_AGE_S = 7 * 86400   # #689: sweep a cache entry unrefreshed this long
@@ -240,7 +241,7 @@ def sweep_stale_cache(home=None, now=None, max_age_s=STALE_CACHE_MAX_AGE_S):
 _CARRY_FORWARD_KEYS = (
     "open", "gk", "bounce", "merged_unreleased", "user_waiting", "ops_wait",
     "skipped", "wdrain_over", "created_today", "closed_today", "name",
-    "pipeline", "done",       # #1141 slice 3
+    "pipeline", "done", "question_cover_numbers",   # #1141 slice 3, #1218
 )
 
 _ERROR_LOG_MAX_BYTES = 64 * 1024   # truncate refresh-errors.log beyond this
@@ -507,8 +508,9 @@ def tickets_segment(cwd, now=None, home=None, spawn=True):
     # cache, or `open` not an int on a gh error / non-repo cwd / SliceUnresolved
     # (`cmd_tickets_status` writes open=user_waiting=ops_wait=None together on
     # any failure) — still surface a pending ping as a STANDALONE `U N`, so a
-    # question the user must answer is never invisible in the footer.
-    ping_count = question_ping_count(cwd, home=home)
+    # question the user must answer is never invisible in the footer. #1218:
+    # attributed against the label-U cover the refresh saved with the counts.
+    ping_count = question_ping_count(cwd, home=home, cover=_cached_cover(cache))
     if not isinstance(cache, dict) or not isinstance(cache.get("open"), int):
         u = cache.get("user_waiting") if isinstance(cache, dict) else None
         total = (u if isinstance(u, int) else 0) + \
@@ -855,15 +857,6 @@ def model_segment(payload, managed_model=None):
     return "\033[38;5;196m%s FALLBACK\033[0m" % label
 
 
-# #512: a ticket reference inside a ❓ ping's own text — a `#<digits>` token.
-# A ping whose question REFERENCES a ticket is assumed already counted in the
-# label-based `user_waiting` (that ticket carries needs-answer/needs-decision/
-# needs-acceptance — the ask-and-continue flow labels the ticket AND pings), so
-# it must NOT be double-counted in the `U N` ping-merge. A ping with NO ticket
-# reference is a session-level question that no label counts → +1 to U.
-_TICKET_REF_RE = re.compile(r"#\d+")
-
-
 def _question_same_project(here, q):
     """Either-direction cwd containment — the session may run at the LAUNCH dir
     (…/odoo) while its ❓ hook recorded a subdir (…/odoo/odoo-slovnormal), same
@@ -877,80 +870,22 @@ def _question_same_project(here, q):
         q == here or q.startswith(here + "/") or here.startswith(q + "/"))
 
 
-def ticketless_question_pings(cwd, home=None):
-    """The unanswered ❓ pings SCOPED to the session's project (`cwd`) that carry
-    NO ticket reference (`#N`) in their own question text — the session-level
-    questions that fold into `U N` (#512: the standalone `Q` segment was removed;
-    its count merges into `U`, "waiting on the OWNER"). Returns a list of the map
-    ENTRIES (dicts), so both the footer count and `core-quals --waiting`'s ping
-    listing use the SAME derivation.
+def _question_entries(cwd, home=None):
+    """The unanswered ❓ map entries SCOPED to `cwd`'s project (#512/#539).
 
-    Dedup rationale: a ping whose text references a ticket is already counted in
-    the label-based `user_waiting` (its ticket carries a USER_WAITING label), so
-    it is EXCLUDED here — never double-counted.
-
-    Source (unchanged): ~/.claude/discord-questions.json — notify.record_question
-    adds an entry per ❓ ping; the watchdog drops it when answered/routed. #368:
-    no age filter (an entry still in the map is still open, re-asked daily). The
-    map + re-ask jobs are UNTOUCHED by #512 — this is render/count only."""
-    d = _load(_claude_dir(home) / "discord-questions.json")
-    if not d:
-        return []
-    here = str(cwd or "").rstrip("/")
-    out = []
-    for v in d.values():
-        if not isinstance(v, dict):
-            continue
-        if not _question_same_project(here, v.get("cwd")):
-            continue
-        text = "%s %s" % (v.get("block") or "", v.get("question") or "")
-        if _TICKET_REF_RE.search(text):
-            continue   # references a ticket -> already in the label U count
-        out.append(v)
-    return out
-
-
-def question_ping_count(cwd, home=None):
-    """The number of ticketless ❓ pings scoped to `cwd` (#512) — folded into the
-    footer's `U N` count. See `ticketless_question_pings` for the derivation."""
-    return len(ticketless_question_pings(cwd, home=home))
-
-
-def question_map_ticket_refs(cwd, home=None):
-    """The SET of issue numbers (int) referenced by any ❓ ping recorded in
-    ~/.claude/discord-questions.json AND SCOPED to `cwd`'s project — the
-    DELIVERED-question signal for the #527 `--waiting` no-question check (#539).
-    A ping whose text references `#N` is a question DELIVERED to the owner about
-    `#N` (`notify.record_question` writes an entry per phone ping; #368: an
-    unanswered entry STAYS in the map, re-asked daily), so its target `#N` is
-    covered.
-
-    **Scoped by project, exactly like the sibling `ticketless_question_pings`**
-    (`_question_same_project(cwd, entry.cwd)`) — a MUST, not a nicety: the map
-    is shared across every repo a box works, and low issue numbers COLLIDE
-    across repos (airuleset #300 == odoo-erp #300). Without scoping, a
-    multi-repo supervisor box (dev1/gatekeeper) would clear/route a ticket in
-    repo A off an unrelated ping about `#300` in repo B — reintroducing the very
-    "U > 0 with no real question here" invariant violation this ticket exists to
-    kill (#539 review MAJOR-1). `cwd` is the caller's repo root; an empty cwd
-    matches nothing (returns an empty set on a readable map — the safe degrade).
-
-    The return distinguishes ABSENT from UNREADABLE, which the caller's fail-safe
-    (`cli_quals._acceptance_present_set`/`_no_question_flagged`) depends on — a
-    plain `_load` (which collapses both to None) is deliberately NOT reused here:
-
-      - file ABSENT (no ❓ ever pinged from this box) -> **empty set**: a
-        readable "nothing delivered" state, so a `U` member with no ref is a
-        genuine no-question candidate (checked further via the comment fallback).
-      - file present but CORRUPT / not a dict / unreadable -> **None**: the
-        caller then tags NOTHING (never a false accusation off an unreadable
-        map, "nikdy falošný", #539).
-      - file valid -> the set of every `#N` in any SAME-PROJECT entry's
-        block+question text (the SAME `_TICKET_REF_RE` the ticketless-ping dedup
-        uses, run in the opposite direction — here we COLLECT the numbers)."""
+    Source: ~/.claude/discord-questions.json — `notify.record_question` adds an
+    entry per ❓ ping; the watchdog drops it when answered/routed (#368: no age
+    filter, an entry still in the map is still open). The map is shared across
+    every repo a box works and low issue numbers COLLIDE across repos (airuleset
+    #300 == odoo-erp #300), so every reader scopes by project
+    (`_question_same_project`, #539 review MAJOR-1); an empty cwd matches
+    nothing. Returns a list, `[]` for an ABSENT map (never pinged — a readable
+    "nothing delivered"), and None for a CORRUPT / non-dict one, which the #539
+    callers' fail-safe depends on (never a false accusation off an unreadable
+    map)."""
     path = _claude_dir(home) / "discord-questions.json"
     if not path.exists():
-        return set()
+        return []
     try:
         with open(path, encoding="utf-8") as h:
             d = json.load(h)
@@ -959,19 +894,54 @@ def question_map_ticket_refs(cwd, home=None):
     if not isinstance(d, dict):
         return None
     here = str(cwd or "").rstrip("/")
+    return [v for v in d.values()
+            if isinstance(v, dict) and _question_same_project(here, v.get("cwd"))]
+
+
+def ticketless_question_pings(cwd, home=None, cover=None):
+    """The ❓ pings scoped to `cwd` that count in `U N` ON THEIR OWN (#512: the
+    standalone `Q` badge folded into U) — the entries `question_attribution`
+    attributes to NO ticket (#1218: no tracking marker and no referenced ticket
+    in `cover`, the label-U set of this box). `cover=None` (rows unknown) keeps
+    the #512 dedup: any `#N` reference excludes the entry. A list of the map
+    ENTRIES, so the footer count and `--waiting`'s ping rows share it."""
+    return [v for v in _question_entries(cwd, home) or []
+            if question_attribution.attribute(v, cover)[0]
+            == question_attribution.TICKETLESS]
+
+
+def question_ping_count(cwd, home=None, cover=None):
+    """The number of ticketless ❓ pings scoped to `cwd` (#512, #1218) — folded
+    into the footer's `U N` count. See `ticketless_question_pings`."""
+    return len(ticketless_question_pings(cwd, home=home, cover=cover))
+
+
+def question_map_ticket_refs(cwd, home=None, cover=None):
+    """The SET of issue numbers (int) the ❓ pings scoped to `cwd` are
+    ATTRIBUTED to (`question_attribution.attribute`, #1218): a tracked entry's
+    ticket, a covered entry's label-U tickets (`cover`), never a context ref.
+    It is the DELIVERED-question signal of the #539/#622 display flags, the
+    #1213 asked refs and the #948 supplement. `cover=None` (rows unknown)
+    collects every referenced `#N` of an unmarked entry (the pre-#1218 set).
+    Empty set for an ABSENT map, None for an UNREADABLE one (see
+    `_question_entries`)."""
+    entries = _question_entries(cwd, home)
+    if entries is None:
+        return None
     refs = set()
-    for v in d.values():
-        if not isinstance(v, dict):
-            continue
-        if not _question_same_project(here, v.get("cwd")):
-            continue                         # #539 review MAJOR-1: cross-repo scope
-        text = "%s %s" % (v.get("block") or "", v.get("question") or "")
-        for m in _TICKET_REF_RE.finditer(text):
-            try:
-                refs.add(int(m.group(0)[1:]))   # "#4" -> 4
-            except ValueError:
-                continue
+    for v in entries:
+        refs |= question_attribution.attribute(v, cover)[1]
     return refs
+
+
+def _cached_cover(cache):
+    """#1218: the label-U numbers the last footer refresh attributed the ❓
+    pings against (`question_cover_numbers`), or None (a legacy / failed cache:
+    the #512 dedup)."""
+    raw = cache.get("question_cover_numbers") if isinstance(cache, dict) else None
+    if not isinstance(raw, list):
+        return None
+    return frozenset(n for n in raw if isinstance(n, int))
 
 
 # --------------------------------------------------------------------------- #

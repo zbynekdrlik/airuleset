@@ -336,16 +336,16 @@ def _print_audit_rows(rows, own_stream=None, dep_wait_map=None):
         print("%s\t%s\t%s\t%s" % (n, row.get("createdAt") or "", action, names))
 
 
-def _queued_acceptance_numbers(waiting, root):
+def _queued_acceptance_numbers(waiting, root, cover=None):
     """#622: the `acceptance`-reason members of the `waiting` (U) bucket whose
     draft is NOT yet delivered — a live `_acceptance_present_set` (question map,
-    no gh) does NOT include them, so they are QUEUED awaiting #606 one-at-a-time
-    owner-approval delivery and get the `queued` display tag instead of a live
-    `acceptance`. On-demand `--waiting`/`--ops-wait` display path only, never the
-    hot footer/count path. A member IN the present set is a live delivered
-    question → stays `acceptance`."""
+    no gh; `cover` = the #1218 label-U set) does NOT include them, so they are
+    QUEUED awaiting #606 one-at-a-time owner-approval delivery and get the
+    `queued` display tag instead of a live `acceptance`. On-demand `--waiting`
+    display path only, never the hot footer/count path. A member IN the present
+    set is a live delivered question → stays `acceptance`."""
     import airuleset
-    present = airuleset._acceptance_present_set(waiting, cwd=root)
+    present = airuleset._acceptance_present_set(waiting, cwd=root, cover=cover)
     return {n for n, row in waiting.items()
             if __import__("cli_ticket_state").owner_question(
                 row.get("labels") if isinstance(row, dict) else None) == "acceptance"
@@ -364,19 +364,41 @@ def _print_ping_rows(ping_entries):
         print("-\t%s\t-\tping\t%s" % (v.get("ts") or "", snippet))
 
 
-def _waiting_ping_entries(cwd=None):
+def _waiting_ping_entries(cwd=None, cover=None):
     """The ticketless ❓ pings scoped to the session cwd, for `--waiting`'s ping
     listing (#512) — the SAME `statusbar.ticketless_question_pings` derivation
-    the footer's `U N` count uses, so the list and the count agree. `cwd`
-    defaults to the process cwd (the /goal loop runs `--waiting` from the
-    session's own cwd, the same one the footer keys on). Fail-safe: any error
-    (statusbar unimportable, unreadable map) yields no ping rows, never a crash
-    of the stop-proof list."""
+    the footer's `U N` count uses (#1218: against the same label-U `cover`), so
+    the list and the count agree. `cwd` defaults to the process cwd (the /goal
+    loop runs `--waiting` from the session's own cwd, the one the footer keys
+    on). Fail-safe: any error yields no ping rows, never a crash."""
     try:
         import statusbar
-        return statusbar.ticketless_question_pings(cwd or os.getcwd())
+        return statusbar.ticketless_question_pings(cwd or os.getcwd(),
+                                                   cover=cover)
     except Exception:
         return []
+
+
+def _emit_waiting(waiting, rows, root, own_stream, supplement=None):
+    """`--waiting` of both quals commands: each U member reason-tagged (#512),
+    `no-question!` when no question was delivered (#539), `queued` for an
+    undelivered bare acceptance (#622), then the ticketless ❓ pings (reason
+    `ping`), so the list matches the footer's `U N`. `supplement` = the slice
+    box's #948 rows, merged in as the cache count adds them (#367). #1218:
+    every ❓ entry is attributed against ONE label-U cover of the UNFILTERED
+    `rows` + the supplement — the `question_cover_numbers` the footer saves."""
+    import airuleset
+    extra = supplement or {}
+    merged = {**waiting, **extra}
+    cover = __import__("cli_ticket_route").question_cover({**rows, **extra},
+                                                          own_stream)
+    _print_issue_rows(merged, own_stream=own_stream,
+                      reason_fn=__import__("cli_ticket_state").owner_question,
+                      flag_numbers=airuleset._no_question_flagged(
+                          merged, cwd=root, cover=cover),
+                      queued_numbers=_queued_acceptance_numbers(merged, root,
+                                                                cover))
+    _print_ping_rows(_waiting_ping_entries(cover=cover))
 
 
 def _refuse_unless_empty_is_trustworthy(cmd, quals, cwd=None):
@@ -973,27 +995,12 @@ def cmd_slice_quals(args):
         _emit_ops_wait(ops_wait, root, quals, own_stream=user)
         return
     if want_waiting:
-        # #512: each labeled member gets a reason tag (answer/decision/
-        # acceptance), then the ticketless ❓ pings (reason=ping) so the list
-        # matches the footer's `U N` count. #539: tag a member carrying NO
-        # delivered question `no-question!` (the #527 invariant, mechanized).
-        # #622: an undelivered bare acceptance is re-tagged `queued` (draft ready,
-        # awaiting #606 delivery) and is no-question!-exempt.
-        # #948 MAJOR-2: merge question-map-supplement rows into `waiting` so
-        # the listing includes every ticket the cache count includes — ONE
-        # derivation (#367). The supplement returns a dict {number: row_dict}
-        # from the SAME `_question_map_u_supplement` the cache path uses.
-        _qmap_extra = airuleset._question_map_u_supplement(
-            rows, root, _slice_quals_runner(root))
-        _waiting_merged = dict(waiting)
-        _waiting_merged.update(_qmap_extra)
-        _print_issue_rows(_waiting_merged, own_stream=user,
-                          reason_fn=__import__("cli_ticket_state").owner_question,
-                          flag_numbers=airuleset._no_question_flagged(
-                              _waiting_merged, cwd=root),
-                          queued_numbers=_queued_acceptance_numbers(
-                              _waiting_merged, root))
-        _print_ping_rows(_waiting_ping_entries())
+        # #948 MAJOR-2: the question-map supplement rows (the SAME
+        # `_question_map_u_supplement` the cache path uses) join the listing,
+        # so it holds every ticket the cache count does — ONE derivation (#367).
+        _emit_waiting(waiting, rows, root, user,
+                      airuleset._question_map_u_supplement(
+                          rows, root, _slice_quals_runner(root)))
         return
     if want_count:
         print(__import__("cli_ticket_route").count(_b))   # I + C (ruling 2)
@@ -1539,7 +1546,7 @@ def cmd_core_quals(args):
             sys.exit(1)
     if want_explain:   # #1141: the SAME buckets --count uses (__import__: size budget)
         return __import__("cli_ticket_explain").explain_core(extra, _b, _facts, want_conflicts,
-                                                             root=root)
+                                                             root=root, rows=seen)
     if want_snapshot:
         # #1067 slice 1d: ALL watchdog quals facts from THIS one partition
         # (own_stream=None: a full-authority box owns no stream).
@@ -1557,17 +1564,8 @@ def cmd_core_quals(args):
         return
     if want_waiting:
         # own_stream=None: a full-authority box owns no stream, so EVERY
-        # stream-labelled row is action-only. #512: reason tag per labeled
-        # member (answer/decision/acceptance) + the ticketless ❓ pings
-        # (reason=ping), matching the footer's `U N` count. #539: tag a member
-        # carrying NO delivered question `no-question!` (#527, mechanized).
-        # #622: an undelivered bare acceptance is re-tagged `queued` and is
-        # no-question!-exempt (the #606 queue is a legit reason for non-delivery).
-        _print_issue_rows(waiting, own_stream=None,
-                          reason_fn=__import__("cli_ticket_state").owner_question,
-                          flag_numbers=airuleset._no_question_flagged(waiting, cwd=root),
-                          queued_numbers=_queued_acceptance_numbers(waiting, root))
-        _print_ping_rows(_waiting_ping_entries())
+        # stream-labelled row is action-only (the tags: `_emit_waiting`).
+        _emit_waiting(waiting, seen, root, None)
         return
     if want_count:
         print(__import__("cli_ticket_route").count(_b))   # I + C (ruling 2)

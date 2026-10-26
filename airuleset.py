@@ -4259,10 +4259,11 @@ def cmd_tickets_status(args):
                     entry, workable_rows, waiting, ops_wait, root, slug)
                 entry["user_waiting"] = len(waiting)
                 entry["ops_wait"] = len(ops_wait)
-                # #948: question-map-aware U supplement — see the full
-                # docstring on `_question_map_u_supplement`. Returns a SET
-                # so `--waiting` can list the same members (#367 invariant).
+                # #948 U supplement (`--waiting` lists the same members, #367);
+                # #1218: the label-U cover the footer render attributes pings by.
                 _qmap_extra = _question_map_u_supplement(rows, root, _out)
+                __import__("cli_ticket_route").record_cover(
+                    entry, {**rows, **_qmap_extra}, _current_user())
                 entry["user_waiting"] += len(_qmap_extra)
                 # #1141 slice 4: the conflict fields over the SAME U the
                 # `--explain`/`--conflicts` commands print (supplement incl.)
@@ -4348,10 +4349,10 @@ def cmd_tickets_status(args):
                 entry["open"] = len(workable)
                 __import__("cli_ticket_route").record(entry, _b)   # M / P / C
                 entry["user_waiting"] = len(waiting)
-                # #1025: the U member NUMBERS — the stop-hook question-in-U
-                # gate's fast-allow membership source (zero gh when fresh). ONE
-                # derivation with the count (#367): same `waiting` dict.
+                # #1025: the U NUMBERS (the stop-hook question-in-U gate's zero-gh
+                # fast-allow), ONE derivation with the count (#367); #1218 cover.
                 entry["user_waiting_numbers"] = sorted(int(n) for n in waiting)
+                __import__("cli_ticket_route").record_cover(entry, seen)
                 entry["ops_wait"] = len(ops_wait)
                 # #868: W-drain breach flag (same as the slice path above).
                 entry["wdrain_over"] = len(ops_wait) > OPS_WAIT_WDRAIN_THRESHOLD

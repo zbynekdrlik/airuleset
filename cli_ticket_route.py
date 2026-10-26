@@ -42,19 +42,48 @@ def footer(rows, root, slug, merged, own_stream=None, *, handed=None,
         cli_ticket_facts.forget(root)
         facts = ts.TicketFacts(merged=frozenset(int(n) for n in merged or ()),
                                handed=dict(handed or {}))
+    box = ts.Box(own_stream=own_stream,   # #1218: cover BEFORE the role filter
+                 asked=asked_refs(root, question_cover(rows, own_stream)))
     if role_filter is not None:
         rows = role_filter(rows)
-    box = ts.Box(own_stream=own_stream, asked=asked_refs(root))
     return ts.bucketize(rows, facts, box), facts
 
 
-def asked_refs(root):
-    """#1213: the ticket numbers this box's own unanswered ❓ pings name,
-    scoped to `root`'s project (`statusbar.question_map_ticket_refs`, the
-    #539/#948 reader). Any read problem is an empty set: today's routing."""
+def question_cover(rows, own_stream=None):
+    """#1218: the numbers in `rows` that are U members BY THEIR OWN LABELS on
+    this box (`classify` with no asked refs). It is rule 2 of
+    `question_attribution`: a ❓ entry naming one of them is covered by it and
+    adds nothing to U. Take it over the rows BEFORE any role filter, so a ping
+    naming another window's labelled ticket never counts twice (#1065)."""
+    box = ts.Box(own_stream=own_stream)
+    out = set()
+    for number, row in (rows or {}).items():
+        try:
+            n = int(number)
+        except (TypeError, ValueError):
+            continue
+        if ts.classify(row, None, box)[0] == "U":
+            out.add(n)
+    return frozenset(out)
+
+
+def record_cover(entry, rows, own_stream=None):
+    """#1218: the footer cache field `question_cover_numbers` — the label-U
+    cover (`question_cover`) of the UNFILTERED rows (+ the slice box's #948
+    supplement), so the render attributes the live ❓ pings exactly as the
+    quals `--waiting` listing does (ONE derivation, #367)."""
+    entry["question_cover_numbers"] = sorted(question_cover(rows, own_stream))
+
+
+def asked_refs(root, cover=None):
+    """#1213: the tickets this box's own unanswered ❓ pings are attributed to
+    (#1218: a tracked entry's ticket, a covered entry's label-U tickets,
+    never a context ref; `cover` = `question_cover`), scoped to `root`'s
+    project (`statusbar.question_map_ticket_refs`, the #539/#948 reader). Any
+    read problem is an empty set: today's routing."""
     try:
         import statusbar
-        refs = statusbar.question_map_ticket_refs(root)
+        refs = statusbar.question_map_ticket_refs(root, cover=cover)
     except Exception as e:  # noqa: BLE001 — never break a count
         sys.stderr.write("tickets-status: question map unreadable (%s)\n" % e)
         return frozenset()
@@ -67,6 +96,9 @@ def quals(rows, root, box, *, extra=None, role=None, slug=None, handed=None):
     A `--extra` (bounce-seed) query is a different axis: no partition and no
     facts, its whole set is I (a handed row is gk on the slice box)."""
     import cli_quals_cmd
+    if not box.asked and not extra:   # #1213/#1218: cover BEFORE the role filter
+        box = dataclasses.replace(box, asked=asked_refs(
+            root, question_cover(rows, box.own_stream)))
     if role in ROLES:
         rows = cli_quals_cmd._apply_role_filter(rows, root, role, slug=slug)
     handed = handed or {}
@@ -84,8 +116,6 @@ def quals(rows, root, box, *, extra=None, role=None, slug=None, handed=None):
     except Exception as e:  # noqa: BLE001 — a display note, never a count
         note = "unknown (%s)" % type(e).__name__
     facts = dataclasses.replace(facts, m_note=note)
-    if not box.asked:   # #1213
-        box = dataclasses.replace(box, asked=asked_refs(root))
     return ts.bucketize(rows, facts, box), facts
 
 

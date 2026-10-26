@@ -49,17 +49,18 @@ def _refuse_extra(extra, flag="--explain"):
         sys.exit(2)
 
 
-def _footer_extras(cwd=None):
+def _footer_extras(cwd=None, cover=None):
     """The footer contributions that are not ticket rows: each ticketless ❓
-    ping adds 1 to U (#512, `statusbar.ticketless_question_pings`, the SAME
-    source as the footer and `--waiting`), and the task-hygiene A count is
+    ping adds 1 to U (#512, `statusbar.ticketless_question_pings` against the
+    #1218 label-U `cover`, the SAME source as the footer and `--waiting`), and
+    the task-hygiene A count is
     added to I (#1036, `statusbar.task_hygiene_a_count`; 0 when unconfigured).
     `--count` never includes either — they are footer display terms."""
     import cli_quals_cmd
     import statusbar
     extras = [("U", 1, "ticketless question ping, no ticket to label (#512)",
                v.get("question") or v.get("block") or "")
-              for v in cli_quals_cmd._waiting_ping_entries(cwd)]
+              for v in cli_quals_cmd._waiting_ping_entries(cwd, cover=cover)]
     try:
         a_count = statusbar.task_hygiene_a_count()
     except Exception:  # noqa: BLE001 — a display term, never a crash
@@ -70,14 +71,16 @@ def _footer_extras(cwd=None):
     return extras
 
 
-def _emit(buckets, box, facts=None, supplement=(), only_conflicts=False):
+def _emit(buckets, box, facts=None, supplement=(), only_conflicts=False,
+          cover=None):
     """Print the `--explain` text, or with `only_conflicts` (`--conflicts`,
-    #1141 slice 4) just its `conflict:` lines, for the gk review loop."""
+    #1141 slice 4) just its `conflict:` lines, for the gk review loop.
+    `cover`: the #1218 label-U set the ticketless pings are attributed by."""
     if only_conflicts:
         lines = ts.conflict_lines(buckets, box, facts or None)
     else:
         lines = ts.explain_lines(buckets, box, facts or None, supplement,
-                                 extras=_footer_extras(_footer_cwd))
+                                 extras=_footer_extras(_footer_cwd, cover))
     for line in lines:
         print(line)
 
@@ -86,17 +89,22 @@ def _flag(only_conflicts):
     return "--conflicts" if only_conflicts else "--explain"
 
 
-def explain_core(extra, buckets, facts, only_conflicts=False, root=None):
+def explain_core(extra, buckets, facts, only_conflicts=False, root=None,
+                 rows=None):
     """`core-quals --explain`: the full-authority box (no gk bucket: it
     actions its own hand-offs). `buckets`/`facts` are the ONE route's result
     (`cli_ticket_route.quals`), the SAME `--count` uses — including the HIDDEN
     rows (a foreign stream's owner question, #1141 slice 2), listed with their
     reason and counted in no bucket. `only_conflicts`: `--conflicts`.
-    `root` fills the box's #1213 asked refs, as `quals` did for the count."""
+    `root` fills the box's #1213 asked refs, as `quals` did for the count,
+    attributed (#1218) against the label-U cover of the unfiltered `rows`
+    (None: the #512 dedup)."""
     _refuse_extra(extra, _flag(only_conflicts))
     import cli_ticket_route
-    box = ts.Box(asked=cli_ticket_route.asked_refs(root) if root else frozenset())
-    _emit(buckets, box, facts, only_conflicts=only_conflicts)
+    cover = None if rows is None else cli_ticket_route.question_cover(rows)
+    box = ts.Box(asked=cli_ticket_route.asked_refs(root, cover) if root
+                 else frozenset())
+    _emit(buckets, box, facts, only_conflicts=only_conflicts, cover=cover)
 
 
 def explain_slice(extra, root, rows, buckets, facts, box=None,
@@ -111,13 +119,15 @@ def explain_slice(extra, root, rows, buckets, facts, box=None,
     import airuleset
     import cli_quals_cmd
     box = box or ts.Box(own_stream=airuleset._current_user())
-    if not box.asked:   # #1213: the same asked refs the count used
-        import cli_ticket_route
-        box = ts.Box(own_stream=box.own_stream, asked=cli_ticket_route.asked_refs(root))
+    if not box.asked:   # #1213/#1218: the same attributed asked refs the count used
+        box = ts.Box(own_stream=box.own_stream, asked=cli_ticket_route.asked_refs(
+            root, cli_ticket_route.question_cover(rows, box.own_stream)))
     extra_u = cli_quals._question_map_u_supplement(
         rows, root, cli_quals_cmd._slice_quals_runner(root))
     _emit({**buckets, "U": {**buckets["U"], **extra_u}}, box, facts,
-          supplement=extra_u, only_conflicts=only_conflicts)
+          supplement=extra_u, only_conflicts=only_conflicts,
+          cover=cli_ticket_route.question_cover({**rows, **extra_u},
+                                                box.own_stream))
 
 
 def _footer_cache_line(cwd):
