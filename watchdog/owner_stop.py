@@ -254,13 +254,18 @@ def _stamp(path):
         return None
 
 
+def _memo_key(pane_id, ctx):
+    return (pane_id, _stamp(ctx.get("tpath")), _stamp(ctx.get("prev")))
+
+
 def pane_latch(pane_id):
     """The latch for a pane `refresh` mapped this sweep, re-read when its
-    transcripts changed since (memoized on their size+mtime); None otherwise."""
+    transcripts changed since (memoized on their size+mtime; `refresh` seeds
+    the memo); None otherwise."""
     ctx = _PANES.get(pane_id)
     if not ctx:
         return None
-    key = (pane_id, _stamp(ctx.get("tpath")), _stamp(ctx.get("prev")))
+    key = _memo_key(pane_id, ctx)
     if key[1] is None:
         return None
     if key not in _MEMO:
@@ -381,6 +386,7 @@ def refresh(state, panes, projects_dir, now, dry_run=False, run=None):
             else:
                 recs.pop(sid, None)
             ctx["rec"] = recs.get(sid)
+        _MEMO[_memo_key(pid, ctx)] = latch      # the sweep's first check reads no tail
     if not dry_run:
         for sid in [k for k, v in recs.items() if k not in seen and (
                 not isinstance(v, dict) or not isinstance(v.get("seen"), (int, float))
