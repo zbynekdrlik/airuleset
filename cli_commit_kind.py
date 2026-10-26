@@ -6,26 +6,28 @@ MENTIONS an epic implements none of it: on presenter (13.10.2026) two
 `docs(…): … (#850, #851)` commits on `dev` put two unstarted epics into M while
 the owner saw `I 1`. A change implements nothing when its conventional-commit
 type is docs / chore / style / ci (a scope and `!` allowed), or when it carries
-the `[no-test: docs…]` marker. Such a ticket stays in I — the safe over-count
-(the owner sees open work). Every other type (fix, feat, test, refactor, …)
-keeps its refs.
+the `[no-test: docs…]` / `[no-test: documentation…]` marker. Such a ticket stays
+in I — the safe over-count (the owner sees open work). Every other type (fix,
+feat, test, refactor, …) keeps its refs.
 
-stdlib only; `introducing_commit_implements_nothing` is the one LOCAL git read
-(never the network), used to re-judge a PR-cache entry written before the rule.
+stdlib only; `rejudge` is the one LOCAL git read (never the network), used to
+re-judge a PR-cache entry written before the rule.
 """
 import re
 import subprocess
 
-_NOTHING_TYPE_RE = re.compile(r"^\s*(?:docs|chore|style|ci)(?:\(.*\))?!?:",
+_NOTHING_TYPE_RE = re.compile(r"^\s*(?:docs|chore|style|ci)(?:\([^)]*\))?!?:",
                               re.IGNORECASE)
-_NO_TEST_DOCS_RE = re.compile(r"\[no-test:\s*docs", re.IGNORECASE)
+_NO_TEST_DOCS_RE = re.compile(r"\[no-test:\s*(?:docs|documentation)\b",
+                              re.IGNORECASE)
 _MERGE_SUBJECT_RE = re.compile(r"^Merge pull request #\d+\b")
-_TRAILING_PR_RE = re.compile(r"\s*\(#\d+\)\s*$")
+_OID_RE = re.compile(r"^[0-9a-f]{7,64}$")
 
 
 def implements_nothing(title, body=""):
-    """True when a commit subject / PR title (+ body) marks a change that
-    implements no ticket (module docstring)."""
+    """True when a commit subject / PR title (+ the commit's own body) marks a
+    change that implements no ticket (module docstring). A PR is judged by its
+    TITLE only: a bundled PR's body can quote a docs commit's marker."""
     title = title or ""
     return bool(_NOTHING_TYPE_RE.match(title)
                 or _NO_TEST_DOCS_RE.search(title)
@@ -34,7 +36,10 @@ def implements_nothing(title, body=""):
 
 def _commit_message(root, oid):
     """`(subject, body)` of commit `oid` in the repo at `root` (local git), or
-    None when git cannot read it (missing commit / repo, timeout)."""
+    None when it cannot be read. Only a hex object id ever reaches git (a
+    cached value could be anything, even an `--option`)."""
+    if not root or not isinstance(oid, str) or not _OID_RE.match(oid):
+        return None
     try:
         r = subprocess.run(
             ["git", "-C", str(root), "log", "-1", "--format=%s%x1f%b", oid],
@@ -48,16 +53,31 @@ def _commit_message(root, oid):
 
 
 def introducing_commit_implements_nothing(root, oid):
-    """`implements_nothing` for a merged PR known only by its INTRODUCING commit
-    (a PR-cache entry written before #1228 kept the refs, not the title): a
-    GitHub merge commit carries the PR title as its body's first line, a squash
-    commit as its subject minus the trailing `(#N)`. False when git cannot read
-    the commit, so the entry keeps its refs (the pre-#1228 behaviour)."""
-    msg = _commit_message(root, oid) if root and oid else None
+    """True / False for a merged PR known only by its INTRODUCING commit (a
+    PR-cache entry written before #1228 kept the refs, not the title), None
+    when git cannot read the commit. The PR title is a GitHub merge commit's
+    body first line, else the squash commit's subject; judged by the title
+    alone, like a PR."""
+    msg = _commit_message(root, oid)
     if msg is None:
-        return False
+        return None
     subject, body = msg
     if _MERGE_SUBJECT_RE.match(subject):
-        title, _, rest = body.strip().partition("\n")
-        return implements_nothing(title, rest)
-    return implements_nothing(_TRAILING_PR_RE.sub("", subject), body)
+        subject = body.strip().partition("\n")[0]
+    return implements_nothing(subject)
+
+
+def rejudge(entry, root, oid, version):
+    """Re-judge a PR-cache `entry` written before the rule (its `v` is not
+    `version`) from commit `oid`: once git READ it, stamp `v` and empty the refs
+    of a change that implements nothing. Unreadable leaves the entry as it is
+    (its refs kept, retried next time). True when the entry changed."""
+    if entry.get("v") == version:
+        return False
+    nothing = introducing_commit_implements_nothing(root, oid)
+    if nothing is None:
+        return False
+    entry["v"] = version
+    if nothing:
+        entry["issues"] = []
+    return True

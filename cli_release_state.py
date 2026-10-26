@@ -82,7 +82,7 @@ _ISSUE_LINE_RE = re.compile(r"(?im)^\s*Issue:\s*#(\d+)")
 _MEMO = {}
 _PARTIAL = {}
 # #1228: PR-cache entries written under the docs rule carry `"v": 2`; an older
-# entry is re-judged once from its introducing commit (`_legacy_nothing`).
+# one is re-judged from its commit (`cli_commit_kind.rejudge`) by both readers.
 _CACHE_V = 2
 
 
@@ -380,14 +380,18 @@ def _save_cache(cache_path, data):
 
 
 def _issue_refs(title, body, exclude_pr):
-    """The implemented-ticket numbers for a PR, with the PR's OWN number removed.
-    Two carriers (#1083 REWORK): the TITLE, where EVERY `#N` is a ticket (the
-    odoo-erp convention, incl. the `fix(#N):` scope and `#7631 #7632` forms; a
-    revert title carries none), and the BODY, ONLY closing-keyword refs +
-    `Issue: #N` lines (a bare body `#N` is a cross-reference, `_CLOSE_KW_RE`).
-    #1228: a docs/chore/style/ci change (or `[no-test: docs…]`) carries none."""
-    if cli_commit_kind.implements_nothing(title, body):
+    """`_raw_issue_refs` of an IMPLEMENTING change: a docs/chore/style/ci title
+    (or a `[no-test: docs…]` one) carries none (#1228; judged by the TITLE)."""
+    if cli_commit_kind.implements_nothing(title):
         return set()
+    return _raw_issue_refs(title, body, exclude_pr)
+
+
+def _raw_issue_refs(title, body, exclude_pr):
+    """The tickets a PR names minus its OWN number (also P's open-PR link and
+    the C veto, `cli_ticket_facts`): every TITLE `#N` (#1083 REWORK, incl. the
+    `fix(#N):` / `#7631 #7632` forms; a revert title has none) + the BODY's
+    closing-keyword / `Issue: #N` refs only (a bare body `#N` is context)."""
     title_text = title or ""
     refs = set() if _REVERT_TITLE_RE.match(title_text) else {
         int(m) for m in _TITLE_REF_RE.findall(title_text)}
@@ -396,13 +400,6 @@ def _issue_refs(title, body, exclude_pr):
     refs |= {int(m.group(1)) for m in _ISSUE_LINE_RE.finditer(body_text)}
     refs.discard(int(exclude_pr))
     return refs
-
-
-def _legacy_nothing(entry, root):
-    """#1228: True for a PR-cache entry written before the docs rule (no `v`)
-    whose introducing commit is a docs/chore/style/ci change (local git)."""
-    return (entry.get("v") != _CACHE_V and cli_commit_kind
-            .introducing_commit_implements_nothing(root, entry.get("oid")))
 
 
 def _pr_introducing_commits(root, git_fn, prefix="origin"):
@@ -479,9 +476,9 @@ def _compute_two_branch(root, git_full_fn, prefix, ref_exists_fn):
         _PARTIAL[root] = "M hidden: %d commits in range" % len(commits)
         return frozenset()
     issues = set()
-    for oid, subj, body in commits:
-        for n in _issue_refs(subj, body, 0):
-            issues.add(int(n))
+    for oid, subj, body in commits:   # #1228: a commit's own body marker too
+        if not cli_commit_kind.implements_nothing(subj, body):
+            issues.update(int(n) for n in _issue_refs(subj, body, 0))
     return frozenset(issues)
 
 
@@ -584,12 +581,11 @@ def _compute_merged_unreleased(root, git_fn, git_full_fn, pr_meta_fn, cache_path
             cache[key] = entry
             new_metas += 1
             _save_cache(cache_path, cache)   # (c) save after EVERY new entry
-        elif entry.get("v") != _CACHE_V:
-            entry["oid"] = entry.get("oid") or oid   # backfill an oid-less one
-            if _legacy_nothing(entry, root):         # #1228: re-judged ONCE
-                entry["issues"] = []
-            entry["v"] = _CACHE_V
-            _save_cache(cache_path, cache)
+        elif entry.get("v") != _CACHE_V:   # #1228: by the readable in-range oid
+            backfill = not entry.get("oid")
+            entry["oid"] = entry.get("oid") or oid
+            if cli_commit_kind.rejudge(entry, root, oid, _CACHE_V) or backfill:
+                _save_cache(cache_path, cache)
         for n in entry.get("issues", []):
             issues.add(int(n))
     if quota_hit:
@@ -654,18 +650,24 @@ def merged_released_oids(root, open_numbers, is_ancestor_fn=None,
         return {}
     if is_ancestor_fn is None:
         is_ancestor_fn = _default_is_ancestor
-    out = {}
-    for entry in cache.values():
+    out, judged = {}, {}
+    for key, entry in cache.items():
         if not isinstance(entry, dict):
             continue
-        # #1083 review: intersect with the OPEN set FIRST, so the per-entry
-        # `git merge-base --is-ancestor` subprocess runs ONLY for a PR that
-        # references a still-open ticket (a small, bounded set) — never once per
-        # cached PR ever (the append-only cache grows unboundedly).
+        # #1083 review: intersect with the OPEN set FIRST, so the per-entry git
+        # subprocesses run ONLY for a PR that references a still-open ticket
+        # (small, bounded) — never per cached PR (the cache grows unboundedly).
         open_hits = [int(n) for n in entry.get("issues", []) if int(n) in open_set]
         oid = entry.get("oid")
-        if (open_hits and oid and not _legacy_nothing(entry, root)   # #1228
-                and is_ancestor_fn(oid, root)):
+        if open_hits and oid and cli_commit_kind.rejudge(entry, root, oid,
+                                                         _CACHE_V):   # #1228
+            judged[key] = entry
+            open_hits = open_hits if entry["issues"] else []
+        if open_hits and oid and is_ancestor_fn(oid, root):
             for n in open_hits:
                 out.setdefault(n, []).append(oid)
+    if judged:   # written back once, merged into the CURRENT file (#1228)
+        fresh = _load_cache(cache_path)
+        _save_cache(cache_path, {**(fresh if isinstance(fresh, dict) else {}),
+                                 **judged})
     return out
