@@ -55,4 +55,6 @@ Applies to all streams (montalu*/david*/miva*/gk) and all messages and all rewor
 
 - **Deep URLs must be FUNCTIONAL action URLs** — never raw model-form URLs (`/odoo/project.task/503` opens the native form without custom tabs; the owner sees "nič tam nie je"). Use `/odoo/project/<pid>/tasks/<tid>` or `/odoo/action-<xmlid>/<id>`. Origin: #907, montalu 2026-09-06.
 - Backstop: `stop-check-question-quality.sh` Check 7 (skipped on a no-board box).
+
+Superseded 26.10.2026 (owner, #1137): the no-task statement is removed and Check 7 is deleted. A question with no board task carries no task line.
 ~~~

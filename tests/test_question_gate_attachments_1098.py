@@ -9,13 +9,12 @@ on ``needs-answer`` asking for the very data the screenshot carried. Owner
 screenshot", „aj ostatne ulohy skontroluj popis fotky".
 
 ROZHODNUTÉ #1098 (supervisor, 2026-09-21): Option A — UNIVERSAL. The trigger is
-a ``/odoo/project/<pid>/tasks/<tid>`` task URL ALONE — NOT gated on Check 7's
-``odoo_ctx`` (Review 1): the incident's OWN shape is headed „projekt montalu
-(Odoo ERP…)" which Check 7's ODOO_PROJECT_RX / ODOO_WORK_RX do NOT match, so
-odoo_ctx is empty there. Any block carrying a board-task URL must ALSO carry a
+a ``/odoo/project/<pid>/tasks/<tid>`` task URL ALONE, never a project-name
+detector (Review 1): the incident's OWN shape is headed „projekt montalu
+(Odoo ERP…)", which a name detector missed. Any block carrying a board-task URL must ALSO carry a
 ``Prílohy:`` line — ``Prílohy: att <ids> prečítané …`` (or a read-evidence
-word) or ``Prílohy: žiadne`` for a task with no attachments. An action URL or an
-explicit no-task statement references no board task (nothing to read), so is
+word) or ``Prílohy: žiadne`` for a task with no attachments. An action URL, or a
+question with no task at all, references no board task (nothing to read), so is
 exempt.
 
 These are FUNCTIONAL tests (real Stop payload on stdin, reusing the #907
@@ -104,9 +103,8 @@ TASK_URL_NO_PRILOHY = (
     "❓ NEEDS YOU: aké rozmery má mať sieťka?\n"
 )
 
-# The incident's OWN head shape: „projekt montalu (Odoo ERP…)" — Check 7's
-# ODOO_PROJECT_RX (projekt odoo[-_ ]) and ODOO_WORK_RX (odoo task/úloh) do NOT
-# match, so odoo_ctx is EMPTY. The ONLY Odoo signal is the task URL. This is the
+# The incident's OWN head shape: „projekt montalu (Odoo ERP…)" — a project-name
+# detector misses it. The ONLY Odoo signal is the task URL. This is the
 # exact #555 shape Review 1 flagged: the old Check 9 precondition
 # `[ -n "${odoo_ctx:-}" ]` let it through. MUST BLOCK (task URL is the proof).
 MONTALU_HEAD_NO_PRILOHY = (
@@ -303,11 +301,10 @@ ACTION_URL_NO_PRILOHY = (
     "❓ NEEDS YOU: opraviť?\n"
 )
 
-# An explicit no-task statement references no board task. MUST PASS.
+# A technical question with no task line references no board task. MUST PASS.
 NO_TASK_STATEMENT = (
     "**Otázka — projekt odoo-erp (Odoo ERP pre montalu):** Čisto "
     "technická migrácia schémy.\n"
-    "Odoo task neexistuje — ide o čisto technickú úlohu.\n"
     "\n"
     "• Migrovať teraz (odporúčam)\n"
     "• Počkať\n"
@@ -335,7 +332,7 @@ class TestCheck9Blocks(_HookCase):
         self.assertTrue(self._blocked(r), r.stdout + r.stderr)
 
     def test_montalu_headed_shape_blocks(self):
-        # odoo_ctx is EMPTY here (Check 7 misses „projekt montalu (Odoo ERP…)");
+        # No project-name signal here („projekt montalu (Odoo ERP…)");
         # the task URL alone must trigger Check 9 (Review 1 precondition drop).
         r = self._run(MONTALU_HEAD_NO_PRILOHY)
         self.assertTrue(self._blocked(r), r.stdout + r.stderr)
