@@ -9,9 +9,8 @@ Facts no label can give (#1141 slice 3), read into a
   reports, or a stuck run, is not "in CI": the ticket stays I). A GraphQL
   query over the repo's open PRs (pages of 50, at most 100; more = unknown —
   #1188 cost cap: 1 point per 50-PR page vs 2 for one 100-PR page). A PR is
-  linked like M links a merged PR, minus the #1228 docs rule
-  (`cli_release_state._raw_issue_refs`: a `#N` in the title, a closing keyword
-  or an `Issue: #N` line in the body; a docs PR keeps C open too),
+  linked the same way M links a merged PR (`cli_release_state._issue_refs`: a
+  `#N` in the title, a closing keyword or an `Issue: #N` line in the body),
   plus GitHub's own `closingIssuesReferences`. Any open linked PR keeps C open.
 - `on_main`: the OPEN tickets whose fix commit is already on main
   (`cli_release_state.merged_released_oids` — 3-branch repos only: only their
@@ -132,8 +131,8 @@ def open_pr_states(payload, now=None, slug=None):
         in_ci = (_dig(head, "statusCheckRollup", "state") == "PENDING"
                  and pr.get("isDraft") is not True
                  and (born is None or now - born <= PIPELINE_MAX_AGE_S))
-        linked = cli_release_state._raw_issue_refs(pr.get("title"),
-                                                   pr.get("body"), number)
+        linked = cli_release_state._issue_refs(pr.get("title"), pr.get("body"),
+                                               number)
         closes = _dig(pr, "closingIssuesReferences", "nodes")
         linked |= {_dig(c, "number") for c in (closes or [])
                    if isinstance(_dig(c, "number"), int) and _same_repo(c, slug)}
@@ -292,6 +291,8 @@ def _facts(merged, handed, prs, on_main, reopened=frozenset()):
         on_main = {n: s for n, s in (on_main or {}).items() if s == ts.PENDING}
     prs = prs or {}
     return ts.TicketFacts(merged=frozenset(int(n) for n in (merged or ())),
+                          merged_docs=frozenset(   # #1228: keeps C open
+                              int(n) for n in getattr(merged, "docs", ())),
                           handed=dict(handed or {}),
                           pipeline=frozenset(n for n, c in prs.items() if c),
                           on_main=dict(on_main or {}),

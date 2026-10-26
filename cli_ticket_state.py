@@ -112,6 +112,8 @@ class Facts:
     `open_pr`: any open linked PR, in any state (it keeps C open).
     `reopened`: GitHub stateReason REOPENED (it keeps C open, ruling 1).
     `on_main`: "" (not on main, or unknown), DEPLOYED, RELEASED or PENDING.
+    `merged_docs`: only a docs/chore/style/ci change named it merged, not
+    released — never M, but it keeps C open (#1228).
     All defaults = the facts are unknown: the label route and nothing else."""
     merged: bool = False
     handed: Union[bool, str] = False
@@ -119,6 +121,7 @@ class Facts:
     on_main: str = ""
     open_pr: bool = False
     reopened: bool = False
+    merged_docs: bool = False
 
 
 @dataclass(frozen=True)
@@ -126,9 +129,9 @@ class TicketFacts:
     """The facts of a whole row set, as `bucketize` reads them (#1141 slice
     3): the merged numbers, the `handed` map (keyed like the rows), the numbers
     with a linked PR in CI, with any open linked PR, and the on-main state by
-    number, the REOPENED numbers, and `m_note` (why the M set is partial, or
-    ""; ruling 3). Empty = unknown: the label buckets (+ gk) of the earlier
-    slices."""
+    number, the REOPENED numbers, `m_note` (why the M set is partial, or "";
+    ruling 3) and `merged_docs` (named only by a merged docs change, #1228).
+    Empty = unknown: the label buckets (+ gk) of the earlier slices."""
     merged: frozenset = frozenset()
     handed: dict = field(default_factory=dict)
     pipeline: frozenset = frozenset()
@@ -136,6 +139,7 @@ class TicketFacts:
     open_pr: frozenset = frozenset()
     reopened: frozenset = frozenset()
     m_note: str = ""
+    merged_docs: frozenset = frozenset()   # #1228
 
     def of(self, number):
         """The `Facts` of ticket `number` (a non-numeric key has none)."""
@@ -148,7 +152,8 @@ class TicketFacts:
                      pipeline=n in self.pipeline,
                      on_main=self.on_main.get(n, ""),
                      open_pr=n in self.open_pr,
-                     reopened=n in self.reopened)
+                     reopened=n in self.reopened,
+                     merged_docs=n in self.merged_docs)
 
 
 def _names(labels):
@@ -396,7 +401,8 @@ def _c_veto(labels, names, facts):
     """What keeps a live fix from reading "done, close it", or "" (#1141
     slice 3, review round 1): unreadable labels (the vetoes cannot be
     checked), a `_C_VETO` label, a reopened ticket (ruling 1), or another fix
-    still pending — merged but not released, in CI, or any open linked PR."""
+    still pending — merged but not released (a docs/chore change too, #1228),
+    in CI, or any open linked PR."""
     if not isinstance(labels, (list, tuple)):
         return "unreadable labels"
     for label in _C_VETO:
@@ -407,6 +413,8 @@ def _c_veto(labels, names, facts):
                 "that flag while it is open)")
     if facts.merged:
         return "another fix merged, not yet released"
+    if facts.merged_docs:
+        return "a docs/chore change merged, not yet released (#1228)"
     if facts.pipeline or facts.open_pr:
         return "an open linked PR"
     return ""

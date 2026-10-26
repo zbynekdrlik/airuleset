@@ -380,18 +380,11 @@ def _save_cache(cache_path, data):
 
 
 def _issue_refs(title, body, exclude_pr):
-    """`_raw_issue_refs` of an IMPLEMENTING change: a docs/chore/style/ci title
-    (or a `[no-test: docs…]` one) carries none (#1228; judged by the TITLE)."""
-    if cli_commit_kind.implements_nothing(title):
-        return set()
-    return _raw_issue_refs(title, body, exclude_pr)
-
-
-def _raw_issue_refs(title, body, exclude_pr):
-    """The tickets a PR names minus its OWN number (also P's open-PR link and
-    the C veto, `cli_ticket_facts`): every TITLE `#N` (#1083 REWORK, incl. the
-    `fix(#N):` / `#7631 #7632` forms; a revert title has none) + the BODY's
-    closing-keyword / `Issue: #N` refs only (a bare body `#N` is context)."""
+    """The tickets a PR names minus its OWN number (also P's open-PR link,
+    `cli_ticket_facts`): every TITLE `#N` (#1083 REWORK, incl. the `fix(#N):`
+    / `#7631 #7632` forms; a revert title has none) + the BODY's closing-
+    keyword / `Issue: #N` refs only (a bare body `#N` is context). Whether the
+    change IMPLEMENTS them is `cli_commit_kind.implements_nothing` (#1228)."""
     title_text = title or ""
     refs = set() if _REVERT_TITLE_RE.match(title_text) else {
         int(m) for m in _TITLE_REF_RE.findall(title_text)}
@@ -475,11 +468,11 @@ def _compute_two_branch(root, git_full_fn, prefix, ref_exists_fn):
             % (len(commits), main_ref, dev_ref, d_main or "?", d_dev or "?"))
         _PARTIAL[root] = "M hidden: %d commits in range" % len(commits)
         return frozenset()
-    issues = set()
+    issues, docs = set(), set()
     for oid, subj, body in commits:   # #1228: a commit's own body marker too
-        if not cli_commit_kind.implements_nothing(subj, body):
-            issues.update(int(n) for n in _issue_refs(subj, body, 0))
-    return frozenset(issues)
+        nothing = cli_commit_kind.implements_nothing(subj, body)
+        (docs if nothing else issues).update(_issue_refs(subj, body, 0))
+    return cli_commit_kind.MergedUnreleased(issues, docs=docs)
 
 
 def _compute_merged_unreleased(root, git_fn, git_full_fn, pr_meta_fn, cache_path,
@@ -554,7 +547,7 @@ def _compute_merged_unreleased(root, git_fn, git_full_fn, pr_meta_fn, cache_path
     cache = _load_cache(cache_path)
     if not isinstance(cache, dict):
         cache = {}
-    issues = set()
+    issues, docs = set(), set()
     new_metas = 0          # (c) new PR metas fetched THIS refresh
     quota_hit = False      # (d) gh reported a rate-limit / 403 / 429
     unread = 0             # PRs left for a later refresh (#1141 ruling 3)
@@ -577,7 +570,8 @@ def _compute_merged_unreleased(root, git_fn, git_full_fn, pr_meta_fn, cache_path
                 continue
             title, body = meta
             entry = {"issues": sorted(_issue_refs(title, body, pr)), "oid": oid,
-                     "v": _CACHE_V}
+                     "v": _CACHE_V,
+                     "docs": cli_commit_kind.implements_nothing(title)}
             cache[key] = entry
             new_metas += 1
             _save_cache(cache_path, cache)   # (c) save after EVERY new entry
@@ -586,14 +580,14 @@ def _compute_merged_unreleased(root, git_fn, git_full_fn, pr_meta_fn, cache_path
             entry["oid"] = entry.get("oid") or oid
             if cli_commit_kind.rejudge(entry, root, oid, _CACHE_V) or backfill:
                 _save_cache(cache_path, cache)
-        for n in entry.get("issues", []):
-            issues.add(int(n))
+        (docs if entry.get("docs") else issues).update(   # #1228
+            int(n) for n in entry.get("issues", []))
     if quota_hit:
         sys.stderr.write(
             "merged-unreleased: gh quota hit — M partial this refresh\n")
     _PARTIAL[root] = ("gh quota hit" if quota_hit else "%d merged PRs not "
                       "read yet" % unread if unread else "")
-    return frozenset(issues)
+    return cli_commit_kind.MergedUnreleased(issues, docs=docs)
 
 
 def merged_unreleased_issues(root, git_fn=None, pr_meta_fn=None,
@@ -650,7 +644,7 @@ def merged_released_oids(root, open_numbers, is_ancestor_fn=None,
         return {}
     if is_ancestor_fn is None:
         is_ancestor_fn = _default_is_ancestor
-    out, judged = {}, {}
+    out, docs, judged = {}, {}, {}
     for key, entry in cache.items():
         if not isinstance(entry, dict):
             continue
@@ -662,10 +656,12 @@ def merged_released_oids(root, open_numbers, is_ancestor_fn=None,
         if open_hits and oid and cli_commit_kind.rejudge(entry, root, oid,
                                                          _CACHE_V):   # #1228
             judged[key] = entry
-            open_hits = open_hits if entry["issues"] else []
         if open_hits and oid and is_ancestor_fn(oid, root):
             for n in open_hits:
-                out.setdefault(n, []).append(oid)
+                (docs if entry.get("docs") else out).setdefault(n, []).append(oid)
+    for n, oids in docs.items():   # #1228: a docs oid must be live too, but
+        if n in out:               # it never puts a ticket on main by itself
+            out[n].extend(oids)
     if judged:   # written back once, merged into the CURRENT file (#1228)
         fresh = _load_cache(cache_path)
         _save_cache(cache_path, {**(fresh if isinstance(fresh, dict) else {}),

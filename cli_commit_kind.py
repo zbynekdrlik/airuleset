@@ -69,15 +69,26 @@ def introducing_commit_implements_nothing(root, oid):
 
 def rejudge(entry, root, oid, version):
     """Re-judge a PR-cache `entry` written before the rule (its `v` is not
-    `version`) from commit `oid`: once git READ it, stamp `v` and empty the refs
-    of a change that implements nothing. Unreadable leaves the entry as it is
-    (its refs kept, retried next time). True when the entry changed."""
+    `version`) from commit `oid`: once git READ it, stamp `v` and `docs` (the
+    refs stay: a docs change is still a pending change for the C veto).
+    Unreadable leaves the entry as it is (implementing, retried next time).
+    True when the entry changed."""
     if entry.get("v") == version:
         return False
     nothing = introducing_commit_implements_nothing(root, oid)
     if nothing is None:
         return False
-    entry["v"] = version
-    if nothing:
-        entry["issues"] = []
+    entry["v"], entry["docs"] = version, nothing
     return True
+
+
+class MergedUnreleased(frozenset):
+    """The M set — the tickets an IMPLEMENTING change merged but did not
+    release — plus `.docs`: the tickets only a docs/chore/style/ci change
+    names. Those never enter M, yet stay a pending change that keeps C open
+    (`cli_ticket_state._c_veto`, through `TicketFacts.merged_docs`)."""
+
+    def __new__(cls, issues=(), docs=()):
+        obj = super().__new__(cls, issues)
+        obj.docs = frozenset(docs)
+        return obj
