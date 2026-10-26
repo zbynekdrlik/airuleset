@@ -501,5 +501,47 @@ class OwnerGrantOnAMachinePickedPane(base._Latched):
         self.assertTrue(ok, logs)
 
 
+class ImplWindowReadsItsOwnSession(_CwdSessions):
+    """Review 2, finding 5: the dual-agent impl window and the main window
+    share the marker cwd, so `cwd_latch` (the cwd's newest session) judged a
+    missing impl window by whichever session wrote last: a paused impl session
+    was missed, a paused main session held the impl window back. The impl
+    window's own session is remembered while it exists."""
+    CWD = "/home/miva1/devel/odoo/odoo-erp"
+
+    def _decide(self, starts):
+        from watchdog import tmux_io
+        with m.patch.object(base.wd, "_pane_claude_start_epoch",
+                            side_effect=lambda pid, run=None: starts.get(pid)):
+            _os().refresh({}, [("%M", self.CWD), ("%I", self.CWD)], self.proj,
+                          NOW, run=lambda argv, timeout=8: "")
+
+        def windows(lines):
+            return lambda argv, timeout=8: lines if argv[:2] == [
+                "tmux", "list-windows"] else ""
+        self.assertEqual(tmux_io.impl_window_presence(
+            {"cwd": self.CWD}, run=windows("miva1\t0\tmiva1\t%M\n"
+                                           "miva1\t1\timpl\t%I\n"), logs=[]),
+            "present")
+        logs = []
+        rc = tmux_io.impl_window_presence(
+            {"cwd": self.CWD}, run=windows("miva1\t0\tmiva1\t%M\n"), logs=logs)
+        return rc, logs
+
+    def test_a_paused_impl_session_is_not_relaunched(self):
+        self._session("SMAIN", [_u("sprav ticket 5", NOW - 900),
+                                base._a("robím", NOW - 5)], NOW - 5)
+        self._session("SIMPL", [_u("pauza", NOW - 600)], NOW - 600)
+        rc, logs = self._decide({"%M": NOW - 950, "%I": NOW - 620})
+        self.assertEqual(rc, "owner-stop", logs)
+
+    def test_a_paused_main_session_never_holds_the_impl_window(self):
+        self._session("SMAIN", [_u("pauza", NOW - 60)], NOW - 60)
+        self._session("SIMPL", [_u("sprav ticket 5", NOW - 900),
+                                base._a("robím", NOW - 300)], NOW - 300)
+        rc, logs = self._decide({"%M": NOW - 80, "%I": NOW - 950})
+        self.assertEqual(rc, "relaunched", logs)
+
+
 if __name__ == "__main__":
     unittest.main()
