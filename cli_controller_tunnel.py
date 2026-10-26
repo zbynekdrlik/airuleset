@@ -89,15 +89,15 @@ def reapply_after_harvest(changed, *, apply_fn=None, is_controller_fn=None):
     """Re-render + apply the controller tunnel when the push harvest CHANGED a
     lane's filedrop port (a new lane's first port, or a drift), so its `/s/`
     rule goes live in THIS push. Returns None when nothing changed, off the
-    controller account, or under a test run with the real seams (a test must
-    never write the live controller tunnel); else the apply's result. Never
-    raises: a failure is LOUD and the next push re-renders anyway."""
+    controller account, or under a test run that left EITHER real seam in
+    place (a test must never write the live controller tunnel); else the
+    apply's result. Never raises: a failure is LOUD and the next push
+    re-renders anyway."""
     if not changed:
         return None
-    if is_controller_fn is None:
-        if os.environ.get("PYTEST_CURRENT_TEST"):
-            return None
-        is_controller_fn = is_controller_account
+    if os.environ.get("PYTEST_CURRENT_TEST") and None in (apply_fn, is_controller_fn):
+        return None
+    is_controller_fn = is_controller_fn or is_controller_account
     keys = ", ".join(changed)
     try:
         if not is_controller_fn():

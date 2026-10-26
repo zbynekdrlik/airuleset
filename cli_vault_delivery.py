@@ -91,27 +91,32 @@ def share_route_probe_url(public_host: str) -> str:
     return "https://%s%s" % (public_host, SHARE_ROUTE_PROBE_PATH)
 
 
-def share_route_failure(code, port_header, port):
+def share_route_failure(code, got_id, want_id):
     """None when the route probe proves `/s/` reaches THIS account's filedrop
-    (204 + its own port, #1238), else why it does not — the share refusal's
-    reason. `/healthz` cannot prove it: the no-path rule serves it (502 there
-    is the ephemeral endpoint port with nothing listening)."""
+    (204 + its own `filedrop.server.instance_id`, #1238), else why it does not
+    — the share refusal's reason. `/healthz` cannot prove it: the no-path rule
+    serves it (502 there is the ephemeral endpoint port with nothing listening)."""
     if code in (None, 530):
         return dead_detail(code)
     if code == PUBLIC_ACCESS_CODE:
         return ("the route probe got the Access login (302): the lane's /healthz "
                 "bypass is not applied, so the /s/ route cannot be proven")
+    if code == 404:
+        return ("the route probe got HTTP 404: this box's filedrop predates the "
+                "probe (restart filedrop.service / re-run install) or the /s/ "
+                "rule is missing")
     if code != 204:
         return ("the route probe got HTTP %s instead of this box's filedrop: the "
-                "/s/ rule is missing from the tunnel ingress (a new lane gets it in "
-                "the push that harvests its filedrop port) or the edge answered" % code)
-    if port_header is None:
-        return ("the route probe got 204 without the filedrop port header — not "
+                "/s/ rule is missing from the tunnel ingress (a controller lane "
+                "gets it in the push that harvests its filedrop port, a local lane "
+                "on its next `drop-gateway --apply`) or the edge answered" % code)
+    if got_id is None:
+        return ("the route probe got 204 without the filedrop id header — not "
                 "this box's filedrop")
-    if str(port_header).strip() != str(port):
-        return ("the /s/ route reaches filedrop port %s, this account serves %s "
-                "(a stale route — the next push re-renders it)"
-                % (str(port_header).strip(), port))
+    if str(got_id).strip() != want_id:
+        return ("the /s/ route reaches another filedrop (id %s), not this "
+                "account's (%s): a stale or wrong route — the next push "
+                "re-renders it" % (str(got_id).strip(), want_id))
     return None
 
 

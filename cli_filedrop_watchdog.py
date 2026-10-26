@@ -403,15 +403,15 @@ def _public_share_status(url, timeout=3):
 
 
 def _public_share_probe(url, timeout=3):
-    """``(status, filedrop port header)`` of GET <url> WITHOUT following
+    """``(status, filedrop id header)`` of GET <url> WITHOUT following
     redirects, or ``(None, None)`` on a connection error / timeout (#1114). 200 =
     the tunnel + filedrop origin served it; 302 = Access-gated (the login
     redirect, never followed, so it is not mistaken for the Access page's own
-    200); a 5xx means the origin is down. #1238: the port header is what the
+    200); a 5xx means the origin is down. #1238: the id header is what the
     filedrop server puts on its `/s/` route probe answer."""
     import urllib.error
     import urllib.request
-    from filedrop.server import FILEDROP_PORT_HEADER
+    from filedrop.server import FILEDROP_ID_HEADER
 
     class _NoRedirect(urllib.request.HTTPRedirectHandler):
         def redirect_request(self, req, fp, code, msg, headers, newurl):
@@ -423,9 +423,9 @@ def _public_share_probe(url, timeout=3):
     req = urllib.request.Request(url, headers={"User-Agent": "airuleset-share"})
     try:
         r = opener.open(req, timeout=timeout)
-        return r.status, r.headers.get(FILEDROP_PORT_HEADER)
+        return r.status, r.headers.get(FILEDROP_ID_HEADER)
     except urllib.error.HTTPError as e:          # 302 / 5xx surface here
-        return e.code, (e.headers.get(FILEDROP_PORT_HEADER) if e.headers else None)
+        return e.code, (e.headers.get(FILEDROP_ID_HEADER) if e.headers else None)
     except Exception:
         return None, None                        # timeout / connection refused / DNS
 
@@ -450,6 +450,7 @@ def cmd_share(args):
     import cli_drop_gateway as _dg
     import cli_vault_delivery as _vd
     from filedrop import advertise_urls
+    from filedrop.server import instance_id
     from filedrop.share import ShareError, share
     private = bool(getattr(args, "private", False))
     if not private:                 # #1192: refuse BEFORE any side effect
@@ -499,9 +500,9 @@ def cmd_share(args):
         # #1238: Access answered at the EDGE, which proves nothing about the /s/
         # ROUTE (a new lane has none until its port harvest). Prove the route:
         # the bypassed /healthz/s rides the same rule pair as /s/, and only THIS
-        # account's filedrop answers it 204 + its port. Anything else: no URL.
-        code, fd_port = _public_share_probe(_vd.share_route_probe_url(public_host))
-        why = _vd.share_route_failure(code, fd_port, sp.port)
+        # account's filedrop answers it 204 + its instance id. Else: no URL.
+        code, fd_id = _public_share_probe(_vd.share_route_probe_url(public_host))
+        why = _vd.share_route_failure(code, fd_id, instance_id(sp.port))
         if why:
             print(_vd.refusal_line("share", "the /s/ route of https://%s/ is not "
                                    "proven — %s" % (public_host, why)), file=sys.stderr)
