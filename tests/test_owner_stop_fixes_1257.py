@@ -164,12 +164,9 @@ class EveryKeystrokePaneIsMapped(base._Pane):
         self.assertIsNone(_os().pane_latch("%99"))   # not in the inventory
 
 
-class TwoPanesOneCwd(unittest.TestCase):
-    """Review finding 5: with two claude panes in one cwd the latch was keyed
-    on the cwd's NEWEST transcript, so the paused pane was typed into and the
-    working one held. Each pane resolves its OWN session by the claude
-    process's resume boundary (#645, `_transcript_resume_boundary_at`);
-    `deliver_goal` checks the session it arms by `sid`."""
+class _CwdSessions(unittest.TestCase):
+    """Sessions of ONE cwd in a temp projects dir, and a refresh sweep whose
+    claude start times come from the `/proc` seam."""
     CWD = "/home/newlevel/devel/twopanes"
 
     def setUp(self):
@@ -193,6 +190,14 @@ class TwoPanesOneCwd(unittest.TestCase):
                             side_effect=lambda pid, run=None: starts.get(pid)):
             return _os().refresh({}, [("%A", self.CWD), ("%B", self.CWD)],
                                  self.proj, NOW, run=run)
+
+
+class TwoPanesOneCwd(_CwdSessions):
+    """Review finding 5: with two claude panes in one cwd the latch was keyed
+    on the cwd's NEWEST transcript, so the paused pane was typed into and the
+    working one held. Each pane resolves its OWN session by the claude
+    process's resume boundary (#645, `_transcript_resume_boundary_at`);
+    `deliver_goal` checks the session it arms by `sid`."""
 
     def _working_and_paused(self, paused_newest=False):
         work = [_u("sprav ticket 5", NOW - 900), base._a("robím", NOW - 5)]
@@ -327,6 +332,55 @@ class LatchHoldIsNoSwallow(base._Latched):
         self.assertEqual(pings, [])
         self.assertTrue(any("subagent-apierr-held" in ln and "owner-stop" in ln
                             for ln in logs), logs)
+
+
+class OnlyClaudePanesShareACwd(_CwdSessions):
+    """Review 2, finding 1: a node/bun pane that hosts no claude (a dev server)
+    was counted as a second Claude in the cwd, so the one real claude pane went
+    through the resume-boundary resolver, failed to resolve and "failed
+    closed" on an old session's /exit; and its cwd read as live, so a real
+    exit there was missed. An unresolved pane also failed closed on sessions
+    that ended before its own claude started."""
+    CWD = "/home/newlevel/devel/webapp"
+    DEV = "4194000"          # a pane_pid with no claude process under it
+
+    def _run(self, lines):
+        inv = "\n".join(lines)
+        return lambda argv, timeout=8: inv if "list-panes" in argv else ""
+
+    def _old_exit(self):
+        self._session("SOLD", [_u("sprav ticket", NOW - 2 * DAY),
+                               _u("<command-name>/exit</command-name>",
+                                  NOW - 2 * DAY + 60)], NOW - 2 * DAY + 60)
+
+    def test_a_dev_server_beside_one_claude_pane_changes_nothing(self):
+        self._old_exit()
+        self._session("SLIVE", [_u("sprav ticket 5", NOW - 3000),
+                                base._a("robím", NOW - 5)], NOW - 5)
+        run = self._run(["%%A\tclaude\t%s\t111" % self.CWD,
+                         "%%N\tnode\t%s\t%s" % (self.CWD, self.DEV)])
+        with m.patch.object(base.wd, "_pane_claude_start_epoch",
+                            side_effect=lambda pid, run=None: {"%A": NOW - 3600}.get(pid)):
+            _os().refresh({}, [("%A", self.CWD)], self.proj, NOW, run=run)
+        self.assertIsNone(_os().pane_latch("%A"))
+
+    def test_an_exit_beside_a_dev_server_still_latches(self):
+        self._session("SLAST", [_u("sprav ticket 5", NOW - 900)], NOW - 800)
+        run = self._run(["%%S\tbash\t%s\t333" % self.CWD,
+                         "%%N\tnode\t%s\t%s" % (self.CWD, self.DEV)])
+        state = {}
+        _os().refresh(state, [], self.proj, NOW, run=run)
+        self.assertEqual(state[_os().STATE_KEY]["SLAST"]["fact"], "exit")
+
+    def test_an_unresolved_pane_ignores_sessions_older_than_its_claude(self):
+        self._old_exit()
+        self._session("SA", [_u("sprav ticket 5", NOW - 900),
+                             base._a("robím", NOW - 5)], NOW - 5)
+        self._session("SB", [_u("sprav ticket 6", NOW - 3000),
+                             base._a("robím", NOW - 60)], NOW - 60)
+        self._sweep({"%A": NOW - 950, "%B": NOW - 3600})
+        self.assertIsNone(_os().pane_latch("%A"))
+        self.assertIsNone(_os().pane_latch("%B"))
 
 
 if __name__ == "__main__":
