@@ -12,6 +12,7 @@ end-to-end by the existing hook tests via the thin bash adapter. Bypass:
 ``# airuleset:secret-ok <reason>`` inline (quote-aware, via gates.shellcmd), logged
 through gates.audit. See block-sensitive-staging.sh's header for the full history.
 """
+import json
 import os
 import re
 import subprocess
@@ -58,6 +59,10 @@ SECRET_PREFIX_PAT = re.compile(
     r"|AIza[0-9A-Za-z_-]{35}"
     r"|npm_[A-Za-z0-9]{36}"
     r"|xox[baprs]-[A-Za-z0-9-]{10,}"
+    r"|discord(?:app)?\.com/api/webhooks/\d{5,}/[A-Za-z0-9_-]{20,}"
+    r"|hooks\.slack\.com/services/T\w+/B\w+/[A-Za-z0-9]{20,}"
+    r"|(?<![A-Za-z0-9])cfat_[A-Za-z0-9_-]{40,}"
+    r"|(?<![\w:])\d{8,10}:[A-Za-z0-9_-]{35}(?![\w-])"     # a Telegram bot
     r"|-----BEGIN [A-Z ]*PRIVATE KEY-----"
     r"|eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"
 )
@@ -65,6 +70,16 @@ SECRET_PREFIX_PAT = re.compile(
 # carry a digit, so a dotted CamelCase identifier is not one.
 DISCORD_PAT = re.compile(
     r"(?<![\w.-])([MN][A-Za-z0-9_-]{23,25})\.[A-Za-z0-9_-]{6}\.([A-Za-z0-9_-]{27,})")
+# Review A6 (formats the retired entropy rule used to catch): a URL/DSN
+# password, an unquoted YAML value, an env NAME ending in KEY/PASS/…/SECRET
+# (`MONKEY=` is not one), and an API-key / Authorization header value.
+URL_CRED_PAT = re.compile(r"(?i)\b[a-z][a-z0-9+.-]{1,20}://[^\s:/@'\"]+:([^\s/@'\"]{8,})@")
+YAML_PAT = re.compile(r"(?i)(?<![\w.-])(password|passwd|passphrase|secret|token|api[_-]?key)"
+                      r"[ \t]*:[ \t]+([^\s'\"#,{}\[\]]{8,})[ \t]*(?:#.*)?$")
+ENV_PAT = re.compile(r"(?<![\w$.-])((?:[A-Z0-9]+_)*(?:KEY|PASS|PASSWD|PASSWORD|TOKEN|SECRET))"
+                     r"=[\"']?([^\s'\"`$<{}()\[\],;]{8,})")
+HEADER_PAT = re.compile(r"(?i)\b(x-api-key|authorization)[\"']?[ \t]*:[ \t]*[\"']?"
+                        r"(?:(?:bearer|basic|token)[ \t]+)?([A-Za-z0-9._~+/=-]{16,})")
 _DIGIT_RE = re.compile(r"\d")
 _LETTER_RE = re.compile(r"[A-Za-z]")
 
@@ -108,10 +123,15 @@ def scan_line(text):
         val = val_m.group(2) if val_m else ""
         if not is_placeholder(val):
             return "literal " + m.group(1).lower() + " value"
-    for pat in (BARE_ASSIGN_PAT, TOKEN_KEY_PAT, BEARER_PAT):
+    for pat in (BARE_ASSIGN_PAT, TOKEN_KEY_PAT, BEARER_PAT, YAML_PAT, ENV_PAT,
+                HEADER_PAT):
         for m in pat.finditer(text):
-            if _token_like(m.group(m.lastindex)):
+            val = m.group(m.lastindex)
+            if _token_like(val) and not val.startswith(("/", "~", ".", "ssh-")):
                 return "literal %s value" % m.group(1).lower()
+    for m in URL_CRED_PAT.finditer(text):
+        if not is_placeholder(m.group(1)) and m.group(1).lower() != "password":
+            return "password in a URL"
     return None
 
 
@@ -307,8 +327,25 @@ def _gate2_msg(violations):
             "  See modules/quality/security-basics.md.\n" % indented)
 
 
+def _shape_error(payload):
+    """Why a JSON payload carries no string command, or "" (issue 1137 B1 B7:
+    a security gate refuses it in one line instead of a traceback)."""
+    try:
+        obj = json.loads(payload)
+    except ValueError:
+        return ""                         # raw text: the TOOL_INPUT fallback
+    tin = obj.get("tool_input") if isinstance(obj, dict) else None
+    cmd = tin.get("command") if isinstance(tin, dict) else None
+    if not isinstance(obj, dict) or not isinstance(tin, (dict, type(None))):
+        return "it is not a tool payload object"
+    return "" if isinstance(cmd, (str, type(None))) else "the command is not a string"
+
+
 def main():
     payload = read_payload()
+    if bad := _shape_error(payload):
+        emit_block("🚫 BLOCKED (fail-closed): block-sensitive-staging could not read"
+                   " this payload — %s." % bad)
     cmd = command_of(payload)
     if block := codeonly.violation(cmd):   # #1220: before, and immune to, any bypass
         emit_block(block)

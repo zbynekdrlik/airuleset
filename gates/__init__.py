@@ -58,7 +58,9 @@ def command_of(payload):
     except Exception:
         obj = None
     if isinstance(obj, dict):
-        cmd = (obj.get("tool_input") or {}).get("command") or ""
+        tin = obj.get("tool_input")
+        cmd = tin.get("command") if isinstance(tin, dict) else ""
+        cmd = cmd if isinstance(cmd, str) else ""      # issue 1137 B1 B7
     if cmd:
         return cmd
     if '"tool_input"' in (payload or ""):
