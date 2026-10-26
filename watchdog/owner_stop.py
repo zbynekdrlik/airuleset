@@ -59,7 +59,7 @@ _CMD_RX = re.compile(r"<command-name>/?([^<\s]+)</command-name>")
 _INTERRUPT = "[Request interrupted by user"
 
 _PANES = {}        # pane_id -> context of THIS sweep (`refresh`)
-_SWEEP = {}        # {"state": the sweep state} for a caller without `state`
+_SWEEP = {}        # {"state", "projects_dir", "cwds": {pane_id: cwd}} of the sweep
 _MEMO = {}         # (pane_id, file stamps) -> latch
 _WITHHELD = set()  # pane ids already journalled by `withhold` this sweep
 
@@ -258,11 +258,28 @@ def _memo_key(pane_id, ctx):
     return (pane_id, _stamp(ctx.get("tpath")), _stamp(ctx.get("prev")))
 
 
+def _unmapped(pane_id):
+    """The context of a pane `refresh` did not map: its cwd's newest session,
+    from the sweep's pane inventory (fail CLOSED). None when the sweep never
+    saw the pane or its cwd has no session."""
+    cwd = (_SWEEP.get("cwds") or {}).get(pane_id)
+    if not cwd or not _SWEEP.get("projects_dir"):
+        return None
+    try:
+        ctx = _context(_SWEEP["projects_dir"], cwd, _SWEEP.get("state"))
+    except Exception:          # noqa: BLE001 -- unreadable = no session to read
+        return None
+    if ctx.get("sid"):
+        _PANES[pane_id] = ctx
+        return ctx
+    return None
+
+
 def pane_latch(pane_id):
-    """The latch for a pane `refresh` mapped this sweep, re-read when its
-    transcripts changed since (memoized on their size+mtime; `refresh` seeds
-    the memo); None otherwise."""
-    ctx = _PANES.get(pane_id)
+    """The latch for a pane this sweep (mapped by `refresh`, else its cwd's —
+    `_unmapped`), re-read when its transcripts changed since (memoized on their
+    size+mtime; `refresh` seeds the memo); None when nothing maps it."""
+    ctx = _PANES.get(pane_id) or _unmapped(pane_id)
     if not ctx:
         return None
     key = _memo_key(pane_id, ctx)
@@ -317,16 +334,38 @@ def _exits(panes, projects_dir, run):
     return out
 
 
+def _all_panes(panes, run):
+    """(`panes` + every claude/node/bun pane the job-20 riders iterate,
+    {pane_id: cwd} of every tmux pane) from the sweep's memoized inventory."""
+    from watchdog.long_turn import _reconcile_candidate_panes
+    from watchdog.tmux_io import _pane_inventory_raw
+    known = {str(p) for p, _c in panes or ()}
+    out = list(panes or ()) + [(p, c) for p, c, _cmd in
+                               _reconcile_candidate_panes(run) if p not in known]
+    cwds = {}
+    for line in (_pane_inventory_raw(run) or "").splitlines():
+        parts = line.split("\t")
+        if len(parts) >= 3 and parts[0].strip():
+            cwds.setdefault(parts[0].strip(), parts[2].strip())
+    return out, cwds
+
+
 def refresh(state, panes, projects_dir, now, dry_run=False, run=None):
     """Once per sweep, BEFORE any keystroke job: latch every session whose
-    claude left its pane (`_exits`, needs `run`), map every claude pane to its
-    transcripts, persist each session's latch and journal its transitions (SET
-    once per episode, cleared once). Returns the journal lines."""
+    claude left its pane (`_exits`, needs `run`), map every claude/node/bun pane
+    to its transcripts, persist each session's latch and journal its
+    transitions (SET once per episode, cleared once). Returns the journal lines."""
     reset()
     logs = []
     if not isinstance(state, dict):
         return logs
-    _SWEEP["state"] = state
+    _SWEEP.update(state=state, projects_dir=projects_dir)
+    if run:
+        try:
+            panes, _SWEEP["cwds"] = _all_panes(panes, run)
+        except Exception as e:     # noqa: BLE001 -- an inventory fault never stops the sweep
+            logs.append("owner-stop latch: pane inventory unreadable (%r), claude "
+                        "panes only" % (e,))
     recs = state.get(STATE_KEY)
     recs = dict(recs) if isinstance(recs, dict) else {}
     try:
