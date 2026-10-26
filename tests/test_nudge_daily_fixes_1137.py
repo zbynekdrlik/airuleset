@@ -16,6 +16,7 @@ import test_goal_stranded_recovery_566 as stranded  # noqa: E402
 import test_infra_priority_arrival_1109 as prio  # noqa: E402
 import watchdog as wd  # noqa: E402
 from watchdog import goal  # noqa: E402
+from watchdog import nudge_gate as ng  # noqa: E402
 
 
 class StrandedOwnGoalBudget(unittest.TestCase):
@@ -89,6 +90,46 @@ class PriorityWaveInTheBatch(prio._RiderBase):
         self.assertEqual(bc, [], logs)
         self.assertTrue(any("kind-off" in ln and "infra-priority" in ln
                             for ln in logs), logs)
+
+
+class EveryDueKindFitsTheDailyBatch(prio._RiderBase):
+    """Review finding 12: BATCH_MAX_CHARS (1400) trimmed the daily batch to
+    two real rider texts, so partition-audit / u-freshness / goal-guard
+    starved while release-gap was due every day. Since issue 1157 the batch
+    body goes to a nudge FILE and ONE pointer row is typed: no cap."""
+
+    def _real_texts(self):
+        from watchdog import ops_wait_recheck, queue_arrival_recheck, release_gap
+        from watchdog import u_freshness
+        members = [{"number": n, "title": "Ticket %d title words here" % n,
+                    "labels": ["ops-wait"]} for n in range(10)]
+        return [
+            ("release-gap", release_gap._nudge_text(
+                7, "develop", "main", deploy_age_h=30.0, inactive_m=200.0)),
+            ("partition-audit", ops_wait_recheck._nudge_text(
+                12, members, prio.NOW, release_landed=[1, 2, 3],
+                stagnation_count=3, deploy_window=[4, 5], deploy_miss=[6],
+                spec_missing_n=2, spec_open=[7])),
+            ("u-freshness", u_freshness._nudge_text(9)),
+            ("queue-arrival", queue_arrival_recheck._nudge_text(
+                list(range(5, 13)), 20,
+                {n: "Some ticket title %d about something long" % n
+                 for n in range(30)})),
+            ("goal-guard", goal._GOAL_GUARD_TEXT)]
+
+    def test_all_five_rider_texts_ride_one_batch(self):
+        texts = self._real_texts()
+        self.assertGreater(sum(len(t) for _c, t in texts), 1400)
+        state, logs, ran = {}, [], []
+        collect = [(c, t, (lambda c=c: ran.append(c))) for c, t in texts]
+        goal._deliver_batch(collect, "%9", self.sid, "gk-infra:0", self.tpath,
+                            self._tmux(), state, prio.NOW, set(), None,
+                            lambda *a, **k: None, logs, None)
+        cats = [c for c, _t in texts]
+        self.assertTrue(any("batch-nudge" in ln and "5 section(s)" in ln
+                            for ln in logs), logs)
+        self.assertEqual(set(ng._session(state, self.sid)), set(cats))
+        self.assertEqual(sorted(ran), sorted(cats))
 
 
 if __name__ == "__main__":
