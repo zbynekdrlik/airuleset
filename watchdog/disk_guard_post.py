@@ -110,4 +110,6 @@ def after_drain(status, home, now, dry_run, timer, planners_fn, scratch_rows,
         logs += dg.severe_journal(
             post, home, now, _cached_top(post) or _cached_top(status),
             dry_run=dry_run, critical_pct=crit)
+    else:
+        dg.clear_severe_stamp(home, dry_run)
     return logs

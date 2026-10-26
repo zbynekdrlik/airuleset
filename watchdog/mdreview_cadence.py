@@ -17,24 +17,21 @@ hooks/block-builtin-command-shadow.sh (gates.commandshadow).
 
 #1137: the job never creates or reopens a ticket. With no ticket recorded it
 ADOPTS the open ticket titled ``TRACKING_TITLE`` (a read-only search). A
-definite miss or a CLOSED ticket is ONE journal line and waits a day; a gh
-error (an unreadable state or search) does NOT advance the daily TTL, so the
-next sweep retries. An audit failure advances the daily TTL (finding 7).
-
-MODEL_TIERS (#908): each daily fire compares ``_model_tiers_hash`` with the
-``model_tiers_hash`` in the state; a change is ONE ``model-generation`` journal
-line (the next /mdreview slimming pass is then non-skippable, Step 5c).
+definite miss or a CLOSED ticket is ONE journal line and waits a day; a
+recorded ticket that is not readable OPEN is re-resolved by title (a deleted or
+replaced ticket is adopted again); a gh error retries after RETRY_S, never every
+sweep. An audit failure advances the daily TTL (finding 7).
 
 Imports NO notify — the lock-test in test_mdreview_audit.py verifies this.
 """
 
-import hashlib
 import json
 import os
 import socket
 from pathlib import Path
 
 DAILY_TTL_S = 86400
+RETRY_S = 3600
 
 _REPO_SLUG = "zbynekdrlik/airuleset"
 
@@ -59,12 +56,6 @@ def _state_path(override=None):
     if ovr:
         return Path(ovr)
     return _DEFAULT_STATE_PATH
-
-
-def _model_tiers_hash():
-    import airuleset
-    items = sorted(airuleset.MODEL_TIERS.items())
-    return hashlib.sha1(str(items).encode("utf-8")).hexdigest()
 
 
 def _load_state(state_path_override=None):
@@ -126,18 +117,6 @@ def find_tracking_ticket(gh_runner=None):
     except (ValueError, TypeError, AttributeError, KeyError):
         return None, False
     return None, True
-
-
-def _model_generation_step(cad_state):
-    """Record the MODEL_TIERS hash; ONE journal line when it changed."""
-    current = _model_tiers_hash()
-    stored = cad_state.get("model_tiers_hash")
-    cad_state["model_tiers_hash"] = current
-    if stored and stored != current:
-        return ["mdreview-cadence: model-generation change (MODEL_TIERS hash "
-                "%s -> %s) -- the next /mdreview slimming pass is mandatory"
-                % (stored[:8], current[:8])]
-    return []
 
 
 def _today():
@@ -229,40 +208,33 @@ def mdreview_cadence_job(now, _state=None, dry_run=False,
         logs.append("mdreview-cadence: ttl-skip")
         return logs
 
-    logs += _model_generation_step(cad_state)
     ticket = cad_state.get("ticket")
     if not ticket and dry_run:
         logs.append("mdreview-cadence: would look up the tracking ticket by "
                     "title (dry-run)")
         return logs
-    if not ticket:
-        ticket, ok = find_tracking_ticket(gh_runner)
-        if not ok:
-            logs.append("mdreview-cadence: tracking-ticket lookup unreadable -- "
-                        "retry next sweep")
-            _save_state(cad_state, state_path)
-            return logs
-        if ticket:
-            cad_state["ticket"] = ticket
-            logs.append("mdreview-cadence: adopted open tracking ticket #%s" % ticket)
     state = ticket_state(ticket, gh_runner) if ticket else None
-    if ticket and state is None:
-        logs.append("mdreview-cadence: tracking ticket #%s unreadable -- retry "
-                    "next sweep" % ticket)
-        if not dry_run:
-            _save_state(cad_state, state_path)
-        return logs
     if state != "OPEN":
-        if not ticket:
-            logs.append("mdreview-cadence: no tracking ticket open -- "
-                        "nothing posted, none is filed (#1137)")
-        else:
-            logs.append("mdreview-cadence: tracking ticket #%s is %s -- no delta "
-                        "posted, never reopened (#1137)" % (ticket, state))
-        if not dry_run:
-            cad_state["last_eval_ts"] = now
-            _save_state(cad_state, state_path)
-        return logs
+        # none recorded, CLOSED, deleted or unreadable: re-resolve by title
+        found, ok = find_tracking_ticket(gh_runner)
+        if not ok:
+            logs.append("mdreview-cadence: tracking ticket unreadable -- retry in "
+                        "%d min" % (RETRY_S // 60))
+            if not dry_run:
+                cad_state["last_eval_ts"] = now - DAILY_TTL_S + RETRY_S
+                _save_state(cad_state, state_path)
+            return logs
+        if not found:
+            logs.append("mdreview-cadence: no tracking ticket open (#%s %s) -- "
+                        "nothing posted, none is filed or reopened (#1137)"
+                        % (ticket or "-", state or "none"))
+            if not dry_run:
+                cad_state["last_eval_ts"] = now
+                _save_state(cad_state, state_path)
+            return logs
+        if found != ticket:
+            logs.append("mdreview-cadence: adopted open tracking ticket #%s" % found)
+        ticket = cad_state["ticket"] = found
 
     if dry_run:
         logs.append("mdreview-cadence: would run daily audit + "

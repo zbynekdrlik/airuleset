@@ -3254,6 +3254,7 @@ def severe_journal(status, home, now, top, dry_run=False, box_class=None,
         if critical_pct is None:
             critical_pct = _esc.default_critical_pct()
     if not _esc.is_severe(status, SEVERE_PCT, critical_pct, box_class):
+        clear_severe_stamp(home, dry_run)
         return []
     stamp = _guard_dir(home) / SEVERE_STAMP_NAME
     key = _severe_key(status, now)
@@ -3271,6 +3272,15 @@ def severe_journal(status, home, now, top, dry_run=False, box_class=None,
         except OSError as e:
             _dbg("severe journal stamp write failed: %r" % e)
     return [line]
+
+
+def clear_severe_stamp(home, dry_run=False):
+    """A disk out of the SEVERE state re-arms the line for its next episode."""
+    if not dry_run:
+        try:
+            (_guard_dir(home) / SEVERE_STAMP_NAME).unlink(missing_ok=True)
+        except OSError as e:
+            _dbg("severe journal stamp clear failed: %r" % e)
 
 
 # --------------------------------------------------------------------------- #

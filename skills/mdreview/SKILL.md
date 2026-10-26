@@ -93,7 +93,7 @@ If `/skill-doctor` is unavailable (CC < v2.1.252), skip this step with a logged 
 
 ## Step 5c — SLIMMING PASS (mandatory, #908)
 
-**This step is MANDATORY on every /mdreview run. A model-generation change (Job 43 journals `model-generation change` when MODEL_TIERS differs from its last recorded hash) makes it NON-SKIPPABLE; any other run also runs it but may produce zero candidates if the set is already minimal.**
+**This step is MANDATORY on every /mdreview run; it may produce zero candidates if the set is already minimal.**
 
 Read the artifact's per-box `slimming` section (`boxes[].slimming`, added by `mdreview-audit` since #908). It carries:
 - **`candidates`** — modules/rules flagged as slimming-eligible, each with `category`, `reason`, and `verdict_hint`
@@ -169,5 +169,5 @@ Every proposed change carries a source URL; no URL = no change.
 - MCP/connector changes are for the OWNING project to apply.
 - Never apply silently; always validate before push.
 - **Re-audit trigger:** after every Claude Code release and every model-generation change.
-- **Slimming pass is MANDATORY** (#908, owner directive): every run produces the slimming output (Step 5c). A model-generation change makes the pass non-skippable. A run that slimmed nothing must say WHY with evidence.
+- **Slimming pass is MANDATORY** (#908, owner directive): every run produces the slimming output (Step 5c). A run that slimmed nothing must say WHY with evidence.
 - **Measurability:** context-baseline bytes BEFORE/AFTER in every audit log. The #857 down-only ceiling is the target; a run that raises it is a finding.
