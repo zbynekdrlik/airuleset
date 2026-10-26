@@ -300,6 +300,10 @@ class DiscordReplyFallbackFollowsTheMarker(unittest.TestCase):
     question's ticket: the TRACKED one, never the context ticket named first."""
 
     def test_fallback_comment_lands_on_the_tracked_ticket(self):
+        self.assertEqual(self._fallback_ticket(TRACKED), ["9065"])
+
+    def _fallback_ticket(self, question):
+        """The tickets job 7's blocked-reply fallback posts on for `question`."""
         import time
         import notify
         import watchdog as wd
@@ -314,7 +318,7 @@ class DiscordReplyFallbackFollowsTheMarker(unittest.TestCase):
                     mock.patch.object(notify, "_read_env", lambda: dict(env)):
                 notify.record_question("888001", "777001", "sid-abc", "/repo/x",
                                        now=time.time(), path=qpath,
-                                       question=TRACKED)
+                                       question=question)
                 now = time.time()
                 state = {"dreply_blocked": {
                     "repX": now - wd.DREPLY_TICKET_FALLBACK_S - 5}}
@@ -335,7 +339,7 @@ class DiscordReplyFallbackFollowsTheMarker(unittest.TestCase):
                     discord_fetch=lambda ch, token: [reply],
                     gh_comment=lambda cwd, num, text, **kw: gh_calls.append(
                         num) or True)
-        self.assertEqual(gh_calls, ["9065"])
+        return gh_calls
 
 
 class ReviewRound2(unittest.TestCase):
@@ -382,6 +386,42 @@ class ReviewRound2(unittest.TestCase):
         self.assertEqual(
             [v["num"] for v in state[u_labels.U_RECONCILE_STATE_KEY].values()],
             [9065])
+
+
+LONG_Q = ("**Otázka — projekt odoo-erp:** uid 15/452 po nasadení #8952 "
+          + "kontext " * 260 + "\n❓ ASKED: ako s tým naložiť? (sledované na #9065)")
+
+
+class ReviewRound3Locks(unittest.TestCase):
+    """The final delta review found these paths unpinned (mutants survived)."""
+
+    def test_core_footer_counts_a_sole_out_of_rows_ping(self):
+        block = ("**Otázka — projekt odoo-erp:** po zatvorení #8800 mám "
+                 "pokračovať?\n❓ NEEDS YOU: áno?")
+        seg = CoreFooterAttribution("test_context_only_ping_counts_once_on_the_"
+                                    "core_box")._render(
+            block, [{"number": 100, "title": "o", "createdAt": "", "labels": []}])
+        self.assertIn("I 1", seg)
+        self.assertIn("U 1", seg)
+
+    def test_both_cover_keys_carry_forward_on_a_failed_refresh(self):
+        prev = {"open": 3, "question_cover_numbers": [5],
+                "question_cover_rows": [5, 6]}
+        entry = statusbar.carry_forward_stale({"ts": 1, "open": None}, prev, "x")
+        self.assertEqual((entry["question_cover_numbers"],
+                          entry["question_cover_rows"]), ([5], [5, 6]))
+
+    def test_a_long_question_reask_pair_keys_the_tracked_ticket(self):
+        from watchdog import u_labels
+        entry = {"session": "sid-l", "question": LONG_Q[:1200],
+                 "block": LONG_Q[:1800], "tracked": 9065}
+        with mock.patch("notify.load_questions", return_value={"1": entry}):
+            self.assertEqual(u_labels._main_map_reask_pairs(), {("sid-l", 9065)})
+
+    def test_a_long_question_fallback_lands_on_the_tracked_ticket(self):
+        case = DiscordReplyFallbackFollowsTheMarker(
+            "test_fallback_comment_lands_on_the_tracked_ticket")
+        self.assertEqual(case._fallback_ticket(LONG_Q), ["9065"])
 
 
 class CoreFooterAttribution(unittest.TestCase):
