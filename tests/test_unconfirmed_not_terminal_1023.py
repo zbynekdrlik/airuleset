@@ -118,7 +118,8 @@ class TestUnconfirmedNotTerminal(unittest.TestCase):
             logs2b = self._run(qrecs, state, now=NOW + 3600 + 60)
         self.assertEqual(sv2b.n, 0, logs2b)
         self.assertEqual(qrecs[self.sid]["base"], [1])
-        self.assertTrue(any("hold:floor" in ln for ln in logs2b), logs2b)
+        # the same hold episode (tick 1's stamp) is journalled once (B9 fix 15)
+        self.assertFalse(any("hold:floor" in ln for ln in logs2b), logs2b)
         # tick 3 (past the day): the send confirms -> baseline advances +
         # cadence re-stamped
         after = NOW + 24 * 3600 + 60
