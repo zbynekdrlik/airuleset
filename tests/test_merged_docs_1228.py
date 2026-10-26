@@ -260,6 +260,26 @@ class LegacyMigrationRound1(unittest.TestCase):
                          {"7662": 2, "7660": 2})
         self.assertEqual(self.reads, [], "a stamped entry is never re-judged")
 
+    def test_a_fetched_entry_is_stamped_and_never_rejudged(self):
+        with TemporaryDirectory() as repo, TemporaryDirectory() as d:
+            docs, fix = self._repo(repo)
+            cache = str(Path(d) / "c.json")
+            meta = {7662: ("docs(#7421): gk Prevencia batch 15", ""),
+                    7660: ("#7644 (M1): hardening", "")}
+            git = _git_fn({"origin/main..origin/develop": [
+                (docs, "docs(#7421): gk Prevencia batch 15 (#7662)"),
+                (fix, "#7644 (M1): hardening (#7660)")]})
+            for _ in range(2):
+                rs._reset_memo()
+                got = rs.merged_unreleased_issues(
+                    repo, git_fn=git, cache_path=cache, slug="o/r",
+                    pr_meta_fn=lambda pr: meta.get(pr))
+            saved = json.loads(Path(cache).read_text())
+        self.assertEqual(set(got), {7644})
+        self.assertEqual({k: v.get("v") for k, v in saved.items()},
+                         {"7662": 2, "7660": 2})
+        self.assertEqual(self.reads, [], "a fetched entry needs no git read")
+
     def test_an_unreadable_commit_is_not_stamped(self):
         with TemporaryDirectory() as repo, TemporaryDirectory() as d:
             docs, fix = self._repo(repo)
