@@ -282,9 +282,11 @@ def _heredoc_body(text, i, delim, strip):
 
 
 def _inert_sink(seg):
-    """A plain `cat`/`tee` that writes its literal stdin out, never into a pipe."""
+    """A plain `cat`/`tee` that writes its literal stdin out, ending at a plain
+    command separator — never a pipe, `>(…)`, a subshell or `&`."""
     words = seg[0].split() if seg else []
-    return bool(words) and words[0] in ("cat", "tee") and seg[1] != "|"
+    return (bool(words) and words[0] in ("cat", "tee")
+            and seg[1] in ("\n", ";", "&&", "||", ""))
 
 
 def split_segments(text, _depth=0, heredocs=False):
