@@ -337,6 +337,52 @@ class DiscordReplyFallbackFollowsTheMarker(unittest.TestCase):
         self.assertEqual(gh_calls, ["9065"])
 
 
+class ReviewRound2(unittest.TestCase):
+    """The delta review of the first review round."""
+
+    def test_a_sole_ref_outside_the_rows_still_counts_once(self):
+        # a question naming one ticket this box does not count (closed, or
+        # outside the obligation set) must not vanish: it is a ping.
+        run = CoreQualsAttribution("test_tracked_entry_lists_only_its_ticket")
+        rows = [{"number": 100, "title": "other", "createdAt": "", "labels": []}]
+        block = ("**Otázka — projekt odoo-erp:** po zatvorení #8800 mám "
+                 "pokračovať?\n❓ NEEDS YOU: áno?")
+        r = run._run(block, rows, "--waiting")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        members = run._members(r.stdout)
+        self.assertEqual([(m[0], m[3]) for m in members], [("-", "ping")],
+                         r.stdout)
+
+    def test_a_long_question_keeps_its_marker(self):
+        # the map caps `question` at 1200 and `block` at 1800 code points, and
+        # the marker sits on the LAST line: it is read from the full text.
+        import time
+        import notify
+        import question_attribution as qa
+        from watchdog import discord_api, u_labels
+        owner = "773451844110385193"
+        long_q = ("**Otázka — projekt odoo-erp:** uid 15/452 po nasadení #8952 "
+                  + "kontext " * 260
+                  + "\n❓ ASKED: ako s tým naložiť? (sledované na #9065)")
+        self.assertGreater(len(long_q), 1900)
+        with TemporaryDirectory() as tmp:
+            path = str(Path(tmp) / "q.json")
+            notify.record_question("888001", "777001", "sid-l", "/repo/x",
+                                   now=time.time(), path=path, question=long_q)
+            entry = notify.load_questions(path)["888001"]
+        self.assertEqual(qa.attribute(entry, frozenset()),
+                         (qa.TRACKED, frozenset({9065})))
+        reply = discord_api.parse_discord_reply(
+            {"id": "repL", "author": {"id": owner}, "content": "1",
+             "message_reference": {"message_id": "888001"}},
+            {owner}, {"888001": entry})
+        state = {}
+        u_labels.capture_answered_ticket(state, reply, 1000)
+        self.assertEqual(
+            [v["num"] for v in state[u_labels.U_RECONCILE_STATE_KEY].values()],
+            [9065])
+
+
 class CoreFooterAttribution(unittest.TestCase):
     """The incident box is the core gk FLOW: its refresh writes the cover and
     the render attributes the live pings by it (both review rounds)."""
