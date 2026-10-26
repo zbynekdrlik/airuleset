@@ -3626,7 +3626,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
         tpath, tmtime = tinfo
         by_transcript.setdefault(str(tpath), []).append((pid, cwd, tmtime, tpath))
     from watchdog import owner_stop     # #1257: map the latch BEFORE any keystroke job
-    logs.extend(owner_stop.refresh(state, panes, projects_dir, now, dry_run=dry_run))
+    logs.extend(owner_stop.refresh(state, panes, projects_dir, now, dry_run, run))
 
     for idx, (tkey, owners) in enumerate(by_transcript.items()):
         if time_fn() >= sweep_deadline:

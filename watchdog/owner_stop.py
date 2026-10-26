@@ -3,8 +3,12 @@ never resumed by a machine keystroke (owner 20.10.2026: "nejaké tvoje procesy
 spustili a dali pokračovať gk-quality/gk-infra aj keď som ich mal /exit … to
 nesmieš!").
 
-SET from STRUCTURED transcript facts, never pane prose (`classify`):
-  exit          the owner's `/exit` or `/quit` command record;
+SET from STRUCTURED facts, never pane prose (`classify`, `_exits`):
+  exit          claude is GONE from a pane: the pane sits at a bare shell and no
+                live claude pane serves its cwd, so the cwd's newest session
+                ended (Claude Code 2.1.306 writes NO transcript record for
+                `/exit` — probed 26.10.2026 — so this is a tmux-pane fact; a
+                `/exit` or `/quit` command record still counts if one appears);
   goal-none     the owner's `/goal` answered `No goal set`;
   goal-cleared  a `Goal cleared:` record that is not the watchdog's own #522
                 question-repoke disarm (`state["goal_disarmed_q"]` within
@@ -50,6 +54,7 @@ _CMD_RX = re.compile(r"<command-name>/?([^<\s]+)</command-name>")
 _INTERRUPT = "[Request interrupted by user"
 
 _PANES = {}        # pane_id -> context of THIS sweep (`refresh`)
+_SWEEP = {}        # {"state": the sweep state} for a caller without `state`
 _MEMO = {}         # (pane_id, file stamps) -> latch
 _WITHHELD = set()  # pane ids already journalled by `withhold` this sweep
 
@@ -57,6 +62,7 @@ _WITHHELD = set()  # pane ids already journalled by `withhold` this sweep
 def reset():
     """Forget this process's pane map (a new sweep, or a test)."""
     _PANES.clear()
+    _SWEEP.clear()
     _MEMO.clear()
     _WITHHELD.clear()
 
@@ -182,9 +188,10 @@ def _two_newest(projects_dir, cwd):
     return (files[0] if files else None), (files[1] if len(files) > 1 else None)
 
 
-def _context(projects_dir, cwd, state):
+def _context(projects_dir, cwd, state, recs=None):
     tpath, prev = _two_newest(projects_dir, cwd)
-    recs = state.get(STATE_KEY) if isinstance(state, dict) else None
+    if recs is None:
+        recs = state.get(STATE_KEY) if isinstance(state, dict) else None
     recs = recs if isinstance(recs, dict) else {}
     dq = state.get("goal_disarmed_q") if isinstance(state, dict) else None
     sid = tpath.stem if tpath else None
@@ -196,7 +203,9 @@ def _context(projects_dir, cwd, state):
 
 
 def cwd_latch(projects_dir, cwd, state=None):
-    """The latch for `cwd`'s current session (`deliver_goal`, resurrect)."""
+    """The latch for `cwd`'s current session (`deliver_goal`, resurrect); a
+    caller without `state` reads the sweep's (`refresh`)."""
+    state = state if state is not None else _SWEEP.get("state")
     try:
         return _latch_of(_context(projects_dir, cwd, state))
     except Exception:          # noqa: BLE001 -- unreadable = no proof of a stop
@@ -246,20 +255,57 @@ def _clock(ts):
     return time.strftime("%d.%m. %H:%M", time.localtime(ts)) if ts else "?"
 
 
-def refresh(state, panes, projects_dir, now, dry_run=False):
-    """Once per sweep, BEFORE any keystroke job: map every claude pane to its
+def _exits(panes, projects_dir, run):
+    """[(cwd, tpath)] — every tmux pane at a bare shell (no claude) whose cwd no
+    live claude pane serves: the cwd's newest transcript is a session that ended
+    there. Read from the sweep's memoized pane inventory."""
+    from watchdog.resurrect import _SHELL_COMMANDS
+    from watchdog.tmux_io import _pane_inventory_raw
+    live = {str(pid) for pid, _c in panes or ()}
+    live_cwds = {str(c) for _p, c in panes or ()}
+    out, done = [], set()
+    for line in (_pane_inventory_raw(run) or "").splitlines():
+        parts = line.split("\t")
+        if len(parts) < 3 or parts[0].strip() in live:
+            continue
+        cmd, cwd = parts[1].strip().lstrip("-"), parts[2].strip()
+        if cmd not in _SHELL_COMMANDS or not cwd or cwd in live_cwds or cwd in done:
+            continue
+        done.add(cwd)
+        tpath, _prev = _two_newest(projects_dir, cwd)
+        if tpath:
+            out.append((cwd, tpath))
+    return out
+
+
+def refresh(state, panes, projects_dir, now, dry_run=False, run=None):
+    """Once per sweep, BEFORE any keystroke job: latch every session whose
+    claude left its pane (`_exits`, needs `run`), map every claude pane to its
     transcripts, persist each session's latch and journal its transitions (SET
     once per episode, cleared once). Returns the journal lines."""
     reset()
     logs = []
     if not isinstance(state, dict):
         return logs
+    _SWEEP["state"] = state
     recs = state.get(STATE_KEY)
     recs = dict(recs) if isinstance(recs, dict) else {}
+    for cwd, tpath in (_exits(panes, projects_dir, run) if run else ()):
+        rec = recs.get(tpath.stem)
+        if not isinstance(rec, dict):
+            logs.append("owner-stop latch %s sid=%s -> SET (exit: no claude in the "
+                        "pane): the next session there gets no machine keystroke "
+                        "until the owner types" % (os.path.basename(cwd) or cwd,
+                                                     tpath.stem))
+            # the session's END: nothing in it happened after the exit
+            rec = {"fact": "exit", "ts": max([os.path.getmtime(tpath)] + [
+                t for t in (_ts(e) for e in _tail(tpath)) if t])}
+        if not dry_run:
+            recs[tpath.stem] = dict(rec, seen=now)
     seen = set()
     for pid, cwd in panes or ():
         try:
-            ctx = _context(projects_dir, cwd, state)
+            ctx = _context(projects_dir, cwd, state, recs)
             latch = _latch_of(ctx) if ctx["sid"] else None
         except Exception as e:     # noqa: BLE001 -- one bad pane never stops the sweep
             logs.append("owner-stop latch %s -> unreadable (%r), not latched" % (pid, e))
