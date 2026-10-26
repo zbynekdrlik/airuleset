@@ -175,16 +175,28 @@ def _whole(path, entries):
         return False
 
 
+def _machine_clears(state, sid):
+    """The watchdog's own #522 disarm time for `sid`, read LIVE from
+    `state["goal_disarmed_q"]` on every evaluation: `qrepoke` may write the veto
+    after `refresh` in the same sweep."""
+    dq = state.get("goal_disarmed_q") if isinstance(state, dict) else None
+    m = dq.get(sid) if isinstance(dq, dict) and sid else None
+    return [m["disarmed_ts"]] if isinstance(m, dict) and isinstance(
+        m.get("disarmed_ts"), (int, float)) else []
+
+
 def _latch_of(ctx):
-    """The latch for one pane context {tpath, prev, rec, prev_rec, mclears}."""
+    """The latch for one pane context {tpath, prev, rec, prev_rec, state}."""
     tpath = ctx.get("tpath")
     if not tpath:
         return None
+    state, prev = ctx.get("state"), ctx.get("prev")
     entries = _tail(tpath)
-    latch, saw = scan(entries, ctx.get("rec"), ctx.get("mclears", ()))
-    if saw or not ctx.get("prev") or not _whole(tpath, entries):
+    latch, saw = scan(entries, ctx.get("rec"), _machine_clears(state, tpath.stem))
+    if saw or not prev or not _whole(tpath, entries):
         return latch
-    inherited, _ = scan(_tail(ctx["prev"]), ctx.get("prev_rec"), ctx.get("mclears", ()))
+    inherited, _ = scan(_tail(prev), ctx.get("prev_rec"),
+                        _machine_clears(state, prev.stem))
     return dict(inherited, inherited=True) if inherited else None
 
 
@@ -204,13 +216,9 @@ def _context(projects_dir, cwd, state, recs=None):
     if recs is None:
         recs = state.get(STATE_KEY) if isinstance(state, dict) else None
     recs = recs if isinstance(recs, dict) else {}
-    dq = state.get("goal_disarmed_q") if isinstance(state, dict) else None
     sid = tpath.stem if tpath else None
-    mclear = (dq or {}).get(sid) if isinstance(dq, dict) else None
-    return {"cwd": cwd, "tpath": tpath, "prev": prev, "sid": sid,
-            "rec": recs.get(sid), "prev_rec": recs.get(prev.stem) if prev else None,
-            "mclears": ([mclear.get("disarmed_ts")] if isinstance(mclear, dict)
-                        else [])}
+    return {"cwd": cwd, "tpath": tpath, "prev": prev, "sid": sid, "state": state,
+            "rec": recs.get(sid), "prev_rec": recs.get(prev.stem) if prev else None}
 
 
 def cwd_latch(projects_dir, cwd, state=None):
