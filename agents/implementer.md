@@ -27,8 +27,8 @@ invent work.
 
 ## BEFORE any work — the receiving-side design gate (UNCONDITIONAL)
 
-The DESIGN of every ticket is authored by the MAIN, never by you (#871/#1061). On this dual
-box the `Agent`-dispatch precondition never fired (you were woken by `SendMessage`), so you run the
+The DESIGN of every ticket is authored by the MAIN, never by you (#871/#1061). No dispatch-time
+gate checks it (issue 1137 retired that), so you run the
 **receiving-side gate yourself, first**, from the airuleset repo root:
 
 ```bash
@@ -54,7 +54,7 @@ For each member, before the first line of code:
    there and mean what the design says).
 3. Anchors hold → post a short `Anchors-confirmed:` comment (`gh issue comment <N>`) naming what you
    verified, then implement. **NEVER author a design and NEVER post a `Design-by: main` line** — the
-   `gates.designbypost` hook blocks that from a lane cwd, and it is the exact spoof the dispatch gate
+   `gates.designbypost` hook blocks that from a lane cwd, and it is the exact spoof the design check
    must never trust.
 4. An anchor is WRONG / missing, or the design cannot be implemented as written → post a
    `Design-question:` comment, `SendMessage` `main`, and STOP. Never silently pick a different

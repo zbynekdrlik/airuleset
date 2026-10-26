@@ -1159,7 +1159,7 @@ class RecursiveFlagBoundHasOneNarrowDocumentedResidual(unittest.TestCase):
     """
 
     def _cmd(self, r_count):
-        return "grep -" + "r" * r_count + " " + "~" + "/" + "." + "claude"
+        return "cp -" + "r" * r_count + " " + "~" + "/" + "." + "claude /tmp/x"
 
     def test_a_509_character_recursive_flag_still_blocks(self):
         r = run(self._cmd(509))

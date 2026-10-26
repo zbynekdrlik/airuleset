@@ -38,7 +38,6 @@ from _hook_state_cleanup import hermetic_hook_env  # noqa: E402  (#1046 hermetic
 
 ROOT = Path(__file__).resolve().parent.parent
 HOOKS = ROOT / "hooks"
-WDRAIN = "block-dispatch-over-wdrain.sh"
 
 _STALE_GATES = "import os\nopen(os.environ['A1046_MARK_G'], 'w').write('g')\n"
 _STALE_CC = ("import os\nopen(os.environ['A1046_MARK_CC'], 'w').write('c')\n"
@@ -78,15 +77,13 @@ def _adapter_hooks():
     """Every gate-adapter hook that resolves a REPO module from a subprocess
     interpreter — discovered by scan, never a hand-kept list: the `-m gates.`
     adapters, plus any hook running `python3 -c`/`-` (stdin) that imports a repo
-    module (block-main-implementation.sh, the stdin heredocs), plus wdrain."""
+    module (block-main-implementation.sh, the stdin heredocs)."""
     out = []
     for p in sorted(HOOKS.glob("*.sh")):
         text = p.read_text(encoding="utf-8")
         if re.search(r"-m gates\.", text) or (
                 _PY_DASH_RE.search(text) and _imports_repo_module(text)):
             out.append(p.name)
-    if WDRAIN not in out:
-        out.append(WDRAIN)
     return out
 
 
@@ -99,9 +96,8 @@ class TestGateAdapterIgnoresStaleCwd(TestCase):
         (Path(d) / "cli_concurrency.py").write_text(_STALE_CC)
         return d
 
-    def test_discovery_covers_wdrain_and_the_m_gates_adapters(self):
+    def test_discovery_covers_the_m_gates_adapters(self):
         hooks = _adapter_hooks()
-        self.assertIn(WDRAIN, hooks)
         self.assertGreaterEqual(
             len(hooks), 10,
             "expected the -m gates. adapter family plus the -c/- repo importers")

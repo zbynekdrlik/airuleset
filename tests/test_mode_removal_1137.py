@@ -145,13 +145,6 @@ class TestRemovedFiles(unittest.TestCase):
         self.assertEqual((r.returncode, r.stdout, r.stderr), (0, "", ""))
         self.assertIn("delete in 0.1.557", stub.read_text())
 
-    def test_dispatch_hook_keeps_only_the_wdrain_gate(self):
-        hook = _read("hooks/block-dispatch-over-wdrain.sh")
-        for gone in ("cli_dispatch_gate", "lane-overlap", "OVERLAP-BYPASS",
-                     "sequential"):
-            self.assertNotIn(gone, hook)
-        self.assertIn("WDRAIN-BYPASS", hook)
-
 
 class TestFleetAndResolver(unittest.TestCase):
     def test_no_mode_key_in_any_window(self):

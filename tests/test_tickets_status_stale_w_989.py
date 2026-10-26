@@ -13,9 +13,9 @@ The CLI path (``cli_quals_cmd.py``) unpacks correctly::
     tacit = tacit_wait | tacit_close
     stale = stale - tacit
 
-These tests drive the exact functions with controlled data and assert the
-``ops_wait_stale`` field is computed correctly for W=0, W>0 (none stale),
-W>0 (with stale members).
+These tests drive the stale/tacit functions with controlled data (the
+footer's ``ops_wait_stale`` helper itself was retired with the W-drain gate,
+issue 1137 B1).
 """
 import sys
 import pathlib
@@ -29,7 +29,7 @@ sys.path.insert(0, str(REPO))
 # --------------------------------------------------------------------------- #
 # Deterministic clocks (#607 working-time coupling -- fix-forward for #999).
 #
-# ``cli_quals._compute_net_stale_w`` / ``_stale_ops_wait_flagged`` measure
+# ``cli_quals._stale_ops_wait_flagged`` measures
 # staleness in WORKING time -- Saturday/Sunday in Europe/Bratislava do NOT count
 # toward the 24h window (``working_time.working_deadline_passed``, #607).
 # Anchoring ``now = time.time()`` on the REAL clock, with the stale member at
@@ -87,52 +87,6 @@ class TestStaleWTacitSubtraction(unittest.TestCase):
         net = stale - tacit
         self.assertEqual(net, {1})
 
-    def test_compute_net_stale_w_empty(self):
-        """W=0 must produce ops_wait_stale=0, not crash -- the #989 repro."""
-        import airuleset
-        ops_wait = {}
-        count = airuleset._compute_net_stale_w(ops_wait)
-        self.assertEqual(count, 0)
-
-    def test_compute_net_stale_w_with_stale_member(self):
-        """W>0 with a stale member must count it."""
-        import airuleset
-        now = _MIDWEEK_NOW
-
-        def ages_fn(n):
-            if n == 10:
-                # Stale: anchor well past the 24h working window.
-                return {"own": now - 200_000, "any": now - 200_000,
-                        "own_cited": now - 200_000, "own_oldest": now - 200_000,
-                        "own_final_reminder": None, "own_target": None,
-                        "own_target_event": None}
-            # Fresh: anchor just now.
-            return {"own": now, "any": now,
-                    "own_cited": now, "own_oldest": now,
-                    "own_final_reminder": None, "own_target": None,
-                    "own_target_event": None}
-
-        ops_wait = {10: {"labels": ["ops-wait"]}, 20: {"labels": ["ops-wait"]}}
-        count = airuleset._compute_net_stale_w(
-            ops_wait, ages_fn=ages_fn, now=now)
-        self.assertEqual(count, 1)
-
-    def test_compute_net_stale_w_none_stale(self):
-        """W>0 with no stale members must produce 0."""
-        import airuleset
-        now = _MIDWEEK_NOW
-
-        def ages_fn(n):
-            return {"own": now, "any": now,
-                    "own_cited": now, "own_oldest": now,
-                    "own_final_reminder": None, "own_target": None,
-                    "own_target_event": None}
-
-        ops_wait = {10: {"labels": ["ops-wait"]}, 20: {"labels": ["ops-wait"]}}
-        count = airuleset._compute_net_stale_w(
-            ops_wait, ages_fn=ages_fn, now=now)
-        self.assertEqual(count, 0)
-
     def test_stale_minus_tacit_end_to_end(self):
         """End-to-end: _stale minus unpacked _tacit with a controlled ages_fn."""
         from cli_quals import (
@@ -167,7 +121,6 @@ class TestStaleWTacitSubtraction(unittest.TestCase):
         the ``now - 200_000`` s window, working-time exclusion drops the SAME
         member BELOW the 24h window -> NOT stale. Guards against a future revert
         to wall-clock staleness; the mid-week tests above prove it IS stale."""
-        import airuleset
         from cli_quals import _stale_ops_wait_flagged
         now = _WEEKEND_NOW
 
@@ -185,8 +138,6 @@ class TestStaleWTacitSubtraction(unittest.TestCase):
         rows = {10: {"labels": ["ops-wait"]}, 20: {"labels": ["ops-wait"]}}
         self.assertNotIn(
             10, _stale_ops_wait_flagged(rows, ages_fn=ages_fn, now=now))
-        self.assertEqual(
-            airuleset._compute_net_stale_w(rows, ages_fn=ages_fn, now=now), 0)
 
 
 if __name__ == "__main__":

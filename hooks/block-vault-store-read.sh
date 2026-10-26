@@ -262,10 +262,13 @@ set -euo pipefail
 #     variable for the COMMAND, not for this hook process), so the workaround
 #     is to describe the path in prose, or write the body to a file with the
 #     Write tool and `cat` it — the same self-tripping shape, and the same
-#     remedy, as block-sensitive-staging.sh. Stripping heredoc bodies to fix
-#     it was considered and REJECTED: a heredoc body is not inert here
-#     (`python3 <<EOF` genuinely executes), so that exemption would re-open a
-#     real read path to buy comfort.
+#     remedy, as block-sensitive-staging.sh. Issue 1137 B1 narrowed it: a
+#     heredoc body is judged on its OWN (its quotes no longer swallow the next
+#     command), and only a QUOTED body that a plain unpiped `cat`/`tee` writes
+#     out is dropped as data — `python3 <<EOF` still executes and is still
+#     judged. A recursive grep resolves a `.claude` operand against the cwd
+#     (a repo's own `.claude/` is not the store's parent). The refusal prints
+#     the exact `secret exec` / `secret inspect` line for each refused file.
 #   - VALUE_FILE_RE's config-extension allow-list (`.json`/`.yaml`/`.yml`/
 #     `.env`/`.toml`/`.ini`, #165) accepts `.env` DELIBERATELY, even though a
 #     `.env` file conventionally carries raw secrets itself. Rule B is a
@@ -443,6 +446,12 @@ if [ "$RC" -eq 0 ]; then
     exit 0
 fi
 
+if [ "$RC" -eq 3 ]; then
+    # A payload the matcher could not understand (not JSON, not an object, a
+    # non-string command): one quiet line, no traceback (issue 1137 B1 B7).
+    echo "🚫 BLOCKED (fail-closed): block-vault-store-read.sh could not read this payload —$(printf '%s' "$VIOLATION" | tr -s '\n ' ' ')" >&2
+    exit 2
+fi
 if [ "$RC" -ne 2 ]; then
     fail_closed "python3 exited $RC instead of running the check. $VIOLATION"
 fi
@@ -459,7 +468,11 @@ AUDIT_FIELDS=$(printf '%s\n' "$VIOLATION" | grep '^#AUDIT# ' | tail -1 || true)
 AUDIT_FIELDS=${AUDIT_FIELDS#\#AUDIT\# }
 ROOTS=$(printf '%s\n' "$VIOLATION" | grep '^#ROOTS# ' | tail -1 || true)
 ROOTS=${ROOTS#\#ROOTS\# }
-VIOLATION=$(printf '%s\n' "$VIOLATION" | grep -v '^#AUDIT# \|^#ROOTS# ' || true)
+KEYS=$(printf '%s\n' "$VIOLATION" | grep '^#KEYS# ' | tail -1 || true)
+KEYS=${KEYS#\#KEYS\# }
+NAMES=$(printf '%s\n' "$VIOLATION" | grep '^#NAMES# ' | tail -1 || true)
+NAMES=${NAMES#\#NAMES\# }
+VIOLATION=$(printf '%s\n' "$VIOLATION" | grep -v '^#AUDIT# \|^#ROOTS# \|^#KEYS# \|^#NAMES# ' || true)
 
 if [ "${AIRULESET_ALLOW_VAULT_READ:-}" = "1" ]; then
     AUDIT_LOG="${AIRULESET_VAULT_READ_AUDIT:-$HOME/devel/airuleset/audits/vault-store-reads.log}"
@@ -492,6 +505,20 @@ fi
 echo "" >&2
 echo "$VIOLATION" >&2
 echo "" >&2
+# Issue 1137 B1: the exact working command for each refused file first, so
+# the next attempt succeeds (names are a fixed charset from the matcher).
+AR="python3 ~/devel/airuleset/airuleset.py secret"
+if [ -n "$KEYS$NAMES" ]; then
+    echo "  Run instead (the value reaches the child, never this transcript):" >&2
+    for KV in ${KEYS//,/ }; do
+        echo "    $AR exec --file ~/.secrets/${KV%%:*} --env ${KV#*:} -- <cmd reading \$${KV#*:}>" >&2
+        echo "    $AR inspect ~/.secrets/${KV%%:*}    (format and NAME= names, no value)" >&2
+    done
+    for N in ${NAMES//,/ }; do
+        echo "    $AR exec $N -- <cmd reading \$$N>" >&2
+    done
+    echo "" >&2
+fi
 echo "  A value read this way lands in the session transcript, survives" >&2
 echo "  compaction, and cannot be revoked — the exact leak the credential" >&2
 echo "  channel exists to prevent." >&2

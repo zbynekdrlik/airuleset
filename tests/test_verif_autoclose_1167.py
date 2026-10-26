@@ -357,13 +357,6 @@ class QualsRespectTheWait(unittest.TestCase):
                                   lambda cwd: None):
             return cli_quals_cmd._ops_wait_flag_sets(ow, "/r")
 
-    def _net_stale(self):
-        import airuleset
-        ow = {100: _w_row(100, self.now), 101: _w_row(101, self.now)}
-        with mock.patch.dict(os.environ, {"HOME": self.tmp}):
-            return airuleset._compute_net_stale_w(
-                ow, ages_fn=lambda n: _old_ages(self.now), now=self.now)
-
     def test_ticket_inside_the_wait_is_neither_stale_nor_converge(self):
         self._persist(MONTALU, 10, ticket=100)
         stale, _rc, _gk, _up, _tw, _tc, converge, no_target, _dt = \
@@ -372,13 +365,11 @@ class QualsRespectTheWait(unittest.TestCase):
         self.assertNotIn(100, converge)
         self.assertNotIn(100, no_target)
         self.assertIn(101, stale | converge)          # an unrelated W member
-        self.assertEqual(1, self._net_stale())
 
     def test_overdue_ticket_is_reported_again(self):
         self._persist(MONTALU, 23, ticket=100)
         stale, _rc, _gk, _up, _tw, _tc, converge, _nt, _dt = self._flag_sets()
         self.assertIn(100, stale | converge)
-        self.assertEqual(2, self._net_stale())
 
     def test_stale_status_file_grants_no_exemption(self):
         self._persist(MONTALU, 10, ticket=100, status_age_s=7 * 3600)
@@ -389,14 +380,12 @@ class QualsRespectTheWait(unittest.TestCase):
         self._persist(MIVA, 2, ticket=100)
         stale, _rc, _gk, _up, _tw, _tc, converge, _nt, _dt = self._flag_sets()
         self.assertIn(100, stale | converge)
-        self.assertEqual(2, self._net_stale())
 
     def test_another_repo_gets_no_exemption(self):
         self._persist(MONTALU, 10, ticket=100)
         self.slug = "zbynekdrlik/airuleset"
         stale, _rc, _gk, _up, _tw, _tc, converge, _nt, _dt = self._flag_sets()
         self.assertIn(100, stale | converge)
-        self.assertEqual(2, self._net_stale())
 
     def test_expired_entry_in_a_fresh_status_gets_no_exemption(self):
         import json

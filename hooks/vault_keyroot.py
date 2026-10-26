@@ -518,6 +518,77 @@ def _grep_walks(args):
     return False
 
 
+# Issue 1137 B1 review B3: a grep's PATTERN is text it searches FOR, never a
+# file it opens — `grep -rn 'gates\.<root>' gates/` names no key. GNU getopt
+# permutes, so a `-e`/`-f` (or an abbreviation of --regexp/--file) ANYWHERE
+# makes every positional a path; otherwise the first positional is the
+# pattern. An unknown option is taken as a flag, so its value (if any) reads
+# as a positional — a path is never skipped as an option value.
+GREP_FAMILY = {"grep", "egrep", "fgrep", "rgrep", "zgrep", "ugrep"}
+GREP_VALUE_LONG = {"--regexp", "--file", "--max-count", "--after-context",
+                   "--before-context", "--context", "--devices", "--directories",
+                   "--binary-files", "--label", "--group-separator", "--include",
+                   "--exclude", "--exclude-dir", "--exclude-from"}
+
+
+def grep_args(tk, start):
+    """(pattern token indices, path operand indices) of the grep at tk[start]."""
+    pats, pos, from_flag = set(), [], False
+    i = start + 1
+    while i < len(tk):
+        t = tk[i]
+        if t == "--":
+            pos += list(range(i + 1, len(tk)))
+            break
+        if t.startswith("--"):
+            key, eq, _v = t.partition("=")
+            regexp = len(key) > 4 and "--regexp".startswith(key)
+            from_flag |= regexp or (len(key) > 3 and "--file".startswith(key))
+            if key in GREP_VALUE_LONG and not eq:
+                pats |= {i + 1} if key == "--regexp" else set()
+                i += 2
+                continue
+            pats |= {i} if regexp else set()
+            i += 1
+            continue
+        if t.startswith("-") and len(t) > 1:
+            for j, ch in enumerate(t[1:], start=1):
+                from_flag |= ch in "ef"
+                if ch in GREP_VALUE_SHORT:
+                    if not t[j + 1:]:
+                        pats |= {i + 1} if ch == "e" else set()
+                        i += 1
+                    elif ch == "e":
+                        pats.add(i)
+                    break
+            i += 1
+            continue
+        pos.append(i)
+        i += 1
+    if not from_flag and pos:
+        pats.add(pos.pop(0))
+    return {p for p in pats if p < len(tk)}, pos
+
+
+# Review B4: awk as a pure text filter — one inline program reading only its
+# stdin, with nothing that opens a file, runs a command or writes one.
+AWK_HEADS = {"awk", "gawk", "mawk", "nawk"}
+AWK_UNSAFE_RE = re.compile(r"getline|system|ARGV|ARGC|close|@|[|>]")
+
+
+def _awk_is_filter(args):
+    i = 0
+    while i < len(args) and args[i].startswith("-") and args[i] != "--":
+        if args[i] in ("-F", "-v"):
+            i += 2
+        elif args[i][:2] in ("-F", "-v") and len(args[i]) > 2:
+            i += 1
+        else:
+            return False          # -f progfile, -e/--source, -i/-l, --exec …
+    rest = args[i + 1:] if args[i:i + 1] == ["--"] else args[i:]
+    return len(rest) == 1 and not AWK_UNSAFE_RE.search(rest[0])
+
+
 def _is_text_sink(seg):
     try:
         tk = shlex.split(seg)
@@ -525,6 +596,8 @@ def _is_text_sink(seg):
         return False
     if not tk or _cmd_start(tk) != 0 or "/" in tk[0]:
         return False
+    if tk[0] in AWK_HEADS:
+        return _awk_is_filter(tk[1:])
     if tk[0] not in INSPECT_SINKS:
         return False
     if tk[0] in GREP_HEADS and _grep_walks(tk[1:]):
@@ -539,6 +612,10 @@ def _is_text_sink(seg):
 # may feed ONLY text filters: no second source may sit in its pipeline (`ls
 # -d <root>/* | git commit --pathspec-from-file=-` would take the names).
 META_SOURCES = {"ls", "stat"}
+# Review B4: `wc -c <key> | …` / `sha256sum <key> | cut` print a count or a
+# digest beside the NAME — the same kind of source, when they name the root
+# (in sink position, a root-free `wc -l` stays a text filter).
+NAMED_META_SOURCES = {"wc", "sha256sum"}
 
 
 def is_meta_source(segment):
@@ -548,11 +625,28 @@ def is_meta_source(segment):
         tk = shlex.split(segment)
     except ValueError:
         return False
-    return bool(tk) and _cmd_start(tk) == 0 and tk[0] in META_SOURCES
+    if not tk or _cmd_start(tk) != 0:
+        return False
+    return tk[0] in META_SOURCES or (tk[0] in NAMED_META_SOURCES
+                                     and key_ref(segment) is not None)
+
+
+def is_repo_consumer_call(segment):
+    """A REPO_KEY_CONSUMERS call that accounts its `--key-file` (issue 1137 B1):
+    its output is the script's own report, so piped into text filters only
+    (`… 2>&1 | tail -20`) it keeps a plain term like a prose command."""
+    try:
+        tk = shlex.split(segment)
+    except ValueError:
+        return False
+    return (bool(tk) and _cmd_start(tk) == 0
+            and bool(_repo_key_args(tk, 0, tk[0].rsplit("/", 1)[-1].lower(),
+                                    "", segment)))
 
 
 def _is_inert_source(seg):
-    return is_secret_inspect(seg) or is_prose_command(seg) or is_meta_source(seg)
+    return (is_secret_inspect(seg) or is_prose_command(seg) or is_meta_source(seg)
+            or is_repo_consumer_call(seg))
 
 
 def pipeline_is_inert(segments):
@@ -565,8 +659,8 @@ def pipeline_is_inert(segments):
     here and is denied by its own `key_violation` pass, like every segment.
     """
     sources = [seg for seg, _t in segments if _is_inert_source(seg)]
-    if not sources:
-        return False
+    if not sources or any(is_repo_consumer_call(seg) for seg, _t in segments[1:]):
+        return False          # nothing may pipe INTO a key consumer (#1160)
     if len(sources) > 1 and any(is_meta_source(seg) for seg in sources):
         return False
     prev = None
@@ -726,13 +820,13 @@ def _assignment_is_identity_only(tok):
     return _rsh_is_identity_only(value)
 
 
-def _accounted(tk, term, segment=None):
+def _accounted(tk, term, segment=None, redefined=()):
     """Indices of tokens whose root reference is a sanctioned, non-printing use."""
     start = _cmd_start(tk)
     assigns = {i for i in range(len(tk) if start is None else start)
                if ASSIGN_RE.match(tk[i]) and _assignment_is_identity_only(tk[i])}
-    if start is None:
-        return assigns
+    if start is None or "*" in redefined or tk[start] in redefined:
+        return assigns            # a redefined name could be anything
     head = tk[start].rsplit("/", 1)[-1].lower()
     if head in DECLARE_HEADS:
         return assigns | {i for i in range(start + 1, len(tk))
@@ -742,6 +836,9 @@ def _accounted(tk, term, segment=None):
 
 def _accounted_command(tk, start, head, term, segment=None):
     ok = _pub_args(tk, start, head, term)
+    if head == tk[start] in GREP_FAMILY and not any(
+            ASSIGN_RE.match(t) or t == "env" for t in tk[:start]):
+        ok |= grep_args(tk, start)[0]          # the pattern is never opened
     if head == "ssh-keygen":
         return ok | _keygen_args(tk, start)
     if head in ("gh", "git"):
@@ -780,13 +877,13 @@ def _accounted_head(tk, start, head, term, segment=None):
     return ok
 
 
-def _unaccounted(tk, term, cwd_hint=None, segment=None):
+def _unaccounted(tk, term, cwd_hint=None, segment=None, redefined=()):
     # A redirection glued into one word (`ls <root>/k><root>/j`) is a WRITE
     # riding on an allowed argument (review C finding 7): a token naming the
     # root that also carries `<`/`>` is never accounted — unless it is PROSE
     # whose brackets were quoted text (`--body 'a <root>/<name>'`, slice 2).
     prose = _prose_indices(tk, term)
-    ok = {i for i in _accounted(tk, term, segment)
+    ok = {i for i in _accounted(tk, term, segment, redefined)
           if ("<" not in tk[i] and ">" not in tk[i])
           or (i in prose and segment is not None
               and _prose_token_is_quoted(segment, tk[i]))}
@@ -853,6 +950,10 @@ COMPOUND_WORDS = {"if", "then", "else", "elif", "fi", "for", "while", "until",
 REBIND_HEADS = {"alias", "unalias", "hash", "enable", "source", ".", "eval",
                 "export", "declare", "typeset", "readonly", "local", "set",
                 "shopt", "exec", "trap"}
+# A bare assignment rebinds a later name only through these (issue 1137 B1:
+# `W=<dir>; ls <root>/ | grep x` is an ordinary listing).
+REBIND_VARS = {"PATH", "IFS", "ENV", "BASH_ENV", "CDPATH", "GLOBIGNORE", "BASHOPTS",
+               "SHELLOPTS", "PROMPT_COMMAND", "PS4", "LD_PRELOAD", "LD_LIBRARY_PATH"}
 _LEAD_WORDS = {"!", "time", "-p", "command", "builtin"}
 
 
@@ -875,8 +976,9 @@ def _whole_command_only(segments):
         if rest and rest[0] in COMPOUND_WORDS:
             return True
         words = [t for t in rest if not ASSIGN_RE.match(t)]
-        if rest and not words:
-            return True               # a bare assignment (`PATH=/x`)
+        if rest and not words and any(t.split("=", 1)[0] in REBIND_VARS
+                                      for t in rest):
+            return True               # a bare `PATH=/x` & co.
         if words and words[0].rsplit("/", 1)[-1] in REBIND_HEADS:
             return True
     return False
@@ -951,11 +1053,37 @@ def effective_terms(segments):
 
 def text_is_clean(text):
     """No segment of shell `text` uses the key-file root unsafely."""
-    return not any(key_violation(seg, term)
-                   for seg, term in effective_terms(split_segments(text)))
+    segs = split_segments(text)
+    redefined = redefined_heads(segs)
+    return not any(key_violation(seg, term, redefined=redefined)
+                   for seg, term in effective_terms(segs))
 
 
-def key_violation(segment, term, cwd_hint=None):
+def redefined_heads(segments):
+    """Command names this command (re)defines before using them — a shell
+    function (`name() …`, `function name`) or an alias — plus `"*"` for a
+    PATH-like rebind (`PATH=…`, `export PATH=…`). A redefined head accounts
+    for nothing: a function named `ls` or `grep` can `cat` its argument
+    (issue 1137 B1 review, found while letting a grep PATTERN name the root)."""
+    out = set()
+    for k, (seg, term) in enumerate(segments):
+        words = seg.split()
+        nxt = segments[k + 1] if k + 1 < len(segments) else ("x", "")
+        if (term == "(" and len(words) == 1 and not nxt[0].strip()
+                and nxt[1] == ")"):
+            out.add(words[0])
+        if words[:1] == ["function"] and len(words) > 1:
+            out.add(words[1].split("(")[0])
+        if words[:1] == ["alias"]:
+            out |= {w.split("=", 1)[0] for w in words[1:] if "=" in w}
+        lead = words[1:] if words[:1] and words[0] in DECLARE_HEADS else words
+        if lead and all(ASSIGN_RE.match(t) for t in lead) and any(
+                t.split("=", 1)[0] in REBIND_VARS for t in lead):
+            out.add("*")
+    return out
+
+
+def key_violation(segment, term, cwd_hint=None, redefined=()):
     """None when `segment` is clean or only uses the root safely, else the ref."""
     ref = key_ref(segment, cwd_hint)
     if not ref:
@@ -964,7 +1092,7 @@ def key_violation(segment, term, cwd_hint=None):
         tk = shlex.split(segment)
     except ValueError:
         return ref                # unbalanced quoting around a reference
-    stray = _unaccounted(tk, term, cwd_hint, segment)
+    stray = _unaccounted(tk, term, cwd_hint, segment, redefined)
     if stray:
         return stray[0]
     # The segment names the root but no single argument does (a reference

@@ -6,12 +6,10 @@ done by the Fable MAIN session; the weaker model only IMPLEMENTS a decided
 design. This module reads the invoking session's OWN model from its live
 transcript jsonl -- NEVER a self-declared string a weaker worker could type --
 plus its main/worker ROLE from the cwd, and composes the stamp line the
-`design-record` poster and the hand-off `Reviewed-by:` line carry. The dispatch
-precondition (`gates.designdispatch`) then refuses an `autopilot-worker` dispatch
-whose newest design comment is not `Design-by: main <Fable id>`.
+`design-record` poster and the hand-off `Reviewed-by:` line carry.
 
 Dependency-light on purpose (only `watchdog.transcripts` + stdlib): it is called
-from a PreToolUse gate on every Agent dispatch, so it must never drag airuleset's
+from the PreToolUse design-by anti-spoof gate, so it must never drag airuleset's
 whole import graph in. The Fable-id MATCH lives in the gate, not here.
 """
 import os

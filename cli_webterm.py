@@ -52,6 +52,7 @@ import time
 from pathlib import Path
 
 import cli_aliases  # #592: the shared fleet target-alias derivation (stdlib-only)
+import cli_ssh_password  # #1236: the sshpass password FILE (stdlib-only)
 import cli_webterm_profiles as profiles  # #612: doména -> session set + auth realm
 from cli_tmux_revive import TMUX_REVIVE_SH  # #1256: revive before create
 # #694/#1159: dashboard template + touch key bar = sibling pure-constant leaves;
@@ -469,8 +470,8 @@ def _remote_command(preferred, start_dir_chain=None, user=None):
 def _ssh_interactive_prefix(entry):
     """Match the deploy loop's identity rule (cli_remote.py cmd_push /
     provision_subdev_soniox_key, ~lines 204-223 / 770-795): `identity` present ->
-    `ssh -i <identity>`; else -> `sshpass -p newlevel ssh` (default-key/shared-
-    password path). Interactive variant: force a PTY (-t), never write the
+    `ssh -i <identity>`; else -> `sshpass -f <password file> ssh` (default-key/
+    shared-password path, #1236). Interactive variant: force a PTY (-t), never write the
     USER's known_hosts (an unpinned host uses /dev/null; a #680-pinned host
     reads a freshly materialized temp pin instead, with UpdateHostKeys=no so ssh
     never appends to it either), fast connect timeout so a dead host fails
@@ -513,7 +514,7 @@ def _ssh_interactive_prefix(entry):
         # watchdog unavailable = not on the controller; proceed with sshpass
         print("  webterm: watchdog.reaper not importable (non-controller box)",
               file=sys.stderr)
-    return ["sshpass", "-p", "newlevel", "ssh"] + common
+    return cli_ssh_password.sshpass_argv() + ["ssh"] + common
 
 
 # #736: a LOCAL connect's `sh -c <attach-body>` runs as a direct child of
@@ -896,9 +897,8 @@ def _ssh_read_prefix(entry):
     identity = entry.get("collect_identity") or entry.get("identity")
     if identity:
         return ["ssh", "-i", os.path.expanduser(identity)] + common
-    # #870 F4a D4 (Y1 review fix): sshpass refusal on controller — same guard
-    # as _ssh_interactive_prefix. The collector path reaches here via
-    # _owner_u_entries → fleet inventory entries with identity=None.
+    # #870 F4a D4 (Y1 review fix): sshpass refusal on controller — same guard as
+    # _ssh_interactive_prefix (reached via _owner_u_entries, identity=None).
     try:
         from watchdog.reaper import default_box_class
         if default_box_class() == "controller":
@@ -910,7 +910,7 @@ def _ssh_read_prefix(entry):
     except ImportError:
         print("  webterm: watchdog.reaper not importable (_ssh_read_prefix)",
               file=sys.stderr)
-    return ["sshpass", "-p", "newlevel", "ssh"] + common
+    return cli_ssh_password.sshpass_argv() + ["ssh"] + common
 
 
 def _read_box_u(entry, run, timeout_s):

@@ -278,3 +278,17 @@ def _isolate_autopilot_lock_dir(monkeypatch):
         lock_dir = Path(d) / "autopilot-lock"
         monkeypatch.setenv("AIRULESET_AUTOPILOT_LOCK_DIR", str(lock_dir))
         yield lock_dir
+
+
+@pytest.fixture(autouse=True)
+def _fake_ssh_password_file(monkeypatch):
+    """(#1236) identity-less ssh argv is `sshpass -f <password file>`: point the
+    `AIRULESET_SSH_PASSWORD_FILE` seam at a FAKE 0600 file so no test depends on
+    the real one (a test of the real resolution clears it). cmd_push's Pass B
+    gets the same env via `cli_ssh_password.fake_file_for_suite`."""
+    with TemporaryDirectory() as d:
+        path = Path(d) / "newlevel-ssh-password"
+        path.write_text("fake-suite-value\n")
+        path.chmod(0o600)
+        monkeypatch.setenv("AIRULESET_SSH_PASSWORD_FILE", str(path))
+        yield path

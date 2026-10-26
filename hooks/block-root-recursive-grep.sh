@@ -69,8 +69,9 @@ case "$CMD" in
 esac
 
 RC=0
-python3 - "$CMD" <<'PYEOF' >/dev/null 2>&1 || RC=$?
+ROOT=$(python3 - "$CMD" 2>/dev/null <<'PYEOF'
 import os
+import posixpath
 import re
 import shlex
 import sys
@@ -113,28 +114,43 @@ DIR_RECURSE_VALUES = {"recurse"}
 
 
 def _is_claude_home_root(t):
-    """True if `t` (already trailing-slash and glob stripped) is under
-    `~/.claude`, `$HOME/.claude`, `${HOME}/.claude`, or
-    `/home/<user>/.claude` — the multi-GB JSONL transcript tree (#865).
-    ANY depth is blocked (`.claude`, `.claude/projects`, `.claude/projects/x`)
-    because the transcripts live throughout the tree."""
-    # ~ forms
-    if t == "~/.claude" or t.startswith("~/.claude/"):
-        return True
-    # $HOME / ${HOME} forms
-    for pfx in ("$HOME", "${HOME}", "$home", "${home}"):
+    """True if `t` (already trailing-slash and `/*` stripped) is an account's
+    `~/.claude` itself or its `projects/` transcript tree (#865): `projects`,
+    one project's transcript dir, or a glob straight inside it. A scoped path
+    below (`memory/`, `work-products/<x>`, `skills/<x>`, one session file)
+    passes (issue 1137 B1: 26 of 26 sampled blocks were such scoped paths)."""
+    rest = None
+    for pfx in ("~", "$HOME", "${HOME}", "$home", "${home}"):
         if t == pfx + "/.claude" or t.startswith(pfx + "/.claude/"):
-            return True
-    # /home/<user>/.claude (any user, any depth)
-    if re.match(r"^/home/[^/]+/\.claude(/|$)", t):
-        return True
-    return False
+            rest = t[len(pfx + "/.claude"):]
+    m = re.match(r"^/home/[^/]+/\.claude(?=/|$)", t)
+    if m:
+        rest = t[m.end():]
+    if rest is None:
+        return False
+    comps = [c for c in rest.split("/") if c]
+    if comps and comps[0] != "projects" and not re.search(r"[*?\[]", comps[0]):
+        return False
+    return len(comps) <= 2 or bool(re.search(r"[*?\[]", comps[2]))
+
+
+def _collapse_dots(t):
+    """`.`, `..` and `//` collapsed before any root check (issue 1137 B1
+    review A5: `~/.claude/..` is the home, `~/.claude/./projects` the
+    transcript tree). A relative token is left as it is."""
+    for pfx in ("${HOME}", "$HOME", "${home}", "$home", "~"):
+        if t == pfx or t.startswith(pfx + "/"):
+            rest = posixpath.normpath("/" + t[len(pfx):].lstrip("/"))
+            return pfx if rest == "/" else pfx + rest
+    if t.startswith("/"):
+        return "/" + posixpath.normpath(t).lstrip("/")
+    return t
 
 
 def _norm_root(tok):
     """A path token normalized for blocked-root comparison, or None if it is
     obviously not a bare root (contains an inner path component)."""
-    t = tok
+    t = _collapse_dots(tok)
     # A `/*`-style glob of a root is a root scan (the shell expands it to
     # every entry): `/*` -> `/`, `/home/*` -> `/home`, `~/*` -> `~`.
     if t.endswith("/*"):
@@ -394,15 +410,21 @@ while i < nlines:
             break
 cmd = "\n".join(out)
 
-sys.exit(2 if classify(cmd) else 0)
+hit = classify(cmd)
+if hit:
+    print(hit)
+sys.exit(2 if hit else 0)
 PYEOF
+) || RC=$?
 
 [ "$RC" -eq 2 ] || exit 0
 
+echo "Refused root: $ROOT — scope it: grep -rn \"<pattern>\" . (the repo), a subdir, or one file." >&2
 cat >&2 <<'MSG'
 BLOCKED: a RECURSIVE grep whose search ROOT is `/` or another huge non-repo
-root (`/home`, `~`, `$HOME`, `~/.claude`, a top-level system dir). #776/#865 —
-this is exactly the shape that spawns a runaway ugrep or a multi-GB grep.
+root (`/home`, `~`, `$HOME`, `~/.claude` or its `projects/` transcript tree,
+a top-level system dir). #776/#865 — the shape that spawns a runaway ugrep or
+a multi-GB grep.
 
 WHY: Claude Code shadows every Bash `grep` into `ugrep -G --ignore-files ...`
 (shell-snapshots), and the bundled ugrep 7.5.0 busy-loops at 100% CPU forever
@@ -418,7 +440,8 @@ Do this instead:
       grep -rn "pattern" .            (cwd/repo)
       grep -rn "pattern" ./src        (a subdir)
       grep -rn "pattern" path/to/dir  (a specific tree)
-  • For ~/.claude transcripts, grep the ONE session file:
+  • Under ~/.claude, scope it: ~/.claude/projects/<repo>/memory/,
+    ~/.claude/work-products/<dir>/, or the ONE session file:
       grep "pattern" <session>.jsonl          (one file)
       tail -c 200000 <session>.jsonl | grep   (bounded tail)
 

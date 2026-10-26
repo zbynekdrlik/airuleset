@@ -17,9 +17,8 @@ body file; this command
      on a literal `gh issue comment` Bash call and would not fire on this command's
      own `airuleset.py design-record` invocation, so design-record writes it here.
 
-The dispatch precondition (`gates.designdispatch`) then refuses an
-autopilot-worker dispatch whose newest design comment is not
-`Design-by: main <Fable id>`.
+The implementer's design check (`gates.designdispatch --issue N`) then
+reads the newest `Design-by:` stamp.
 """
 import os
 import subprocess
@@ -217,7 +216,7 @@ def post_and_record(issue, repo, raw_body, cwd, runner=None, projects_dir=None,
     if not ok:
         return False, "invalid design: " + "; ".join(reasons), None
     # #1061 fix-forward / #1064: never post a `Design-by: <role> unknown` stamp
-    # -- the dispatch gate (gates.designdispatch) would then REFUSE a legitimately
+    # -- the implementer's design check (gates.designdispatch) would REFUSE a legitimately
     # main-authored design (the deploy defect). Since #1064 the stamp records the
     # CONFIGURED (launch) model with the served model as an audit suffix, so a
     # busy-turn / API float no longer trips this: the model reads `unknown` ONLY

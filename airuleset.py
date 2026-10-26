@@ -3795,25 +3795,6 @@ def _timeline_handoff_signal(ev):
     return None, False
 
 
-def _count_deploy_wait(ops_wait):
-    """#953 follow-on (Y7): shared helper for the deploy-target exempt count
-    duplicated across both `cmd_tickets_status` authority branches (slice
-    and core) — a lightweight title-based heuristic (no extra gh calls); the
-    full comment-based deploy-target! tag runs in `_ops_wait_flag_sets`,
-    which is too expensive on this hot footer-refresh path. Fail-safe to 0
-    on any import/lookup error (a missing/broken release_watch module must
-    never break the footer refresh)."""
-    dw = 0
-    try:  # airuleset:script-ok guarded cache write, fail-safe to 0
-        from watchdog.release_watch import is_deploy_target as _idt
-        for _n, _r in ops_wait.items():
-            if _idt((_r or {}).get("title") or ""):
-                dw += 1
-    except Exception:
-        pass
-    return dw
-
-
 def _merged_unreleased_set(root, slug):
     """#1083 — the git-derived set of open-ticket numbers whose fix PR is merged
     into develop/staging but NOT yet in main (`M`). Fully fail-safe EMPTY (a
@@ -4294,30 +4275,9 @@ def cmd_tickets_status(args):
                 # `_qmap_extra`, so the numbers can never drift from user_waiting.
                 entry["user_waiting_numbers"] = sorted(
                     {int(n) for n in waiting} | {int(n) for n in _qmap_extra})
-                # #868: W-drain breach flag — consumed by statusbar._ops_wait_sfx
-                # for the red `· W N!` footer signal and by block-dispatch-over-
-                # wdrain.sh (which reads ops_wait directly, not this bool).
+                # #868: W-drain breach flag — the red `· W N!` footer signal
+                # (statusbar._ops_wait_sfx).
                 entry["wdrain_over"] = len(ops_wait) > OPS_WAIT_WDRAIN_THRESHOLD
-                # #953: deploy-target exempt count — members blocked on a
-                # release/deploy train (see `_count_deploy_wait`'s own
-                # docstring for the heuristic + fail-safe rationale).
-                entry["ops_wait_deploy_wait"] = _count_deploy_wait(ops_wait)
-                # #986: stale W count for the dispatch gate.
-                # #989: use _compute_net_stale_w which correctly unpacks
-                # the (tacit_wait, tacit_close) tuple from
-                # _tacit_window_flagged (the inline set - tuple was a
-                # TypeError — #989). Fail-open: any error -> omit the
-                # field (hook falls back to total ops_wait).
-                try:
-                    # #1067 (a): batched comment prefetch (O(quals) gh calls)
-                    # on the hot footer refresh instead of O(members) per-member
-                    # `gh issue view` — the SAME `member_quals` slice that
-                    # produced the W members.
-                    entry["ops_wait_stale"] = _compute_net_stale_w(
-                        ops_wait, cwd=root, member_quals=quals)
-                except Exception as _e:
-                    sys.stderr.write("tickets-status: stale W count "
-                                     "skipped (%s)\n" % _e)
             # Skipped bucket (2026-07-16): same slice quals, POSITIVE label
             # filter — how many of MY tickets are excluded from autopilot runs.
             # `quals` empty ⟺ SliceUnresolved above (it is otherwise always 1
@@ -4395,20 +4355,6 @@ def cmd_tickets_status(args):
                 entry["ops_wait"] = len(ops_wait)
                 # #868: W-drain breach flag (same as the slice path above).
                 entry["wdrain_over"] = len(ops_wait) > OPS_WAIT_WDRAIN_THRESHOLD
-                # #953: deploy-target exempt count (same as the slice path above).
-                entry["ops_wait_deploy_wait"] = _count_deploy_wait(ops_wait)
-                # #986: stale W count (same as the slice path above).
-                # #989: use _compute_net_stale_w (same fix as the slice
-                # path — the inline set - tuple was a TypeError).
-                try:
-                    # #1067 (a): batched comment prefetch on the core footer's
-                    # hot refresh, keyed by the SAME obligation quals that
-                    # produced the W members (O(quals) gh, not O(members)).
-                    entry["ops_wait_stale"] = _compute_net_stale_w(
-                        ops_wait, cwd=root, member_quals=_obligation_quals())
-                except Exception as _e:
-                    sys.stderr.write("tickets-status: stale W count "
-                                     "skipped (%s)\n" % _e)
             # Skipped bucket (2026-07-16): the POSITIVE label query over the
             # CORE partition — how many tickets are excluded from autopilot.
             # #367 left this scoped to the core partition (unchanged) rather
@@ -6595,7 +6541,6 @@ from cli_remote import (  # noqa: E402, F401
     _ssh_multiplex_opts as _ssh_multiplex_opts,
     host_key_check_opts as host_key_check_opts,
     _materialize_pinned_known_hosts as _materialize_pinned_known_hosts,
-    _redacted_ssh_cmd as _redacted_ssh_cmd,
     _HOME_AUDIT_MARKER as _HOME_AUDIT_MARKER,
     _shared_remote_host_ips as _shared_remote_host_ips,
     _remote_cmd_with_home_audit as _remote_cmd_with_home_audit,
@@ -9084,7 +9029,6 @@ from cli_quals import (  # noqa: E402  (#433 cluster I facade — leaf re-export
     ops_wait_ages_fn as ops_wait_ages_fn,
     _stale_ops_wait_flagged as _stale_ops_wait_flagged,
     _tacit_window_flagged as _tacit_window_flagged,
-    _compute_net_stale_w as _compute_net_stale_w,
     _release_recheck_flagged as _release_recheck_flagged,
     _release_train_drained as _release_train_drained,
     _unpark_release_flagged as _unpark_release_flagged,
@@ -9449,11 +9393,6 @@ from cli_prod_transfer import (  # noqa: E402, F401
 )
 from cli_mdreview_audit import (  # noqa: E402, F401
     cmd_mdreview_audit as cmd_mdreview_audit,
-)
-
-# --- #868: W-drain receipt CLI (block-dispatch-over-wdrain.sh companion).
-from cli_wdrain import (  # noqa: E402
-    cmd_wdrain_pass as cmd_wdrain_pass,
 )
 
 
@@ -10431,18 +10370,6 @@ def main():
     p_su.add_argument("--days", type=int, default=60,
                       help="Window in days (default 60)")
 
-    # --- #868: W-drain receipt for block-dispatch-over-wdrain.sh gate ------
-    p_wdrain = sub.add_parser(
-        "wdrain-pass",
-        help="Record a W-drain receipt after validating per-member verdicts "
-             "(unblocks block-dispatch-over-wdrain.sh for 24h working time, #868)")
-    p_wdrain.add_argument("--record", action="store_true",
-                          help="Validate verdicts and write the receipt")
-    p_wdrain.add_argument("--verdicts-file", dest="verdicts_file",
-                          help="Tab-separated verdicts file (#N<TAB>action<TAB>citation)")
-    p_wdrain.add_argument("--cwd", default=None,
-                          help="Override cwd for cache key resolution")
-
     # --- #858: mdreview-audit ---
     p_ma = sub.add_parser(
         "mdreview-audit",
@@ -11232,7 +11159,6 @@ SUBCOMMANDS = {
     "model-tiers": cmd_model_tiers,
     "context-baseline": cmd_context_baseline,
     "skill-usage": cmd_skill_usage,
-    "wdrain-pass": cmd_wdrain_pass,
     "key-rotation": cmd_key_rotation,
     "mdreview-audit": cmd_mdreview_audit,
     "doctrine-audit": cmd_doctrine_audit,

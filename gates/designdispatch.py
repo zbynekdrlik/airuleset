@@ -1,42 +1,29 @@
-"""gates.designdispatch -- the MAIN-authored-design dispatch precondition
-(#1061, owner escalation 2026-09-17). Entry for
-hooks/block-dispatch-without-main-design.sh.
+"""gates.designdispatch -- the MAIN-authored-design check (#1061, owner
+escalation 2026-09-17), run by the implementer before any work:
+`python3 -m gates.designdispatch --issue N [--slug owner/repo] [--cwd D]`.
 
-Active ONLY for an `autopilot-worker` Agent/Task dispatch. REFUSES the dispatch
-unless the NEWEST `Design-by:` comment on every issue named in the prompt is
+`check_issue` passes only when the NEWEST `Design-by:` comment on the issue is
 `Design-by: main <managed-main id>` -- a managed MAIN-tier id (Opus 5.5 since
-#1119, or Fable 5.1 through the transition; see `_accepted_main_ids`), i.e. the
-design was authored by the managed MAIN session, per the owner's standing #871
-rule. FAIL-CLOSED: an unreadable comment
-thread (gh error / no network / auth) REFUSES with an honest reason (the owner's
-rule -- never dispatch a worker onto an unverifiable design). A prompt with no
-parseable ticket number is REFUSED too (#1061 review-3: an autopilot-worker
-always works a ticket, so "names no ticket" is fail-closed); a ticket is
-`#N` or `issue N` with N of 1-6 digits (#1165 -- a young repo's `issue 4`).
+#1119, or Fable 5.1 through the transition; see `_accepted_main_ids`), i.e.
+the design was authored by the managed MAIN session, per the owner's standing
+#871 rule. FAIL-CLOSED: an unreadable comment thread (gh error / no network /
+auth) or an unresolvable repo refuses with an honest reason. Its dispatch-time
+hook (`evaluate` on an Agent payload) was retired by issue 1137 B1; the
+commit-time block-commit-without-design.sh keeps design-first.
 
-Bypass: `airuleset:design-by-ok <reason>` in the dispatch prompt -- allowed and
-logged to ~/.claude/design-by-gate.log.
-
-STDLIB ONLY at import; airuleset (MODEL_TIERS / _gh_env) is imported lazily.
+STDLIB ONLY at import; airuleset (MANAGED_MODEL / _gh_env) is imported lazily.
 """
-import json
 import os
 import re
 import subprocess
 import sys
-import time
 
-from gates import read_payload, field_of, emit_block_stderr, allow
 from gates import ghread
 from gates import ticketrefs
 
-DESIGN_BY_LOG = "design-by-gate.log"
-
-# Ticket-number parsing of the dispatch prompt lives in gates/ticketrefs.py
-# (#1165 split); `issue_numbers` is re-exported for callers + tests.
+# Ticket-number parsing lives in gates/ticketrefs.py (#1165 split);
+# `issue_numbers` is re-exported for callers + tests.
 issue_numbers = ticketrefs.issue_numbers
-
-_BYPASS_RE = re.compile(r"airuleset:design-by-ok\s*(?P<reason>.*)", re.IGNORECASE)
 
 # A `Design-by: <role> <model>` line, leading-bullet + bold tolerant (the
 # MINOR-3 lesson shared with the design classifiers): a `**Design-by:**` /
@@ -51,16 +38,6 @@ _DESIGN_BY_RE = re.compile(
     r"(?im)^[ \t>*#-]*\**[ \t]*Design-?by\**[ \t]*:[ \t]*\**[ \t]*"
     r"(?P<role>main|worker)\b[ \t]*(?P<model>\S+)?"
     r"(?:[ \t]*\(served:[ \t]*(?P<served>[^)]*)\))?")
-
-
-def _log(line):
-    try:
-        path = os.path.join(os.path.expanduser("~"), ".claude", DESIGN_BY_LOG)
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "a", encoding="utf-8") as fh:
-            fh.write(line + "\n")
-    except OSError:
-        return
 
 
 def _norm_model(m):
@@ -143,13 +120,8 @@ def _gh_env():
 
 
 def _resolve_slug(cwd, timeout=6):
-    # NOTE: the repo is resolved from the dispatch cwd (the target repo's
-    # checkout), NOT the prompt's `in <repo>` name — autopilot is single-repo
-    # per run, so the cwd is authoritative and needs no prompt parsing.
-    # Timeout kept WELL under the hook's own timeout (settings/hooks.json) so the
-    # gate's own timeout->None->block path runs BEFORE CC kills the hook (a
-    # killed PreToolUse hook fail-OPENs — the exact inverse of this gate's
-    # fail-closed contract; #1061 review).
+    # The repo is resolved from the cwd (the target repo's checkout); a
+    # timeout or failure returns None, which the caller refuses (fail-closed).
     # #1070 item 1 -- resolve the slug from the LOCAL git remote FIRST (never an
     # API call, so it survives the owner identity's hourly GraphQL exhaustion);
     # `gh repo view` (GraphQL) is only the fallback. Without this, slug
@@ -247,117 +219,16 @@ def check_issue(number, slug, cwd, fetch=None, fable_id=None):
     return True, "ok"
 
 
-def _is_pull_request(number, slug, cwd):
-    """(is_pr, err) via a single REST `GET /issues/<N>` (GitHub's issues
-    endpoint returns a PR too, carrying a `pull_request` key). REST survives the
-    hourly GraphQL exhaustion. `is_pr` is None (UNKNOWN) when the read fails."""
-    return ghread.is_pull_request(number, slug, cwd=cwd)
-
-
-def evaluate(payload, fetch=None, resolve_slug=None, fable_id=None, is_pr=None):
-    """('allow', reason) or ('block', reason). Pure of process exit so tests can
-    assert the verdict directly; `main()` maps it to allow()/emit_block_stderr()."""
-    tool = field_of(payload, "tool_name", "")
-    if tool not in ("Agent", "Task"):
-        return "allow", "not an Agent/Task dispatch"
-    try:
-        obj = json.loads(payload)
-    except Exception:
-        return "allow", "unparseable payload"
-    tin = obj.get("tool_input") if isinstance(obj, dict) else None
-    if not isinstance(tin, dict):
-        return "allow", "no tool_input"
-    if (tin.get("subagent_type") or "") != "autopilot-worker":
-        return "allow", "not an autopilot-worker dispatch"
-    prompt = tin.get("prompt") or ""
-    cwd = obj.get("cwd") or ""
-
-    mb = _BYPASS_RE.search(prompt)
-    if mb:
-        _log("%s\tBYPASS\t%s\t%s" % (
-            time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            cwd, mb.group("reason").strip()))
-        return "allow", "design-by-ok bypass (logged)"
-
-    # #1165 round 2: a `PR #N` is never a ticket (ticketrefs drops it), so a
-    # dispatch that only rides a PR (#1070 item 2) falls back to its PR numbers;
-    # the is_pr check below still verifies each one IS a PR before allowing.
-    issues = issue_numbers(prompt) or ticketrefs.pr_numbers(prompt)
-    if not issues:
-        # FAIL-CLOSED (#1061 review-3, owner's rule): an autopilot-worker ALWAYS
-        # works a ticket, so a dispatch that names none is refused — name it as
-        # `issue N` (or `#N`). The bypass stays `airuleset:design-by-ok`.
-        return "block", ("this autopilot-worker dispatch names no ticket — name "
-                         "the ticket as `issue N` (or `#N`) in the prompt so its "
-                         "Design-by: main comment can be verified")
-
-    slug = None
-    resolver = resolve_slug or _resolve_slug
-    slug = resolver(cwd)
-    if not slug:
-        return "block", ("could not resolve the repo (gh repo view failed) -- "
-                         "refusing an autopilot-worker dispatch that cannot be "
-                         "design-by verified (fail-closed)")
-
-    # #1070 item 2 -- a dispatch prompt legitimately names an open PR it rides
-    # ("this batch rides PR #201, do not gh pr create"); a PR carries no design
-    # comment, so demanding `Design-by:` for it is a false block (#1079). Resolve
-    # each `#N` as PR vs issue via one REST `GET /issues/<N>` (a PR carries
-    # `pull_request`) and SKIP the PRs; an UNKNOWN read (gate-unavailable) is
-    # kept as an issue so its own comment read produces the honest verdict.
-    is_pr_fn = is_pr or _is_pull_request
-    checkable = []
-    for n in issues:
-        pr, _perr = is_pr_fn(n, slug, cwd)
-        if pr is True:
-            _log("%s\tSKIP-PR\t%s\t#%d" % (
-                time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), cwd, n))
-            continue
-        checkable.append(n)
-    if not checkable:
-        # every named ref resolved to a PR -> there is no issue to design-check
-        # (a PR cannot carry a design comment); nothing to refuse.
-        return "allow", "every named ref is a PR -- no issue to design-check"
-
-    # #1060 L3a: the Fable id is the only accepted design model on every box (the
-    # #1062 L2 pilot-alias acceptance is removed -- the main always designs).
-    for n in checkable:
-        ok, reason = check_issue(n, slug, cwd, fetch=fetch, fable_id=fable_id)
-        if not ok:
-            return "block", reason
-    return "allow", "every issue has a Design-by: main <Fable id> comment"
-
-
-def _block_message(reason):
-    return (
-        "BLOCKED: main-authored design precondition (#1061) -- %s\n"
-        "\n"
-        "  The owner's standing rule (#871): the DESIGN of every ticket is "
-        "authored by\n"
-        "  the Fable MAIN session, the worker only IMPLEMENTS it. Before "
-        "dispatching an\n"
-        "  autopilot-worker, post the design yourself:\n"
-        "\n"
-        "    python3 ~/devel/airuleset/airuleset.py design-record \\\n"
-        "      --repo <owner/name> --issue <N> --body-file <design.md>\n"
-        "\n"
-        "  (root cause traced in code + chosen approach + rejected alternative "
-        "+ Triage:\n"
-        "  + Architektura: + Shared-benefit:). Then re-dispatch. Bypass with\n"
-        "  `airuleset:design-by-ok <reason>` in the prompt (logged)." % reason)
-
-
 def _run_issue_cli(argv, fetch=None, fable_id=None, resolve_slug=None):
     """#1060 L3b — the RECEIVING-SIDE design gate the IMPLEMENTER runs before any
     work. `python3 gates/designdispatch.py --issue N [--slug owner/repo] [--cwd D]`
-    exits 2 unless `#N`'s newest design comment is role-main + the Fable id (the
-    SAME `check_issue` the dispatch hook uses), else 0 — fail-closed on an
-    unreadable thread / unresolvable repo, exactly like the hook path.
+    exits 2 unless `#N`'s newest design comment is role-main + a managed MAIN id
+    (`check_issue`), else 0 — fail-closed on an unreadable thread or an
+    unresolvable repo.
 
-    The dispatch hook (`main` below, no argv) trusts the design comment on the
-    SENDER side; on the two independent-session `dual` box the implementer is
-    reached by `SendMessage`, not an `Agent` dispatch, so the same precondition
-    must be re-checked HERE, on the receiver, before it touches the ticket.
+    On the two independent-session `dual` box the implementer is reached by
+    `SendMessage`, not an `Agent` dispatch, so the precondition is checked
+    HERE, on the receiver, before it touches the ticket.
 
     `fetch` / `fable_id` / `resolve_slug` are injected in tests; production uses
     the module defaults. Returns the exit code (never calls sys.exit)."""
@@ -395,20 +266,7 @@ def _run_issue_cli(argv, fetch=None, fable_id=None, resolve_slug=None):
 
 
 def main():
-    argv = sys.argv[1:]
-    if "--issue" in argv or any(a.startswith("--issue=") for a in argv):
-        # #1060 L3b — receiving-side CLI mode (the implementer runs this before
-        # any work); distinct from the stdin PreToolUse hook path below.
-        sys.exit(_run_issue_cli(argv))
-    payload = read_payload()
-    if not payload:
-        allow()
-    verdict, reason = evaluate(payload)
-    if verdict == "block":
-        _log("%s\tBLOCK\t%s" % (
-            time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), reason))
-        emit_block_stderr(_block_message(reason))
-    allow()
+    sys.exit(_run_issue_cli(sys.argv[1:]))
 
 
 if __name__ == "__main__":

@@ -3,7 +3,7 @@ cache's timeout backoff.
 
 Approach 1 of the design (issue #1067 comment 5787085030, slice 1b):
 
-  (a) `_ops_wait_flag_sets` / the footer's `_compute_net_stale_w` used to run one
+  (a) `_ops_wait_flag_sets` (and the since-retired footer stale-W count) ran one
       `gh issue view <n> --json comments` per W member (102 s for 74 members on
       montalu1). A single batched prefetch (`_ops_wait_prefetch_comments`) feeds
       the existing `ages_fn` seam via `ops_wait_ages_fn`; a member missing from
@@ -359,14 +359,6 @@ class PrefetchSkippedWhenNoWMembers(unittest.TestCase):
             airuleset.ops_wait_ages_fn({}, "/r", ["q1", "q2"])
         self.assertEqual(0, rec.comment_calls)
 
-    def test_compute_net_stale_w_empty_no_gh(self):
-        rec = _GhRecorder(COMMENTS)
-        with mock.patch.object(airuleset, "_gh_out", rec), \
-                mock.patch.object(airuleset, "_stream_self_login", lambda: "me"):
-            n = airuleset._compute_net_stale_w({}, cwd="/r",
-                                               member_quals=["q1"])
-        self.assertEqual(0, n)
-        self.assertEqual(0, rec.comment_calls)
 
 
 class PrefetchSlugFailureFallsBack(unittest.TestCase):

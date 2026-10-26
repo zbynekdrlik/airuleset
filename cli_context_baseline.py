@@ -540,7 +540,8 @@ def run_fleet(runner=None):
 
     #900: SSH commands mirror the push deploy identity map from cli_fleet
     REMOTE_HOSTS — identity-pinned hosts get `-i <key> -o BatchMode=yes`,
-    default-key hosts get `sshpass -p <pw> -o NumberOfPasswordPrompts=1`,
+    default-key hosts get `sshpass -f <password file> -o NumberOfPasswordPrompts=1`
+    (#1236: an unusable file fails that ONE host as `SshPasswordFileError`),
     host-key pins (#669) apply via `cli_remote.host_key_check_opts()`.
     Webterm OBSERVER accounts (WEBTERM_OBSERVER_USERS) are excluded — they
     run no Claude sessions, so measuring them is wasted ssh + auth risk.
@@ -551,6 +552,7 @@ def run_fleet(runner=None):
     import subprocess
     import cli_fleet
     import cli_remote
+    import cli_ssh_password
 
     hosts = cli_remote._deployable_hosts()
 
@@ -582,11 +584,8 @@ def run_fleet(runner=None):
                 user = host.get("user", "newlevel")
                 repo_path = host.get("repo_path",
                                      "~/devel/airuleset")
-                remote_argv = [
-                    "python3",
-                    f"{repo_path}/airuleset.py",
-                    "context-baseline", "--json"
-                ]
+                remote_argv = ["python3", f"{repo_path}/airuleset.py",
+                               "context-baseline", "--json"]
                 # Derive per-host project dirs from registry (#857)
                 # shlex.quote each path for the remote shell (YELLOW 3)
                 host_projects = by_host.get(name, [])
@@ -607,7 +606,7 @@ def run_fleet(runner=None):
                     ]
                 else:
                     ssh_base = [
-                        "sshpass", "-p", "newlevel",
+                        *cli_ssh_password.sshpass_argv(),
                         "ssh", *hostkey_opts,
                         "-o", "NumberOfPasswordPrompts=1",
                         "-o", "ConnectTimeout=10",

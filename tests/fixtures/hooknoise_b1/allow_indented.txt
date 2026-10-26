@@ -1,0 +1,6 @@
+test.describe("catering storno", () => {
+  test.beforeEach(async () => {
+    // one line — ci.yml no-skip-validation greps the literal `test.skip(notApplicable(), `
+    test.skip(notApplicable(), "Pokladna Veduca credentials (POKLADNA_VEDUCA_*) not provided");
+  });
+});

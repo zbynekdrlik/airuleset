@@ -31,27 +31,19 @@ PATTERNS = [
      "expect(true).toBe(true) — tautology, verifies nothing"),
 ]
 
-# #1069 -- the ONE sanctioned skip shape the fleet gate allows: a TOP-LEVEL
-# (column 0) Playwright `test.skip` whose ONLY arguments are exactly the bare
-# call notApplicable() and a quoted/template reason, forming the WHOLE line. It
-# marks a per-instance e2e spec not applicable when its addon is absent from
-# the -i install list (odoo-erp .claude/rules/gk-review-lenses.md
-# §test-integrity; the odoo-erp CI job `No Skip Validation` guards placement).
-# The regex is anchored on BOTH axes so a real skip cannot hide behind the
-# literal: column 0 at the START (no leading `\s*` -> an INDENTED nested skip
-# stays blocked) AND `\)\s*;?\s*$` at the END (the whole line is just this one
-# call -> a real truthy skip call appended on the SAME physical line is NOT
-# sanctioned, since git diff -U0 added-lines are per physical line). The reason
-# class `'[^'\n]*'` / "..." / `...` requires a real reason and cannot span its
-# own closing quote (no `.*?` backtracking across an injected `;)`), so an empty
-# reason is rejected too. A matching line is dropped by scan_test_file before
-# the PATTERNS pass; everything else still runs.
-SANCTIONED = [
-    re.compile(
-        r"""^test\.skip\(\s*notApplicable\(\)\s*,\s*"""
-        r"""(?:'[^'\n]*'|"[^"\n]*"|`[^`\n]*`)\s*\)\s*;?\s*$"""
-    ),
-]
+# #1069 / issue 1255 -- the ONE sanctioned skip: a Playwright
+# `test.skip` call with the args (notApplicable(), <reason>) at ANY indentation (the odoo-erp CI
+# job `No Skip Validation` accepts every line carrying that literal; the spec
+# marks a per-instance e2e test not applicable). Each COMPLETE call is cut out
+# of an added line before PATTERNS run, so a real skip on the same physical line
+# still blocks (git diff -U0 is per physical line). The reason must be one
+# quoted/template string that cannot span its own closing quote, so a missing
+# reason, `notApplicable() || x` and a nested `;)` are not the literal. A `//`
+# comment line skips nothing and is not scanned.
+SANCTIONED = re.compile(
+    r"""\btest\.skip\(\s*notApplicable\(\)\s*,\s*"""
+    r"""(?:'[^'\n]*'|"[^"\n]*"|`[^`\n]*`)\s*\)""")
+_COMMENT_LINE_RE = re.compile(r"^\s*//")
 EMPTY_BODY = re.compile(
     r'^[ \t]*def\s+test_\w*\([^)]*\):[ \t]*\n[ \t]*pass[ \t]*$'
     r'|fn\s+test_\w*\([^)]*\)\s*\{\s*\}'
@@ -97,10 +89,11 @@ def scan_test_file(tf, base_ref, dest_ref):
         added_lines = [ln[1:] for ln in hunk.splitlines()
                        if ln.startswith("+") and not ln.startswith("+++")]
         kept = []
-        for ln in added_lines:
-            if any(s.search(ln) for s in SANCTIONED):
-                continue  # #1069 -- the one allowed literal; never scanned
-            if dest and ln.strip() in dest:
+        for raw in added_lines:
+            if _COMMENT_LINE_RE.match(raw):
+                continue
+            ln = SANCTIONED.sub("", raw)  # #1069 / issue 1255
+            if dest and raw.strip() in dest:
                 for pat, _lbl in PATTERNS:
                     if pat.search(ln):
                         excluded_banned = True
@@ -145,11 +138,11 @@ _BLOCK_MSG = (
     "  no empty test bodies.\n"
     "\n"
     "  The ONE sanctioned exception (odoo-erp .claude/rules/gk-review-lenses.md\n"
-    "  §test-integrity): a TOP-LEVEL (column 0) `test.skip` whose first argument is\n"
-    "  exactly the bare call notApplicable() followed by a reason — marking a\n"
-    "  per-instance Playwright e2e spec not applicable. That literal is allowed\n"
-    "  automatically; every other skip shape (indented, truthy/condition arg,\n"
-    "  compound arg, no reason, it-skip, pytest mark) stays blocked below.\n"
+    "  §test-integrity): a `test.skip` whose arguments are exactly notApplicable()\n"
+    "  and a reason, at any indentation — a per-instance Playwright e2e spec not\n"
+    "  applicable here. That literal is allowed automatically; every other skip\n"
+    "  shape (truthy/condition arg, compound arg, no reason, a second skip on the\n"
+    "  same line, it-skip, pytest mark) stays blocked below.\n"
     "\n"
     "%s\n"
     "\n"

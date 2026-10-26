@@ -261,7 +261,7 @@ def is_pull_request(number, slug, cwd=None, runner=None, timeout=8, env=None):
 # re-poll for FREE as long as nothing changed. `rest_get_cached` caches
 # `{etag, body, ts}` per URL and sends the ETag; `list_open_issues_cached`
 # pages the REST issues endpoint through it (PRs dropped via the `pull_request`
-# key, exactly as `is_pull_request`/`gates.designdispatch` do); the client-side
+# key, exactly as `is_pull_request` does); the client-side
 # `search_*` helpers replicate the label/@me `--search` qualifiers so a caller
 # can filter one cached snapshot instead of spending one GraphQL search per
 # qual. FAIL-OPEN throughout: any error falls back to a plain uncached GET, and

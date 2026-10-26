@@ -1,11 +1,11 @@
 """#1069 -- gates.testskips SANCTIONED allow-list for the ONE Playwright
-literal odoo-erp's contract permits: a TOP-LEVEL (column 0)
+literal odoo-erp's contract permits: a
 ``test.skip`` whose first argument is exactly the bare call ``notApplicable()``
 followed by a reason (see ``.claude/rules/gk-review-lenses.md`` §test-integrity,
-odoo-erp CI job ``No Skip Validation`` for placement). Everything else — the
-same shape INDENTED inside a body, a truthy/condition first arg, a compound
-first arg, a missing reason, the it-skip / pytest-mark-skip shapes — stays
-blocked.
+odoo-erp CI job ``No Skip Validation`` for placement; issue 1255 later allowed
+it at any indentation). Everything else — a truthy/condition first arg, a
+compound first arg, a missing reason, the it-skip / pytest-mark-skip shapes —
+stays blocked.
 
 The skip literals themselves live in ``tests/fixtures/testskips_1069/*.txt``
 (a non-code extension, so gates.testskips never scans THEM); this test file
@@ -101,14 +101,6 @@ class TestSanctionedTestSkip(unittest.TestCase):
 
     def test_blocks_condition_first_arg(self):
         r = self._push("block_negation.txt", "tests/e2e/money.spec.ts")
-        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
-        self.assertIn("BLOCKED", r.stdout + r.stderr)
-
-    def test_blocks_sanctioned_shape_when_indented_in_body(self):
-        # identical call, but INDENTED inside a test( body -> not top-level
-        # -> must block (this is the exact security hole the ticket exists
-        # to prevent: a real skip hiding behind the sanctioned literal).
-        r = self._push("block_indented.txt", "tests/e2e/money.spec.ts")
         self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
         self.assertIn("BLOCKED", r.stdout + r.stderr)
 

@@ -79,10 +79,12 @@ class PipedInspect(Base):
                      "%s inspect %s 2>&1 | tail -n 3 | wc -l" % (CLI, KEY),
                      "python3 airuleset.py secret inspect %s | sort" % KEY,
                      # the store's format check pipes the same way
-                     "%s inspect %s 2>&1 | head" % (CLI, STORE)],
+                     "%s inspect %s 2>&1 | head" % (CLI, STORE),
+                     # issue 1137 B1 review B4: awk as a pure print filter
+                     "%s inspect %s | awk '{print $2}'" % (CLI, KEY)],
             denied=["%s inspect %s | xargs cat" % (CLI, KEY),
                     "%s inspect %s | sed -n 's/^path: //p' | xargs cat" % (CLI, KEY),
-                    "%s inspect %s | awk '{print $2}'" % (CLI, KEY),
+                    "%s inspect %s | awk '{system(\"cat \" $2)}'" % (CLI, KEY),
                     "%s inspect %s | while read a b; do cat \"$b\"; done" % (CLI, KEY),
                     "%s inspect %s | sh" % (CLI, KEY),
                     "%s inspect %s | wc --files0-from=-" % (CLI, KEY),

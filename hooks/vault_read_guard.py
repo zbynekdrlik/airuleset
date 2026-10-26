@@ -22,8 +22,10 @@ path puts THIS directory on sys.path[0], not the caller's cwd, so a stray
 `json.py`/`re.py` in whatever directory the agent happens to be in cannot
 shadow a stdlib module this guard imports (the #1046 class).
 """
+import fnmatch
 import hashlib
 import json
+import os
 import re
 import shlex
 import sys
@@ -31,11 +33,12 @@ import sys
 # Invoked by path, so sys.path[0] is this directory: the two siblings below
 # resolve from here, never from the caller's cwd. An import failure exits
 # non-zero-non-2, which the wrapper turns into fail_closed.
-from vault_guard_shell import (ASSIGN_RE, TOKEN_RE, can_be,
+from vault_guard_shell import (ASSIGN_RE, GLOB_META, TOKEN_RE, can_be,
                                path_candidates,
                                split_segments)
-from vault_keyroot import (effective_terms, is_pub_path, is_secret_inspect,
-                           key_audit_ref, key_ref, key_violation)
+from vault_keyroot import (_cmd_start, _grep_walks, effective_terms, grep_args,
+                           is_pub_path, is_secret_inspect, key_audit_ref, key_ref,
+                           key_violation, redefined_heads)
 
 raw = sys.argv[1]
 
@@ -74,6 +77,11 @@ tin = payload.get("tool_input") or {}
 cmd = ""
 if isinstance(tin, dict):
     cmd = tin.get("command") or ""
+    if not isinstance(cmd, str):
+        # Issue 1137 B1 review B7: not a shell command at all — refuse
+        # (the wrapper fails closed on exit 3) rather than crash on it.
+        print("  the command is a %s, not a string" % type(cmd).__name__)
+        sys.exit(3)
 elif isinstance(tin, str):
     # Understandable input in an UNEXPECTED SHAPE — not the same thing as
     # unparseable input, so it is inspected rather than failed closed. Failing
@@ -206,18 +214,24 @@ def ext_can_be_value(component):
     return ext != VALUE_EXT and can_be(ext, VALUE_EXT)
 
 
-def cd_target(segment, head):
-    """Where an allowed `cd` in an EARLIER segment leaves the later ones."""
+def cd_target(segment, head, prev=None):
+    """Where an allowed `cd` in an EARLIER segment leaves the later ones.
+
+    A bare `cd` goes HOME; a relative target builds on the previous `cd`
+    (`cd ~/devel && cd ..` is HOME, review A4); `cd -`/`popd` is unknown."""
+    if head == "popd":
+        return "-"
     if head not in ("cd", "pushd"):
         return None
     try:
         tk = shlex.split(segment)
     except ValueError:
         tk = segment.split()
-    for t in tk[1:]:
-        if not t.startswith("-"):
-            return t.rstrip("/")
-    return None
+    t = next((t for t in tk[1:] if not t.startswith("-") or t == "-"), "~")
+    t = t.rstrip("/") or "/"
+    if t == "-" or t.startswith(("/", "~", "$")) or prev is None:
+        return t
+    return "-" if prev == "-" else prev.rstrip("/") + "/" + t
 
 
 def globbed_store_ref(segment, cwd_hint=None):
@@ -342,7 +356,85 @@ def audit_refs(segment, cwd_hint=None):
     return out
 
 
-def sweeps_the_parent(segment, head):
+HOME = os.path.normpath(os.path.expanduser("~"))
+HOME_DIR_RE = re.compile(r"^/(?:home/[^/]+|root)$")
+GREP_HEADS = {"grep", "egrep", "fgrep", "rgrep", "zgrep", "ugrep"}
+
+
+def resolve_dir(tok, base):
+    """The absolute path a path token names, or None when an expansion this
+    hook cannot follow decides it (`~user`, a variable, a relative token and
+    no known cwd)."""
+    for pfx in ("~", "$HOME", "${HOME}"):
+        if tok == pfx or tok.startswith(pfx + "/"):
+            return os.path.normpath(HOME + tok[len(pfx):])
+    if tok.startswith(("~", "$", "`")):
+        return None
+    if tok.startswith("/"):
+        return os.path.normpath(tok)
+    return os.path.normpath(os.path.join(base, tok)) if base else None
+
+
+def _home_like(prefix):
+    """An account home (or a glob that can be one) as a `/`-joined prefix."""
+    return (prefix == HOME or bool(HOME_DIR_RE.match(prefix))
+            or bool(set(prefix) & GLOB_META))
+
+
+def path_reaches_store(t, comps, base):
+    """Does a recursive read rooted at path token `t` reach a store?
+
+    Issue 1137 B1 + review A1/B1: the root is the store, inside it, or an
+    ancestor of it (an account home, `/home`, `/`); or it names `<home>/.claude`
+    itself; or a component right after `<home>/.claude` is the store or a glob
+    that can be it (`~/.claude/*`, `[s]ecrets`, `*/*`); or it is a glob
+    straight under an account home (`~/*`). A repo's own `.claude/` is
+    ordinary work (19 of 48 sampled subdev blocks). An unresolvable token
+    (`~user/…`, `$VAR/…`, a relative one with no known cwd) decides on its
+    text: any `.claude` component not followed by a deeper literal one."""
+    p = resolve_dir(t, base)
+    if p is None:
+        return any(can_be(c, CLAUDE_DIR) and (k == len(comps) - 1 or set(comps[k + 1]) & GLOB_META)
+                   for k, c in enumerate(comps))
+    store = os.path.join(HOME, CLAUDE_DIR, STORE_DIR)
+    if p == "/" or p == store or store.startswith(p + "/") or p.startswith(store + "/"):
+        return True
+    parts = [c for c in p.split("/") if c]
+    if HOME_DIR_RE.match(p) or p == "/home":
+        return True
+    for k, c in enumerate(parts):
+        if not (can_be(c, CLAUDE_DIR) and _home_like("/" + "/".join(parts[:k]))):
+            continue
+        nxt = parts[k + 1] if k + 1 < len(parts) else None
+        if nxt is None or nxt == STORE_DIR or (
+                set(nxt) & GLOB_META and fnmatch.fnmatchcase(STORE_DIR, nxt)):
+            return True
+    return bool(parts) and bool(set(parts[-1]) & GLOB_META) and _home_like(
+        "/" + "/".join(parts[:-1]))
+
+
+def grep_reads_the_parent(segment, base):
+    """A recursive grep whose PATH operands (never its pattern, review B3) —
+    or the cwd, when it names none — reach a store (`path_reaches_store`).
+    Operands are judged before the cwd, so `grep -rn x <repo>/hooks` from a
+    `~/.claude` cwd is ordinary work (review B1)."""
+    try:
+        tk = shlex.split(segment)
+    except ValueError:
+        tk = segment.split()
+    start = _cmd_start(tk)
+    if start is None:
+        return False
+    head = tk[start].rsplit("/", 1)[-1].lower()
+    if not (head == "rgrep" or RECURSIVE_RE.search(segment)
+            or _grep_walks(tk[start + 1:])):
+        return False
+    paths = [tk[i] for i in grep_args(tk, start)[1]] or ["."]
+    return any(path_reaches_store(t, comps, base)
+               for raw in paths for t, comps in path_candidates(raw))
+
+
+def sweeps_the_parent(segment, head, base=None):
     """The store's PARENT read wholesale, without ever naming the store.
 
     `grep -r password ~/.claude` and `tar czf /tmp/c.tgz ~/.claude` print or
@@ -352,6 +444,10 @@ def sweeps_the_parent(segment, head):
     """
     if head in ALLOW_HEADS:
         return None          # `ls -R ~/.claude` lists names, never content
+    if head in GREP_HEADS:
+        if grep_reads_the_parent(segment, base):
+            return "recursive read/archive of the store's parent dir"
+        return None
     operands = without_pattern_args(segment)
     if not (CLAUDE_ROOT_RE.search(operands) or globbed_parent_ref(operands)):
         return None
@@ -360,6 +456,13 @@ def sweeps_the_parent(segment, head):
                 and TREE_WALK_ACTION_RE.search(segment))):
         return "recursive read/archive of the store's parent dir"
     return None
+
+
+def env_name(fname):
+    """The `--env` variable a plain key file is handed over as."""
+    stem = fname[:-4] if fname.endswith(".env") else fname
+    var = re.sub(r"[^A-Za-z0-9]+", "_", stem).strip("_").upper()[:60]
+    return var if re.match(r"[A-Z_]", var or "0") else "KEY_" + var
 
 
 def excerpt(segment):
@@ -423,6 +526,10 @@ if not cmd:
     if bad or keyed:
         print("\n".join("  %s %s -> %s" % (tool or "tool", k, excerpt(v))
                         for k, _refs, v in bad + keyed))
+        kfs = [re.fullmatch(r"\.secrets/([A-Za-z0-9_.-]{1,64})", key_audit_ref(r))
+               for _k, r, _v in keyed]
+        print("#KEYS# %s" % ",".join("%s:%s" % (m.group(1), env_name(m.group(1)))
+                                     for m in kfs if m))
         print("#ROOTS# %s" % ",".join(
             r for r, hit in (("store", bad), ("keyfile", keyed)) if hit))
         # `fields` holds (key, value) PAIRS while `bad` holds triples — the
@@ -445,25 +552,34 @@ refs = []
 # why `cd` INTO the store is refused outright and stays a stated gap.
 cwd_hint = None
 roots = set()
-for seg, term in effective_terms(split_segments(cmd)):
+pcwd = payload.get("cwd")
+pcwd = os.path.normpath(pcwd) if isinstance(pcwd, str) and pcwd.startswith("/") else None
+keyfiles, names = [], []
+segments = split_segments(cmd, heredocs=True)
+redefined = redefined_heads(segments)
+for seg, term in effective_terms(segments):
     head = head_of(seg)
-    sweep = sweeps_the_parent(seg, head)
+    base = (pcwd if not cwd_hint else None if cwd_hint == "-"
+            else resolve_dir(cwd_hint, pcwd))
+    sweep = sweeps_the_parent(seg, head, base)
     if sweep:
         hits.append("%s  ->  %s (%s)" % (head or "?", excerpt(seg), sweep))
         refs.append(globbed_parent_ref(seg) or ".claude")
         roots.add("store")
         continue
-    stray = key_violation(seg, term, cwd_hint)
+    stray = key_violation(seg, term, cwd_hint, redefined)
     if stray:
         hits.append("%s  ->  %s (key file %s)" % (
             head or "(redirection/substitution)", excerpt(seg), excerpt(stray)))
         refs.append(key_audit_ref(stray))
         roots.add("keyfile")
+        kf = re.fullmatch(r"\.secrets/([A-Za-z0-9_.-]{1,64})", key_audit_ref(stray))
+        keyfiles += [kf.group(1)] if kf else []
         # A segment can name BOTH roots; the store check below still runs so
         # its audit refs and guidance are not lost.
     seg_refs = store_refs(seg, cwd_hint)
     if not seg_refs:
-        cwd_hint = cd_target(seg, head) or cwd_hint
+        cwd_hint = cd_target(seg, head, cwd_hint) or cwd_hint
         continue
     if (head in ALLOW_HEADS or is_secret_inspect(seg)) and term != "|":
         # Piped, an allowlisted head is just a name source for whatever
@@ -473,9 +589,16 @@ for seg, term in effective_terms(split_segments(cmd)):
                                 excerpt(seg)))
     refs.extend(audit_refs(seg, cwd_hint))
     roots.add("store")
+    names += [r[:-7] for r in audit_refs(seg, cwd_hint)
+              if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}\.secret", r)]
 
 if hits:
     print("\n".join("  " + h for h in dict.fromkeys(hits)))
+    # The exact working command per refused file (issue 1137 B1), for the
+    # wrapper: names are a fixed charset, never a value.
+    print("#KEYS# %s" % ",".join("%s:%s" % (f, env_name(f))
+                                 for f in dict.fromkeys(keyfiles)))
+    print("#NAMES# %s" % ",".join(dict.fromkeys(names)))
     print("#ROOTS# %s" % ",".join(sorted(roots)))
     audit(tool, refs, cmd)
     sys.exit(2)

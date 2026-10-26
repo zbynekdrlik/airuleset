@@ -8,7 +8,8 @@ shape every session uses, since `gh issue comment` prints only the URL.
 Slice 3 extends the slice-2 piped-inspect pattern (ONE code path, ONE filter
 set — `INSPECT_SINKS`) to the prose heads: a bare-name `gh issue|pr
 comment|create|edit` / `git commit` source may pipe only into pure text
-filters. Never into `xargs`/`sh`/`bash`/`awk`/`sed`, a substitution, a group,
+filters. Never into `xargs`/`sh`/`bash`/`sed` (or an awk program beyond a pure
+print filter, issue 1137 B1 review B4), a substitution, a group,
 or a path-named/assignment-prefixed filter — and every root reference in the
 source is still checked token by token, so the file-reading forms stay denied.
 
@@ -67,11 +68,12 @@ class PipedProse(Base):
                      "gh pr create --title t --body 'mentions %s' | tail -n1" % KEY,
                      "gh issue create -R o/r --title 'fix %s' --body x | grep -o 'http.*'"
                      % KEY,
-                     "gh pr edit 7 --body 'mentions %s' | cat" % KEY],
+                     "gh pr edit 7 --body 'mentions %s' | cat" % KEY,
+                     PROSE + " | awk '{print $2}'"],
             denied=[PROSE + " | xargs cat",
                     PROSE + " | sh",
                     PROSE + " | bash",
-                    PROSE + " | awk '{print $2}'",
+                    PROSE + " | awk '{system($2)}'",
                     PROSE + " | sed -e 's/x/cat/e'",
                     PROSE + " | sed 'w /tmp/o'",
                     PROSE + " | sed -n 1p",

@@ -614,13 +614,6 @@ class TestDesignGateFableOnly(unittest.TestCase):
     the accepted set is the managed main (Opus 5.5) plus Fable 5.1 through the
     transition; a bare alias like `impl-main` is still rejected."""
 
-    def _payload(self, prompt="Work issue #1060"):
-        return json.dumps({
-            "tool_name": "Agent",
-            "cwd": "/repo",
-            "tool_input": {"subagent_type": "autopilot-worker", "prompt": prompt},
-        })
-
     def test_check_issue_accepts_fable_id(self):
         from gates import designdispatch as dd
         ok, _ = dd.check_issue(
@@ -638,24 +631,15 @@ class TestDesignGateFableOnly(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("impl-main", reason)
 
-    def test_evaluate_rejects_alias_even_with_marker(self):
+    def test_check_issue_rejects_alias_even_with_marker(self):
         # RED lock: on a marker box the L2 gate ALLOWED the alias; L3a BLOCKS it
-        # (the main authors the design on Fable, always).
+        # (the main authors the design, always).
         from gates import designdispatch as dd
         with m.patch("cli_model_backend.load_marker", return_value=MARKER):
-            verdict, _ = dd.evaluate(
-                self._payload(),
-                fetch=lambda s, n, c: ["Design-by: main impl-main"],
-                resolve_slug=lambda cwd: "o/r", fable_id="claude-fable-5-1")
-        self.assertEqual(verdict, "block")
-
-    def test_evaluate_allows_fable(self):
-        from gates import designdispatch as dd
-        verdict, _ = dd.evaluate(
-            self._payload(),
-            fetch=lambda s, n, c: ["Design-by: main claude-fable-5-1"],
-            resolve_slug=lambda cwd: "o/r", fable_id="claude-fable-5-1")
-        self.assertEqual(verdict, "allow")
+            ok, _ = dd.check_issue(
+                1, "o/r", "/repo", fetch=lambda s, n, c: ["Design-by: main impl-main"],
+                fable_id="claude-fable-5-1")
+        self.assertFalse(ok)
 
     def test_pilot_alias_helpers_gone(self):
         from gates import designdispatch as dd
@@ -663,8 +647,6 @@ class TestDesignGateFableOnly(unittest.TestCase):
         import inspect
         self.assertNotIn("allowed_alias",
                          inspect.signature(dd.check_issue).parameters)
-        self.assertNotIn("pilot_main",
-                         inspect.signature(dd.evaluate).parameters)
 
 
 class TestUsagePollsOnMarkerBox(unittest.TestCase):
