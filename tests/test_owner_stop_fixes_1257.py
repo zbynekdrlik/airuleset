@@ -83,5 +83,39 @@ class MachineClearSameSweep(base._Pane):
         self.assertIsNone(_os().pane_latch(self.PID))
 
 
+class MachineClearPersists(base._Pane):
+    """Review finding 2: once `refresh` matched a `Goal cleared:` to the
+    watchdog's own #522 disarm, that clear stays machine for the life of the
+    session's latch record (7-day TTL), after `goal_disarmed_q` is reaped."""
+
+    def test_the_own_disarm_stays_machine_after_its_veto_is_reaped(self):
+        clear_ts = T0 + 3600
+        self._append(*OWNER_WORK, _sys(GOAL_SET, T0 + 5),
+                     _sys(GOAL_CLEARED, clear_ts),
+                     _u("<task-notification>done</task-notification>",
+                        clear_ts + 100))
+        state = {"goal_disarmed_q": {self.SID: {"disarmed_ts": clear_ts - 10}}}
+        _os().refresh(state, [(self.PID, self.CWD)], self.proj, NOW)
+        self.assertIsNone(_os().pane_latch(self.PID))
+        self.assertEqual(state[_os().STATE_KEY][self.SID]["mclears"], [clear_ts])
+        state.pop("goal_disarmed_q")       # `_reap_qdisarm_state`, 24 h later
+        logs = _os().refresh(state, [(self.PID, self.CWD)], self.proj, NOW + DAY)
+        self.assertIsNone(_os().pane_latch(self.PID), logs)
+        self.assertFalse(any("SET" in ln for ln in logs), logs)
+        sent = []
+        self.assertTrue(base.wd.keys(
+            self.PID, "Enter", kind="continue", nudge="resume",
+            run=lambda argv, timeout=8: sent.append(argv) or ""))
+        self.assertEqual(len(sent), 1)
+
+    def test_the_record_ages_out_with_the_ttl(self):
+        self._append(*OWNER_WORK, _sys(GOAL_CLEARED, T0 + 60))
+        state = {"goal_disarmed_q": {self.SID: {"disarmed_ts": T0 + 55}}}
+        _os().refresh(state, [(self.PID, self.CWD)], self.proj, NOW)
+        self.assertIn(self.SID, state[_os().STATE_KEY])
+        _os().refresh(state, [], self.proj, NOW + _os().RECORD_TTL_S + 1)
+        self.assertNotIn(_os().STATE_KEY, state)
+
+
 if __name__ == "__main__":
     unittest.main()
