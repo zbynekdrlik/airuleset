@@ -307,9 +307,7 @@ class WaitingReasonAndPingMerge(unittest.TestCase):
                 TemporaryDirectory() as bindir:
             subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
             self._fake_gh(bindir)
-            # scoped to the subprocess cwd (= repo); one ticketless, one naming
-            # the needs-answer #4 (#1218: a ping is deduped by a ticket that is
-            # U by its own label; a non-U `#N` no longer hides a ping).
+            # one ticketless, one naming the U-labelled #4 (#1218 dedup, cwd=repo)
             self._seed_questions(home, {
                 "1": {"cwd": repo, "block": "otazka bez ticketu", "ts": 1},
                 "2": {"cwd": repo, "block": "otazka k #4", "ts": 2},
