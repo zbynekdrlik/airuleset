@@ -586,9 +586,9 @@ merge→gates→push at a time per repo across all sessions).
      `action-only` is NOT yours to implement** — you review / merge / close / unblock it and never
      write its code; only an `implement` row is ordinary work.
      Several open bounce tickets that pass the
-     bundling gate bundle together like any other issues, bounce ones first. No bounce ticket open
-     → seed = the next open non-`autopilot-skip` issue (highest priority / oldest first — the
-     normal queue). **A RUNNING batch is NEVER preempted** — it finishes, the bounce ticket seeds
+     bundling gate bundle together like any other same-area issues, bounce ones first. No bounce ticket open
+     → seed = the next open non-`autopilot-skip` issue (a priority label first, then oldest first —
+     the normal queue). **A RUNNING batch is NEVER preempted** — it finishes, the bounce ticket seeds
      the very NEXT batch, then the normal queue resumes (the user's flow: "dokonči rozrobený →
      sprav gatekeeper ticket → pokračuj v ostatných"). The worker removes the `prio:bounce` label
      at its done-point, so a resolved bounce leaves the lane automatically.
@@ -596,21 +596,27 @@ merge→gates→push at a time per repo across all sessions).
      at bounce round ≥ 3 as `round3!`. A `round3!` member gets a DESIGN CONSULT (a digest of ALL
      prior gk findings for that ticket) BEFORE the worker re-implements — the digest goes into the
      worker's dispatch prompt.
-   - **Grow greedily** by adding more open backlog issues that EACH pass the **bundling gate** vs the
-     seed and the batch-so-far:
+   - **Grow by AREA** (#1137): candidates are open tickets from the seed's OWN area — the same
+     `.claude/rules/internals-<area>` / module / area label / files the seed will touch (a generic
+     type label like `bug` is not an area); an unrelated small ticket is NOT the growth pool. Add each
+     that passes the **bundling gate** vs the seed and the batch-so-far:
        • each member ≤ ~300 LoC estimated, AND cumulative batch ≤ ~600 LoC, AND ≤ 4 issues (keep the
          PR reviewable);
        • no DB schema/migration, no public-API break (routes/exported types/CLI flags), no
          security-boundary change (auth/permissions/secrets), no cross-cutting refactor (rename >5
          files / dep major bump / framework upgrade);
-       • independent — no member depends on another member's design choice.
+       • no member waits on a design decision still open with the owner. Dependent PHASES of one
+         feature / ticket family MAY share the unit as sequential commits on one branch (one PR,
+         one CI cycle) — one ticket's planned phases go in ONE unit/PR, never one PR per phase
+         (barring a live-DB backfill split); over the ceilings that ticket runs solo, still as ONE PR.
    - An issue that FAILS the gate is NOT added — it becomes the seed of a LATER solo batch (its own PR).
      A large / schema / API / security / cross-cut seed runs SOLO; never force-bundle it.
-   - **Best-effort:** if nothing else qualifies, the batch is just the seed (one issue — today's behavior).
+   - **Solo only after a real search:** a seed that passes the gate ships alone only when no open
+     ticket of its area passes the gate too — never fall back to unrelated tickets.
 1b. **VALIDATE EACH batch member FIRST — hard gate** (`verify-issue-still-valid.md`). Before dispatching
    the worker, dispatch the read-only **`ticket-validator`** subagent
-   (`subagent_type: ticket-validator`, prompt `Validate issue #<N> in <repo>`) for EVERY member — they
-   are independent, so validate them in parallel (they share the account-wide rate limit with any
+   (`subagent_type: ticket-validator`, prompt `Validate issue #<N> in <repo>`) for EVERY member — the
+   checks are independent, so validate them in parallel (they share the account-wide rate limit with any
    workers; on a real rate-limit signal stagger them, #332). A validator KILLED by a rate limit (or
    any other fatal API error) mid-dispatch is NEVER re-dispatched and NEVER blocks the rest — treat
    that ONE member exactly as if Step 1b had simply been skipped for it (the worker's own Step 0
@@ -626,7 +632,8 @@ merge→gates→push at a time per repo across all sessions).
      <evidence> — close it?") with the validator's evidence; act on their answer (close, or run it solo).
    - **UNCLEAR** → DROP from the batch and ask the user, quoting the validator's `premise_check` so nothing
      already-answered is re-asked. **One unclear/overcome member must NOT block the rest of the batch** —
-     pull it out and proceed with the surviving STILL_VALID / PARTIAL members.
+     pull it out and proceed with the surviving STILL_VALID / PARTIAL members — a dropped member's
+     dependent later phases drop with it.
    - **`cross_stream` and `governing_design` are checked IN ADDITION to `verdict:`** — the validator emits
      them ALWAYS, independent of STILL_VALID/OVERCOME/etc, so a `conflict` in EITHER field DROPS the member
      even when `verdict: STILL_VALID` (a ticket valid against merged code can still collide with unmerged /
@@ -770,7 +777,7 @@ merge→gates→push at a time per repo across all sessions).
    continues. **A question is a conversation, NOT an abandoned issue.** If a member turns
    out to violate the gate mid-flight (schema/API/security/cross-cut discovered), the worker DROPS it
    from this PR (leaves its issue open) and finishes the rest — the loop re-dispatches the dropped one
-   solo later.
+   with its dependent phases as its own unit later.
 
    > **Worktree mode — the worker's cycle stops at its OWN branch; the supervisor's Step 4
    > integrates.** In `isolation: "worktree"` mode a worker does version bump → per-issue TDD
