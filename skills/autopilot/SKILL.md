@@ -586,7 +586,7 @@ merge→gates→push at a time per repo across all sessions).
      `action-only` is NOT yours to implement** — you review / merge / close / unblock it and never
      write its code; only an `implement` row is ordinary work.
      Several open bounce tickets that pass the
-     bundling gate bundle together like any other issues, bounce ones first. No bounce ticket open
+     bundling gate bundle together like any other same-area issues, bounce ones first. No bounce ticket open
      → seed = the next open non-`autopilot-skip` issue (a priority label first, then oldest first —
      the normal queue). **A RUNNING batch is NEVER preempted** — it finishes, the bounce ticket seeds
      the very NEXT batch, then the normal queue resumes (the user's flow: "dokonči rozrobený →
@@ -597,9 +597,9 @@ merge→gates→push at a time per repo across all sessions).
      prior gk findings for that ticket) BEFORE the worker re-implements — the digest goes into the
      worker's dispatch prompt.
    - **Grow by AREA** (#1137): candidates are open tickets from the seed's OWN area — the same
-     `.claude/rules/internals-<area>` / module / label / files the seed will touch; an unrelated
-     small ticket is NOT the growth pool. Add each that passes the **bundling gate** vs the seed and
-     the batch-so-far:
+     `.claude/rules/internals-<area>` / module / area label / files the seed will touch (a generic
+     type label like `bug` is no area); an unrelated small ticket is NOT the growth pool. Add each
+     that passes the **bundling gate** vs the seed and the batch-so-far:
        • each member ≤ ~300 LoC estimated, AND cumulative batch ≤ ~600 LoC, AND ≤ 4 issues (keep the
          PR reviewable);
        • no DB schema/migration, no public-API break (routes/exported types/CLI flags), no
@@ -607,11 +607,12 @@ merge→gates→push at a time per repo across all sessions).
          files / dep major bump / framework upgrade);
        • no member waits on a design decision still open with the owner. Dependent PHASES of one
          feature / ticket family MAY share the unit as sequential commits on one branch (one PR,
-         one CI cycle) — one ticket's planned phases go in ONE unit/PR when they fit the ceilings,
-         never one PR per phase.
+         one CI cycle) — one ticket's planned phases go in ONE unit/PR, never one PR per phase;
+         over the ceilings that ticket runs solo, still as ONE PR.
    - An issue that FAILS the gate is NOT added — it becomes the seed of a LATER solo batch (its own PR).
      A large / schema / API / security / cross-cut seed runs SOLO; never force-bundle it.
-   - **Best-effort:** if nothing else qualifies, the batch is just the seed (one issue — today's behavior).
+   - **Solo only after a real search:** the seed ships alone only when no open ticket of its area
+     passes the gate — never fall back to unrelated tickets.
 1b. **VALIDATE EACH batch member FIRST — hard gate** (`verify-issue-still-valid.md`). Before dispatching
    the worker, dispatch the read-only **`ticket-validator`** subagent
    (`subagent_type: ticket-validator`, prompt `Validate issue #<N> in <repo>`) for EVERY member — the
@@ -631,7 +632,8 @@ merge→gates→push at a time per repo across all sessions).
      <evidence> — close it?") with the validator's evidence; act on their answer (close, or run it solo).
    - **UNCLEAR** → DROP from the batch and ask the user, quoting the validator's `premise_check` so nothing
      already-answered is re-asked. **One unclear/overcome member must NOT block the rest of the batch** —
-     pull it out and proceed with the surviving STILL_VALID / PARTIAL members.
+     pull it out and proceed with the surviving STILL_VALID / PARTIAL members — a dropped member's
+     dependent later phases drop with it.
    - **`cross_stream` and `governing_design` are checked IN ADDITION to `verdict:`** — the validator emits
      them ALWAYS, independent of STILL_VALID/OVERCOME/etc, so a `conflict` in EITHER field DROPS the member
      even when `verdict: STILL_VALID` (a ticket valid against merged code can still collide with unmerged /

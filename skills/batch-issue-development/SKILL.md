@@ -19,7 +19,7 @@ user-invocable: false
 
 #### The model — bundle related issues
 
-Related = the same AREA (same `internals-<area>` / module / label / files); an unrelated small issue is not a bundle partner. When `/issue-planner` runs:
+Related = the same AREA (same `internals-<area>` / module / area label / files — a generic type label like `bug` is no area); an unrelated small issue is not a bundle partner. When `/issue-planner` runs:
 
 1. Step 4 presents issues with `multiSelect: true`, so related ones can be picked together.
 2. After selection, the agent processes ALL chosen issues on the SAME `dev` branch, in sequence:
@@ -37,11 +37,11 @@ Bundle into one PR when EVERY selected issue meets ALL of these:
 - No public API breaking change (HTTP routes, exported types, CLI flags)
 - No security boundary modification (auth, permissions, secret handling)
 - No cross-cutting refactor (rename across >5 files, dependency major bump, framework upgrade)
-- No issue waits on a design decision still open with the owner — dependent PHASES of one feature / ticket family may share the PR as sequential commits; one ticket's planned phases go in ONE PR when they fit the ceilings, never one PR per phase
+- No issue waits on a design decision still open with the owner — dependent PHASES of one feature / ticket family may share the PR as sequential commits; one ticket's planned phases go in ONE PR, never one PR per phase (over the ceilings that ticket gets its OWN single PR)
 
 **Cumulative ceiling (keep the PR reviewable):** even when every member passes the per-issue gate, cap the bundle at **≤ ~600 LoC total AND ≤ 4 issues**. A batch that would exceed either ceiling splits into two PRs — bundling cuts CI cycles, it does NOT license a 2000-LoC mega-PR no one can review.
 
-If ANY selected issue fails the gate (or the ceiling is hit) → that issue gets its OWN PR, processed first or last (user's choice via AskUserQuestion). The remaining bundle-safe issues still go in one PR together.
+If ANY selected issue fails the gate (or the ceiling is hit) → that issue gets its OWN PR, processed first or last (agent's choice). The remaining bundle-safe issues still go in one PR together.
 
 #### Per-issue cycle inside the batch — chain without prompting
 
