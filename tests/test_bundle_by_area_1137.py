@@ -48,14 +48,30 @@ class TestAutopilotUnitSelection(TestCase):
 
     def test_growth_pool_is_the_seed_area(self):
         self.assertIn("seed's OWN area", self.grow)
-        self.assertIn("`.claude/rules/internals-<area>` / module / label / files", self.grow)
+        self.assertIn("`.claude/rules/internals-<area>` / module / area label / files", self.grow)
+        self.assertIn("a generic type label like `bug` is no area", self.grow)
         self.assertIn("an unrelated small ticket is NOT the growth pool", self.grow)
+
+    def test_solo_only_when_the_area_has_no_partner(self):
+        solo = _window(self.t, "**Solo only after a real search:**", "\n1b.")
+        self.assertIn("only when no open ticket of its area passes the gate", solo)
+        self.assertIn("never fall back to unrelated tickets", solo)
+        self.assertNotIn("today's behavior", self.t)
+
+    def test_bounce_tickets_bundle_by_area_too(self):
+        bounce = _window(self.t, "Several open bounce tickets", "No bounce ticket open")
+        self.assertIn("like any other same-area issues", bounce)
+
+    def test_a_dropped_phase_takes_its_dependents(self):
+        step1b = _window(self.t, "**One unclear/overcome member must NOT block", "\n   - ")
+        self.assertIn("a dropped member's dependent later phases drop with it", step1b)
 
     def test_dependent_phases_may_share_a_unit(self):
         self.assertIn("Dependent PHASES of one feature / ticket family MAY share the unit",
                       self.grow)
         self.assertIn("sequential commits on one branch (one PR, one CI cycle)", self.grow)
         self.assertIn("never one PR per phase", self.grow)
+        self.assertIn("over the ceilings that ticket runs solo, still as ONE PR", self.grow)
 
     def test_only_an_open_owner_decision_blocks_a_member(self):
         self.assertIn("no member waits on a design decision still open with the owner",
@@ -70,6 +86,7 @@ class TestAutopilotUnitSelection(TestCase):
     def test_greedy_size_only_growth_and_independence_are_gone(self):
         self.assertNotIn("Grow greedily", self.t)
         self.assertNotIn("independent — no member depends", self.t)
+        self.assertIsNone(re.search(r"\bindependent\b", self.grow))
 
 
 class TestBatchSkillGate(TestCase):
@@ -82,6 +99,7 @@ class TestBatchSkillGate(TestCase):
 
     def test_related_means_same_area(self):
         self.assertIn("Related = the same AREA", self.model)
+        self.assertIn("a generic type label like `bug` is no area", self.model)
         self.assertIn("an unrelated small issue is not a bundle partner", self.model)
 
     def test_dependent_phases_replace_independence(self):
@@ -90,12 +108,31 @@ class TestBatchSkillGate(TestCase):
         self.assertIn("dependent PHASES of one feature / ticket family may share the PR",
                       self.gate)
         self.assertIn("never one PR per phase", self.gate)
+        self.assertIn("over the ceilings that ticket gets its OWN single PR", self.gate)
         self.assertNotIn("Issues are independent", self.t)
+        self.assertIsNone(re.search(r"\bindependent\b", self.gate))
+
+    def test_split_order_is_the_agents_call(self):
+        split = _window(self.t, "If ANY selected issue fails the gate", "\n")
+        self.assertIn("(agent's choice)", split)
+        self.assertNotIn("AskUserQuestion", split)
 
     def test_ceilings_are_kept(self):
         for kept in ("≤ 300 LoC", "No DB schema change", "No public API breaking change",
                      "No security boundary modification", "No cross-cutting refactor"):
             self.assertIn(kept, self.gate, kept)
+
+
+class TestWorkerPhaseOrder(TestCase):
+    def setUp(self):
+        self.w = _read("agents/autopilot-worker.md")
+        self.step3 = _window(self.w, "3. Implement **the named issue(s) ONLY**", "\n4. ")
+
+    def test_members_run_in_dependency_order(self):
+        self.assertIn("Do each member in dependency order (phases first-to-last)", self.step3)
+
+    def test_a_dropped_member_takes_its_dependent_phases(self):
+        self.assertIn("a dropped member takes its dependent later phases with it", self.step3)
 
 
 if __name__ == "__main__":
