@@ -49,12 +49,13 @@ class TestAutopilotUnitSelection(TestCase):
     def test_growth_pool_is_the_seed_area(self):
         self.assertIn("seed's OWN area", self.grow)
         self.assertIn("`.claude/rules/internals-<area>` / module / area label / files", self.grow)
-        self.assertIn("a generic type label like `bug` is no area", self.grow)
+        self.assertIn("a generic type label like `bug` is not an area", self.grow)
         self.assertIn("an unrelated small ticket is NOT the growth pool", self.grow)
 
     def test_solo_only_when_the_area_has_no_partner(self):
         solo = _window(self.t, "**Solo only after a real search:**", "\n1b.")
-        self.assertIn("only when no open ticket of its area passes the gate", solo)
+        self.assertIn("a seed that passes the gate ships alone only when no open ticket of its area "
+                      "passes the gate too", solo)
         self.assertIn("never fall back to unrelated tickets", solo)
         self.assertNotIn("today's behavior", self.t)
 
@@ -72,6 +73,7 @@ class TestAutopilotUnitSelection(TestCase):
         self.assertIn("sequential commits on one branch (one PR, one CI cycle)", self.grow)
         self.assertIn("never one PR per phase", self.grow)
         self.assertIn("over the ceilings that ticket runs solo, still as ONE PR", self.grow)
+        self.assertIn("barring a live-DB backfill split", self.grow)
 
     def test_only_an_open_owner_decision_blocks_a_member(self):
         self.assertIn("no member waits on a design decision still open with the owner",
@@ -99,7 +101,7 @@ class TestBatchSkillGate(TestCase):
 
     def test_related_means_same_area(self):
         self.assertIn("Related = the same AREA", self.model)
-        self.assertIn("a generic type label like `bug` is no area", self.model)
+        self.assertIn("a generic type label like `bug` is not an area", self.model)
         self.assertIn("an unrelated small issue is not a bundle partner", self.model)
 
     def test_dependent_phases_replace_independence(self):
@@ -109,6 +111,12 @@ class TestBatchSkillGate(TestCase):
                       self.gate)
         self.assertIn("never one PR per phase", self.gate)
         self.assertIn("over the ceilings that ticket gets its OWN single PR", self.gate)
+        self.assertIn("only the rare Acceptable splits below may separate them", self.gate)
+
+    def test_ceiling_split_is_at_a_ticket_boundary(self):
+        ceiling = _window(self.t, "**Cumulative ceiling", "\n")
+        self.assertIn("splits into two PRs at a ticket boundary (one ticket's phases never split)",
+                      ceiling)
         self.assertNotIn("Issues are independent", self.t)
         self.assertIsNone(re.search(r"\bindependent\b", self.gate))
 
@@ -133,6 +141,8 @@ class TestWorkerPhaseOrder(TestCase):
 
     def test_a_dropped_member_takes_its_dependent_phases(self):
         self.assertIn("a dropped member takes its dependent later phases with it", self.step3)
+        self.assertIn("re-dispatches it, with its dependent phases, as its own unit", self.step3)
+        self.assertNotIn("re-dispatches it solo", self.step3)
 
 
 if __name__ == "__main__":
