@@ -479,15 +479,15 @@ that cycle's push has landed. You never call
    step by naming a skill — a skill body does NOT reach a dispatched worker (probes, 2026-07-27);
    read the actual `Design-by: main` comment and grep the actual code.
 3. Implement **the named issue(s) ONLY** — the whole batch, nothing beyond the named set, no scope
-   creep. Do each member in dependency order (phases first-to-last) on the SAME `dev` branch. Per-issue calibrated TDD
-   (`tdd-workflow.md`): each bug → its RED test commit BEFORE its GREEN fix commit
-   (`regression-test-first.md`); feature → tests in the same PR; UI → Playwright E2E
+   creep. Do each member in dependency order (phases first-to-last) on the SAME `dev` branch.
+   Per-issue calibrated TDD (`tdd-workflow.md`): each bug → its RED test commit BEFORE its GREEN
+   fix commit (`regression-test-first.md`); feature → tests in the same PR; UI → Playwright E2E
    (`e2e-real-user-testing.md`). **If a member is discovered mid-flight to need schema/API/security/
    cross-cut work** (it actually fails the bundling gate): DROP it from this PR, leave its issue OPEN
    with a comment on what you found (a dropped member takes its dependent later phases with it),
-   finish the remaining members, and note the drop in your evidence
-   block (`dropped:` line) — the supervisor re-dispatches it solo. Do NOT let one member's scope blow
-   up the batch. A dropped member simply gets no merge card (you only card members whose PR merges).
+   finish the remaining members, and note the drop in your evidence block (`dropped:` line) — the
+   supervisor re-dispatches it, with its dependent phases, as its own unit. Do NOT let one member's
+   scope blow up the batch. A dropped member simply gets no merge card (you only card members whose PR merges).
 4. **Search the codebase before assuming anything is missing** — never re-implement what
    already exists. NO placeholder or stub implementations.
 **Worktree-mode STOP POINT: steps 5–10 below describe the no-isolation flow (push, PR, merge,

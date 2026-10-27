@@ -598,7 +598,7 @@ merge→gates→push at a time per repo across all sessions).
      worker's dispatch prompt.
    - **Grow by AREA** (#1137): candidates are open tickets from the seed's OWN area — the same
      `.claude/rules/internals-<area>` / module / area label / files the seed will touch (a generic
-     type label like `bug` is no area); an unrelated small ticket is NOT the growth pool. Add each
+     type label like `bug` is not an area); an unrelated small ticket is NOT the growth pool. Add each
      that passes the **bundling gate** vs the seed and the batch-so-far:
        • each member ≤ ~300 LoC estimated, AND cumulative batch ≤ ~600 LoC, AND ≤ 4 issues (keep the
          PR reviewable);
@@ -607,12 +607,12 @@ merge→gates→push at a time per repo across all sessions).
          files / dep major bump / framework upgrade);
        • no member waits on a design decision still open with the owner. Dependent PHASES of one
          feature / ticket family MAY share the unit as sequential commits on one branch (one PR,
-         one CI cycle) — one ticket's planned phases go in ONE unit/PR, never one PR per phase;
-         over the ceilings that ticket runs solo, still as ONE PR.
+         one CI cycle) — one ticket's planned phases go in ONE unit/PR, never one PR per phase
+         (barring a live-DB backfill split); over the ceilings that ticket runs solo, still as ONE PR.
    - An issue that FAILS the gate is NOT added — it becomes the seed of a LATER solo batch (its own PR).
      A large / schema / API / security / cross-cut seed runs SOLO; never force-bundle it.
-   - **Solo only after a real search:** the seed ships alone only when no open ticket of its area
-     passes the gate — never fall back to unrelated tickets.
+   - **Solo only after a real search:** a seed that passes the gate ships alone only when no open
+     ticket of its area passes the gate too — never fall back to unrelated tickets.
 1b. **VALIDATE EACH batch member FIRST — hard gate** (`verify-issue-still-valid.md`). Before dispatching
    the worker, dispatch the read-only **`ticket-validator`** subagent
    (`subagent_type: ticket-validator`, prompt `Validate issue #<N> in <repo>`) for EVERY member — the
@@ -777,7 +777,7 @@ merge→gates→push at a time per repo across all sessions).
    continues. **A question is a conversation, NOT an abandoned issue.** If a member turns
    out to violate the gate mid-flight (schema/API/security/cross-cut discovered), the worker DROPS it
    from this PR (leaves its issue open) and finishes the rest — the loop re-dispatches the dropped one
-   solo later.
+   with its dependent phases as its own unit later.
 
    > **Worktree mode — the worker's cycle stops at its OWN branch; the supervisor's Step 4
    > integrates.** In `isolation: "worktree"` mode a worker does version bump → per-issue TDD
