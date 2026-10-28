@@ -313,3 +313,28 @@ class TestLateMarkerDropsPendingSelfArm(_Base):
         _append_marker(self.tpath, "Goal set: " + PAYLOAD)
         logs, fake = self._sweep()
         self.assertEqual(fake.typed_texts(), [TEXT], logs)
+
+
+class TestLateMarkerLeaf(_Base):
+    def test_origin_constant_matches_goal_module(self):
+        from watchdog import goal_arm_confirm as gac
+        self.assertEqual(gac.SELF_CALLBACK_ORIGIN, goal._GOAL_SELF_CALLBACK_ORIGIN)
+
+    def test_offset_only_for_owner_arm(self):
+        from watchdog import goal_arm_confirm as gac
+        self.assertIsNone(gac.request_mark_offset(self.proj, CWD, SID, "dark-rearm"))
+        self.assertEqual(gac.request_mark_offset(self.proj, CWD, SID, "self-callback"),
+                         os.path.getsize(self.tpath))
+        self.assertIsNone(gac.request_mark_offset(self.proj, CWD, "no-such", "self-callback"))
+
+    def test_other_origin_or_bad_offset_never_late_dropped(self):
+        from watchdog import goal_arm_confirm as gac
+        _append_marker(self.tpath, "Goal set: " + PAYLOAD)
+        self.assertIsNone(gac.late_arm_drop({"origin": "dark-rearm", "moff": 0},
+                                            SID, CWD, self.proj))
+        self.assertIn("drop:already-armed",
+                      gac.late_arm_drop({"origin": "self-callback", "moff": 0},
+                                        SID, CWD, self.proj))
+        for bad in (None, True, -1, "0"):
+            self.assertIsNone(gac.late_arm_drop({"origin": "self-callback", "moff": bad},
+                                                SID, CWD, self.proj), bad)

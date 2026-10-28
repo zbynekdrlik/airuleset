@@ -66,3 +66,52 @@ def transcript_arm_landed(tpath, off, log=None):
     if log is not None:
         log("ARM-CONFIRMED src=transcript sid=%s" % Path(str(tpath)).stem)
     return True
+
+
+def _own_transcript(projects_dir, cwd, sid):
+    """Session `sid`'s OWN transcript path (`<projects>/<encoded cwd>/<sid>.jsonl`),
+    addressed by sid -- never "the newest in the folder"."""
+    base = projects_dir or watchdog.PROJECTS_DIR
+    return str(Path(base) / watchdog.encode_project_dir(cwd) / (str(sid) + ".jsonl"))
+
+
+SELF_CALLBACK_ORIGIN = "self-callback"   # == goal._GOAL_SELF_CALLBACK_ORIGIN (locked by a test)
+
+
+def request_mark_offset(projects_dir, cwd, sid, origin):
+    """#1265 follow-up -- the byte size of `sid`'s own transcript at the moment a
+    `self-callback` request is recorded (stored as the request's `moff`), or None
+    for any other origin or when it cannot be read. Bytes past it were written
+    after the request."""
+    if origin != SELF_CALLBACK_ORIGIN:
+        return None
+    try:
+        return os.path.getsize(_own_transcript(projects_dir, cwd, sid))
+    except OSError:
+        return None
+
+
+def landed_since_request(projects_dir, cwd, sid, moff):
+    """#1265 follow-up (supervisor ROZHODNUTÉ) -- True iff `sid`'s own transcript
+    has a newest `/goal` marker `set` written after the request's `moff`: the arm
+    landed after the 8 s confirm window, so a pending owner arm must not be
+    retyped (`drop:already-armed`). A marker that predates the request never
+    counts (#1113 keeps the owner's arm). A missing / non-int `moff` (a legacy
+    request), a missing transcript, a newest `cleared` marker or a file shorter
+    than `moff` -> False, today's behaviour. Clock-free, like the confirm."""
+    if isinstance(moff, bool) or not isinstance(moff, int) or moff < 0:
+        return False
+    return transcript_arm_landed(_own_transcript(projects_dir, cwd, sid), moff)
+
+
+def late_arm_drop(entry, sid, cwd, projects_dir):
+    """`goal_sweep`'s pre-delivery check: the `DROP ... drop:already-armed` log
+    line when a pending owner (`self-callback`) request's arm landed after it was
+    recorded (`landed_since_request`), else None. The caller clears the request
+    terminally and types nothing."""
+    if entry.get("origin") != SELF_CALLBACK_ORIGIN:
+        return None
+    if not landed_since_request(projects_dir, cwd, sid, entry.get("moff")):
+        return None
+    return ("DROP (goal-sweep) %s sid=%s -> drop:already-armed (Goal set: in the "
+            "transcript after the request, #1265)" % (watchdog.project_label(cwd), sid))
