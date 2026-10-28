@@ -2265,17 +2265,17 @@ def goal_sweep(now, run=None, dry_run=False, projects_dir=None,
             logs.append("DRY-RUN goal-sweep %s would evaluate sid=%s"
                         % (watchdog.project_label(cwd), sid))
             continue
-        _late = _arm_confirm.late_arm_drop(entry, sid, cwd, projects_dir)  # #1265 landed late
-        if _late:
+        _late = _arm_confirm.late_arm_drop(entry, sid, cwd, projects_dir, _log_goal_sync)  # #1265
+        if _late:                                   # an owner arm landed late: never retype it
             logs.append(_late)
-            clear_goal_request(sid, path=requests_path)   # (aborts reaped next sweep)
+            aborts.pop(sid, None)                   # same bookkeeping as `sent`
+            _arm_failure.clear(state, sid)
+            clear_goal_request(sid, path=requests_path)
             continue
-        # #731 -- the per-request delivery-attempt CAP, checked BEFORE deliver_goal
-        # so a request that already failed CAP keystroke deliveries is DROPPED
-        # terminally (never a CAP+1 keystroke): clean up any leftover /goal text
-        # it stranded in the prompt, clear it, and ping (origin-gated). This is
-        # the montalu4 retype-livelock exit -- `dl_fails` is INT-guarded across
-        # the JSON boundary (#714).
+        # #731 -- the per-request delivery-attempt CAP, checked BEFORE deliver_goal: a request
+        # that already failed CAP keystroke deliveries is DROPPED terminally (never CAP+1): clean
+        # up its stranded /goal text, clear it, ping (origin-gated). The montalu4 retype-livelock
+        # exit; `dl_fails` is INT-guarded across the JSON boundary (#714).
         try:
             dl_fails = int(entry.get("dl_fails", 0))
         except (TypeError, ValueError):

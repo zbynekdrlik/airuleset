@@ -104,14 +104,18 @@ def landed_since_request(projects_dir, cwd, sid, moff):
     return transcript_arm_landed(_own_transcript(projects_dir, cwd, sid), moff)
 
 
-def late_arm_drop(entry, sid, cwd, projects_dir):
+def late_arm_drop(entry, sid, cwd, projects_dir, log=None):
     """`goal_sweep`'s pre-delivery check: the `DROP ... drop:already-armed` log
     line when a pending owner (`self-callback`) request's arm landed after it was
     recorded (`landed_since_request`), else None. The caller clears the request
-    terminally and types nothing."""
+    terminally and types nothing. `log` (optional) also gets the line, the
+    goal-sync trail every other DROP leaves."""
     if entry.get("origin") != SELF_CALLBACK_ORIGIN:
         return None
     if not landed_since_request(projects_dir, cwd, sid, entry.get("moff")):
         return None
-    return ("DROP (goal-sweep) %s sid=%s -> drop:already-armed (Goal set: in the "
+    line = ("DROP (goal-sweep) %s sid=%s -> drop:already-armed (Goal set: in the "
             "transcript after the request, #1265)" % (watchdog.project_label(cwd), sid))
+    if log is not None:
+        log(line)
+    return line

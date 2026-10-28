@@ -289,6 +289,31 @@ class TestLateMarkerDropsPendingSelfArm(_Base):
         self.assertTrue(any("drop:already-armed" in ln for ln in logs), logs)
         self.assertNotIn(SID, goal.load_goal_requests(self.reqp))
 
+    def test_incident_path_typed_unconfirmed_then_late_marker_drops(self):
+        # sweep 1 types the arm; CC writes nothing within the confirm window
+        # (a plain `user` turn advances the transcript) -> verify-failed-live.
+        self._record_busy()
+        now = time.time()
+        self._quiet(now)
+        fake1 = DeliverGoalFakeTmux(PANE, GOAL_IDLE_CAP, model_type=True,
+                                    arm_on_submit=False, transcript_path=str(self.tpath))
+        with m.patch.object(wd, "_draft_rescue_persist", return_value=None):
+            logs1 = goal.goal_sweep(now, run=fake1, projects_dir=self.proj,
+                                    requests_path=self.reqp, state={},
+                                    send_fn=lambda msg, **kw: None,
+                                    sleep_fn=lambda s: None)
+        self.assertEqual(fake1.typed_texts(), [TEXT])
+        self.assertTrue(any("verify-failed-live" in ln for ln in logs1), logs1)
+        self.assertIn("moff", goal.load_goal_requests(self.reqp)[SID],
+                      "the record-time offset survives a failed delivery")
+        # the arm lands late; the next sweep must type nothing
+        _append_marker(self.tpath, "Goal set: " + PAYLOAD)
+        logs2, fake2 = self._sweep()
+        self.assertEqual(fake2.typed_texts(), [], logs2)
+        self.assertTrue(any("drop:already-armed" in ln for ln in logs2), logs2)
+        self.assertIn("drop:already-armed", Path(self.syncp).read_text(encoding="utf-8"))
+        self.assertNotIn(SID, goal.load_goal_requests(self.reqp))
+
     def test_goal_set_before_request_does_not_block_owner_arm(self):
         _append_marker(self.tpath, "Goal set: an older loop condition")
         self._record_busy()
