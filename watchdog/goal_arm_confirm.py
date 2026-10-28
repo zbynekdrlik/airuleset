@@ -19,10 +19,28 @@ offset were written after the keystroke by construction, so no clock is compared
 it). A stale `Goal set:` sits before the offset and is never read. A `cleared`
 marker after it is the newest one and refuses. A submit CC reads as a plain
 prompt writes a `user` turn but no marker, so the #720 protection holds.
+
+`tpath` is the NEWEST transcript in the cwd's project dir
+(`find_active_transcript`), which is not always session `sid`'s own file when
+two sessions share a cwd. A marker in ANOTHER session's file must never confirm
+our arm (a `sent` is terminal: the owner's request would be lost), so the
+confirm offset is only handed out when the file's stem IS `sid`
+(`scan_with_confirm_offset`); otherwise the confirm stays pane-only.
 """
 import os
+from pathlib import Path
 
 import watchdog
+
+
+def scan_with_confirm_offset(tpath, sid):
+    """`deliver_goal`'s ONE pre-keystroke marker scan: returns
+    `(confirm_off, newest_mark)` where `newest_mark` is exactly
+    `scan_goal_markers(tpath)`'s marker (the #170 cleared-after-request input)
+    and `confirm_off` is its resume offset, or None when `tpath` is not session
+    `sid`'s own transcript (stem mismatch -> pane-only confirm)."""
+    off, mark = watchdog.scan_goal_markers(tpath)
+    return (off if Path(str(tpath)).stem == sid else None), mark
 
 
 def transcript_arm_landed(tpath, off, log=None):
@@ -46,5 +64,5 @@ def transcript_arm_landed(tpath, off, log=None):
     if not mark or mark.get("state") != "set":
         return False
     if log is not None:
-        log("ARM-CONFIRMED src=transcript tpath=%s" % os.path.basename(str(tpath)))
+        log("ARM-CONFIRMED src=transcript sid=%s" % Path(str(tpath)).stem)
     return True

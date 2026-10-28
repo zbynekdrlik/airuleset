@@ -164,6 +164,42 @@ class TestNotALandedArm(_Base):
         self.assertEqual(word, "skip:verify-failed-live")
 
 
+class TestOtherArmRoutes(_Base):
+    """#1265 review -- the stash and stranded-own routes share the confirm; prove
+    both pass the offset end to end (dropping it would re-open the retype)."""
+
+    def test_stranded_own_goal_landed_with_dark_pane_is_sent(self):
+        now = time.time()
+        self._quiet(now)
+        fake = _ArmCoveredFake(PANE, GOAL_IDLE_CAP, model_type=True,
+                               tpath=self.tpath, initial_box=TEXT,
+                               on_submit=["Goal set: " + PAYLOAD])
+        word = self._deliver(fake, now)
+        self.assertEqual(word, "sent")
+        log = Path(self.syncp).read_text(encoding="utf-8")
+        self.assertIn("SEND recover-swallowed", log)
+        self.assertIn("ARM-CONFIRMED src=transcript sid=%s" % SID, log)
+
+    def test_stash_route_landed_with_dark_pane_is_sent(self):
+        now = time.time()
+        self._quiet(now)
+        fake = DeliverGoalFakeTmux(PANE, GOAL_IDLE_CAP, model_type=True,
+                                   initial_box="rozpisany draft",
+                                   arm_on_submit=False)
+
+        def _stash_send(pid, text, run, **kw):
+            # CC arms the stash-delivered /goal; the pane stays dark
+            _append_marker(self.tpath, "Goal set: " + PAYLOAD)
+            return True
+
+        with m.patch.object(wd, "deliver_with_stash", side_effect=_stash_send):
+            word = self._deliver(fake, now)
+        self.assertEqual(word, "sent")
+        log = Path(self.syncp).read_text(encoding="utf-8")
+        self.assertIn("SEND stash", log)
+        self.assertIn("ARM-CONFIRMED src=transcript", log)
+
+
 class TestStructuredConfirmUnit(_Base):
     """`_await_goal_armed` + `_transcript_arm_landed` directly (the confirm the
     stash and stranded-own routes share with the bare route)."""
@@ -188,6 +224,14 @@ class TestStructuredConfirmUnit(_Base):
         self.assertFalse(goal._await_goal_armed("%9", self._dark(), lambda s: None))
         self.assertFalse(goal._transcript_arm_landed(None, 0))
         self.assertFalse(goal._transcript_arm_landed(str(self.tpath), None))
+
+    def test_foreign_session_transcript_gets_no_confirm_offset(self):
+        # the newest transcript of the cwd belongs to ANOTHER session: its
+        # marker must never confirm our arm (pane-only).
+        off, _mark = goal._scan_with_confirm_offset(str(self.tpath), "other-sid")
+        self.assertIsNone(off)
+        off, _mark = goal._scan_with_confirm_offset(str(self.tpath), SID)
+        self.assertEqual(off, os.path.getsize(self.tpath))
 
     def test_truncated_transcript_never_confirms(self):
         # a rotated/truncated file (size < offset) would make the scan fall back

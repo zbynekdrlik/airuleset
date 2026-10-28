@@ -201,7 +201,8 @@ from watchdog import u_freshness as _u_freshness             # #797 (U reconcile
 from watchdog import nudge_gate as _nudge_gate               # #797 (cadence gate)
 from watchdog import roster as _roster                       # #804 (armed roster)
 from watchdog import goal_turn_liveness as _turn_liveness     # #1110 (transcript liveness)
-from watchdog.goal_arm_confirm import transcript_arm_landed as _transcript_arm_landed  # #1265
+from watchdog.goal_arm_confirm import (transcript_arm_landed as _transcript_arm_landed,  # #1265
+                                       scan_with_confirm_offset as _scan_with_confirm_offset)
 from watchdog import gk_stall_notice as _gk_stall_notice      # #1109 (gk role-pane stall notice)
 from watchdog import stream_migrate as _stream_migrate        # #1143 (dark stream loop re-arm)
 from watchdog import send_outcome as _send_outcome            # #1157 (delivery outcome)
@@ -1881,7 +1882,7 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
     tinfo = watchdog.find_active_transcript(projects_dir, cwd)
     if tinfo:
         tpath, _tmtime = tinfo
-        _mark_off, mark = watchdog.scan_goal_markers(tpath)   # #1265 offset = keystroke boundary
+        _mark_off, mark = _scan_with_confirm_offset(tpath, sid)   # #1265 keystroke boundary
         if mark is not None and mark.get("state") == "cleared":
             mts = mark.get("ts")
             if mts is not None and request_ts is not None and mts > request_ts:
