@@ -201,6 +201,8 @@ from watchdog import u_freshness as _u_freshness             # #797 (U reconcile
 from watchdog import nudge_gate as _nudge_gate               # #797 (cadence gate)
 from watchdog import roster as _roster                       # #804 (armed roster)
 from watchdog import goal_turn_liveness as _turn_liveness     # #1110 (transcript liveness)
+from watchdog import goal_arm_confirm as _arm_confirm         # #1265 (transcript arm-confirm)
+from watchdog.goal_arm_confirm import transcript_arm_landed as _transcript_arm_landed, scan_with_confirm_offset as _scan_with_confirm_offset  # noqa: E501
 from watchdog import gk_stall_notice as _gk_stall_notice      # #1109 (gk role-pane stall notice)
 from watchdog import stream_migrate as _stream_migrate        # #1143 (dark stream loop re-arm)
 from watchdog import send_outcome as _send_outcome            # #1157 (delivery outcome)
@@ -395,7 +397,7 @@ def _record_delivered_attempt(state, origin, sid, now):
 
 
 def record_goal_request(session, cwd, text, authority, now=None, path=None,
-                        origin=None):
+                        origin=None, moff=None):
     """Record a pending `/goal` arm request for `session`. MULTIPLE writers:
     the user's `goal-arm --self` callback (origin "self-callback", #478) AND
     the watchdog auto-re-arms — `dark-rearm` (#478), `auth-rearm` (#675),
@@ -486,6 +488,7 @@ def record_goal_request(session, cwd, text, authority, now=None, path=None,
         "origin": new_origin,
         "authority": str(authority or "").strip(),
         "text": str(text or ""),
+        **({"moff": moff} if moff is not None else {}),   # #1265 record-time transcript offset
     }
     return _save_goal_requests(d, path)
 
@@ -889,24 +892,21 @@ def _await_typed(pid, text, run, sleep_fn, want=True):
     return not want
 
 
-def _await_goal_armed(pid, run, sleep_fn):
-    """#720 -- poll (bounded) until the pane footer shows the `◎ /goal` armed
-    glyph (`pane_goal_armed is True`). A render-settle poll like `_await_typed`:
-    CC arms a submitted /goal a moment after Enter, so the glyph lags the box
-    clearing. Returns True the instant it reads armed, False if the bounded
-    window elapses -- a submit CC read as a plain prompt clears the box (and
-    appends a `user` turn) but never arms, so box-cleared / transcript-confirmed
-    is NOT proof the goal armed (the #720 silent-'sent' tail). On False the
-    caller keeps the request pending; the next sweep's own `armed is True` check
-    turns a render-lag false-negative into `drop:already-armed`, never a
-    double-arm. Shared by all three arm routes (bare / stash / stranded).
-
-    (#1113: the old #720-review blind spot -- a stale-rearm REPLACE typing past
-    an ALREADY-armed footer, where this confirm could not tell old-armed from
-    new-armed -- is GONE: no origin types past an armed footer any more, so every
-    delivery this confirms started from a DARK footer, and a True read here is
-    genuinely our fresh arm.)"""
+def _await_goal_armed(pid, run, sleep_fn, tpath=None, mark_off=None):
+    """#720 -- bounded render-settle poll (like `_await_typed`) until the arm is
+    CONFIRMED; False when the window elapses. Box-cleared / transcript-advanced is
+    NOT proof: a submit CC read as a plain prompt clears the box and appends a
+    `user` turn but never arms (the #720 silent-'sent' tail). On False the request
+    stays pending. Shared by all three arm routes (bare / stash / stranded); #1113:
+    no origin types past an armed footer, so a True read is our fresh arm.
+    #1265 -- STRUCTURED STATE FIRST (#486): with `tpath` + `mark_off` (the
+    pre-keystroke marker-scan offset) each poll asks the transcript first (a
+    `Goal set:` written after the keystroke, `watchdog.goal_arm_confirm`), then the
+    `◎ /goal` footer -- CC 2.1.311 covers the glyph with the arm's own turn
+    (dev1 camera-box: 6 landed arms retyped). Without them: pane-only."""
     for i in range(GOAL_TYPE_SETTLE_POLLS):
+        if _transcript_arm_landed(tpath, mark_off, log=_log_goal_sync):
+            return True
         if watchdog.pane_goal_armed(watchdog.capture_pane(pid, run, lines=40)) is True:
             return True
         if i < GOAL_TYPE_SETTLE_POLLS - 1:
@@ -915,7 +915,7 @@ def _await_goal_armed(pid, run, sleep_fn):
 
 
 def _send_goal_verified(pid, text, run, captured=None, sleep_fn=None, logs=None,
-                        verify_armed=True, nudge="goal-sweep", out=None):
+                        verify_armed=True, nudge="goal-sweep", out=None, tpath=None, mark_off=None):
     """Type a LONG `/goal ...` into a BARE input box and submit it,
     verifying every step against a fresh capture -- the same protocol
     `deliver_with_stash` uses for its own type/submit steps, minus the
@@ -1004,7 +1004,7 @@ def _send_goal_verified(pid, text, run, captured=None, sleep_fn=None, logs=None,
         return True                        # `/goal clear` disarm -- box-cleared IS the signal (#522)
     # #720 -- box-cleared does NOT prove the goal ARMED (a submit CC read as a
     # plain prompt also clears it -- the incident's "sent"-but-dark tail).
-    if _await_goal_armed(pid, run, sleep_fn):
+    if _await_goal_armed(pid, run, sleep_fn, tpath, mark_off):   # #1265 structured first
         return True
     _log("goal-verify-abort: not-armed-after-submit")
     return False
@@ -1873,17 +1873,12 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
         _log_goal_sync("SKIP dialog-open sid=%s cwd=%s" % (sid, cwd))
         return "skip:dialog-open"
 
-    tpath = None            # #566: defined for the case-(a) recovery below even
-                            # when there is no active transcript (normal origin)
-    mark = None             # the newest marker from the 4 MB tail, read below
-                            # when a transcript exists; used ONLY for the
-                            # cleared-after-request check (#170). (#1113: the
-                            # #623 stale-rearm REPLACE that re-read via
-                            # seed_goal_marker is removed.)
+    tpath = _mark_off = None  # #566: defined for the case-(a) recovery even with no transcript
+    mark = None             # newest marker in the 4 MB tail; ONLY for the #170 cleared-after-request check
     tinfo = watchdog.find_active_transcript(projects_dir, cwd)
     if tinfo:
         tpath, _tmtime = tinfo
-        _off, mark = watchdog.scan_goal_markers(tpath)
+        _mark_off, mark = _scan_with_confirm_offset(tpath, sid)   # #1265 keystroke boundary
         if mark is not None and mark.get("state") == "cleared":
             mts = mark.get("ts")
             if mts is not None and request_ts is not None and mts > request_ts:
@@ -2065,7 +2060,7 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
             if _rearm_budgeted:
                 _nudge_gate.mark_pane_attempt(state, pid, now)
             watchdog._janitor_clear_watch(state, pid)
-            if not _await_goal_armed(pid, run, sleep_fn):   # #720 same arm-confirm
+            if not _await_goal_armed(pid, run, sleep_fn, tpath, _mark_off):  # #720/#1265
                 _log_goal_sync("SKIP not-armed(stranded) sid=%s cwd=%s" % (sid, cwd))
                 _log_arm_confirm_fail(sid, cwd, text, pid, run,
                                       sleep_fn=sleep_fn, tpath=tpath,
@@ -2106,7 +2101,7 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
                                          nudge=_nudge)   # #1038 declared-window -> goal-arm
         if ok:
             watchdog._janitor_clear_watch(state, pid)
-            if not _await_goal_armed(pid, run, sleep_fn):   # #720 same arm-confirm
+            if not _await_goal_armed(pid, run, sleep_fn, tpath, _mark_off):  # #720/#1265
                 _log_goal_sync("SKIP not-armed(stash) sid=%s cwd=%s" % (sid, cwd))
                 _log_arm_confirm_fail(sid, cwd, text, pid, run,
                                       sleep_fn=sleep_fn, tpath=tpath,
@@ -2132,7 +2127,7 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
     _send_out = {}
     ok = _send_goal_verified(pid, text, run, captured=captured,
                              sleep_fn=sleep_fn, logs=logs,
-                             nudge=_nudge, out=_send_out)   # #1038 declared-window -> goal-arm
+                             nudge=_nudge, out=_send_out, tpath=tpath, mark_off=_mark_off)  # #1038/#1265
     # #1092 (e) -- count a budgeted re-arm ONLY when a keystroke was ACTUALLY
     # sent (`out["typed"]`, #1104): an OFF-suppressed or raced-abort re-arm typed
     # nothing and must not spend the budget (the montalu1 16:04 phantom hold).
@@ -2173,8 +2168,8 @@ def _goal_sync_attempt(sid, cwd, text, authority, origin, run=None,
     `"skip:no-session"` if recording itself failed. Clears the request on
     any TERMINAL word. Prints nothing -- the caller owns stdout."""
     now_fn = now_fn or time.time
-    ok = record_goal_request(sid, cwd, text, authority, now=now_fn(),
-                             path=requests_path, origin=origin)
+    ok = record_goal_request(sid, cwd, text, authority, now=now_fn(), path=requests_path, origin=origin,
+                             moff=_arm_confirm.request_mark_offset(projects_dir, cwd, sid, origin))  # #1265
     if not ok:
         return "skip:no-session"
     entry = load_goal_requests(requests_path).get(sid) or {}
@@ -2270,12 +2265,17 @@ def goal_sweep(now, run=None, dry_run=False, projects_dir=None,
             logs.append("DRY-RUN goal-sweep %s would evaluate sid=%s"
                         % (watchdog.project_label(cwd), sid))
             continue
-        # #731 -- the per-request delivery-attempt CAP, checked BEFORE deliver_goal
-        # so a request that already failed CAP keystroke deliveries is DROPPED
-        # terminally (never a CAP+1 keystroke): clean up any leftover /goal text
-        # it stranded in the prompt, clear it, and ping (origin-gated). This is
-        # the montalu4 retype-livelock exit -- `dl_fails` is INT-guarded across
-        # the JSON boundary (#714).
+        _late = _arm_confirm.late_arm_drop(entry, sid, cwd, projects_dir, _log_goal_sync)  # #1265
+        if _late:                                   # an owner arm landed late: never retype it
+            logs.append(_late)
+            aborts.pop(sid, None)                   # same bookkeeping as `sent`
+            _arm_failure.clear(state, sid)
+            clear_goal_request(sid, path=requests_path)
+            continue
+        # #731 -- the per-request delivery-attempt CAP, checked BEFORE deliver_goal: a request
+        # that already failed CAP keystroke deliveries is DROPPED terminally (never CAP+1): clean
+        # up its stranded /goal text, clear it, ping (origin-gated). The montalu4 retype-livelock
+        # exit; `dl_fails` is INT-guarded across the JSON boundary (#714).
         try:
             dl_fails = int(entry.get("dl_fails", 0))
         except (TypeError, ValueError):
