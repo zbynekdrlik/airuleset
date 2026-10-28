@@ -1,0 +1,205 @@
+"""#1265 — a goal arm that LANDED is confirmed from the session transcript, not
+only from the pane render.
+
+Incident (owner, dev1 camera-box 28.10.2026, sid 90bc51f3): the owner's
+`/autopilot` arm was typed six times. Each time CC answered with
+`<local-command-stdout>Goal set: …`, i.e. the arm landed, but the arm's own turn
+started at once and covered the `◎ /goal` footer, so `_await_goal_armed` read
+`armed=False box=empty`. The transcript had advanced, so `_verify_fail_word`
+said `skip:verify-failed-live` (uncounted), and `goal_sweep` retyped the request
+until `GOAL_DELIVERY_LIVE_ATTEMPT_CAP`.
+
+Fix (design comment on the ticket): `_await_goal_armed` reads the structured
+state first (#486). A `Goal set:` marker in the bytes appended AFTER the
+pre-keystroke `scan_goal_markers` offset means the arm landed. A stale marker
+(before the offset) or a `cleared` marker after it never counts.
+"""
+import json
+import os
+import sys
+import time
+import unittest
+import unittest.mock as m
+from datetime import datetime, timezone
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import watchdog as wd  # noqa: E402
+from watchdog import goal  # noqa: E402
+from _goal_arm_helpers import (  # noqa: E402
+    DeliverGoalFakeTmux,
+    GOAL_IDLE_CAP,
+    _isolate_goal_state,
+    _write_marker_transcript,
+)
+
+CWD = "/home/newlevel/devel/armconfirm1265"
+SID = "sess-armconfirm-1265"
+PAYLOAD = "work the whole backlog one ticket at a time until every issue is closed"
+TEXT = "/goal " + PAYLOAD
+PANE = [("%9", "claude", CWD, "111")]
+
+
+def _append_marker(tpath, text):
+    """Append a CC `/goal` stdout marker (`Goal set: …` / `Goal cleared: …`)
+    the way CC writes it: a top-level `system` entry, LCS-wrapped."""
+    iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    entry = {"type": "system", "subtype": "local_command", "timestamp": iso,
+             "content": "<local-command-stdout>%s</local-command-stdout>" % text}
+    with open(tpath, "a", encoding="utf-8") as f:
+        f.write(json.dumps(entry) + "\n")
+
+
+class _ArmCoveredFake(DeliverGoalFakeTmux):
+    """The camera-box shape: the `/goal` submit ARMS (CC writes the marker to
+    the transcript) but the pane never shows the `◎ /goal` glyph, because the
+    arm's own turn covers it (`arm_on_submit=False` keeps the footer dark).
+    `on_submit` lists the marker texts CC appends on a `/goal` submit."""
+
+    def __init__(self, *a, tpath=None, on_submit=(), **kw):
+        kw.setdefault("arm_on_submit", False)
+        super().__init__(*a, **kw)
+        self._tpath = tpath
+        self._on_submit = list(on_submit)
+
+    def __call__(self, argv, timeout=8):
+        if (self.model_type and "send-keys" in " ".join(argv)
+                and argv[-1] == "Enter" and "-l" not in argv
+                and self.box.strip().startswith("/goal ")
+                and self.enters_swallowed == 0):
+            for mark in self._on_submit:
+                _append_marker(self._tpath, mark)
+        return super().__call__(argv, timeout)
+
+
+class _Base(unittest.TestCase):
+    def setUp(self):
+        self.reqp, self.syncp = _isolate_goal_state(self)
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        self.proj = Path(d.name)
+        self.tpath = _write_marker_transcript(self.proj, CWD, SID,
+                                              transcript_age_s=None)
+
+    def _quiet(self, now):
+        # idle at the gate: last write 120 s before the sweep `now`
+        os.utime(self.tpath, (now - 120, now - 120))
+
+    def _deliver(self, fake, now):
+        with m.patch.object(wd, "_draft_rescue_persist", return_value=None):
+            return goal.deliver_goal(SID, CWD, TEXT, "full", run=fake,
+                                     projects_dir=self.proj, now=now, state={},
+                                     sleep_fn=lambda s: None)
+
+
+class TestLandedArmIsSent(_Base):
+    def test_incident_arm_landed_but_pane_dark_is_sent(self):
+        now = time.time()
+        self._quiet(now)
+        fake = _ArmCoveredFake(PANE, GOAL_IDLE_CAP, model_type=True,
+                               tpath=self.tpath,
+                               on_submit=["Goal set: " + PAYLOAD])
+        word = self._deliver(fake, now)
+        self.assertEqual(word, "sent",
+                         "a `Goal set:` written after the keystroke IS a landed arm")
+        log = Path(self.syncp).read_text(encoding="utf-8")
+        self.assertIn("ARM-CONFIRMED src=transcript", log)
+        self.assertIn("SEND typed", log)
+        self.assertNotIn("ARM-CONFIRM-FAIL", log)
+
+    def test_sweep_clears_request_and_second_sweep_types_nothing(self):
+        now = time.time()
+        self._quiet(now)
+        goal.record_goal_request(SID, CWD, TEXT, "full", now=now,
+                                 path=self.reqp, origin="self-callback")
+        fake = _ArmCoveredFake(PANE, GOAL_IDLE_CAP, model_type=True,
+                               tpath=self.tpath,
+                               on_submit=["Goal set: " + PAYLOAD])
+        with m.patch.object(wd, "_draft_rescue_persist", return_value=None):
+            logs = goal.goal_sweep(now, run=fake, projects_dir=self.proj,
+                                   requests_path=self.reqp,
+                                   send_fn=lambda msg, **kw: None,
+                                   sleep_fn=lambda s: None)
+        self.assertTrue(any("-> sent" in ln for ln in logs), logs)
+        self.assertNotIn(SID, goal.load_goal_requests(self.reqp))
+        # the next idle sweep has nothing pending -> zero keystrokes
+        later = now + 70
+        self._quiet(later)
+        fake2 = _ArmCoveredFake(PANE, GOAL_IDLE_CAP, model_type=True,
+                                tpath=self.tpath)
+        with m.patch.object(wd, "_draft_rescue_persist", return_value=None):
+            goal.goal_sweep(later, run=fake2, projects_dir=self.proj,
+                            requests_path=self.reqp,
+                            send_fn=lambda msg, **kw: None,
+                            sleep_fn=lambda s: None)
+        self.assertEqual(fake2.typed_texts(), [], "a landed arm is never retyped")
+
+
+class TestNotALandedArm(_Base):
+    def test_stale_goal_set_before_keystroke_does_not_count(self):
+        # an OLD arm marker already in the transcript; the submit is read as a
+        # plain prompt (a `user` turn advances the transcript, no new marker).
+        _append_marker(self.tpath, "Goal set: an older loop condition")
+        now = time.time()
+        self._quiet(now)
+        fake = _ArmCoveredFake(PANE, GOAL_IDLE_CAP, model_type=True,
+                               tpath=self.tpath, transcript_path=str(self.tpath))
+        word = self._deliver(fake, now)
+        self.assertEqual(word, "skip:verify-failed-live")
+        self.assertNotIn("ARM-CONFIRMED src=transcript",
+                         Path(self.syncp).read_text(encoding="utf-8"))
+
+    def test_cleared_after_keystroke_does_not_count(self):
+        now = time.time()
+        self._quiet(now)
+        fake = _ArmCoveredFake(PANE, GOAL_IDLE_CAP, model_type=True,
+                               tpath=self.tpath,
+                               on_submit=["Goal set: " + PAYLOAD,
+                                          "Goal cleared: " + PAYLOAD])
+        word = self._deliver(fake, now)
+        self.assertNotEqual(word, "sent", "the newest marker is `cleared`")
+        self.assertEqual(word, "skip:verify-failed-live")
+
+
+class TestStructuredConfirmUnit(_Base):
+    """`_await_goal_armed` + `_transcript_arm_landed` directly (the confirm the
+    stash and stranded-own routes share with the bare route)."""
+
+    def _dark(self):
+        return DeliverGoalFakeTmux(PANE, GOAL_IDLE_CAP)   # footer never armed
+
+    def test_marker_after_offset_confirms_with_dark_pane(self):
+        off, _ = wd.scan_goal_markers(str(self.tpath))
+        _append_marker(self.tpath, "Goal set: " + PAYLOAD)
+        self.assertTrue(goal._await_goal_armed("%9", self._dark(), lambda s: None,
+                                               tpath=str(self.tpath), mark_off=off))
+
+    def test_marker_before_offset_does_not_confirm(self):
+        _append_marker(self.tpath, "Goal set: " + PAYLOAD)
+        off, _ = wd.scan_goal_markers(str(self.tpath))
+        self.assertFalse(goal._await_goal_armed("%9", self._dark(), lambda s: None,
+                                                tpath=str(self.tpath), mark_off=off))
+
+    def test_no_offset_or_path_is_pane_only(self):
+        _append_marker(self.tpath, "Goal set: " + PAYLOAD)
+        self.assertFalse(goal._await_goal_armed("%9", self._dark(), lambda s: None))
+        self.assertFalse(goal._transcript_arm_landed(None, 0))
+        self.assertFalse(goal._transcript_arm_landed(str(self.tpath), None))
+
+    def test_truncated_transcript_never_confirms(self):
+        # a rotated/truncated file (size < offset) would make the scan fall back
+        # to the tail bootstrap and could return a STALE marker: refuse it.
+        _append_marker(self.tpath, "Goal set: " + PAYLOAD)
+        size = os.path.getsize(self.tpath)
+        self.assertFalse(goal._transcript_arm_landed(str(self.tpath), size + 500))
+
+    def test_missing_transcript_never_confirms(self):
+        self.assertFalse(goal._transcript_arm_landed(
+            str(self.proj / "no-such.jsonl"), 0))
+
+
+if __name__ == "__main__":
+    unittest.main()
