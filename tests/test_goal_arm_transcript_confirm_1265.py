@@ -247,3 +247,69 @@ class TestStructuredConfirmUnit(_Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestLateMarkerDropsPendingSelfArm(_Base):
+    """#1265 follow-up (supervisor ROZHODNUTÉ): CC may write `Goal set:` AFTER the
+    8 s confirm window. A pending `self-callback` request whose session's OWN
+    transcript has a newest marker `set` written after the request was recorded
+    is dropped terminally (`drop:already-armed`, zero keystrokes). A marker that
+    predates the owner's /autopilot never blocks the arm (#1113)."""
+
+    def _record_busy(self):
+        # the owner's /autopilot turn is still running at record time -> the
+        # sync attempt defers (busy-transcript) with zero keystrokes
+        now = time.time()
+        os.utime(self.tpath, (now - 5, now - 5))
+        fake = DeliverGoalFakeTmux(PANE, GOAL_IDLE_CAP, model_type=True)
+        word = goal._goal_sync_attempt(SID, CWD, TEXT, "full", "self-callback",
+                                       run=fake, projects_dir=self.proj,
+                                       requests_path=self.reqp, state={},
+                                       sleep_fn=lambda s: None)
+        self.assertEqual(word, "skip:busy-transcript")
+        self.assertEqual(fake.typed_texts(), [])
+
+    def _sweep(self, arm=True):
+        now = time.time()
+        self._quiet(now)
+        fake = DeliverGoalFakeTmux(PANE, GOAL_IDLE_CAP, model_type=True,
+                                   arm_on_submit=arm)
+        with m.patch.object(wd, "_draft_rescue_persist", return_value=None):
+            logs = goal.goal_sweep(now, run=fake, projects_dir=self.proj,
+                                   requests_path=self.reqp, state={},
+                                   send_fn=lambda msg, **kw: None,
+                                   sleep_fn=lambda s: None)
+        return logs, fake
+
+    def test_late_goal_set_after_request_drops_with_no_keystroke(self):
+        self._record_busy()
+        _append_marker(self.tpath, "Goal set: " + PAYLOAD)   # landed late
+        logs, fake = self._sweep()
+        self.assertEqual(fake.typed_texts(), [], "a landed arm is never retyped")
+        self.assertTrue(any("drop:already-armed" in ln for ln in logs), logs)
+        self.assertNotIn(SID, goal.load_goal_requests(self.reqp))
+
+    def test_goal_set_before_request_does_not_block_owner_arm(self):
+        _append_marker(self.tpath, "Goal set: an older loop condition")
+        self._record_busy()
+        logs, fake = self._sweep()
+        self.assertEqual(fake.typed_texts(), [TEXT], logs)
+        self.assertTrue(any("-> sent" in ln for ln in logs), logs)
+
+    def test_cleared_after_set_does_not_drop(self):
+        self._record_busy()
+        _append_marker(self.tpath, "Goal set: " + PAYLOAD)
+        _append_marker(self.tpath, "Goal cleared: " + PAYLOAD)
+        logs, fake = self._sweep()
+        # newest marker is `cleared`: never already-armed; today's owner-clear
+        # handling (#170 / #1257 owner-stop) still decides, unchanged.
+        self.assertFalse(any("drop:already-armed" in ln for ln in logs), logs)
+        self.assertTrue(any("drop:owner-stop" in ln for ln in logs), logs)
+
+    def test_request_without_offset_keeps_todays_behaviour(self):
+        # a legacy request (recorded before this change) carries no offset
+        goal.record_goal_request(SID, CWD, TEXT, "full", path=self.reqp,
+                                 origin="self-callback")
+        _append_marker(self.tpath, "Goal set: " + PAYLOAD)
+        logs, fake = self._sweep()
+        self.assertEqual(fake.typed_texts(), [TEXT], logs)
