@@ -204,12 +204,10 @@ case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) PATH="$HOME/.local/bin:$PATH" ;;
 # tuple (shared with the settings-merge drop list) — never a second hardcoded copy.
 {{MANAGED_ENV_UNSET}}
 
-# #659/#669: the owner_vps headless OAuth-token export that once stood here was
-# REMOVED. login/auth ON a target is the PROJECT claudy's responsibility, and
-# airuleset never touches auth (owner ROZHODNUTÉ #659, #537 machine-identity
-# boundary). The launcher no longer delivers or exports any OAuth token;
-# ~/.claude/.credentials.json (managed by the box's own claudy) is the login on
-# every box, owner VPS included.
+# #659/#669: no OAuth-token export here — login/auth ON a target is the PROJECT
+# claudy's job (owner ROZHODNUTÉ #659); ~/.claude/.credentials.json is the login.
+# #1266: the peer channel flag only when install enabled it (cli_peer_channel marker).
+_peer=(); [ ! -f "$HOME/.claude/airuleset-peer-channel.on" ] || _peer=(--channels plugin:peer@airuleset)
 
 _has_conversation() {
   local ccdir="${PWD//\//-}"; ccdir="${ccdir//./-}"; ccdir="${ccdir//_/-}"
@@ -223,34 +221,34 @@ case "$mode" in
     ;;
   new)
     exec claude --dangerously-skip-permissions \
-      --model "$_model" --allowedTools Grep,Glob "$@"
+      --model "$_model" --allowedTools Grep,Glob "${_peer[@]}" "$@"
     ;;
   ultracode)
     if _has_conversation; then
       exec claude --dangerously-skip-permissions -c \
-        --model "$_model" --allowedTools Grep,Glob "$@"
+        --model "$_model" --allowedTools Grep,Glob "${_peer[@]}" "$@"
     else
       exec claude --dangerously-skip-permissions \
-        --model "$_model" --allowedTools Grep,Glob "$@"
+        --model "$_model" --allowedTools Grep,Glob "${_peer[@]}" "$@"
     fi
     ;;
   fullscreen)
     export CLAUDE_CODE_NO_FLICKER=1
     if _has_conversation; then
       exec claude --dangerously-skip-permissions -c \
-        --model "$_model" --allowedTools Grep,Glob "$@"
+        --model "$_model" --allowedTools Grep,Glob "${_peer[@]}" "$@"
     else
       exec claude --dangerously-skip-permissions \
-        --model "$_model" --allowedTools Grep,Glob "$@"
+        --model "$_model" --allowedTools Grep,Glob "${_peer[@]}" "$@"
     fi
     ;;
   *)
     if _has_conversation; then
       exec claude --dangerously-skip-permissions -c \
-        --model "$_model" --allowedTools Grep,Glob "$@"
+        --model "$_model" --allowedTools Grep,Glob "${_peer[@]}" "$@"
     else
       exec claude --dangerously-skip-permissions \
-        --model "$_model" --allowedTools Grep,Glob "$@"
+        --model "$_model" --allowedTools Grep,Glob "${_peer[@]}" "$@"
     fi
     ;;
 esac
