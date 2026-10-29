@@ -1,4 +1,5 @@
 """#1266 — cross-account peer channel (peer_channel.py runtime + cli_peer_channel managed side)."""
+import inspect
 import io
 import json
 import os
@@ -8,9 +9,10 @@ import stat
 import subprocess
 import sys
 import tempfile
-import threading
+import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
@@ -34,32 +36,38 @@ class _Recorder:
         return [e for e, _ in self.events]
 
 
-def _write_config(d, links, extra=()):
+def _write_config(d, links):
     reg = [{"name": "alpha", "host": HOST, "account": ME, "path": "~/devel/alpha"},
            {"name": "beta", "host": HOST, "account": ME, "path": "~/devel/beta"},
            {"name": "gamma", "host": HOST, "account": ME, "path": "~/devel/gamma"},
            {"name": "foreign", "host": HOST, "account": OTHER, "path": "/srv/foreign"},
            {"name": "elsewhere", "host": "otherhost", "account": ME, "path": "~/x"}]
-    reg += list(extra)
     Path(d, pc.REGISTRY_FILE).write_text(json.dumps(reg))
     Path(d, pc.LINKS_FILE).write_text(json.dumps({"hosts": {HOST: {"links": links}}}))
 
 
+def _scratch(testcase, prefix):
+    # AF_UNIX paths are capped at 108 bytes: keep socket dirs short, under /tmp.
+    d = tempfile.mkdtemp(prefix=prefix, dir="/tmp")
+    testcase.addCleanup(lambda: subprocess.run(["rm", "-rf", d], check=False))
+    return d
+
+
 class _Env(unittest.TestCase):
+    LINKS = [["alpha", "beta"], ["alpha", "foreign"]]
+
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
-        self.cfg = os.path.join(self.tmp.name, "cfg")
-        # AF_UNIX paths are capped at 108 bytes: keep the socket dir short.
-        self.sock = tempfile.mkdtemp(prefix="pc", dir="/tmp")
-        self.addCleanup(lambda: subprocess.run(["rm", "-rf", self.sock], check=False))
-        os.makedirs(self.cfg)
-        _write_config(self.cfg, [["alpha", "beta"], ["alpha", "foreign"]])
+        self.home = _scratch(self, "pch")
+        self.cfg = _scratch(self, "pcc")
+        self.sock = _scratch(self, "pcs")
+        os.makedirs(os.path.join(self.sock, ME))
+        _write_config(self.cfg, self.LINKS)
 
     def peer(self, project, **kw):
         delivered = []
         log = _Recorder()
-        p = pc.Peer(HOST, ME, os.getuid(), "/", self.tmp.name, project_arg=project,
+        kw.setdefault("armed", True)
+        p = pc.Peer(HOST, ME, os.getuid(), "/", self.home, project_arg=project,
                     sock_dir=self.sock, config_dir=self.cfg, log=log,
                     notify=lambda text, meta: delivered.append((text, meta)), **kw)
         p.delivered, p.rec = delivered, log
@@ -68,16 +76,19 @@ class _Env(unittest.TestCase):
 
 
 class TestConfig(unittest.TestCase):
-    def test_committed_links_valid_against_registry(self):
+    def test_committed_links_valid_against_registry_and_root_hosts(self):
         self.assertEqual(cpc.validate_links(cpc.load_links(), cpc.load_registry()), [])
 
-    def test_validate_links_rejects_unknown_self_and_wrong_host(self):
+    def test_validate_links_rejects_unknown_self_wrong_host_and_non_root_host(self):
         reg = [{"name": "a", "host": "h", "account": "u", "path": "/a"},
                {"name": "b", "host": "other", "account": "u", "path": "/b"}]
-        errs = cpc.validate_links({"hosts": {"h": {"links": [["a", "a"], ["a", "b"], ["a"]]}}}, reg)
+        doc = {"hosts": {"h": {"links": [["a", "a"], ["a", "b"], ["a"]]},
+                         "nope": {"links": []}}}
+        errs = cpc.validate_links(doc, reg, root_hosts={"h"})
         self.assertTrue(any("self link" in e for e in errs))
         self.assertTrue(any("'b' is not a registry project on h" in e for e in errs))
         self.assertTrue(any("malformed" in e for e in errs))
+        self.assertTrue(any(e.startswith("nope: not a root-leg host") for e in errs))
 
     def test_accounts_for_host(self):
         reg = [{"name": "a", "host": "h", "account": "ua", "path": "/a"},
@@ -95,13 +106,62 @@ class TestConfig(unittest.TestCase):
         self.assertEqual(pc.resolve_project(projects, "u", "/h/devel/other", "/h"), "outer")
         self.assertIsNone(pc.resolve_project(projects, "u", "/h/devels", "/h"))
 
+    def test_resolve_project_follows_a_symlinked_cwd(self):
+        d = _scratch(self, "pcr")
+        os.makedirs(os.path.join(d, "devel", "inner"))
+        os.symlink(os.path.join(d, "devel", "inner"), os.path.join(d, "link"))
+        projects = {"inner": {"account": "u", "path": "~/devel/inner"}}
+        self.assertEqual(pc.resolve_project(projects, "u", os.path.join(d, "link"), d), "inner")
+
     def test_project_arg_must_belong_to_this_account(self):
-        with tempfile.TemporaryDirectory() as d:
-            _write_config(d, [])
-            p = pc.Peer(HOST, ME, os.getuid(), "/", d, project_arg="foreign",
-                        sock_dir=d, config_dir=d, log=_Recorder())
-            self.assertIsNone(p.project)
-            self.assertIn("not a testhost project", p.problem)
+        d = _scratch(self, "pca")
+        _write_config(d, [])
+        p = pc.Peer(HOST, ME, os.getuid(), "/", d, project_arg="foreign",
+                    sock_dir=d, config_dir=d, log=_Recorder())
+        self.assertIsNone(p.project)
+        self.assertIn("not a testhost project", p.problem)
+
+    def test_mcp_json_runs_the_fleet_checkout(self):
+        import cli_fleet
+        args = json.loads(cpc.MCP_JSON_PATH.read_text())["mcpServers"]["peer"]["args"]
+        self.assertIn('"$HOME/devel/airuleset/peer_channel.py"', args[-1])
+        hosts = {h["host"] for h in cli_fleet.DISK_GUARD_ROOT_HOSTS
+                 if h["name"] in cpc.load_links()["hosts"]}
+        for r in cli_fleet.REMOTE_HOSTS:
+            if r.get("host") in hosts:
+                self.assertEqual(r.get("repo_path"), "~/devel/airuleset", r["name"])
+
+
+class TestChannelArmed(unittest.TestCase):
+    def _pid_with(self, *extra):
+        p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"] + list(extra))
+        self.addCleanup(p.wait)
+        self.addCleanup(p.kill)      # LIFO: kill first, then reap
+        # /proc/<pid>/cmdline reads empty for a moment right after exec; a real
+        # parent claude has long been running when its MCP server starts.
+        deadline = time.monotonic() + 5
+        while not Path("/proc/%d/cmdline" % p.pid).read_bytes() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        return p.pid
+
+    def test_armed_only_with_our_channel_flag(self):
+        self.assertTrue(pc.channel_armed(self._pid_with("--channels", pc.CHANNEL_ARG)))
+        self.assertTrue(pc.channel_armed(self._pid_with("--channels", "x", pc.CHANNEL_ARG)))
+        self.assertTrue(pc.channel_armed(self._pid_with("--channels=" + pc.CHANNEL_ARG)))
+        self.assertFalse(pc.channel_armed(self._pid_with("--channels", "plugin:other@x")))
+        self.assertFalse(pc.channel_armed(self._pid_with("--model", pc.CHANNEL_ARG)))
+        self.assertFalse(pc.channel_armed(self._pid_with()))
+
+    def test_not_armed_session_never_listens(self):
+        env = _Env("setUp")
+        env.setUp()
+        try:
+            p = env.peer("beta", armed=False)
+            self.assertFalse(p.start_listener())
+            self.assertIn("listen-skipped", p.rec.names())
+            self.assertEqual(os.listdir(os.path.join(env.sock, ME)), [])
+        finally:
+            env.doCleanups()
 
 
 class TestDelivery(_Env):
@@ -114,31 +174,42 @@ class TestDelivery(_Env):
         self.assertIn("deliver", b.rec.names())
         self.assertIn("send", a.rec.names())
 
-    def test_socket_mode_and_cleanup(self):
+    def test_socket_in_own_subdir_mode_and_cleanup(self):
         b = self.peer("beta")
         b.start_listener()
         path = b.sock_path
+        self.assertEqual(os.path.dirname(path), os.path.join(self.sock, ME))
         self.assertTrue(stat.S_ISSOCK(os.lstat(path).st_mode))
         self.assertEqual(stat.S_IMODE(os.lstat(path).st_mode), 0o666)
         b.close()
         self.assertFalse(os.path.lexists(path))
 
+    def test_project_without_link_does_not_listen(self):
+        g = self.peer("gamma")
+        self.assertFalse(g.start_listener())
+        self.assertEqual(g.rec.events[-1], ("listen-skipped", {"project": "gamma",
+                                                                "reason": "no link"}))
+
+    def test_missing_own_dir_is_reported_not_fatal(self):
+        os.rmdir(os.path.join(self.sock, ME))
+        p = self.peer("alpha")
+        self.assertFalse(p.start_listener())
+        self.assertIn("root leg not applied", p.problem)
+
     def test_unlinked_pair_refused_both_ends(self):
-        b, g = self.peer("beta"), self.peer("gamma")
-        g.start_listener()
+        b = self.peer("beta")
         ok, out = b.send("gamma", "hi")
         self.assertFalse(ok)
         self.assertIn("not linked", out)
-        # a raw client bypassing the sender check is refused by the receiver
-        reply = g.handle_request({"v": 1, "op": "msg", "from": "beta", "to": "gamma",
+        a = self.peer("alpha")
+        reply = a.handle_request({"v": 1, "op": "msg", "from": "gamma", "to": "alpha",
                                   "text": "x"}, os.getuid())
         self.assertFalse(reply["ok"])
         self.assertIn("no link", reply["error"])
-        self.assertEqual(g.delivered, [])
+        self.assertEqual(a.delivered, [])
 
     def test_sender_spoofing_another_accounts_project_refused(self):
         a = self.peer("alpha")
-        # kernel says the caller is ME, but it claims to be 'foreign' (account OTHER)
         reply = a.handle_request({"v": 1, "op": "msg", "from": "foreign", "to": "alpha",
                                   "text": "spoof"}, os.getuid())
         self.assertFalse(reply["ok"])
@@ -147,9 +218,8 @@ class TestDelivery(_Env):
 
     def test_genuine_other_account_sender_accepted_when_linked(self):
         a = self.peer("alpha")
-        other_uid = pwd.getpwnam(OTHER).pw_uid
         reply = a.handle_request({"v": 1, "op": "msg", "from": "foreign", "to": "alpha",
-                                  "text": "real"}, other_uid)
+                                  "text": "real"}, pwd.getpwnam(OTHER).pw_uid)
         self.assertTrue(reply["ok"], reply)
         self.assertEqual(a.delivered, [("real", {"from": "foreign"})])
 
@@ -161,31 +231,38 @@ class TestDelivery(_Env):
         self.assertIn("unknown uid", a.handle_request(
             {"v": 1, "op": "msg", "from": "beta", "to": "alpha", "text": "x"}, 2 ** 31 - 7)["error"])
 
-    def test_impostor_listener_refused_before_text_is_sent(self):
-        # a socket named after 'foreign' (account OTHER) but owned by ME
-        a = self.peer("alpha")
-        planted = os.path.join(self.sock, pc.socket_name("foreign", 4242))
+    def test_target_dir_not_owned_by_target_account_is_never_connected(self):
+        # a dir named after OTHER's account but owned by ME (a planted namespace)
+        os.makedirs(os.path.join(self.sock, OTHER))
+        planted = os.path.join(self.sock, OTHER, pc.socket_name("foreign", 4242))
         srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         srv.bind(planted)
         srv.listen(1)
+        srv.settimeout(0.5)
         self.addCleanup(srv.close)
-        got = []
-
-        def accept():
-            c, _ = srv.accept()
-            c.settimeout(2)
-            try:
-                got.append(c.recv(100))
-            except OSError as e:
-                got.append(repr(e))
-            c.close()
-        t = threading.Thread(target=accept, daemon=True)
-        t.start()
-        ok, out = a.send("foreign", "secret text")
-        t.join(3)
+        ok, out = self.peer("alpha").send("foreign", "secret text")
         self.assertFalse(ok)
-        self.assertIn("impostor", out)
-        self.assertEqual(got, [b""])
+        self.assertIn("no live session", out)
+        with self.assertRaises(socket.timeout):
+            srv.accept()
+
+    def test_listener_uid_mismatch_refused_before_text_is_sent(self):
+        b = self.peer("beta")
+        b.start_listener()
+        a = self.peer("alpha")
+        r = a._call(b.sock_path, pwd.getpwnam(OTHER).pw_uid,
+                    {"v": 1, "op": "msg", "from": "alpha", "to": "beta", "text": "x"},
+                    time.monotonic() + 3)
+        self.assertEqual(r, {"ok": False, "error": "impostor socket"})
+        self.assertEqual(b.delivered, [])
+
+    def test_symlink_entry_skipped(self):
+        b = self.peer("beta")
+        b.start_listener()
+        link = os.path.join(self.sock, ME, pc.socket_name("beta", 7))
+        os.symlink(b.sock_path, link)
+        a = self.peer("alpha")
+        self.assertEqual(a._target_sockets("beta", os.getuid(), ME), [b.sock_path])
 
     def test_rate_limit(self):
         now = [0.0]
@@ -216,34 +293,96 @@ class TestDelivery(_Env):
         self.assertIn("foreign: offline", out)
         self.assertEqual(b.delivered, [])
 
-    def test_no_live_session_reported(self):
-        ok, out = self.peer("alpha").send("beta", "hi")
-        self.assertFalse(ok)
-        self.assertIn("no live session", out)
+    def test_send_retries_listener_lazily(self):
+        os.rmdir(os.path.join(self.sock, ME))
+        a = self.peer("alpha")
+        self.assertFalse(a.start_listener())
+        os.makedirs(os.path.join(self.sock, ME))
+        a.send("beta", "x")
+        self.assertIsNotNone(a.listener)
 
     def test_stale_own_socket_swept(self):
-        dead = os.path.join(self.sock, pc.socket_name("beta", 2 ** 22 + 12345))
+        dead = os.path.join(self.sock, ME, pc.socket_name("beta", 2 ** 22 + 12345))
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         s.bind(dead)
         s.close()
         self.peer("beta").start_listener()
         self.assertFalse(os.path.lexists(dead))
 
-    def test_missing_dir_is_reported_not_fatal(self):
-        p = pc.Peer(HOST, ME, os.getuid(), "/", self.tmp.name, project_arg="alpha",
-                    sock_dir=os.path.join(self.tmp.name, "nope"), config_dir=self.cfg,
-                    log=_Recorder())
-        self.assertFalse(p.start_listener())
-        self.assertIn("root leg not applied", p.problem)
+
+class TestListenerHardening(_Env):
+    def _connect(self, path):
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(3)
+        s.connect(path)
+        self.addCleanup(s.close)
+        return s
+
+    def test_connection_cap(self):
+        b = self.peer("beta")
+        b.start_listener()
+        idle = [self._connect(b.sock_path) for _ in range(pc.MAX_CONNS)]
+        time.sleep(0.3)
+        extra = self._connect(b.sock_path)
+        self.assertEqual(extra.recv(10), b"")        # closed at once, no thread
+        self.assertIn("too many connections",
+                      [f.get("reason") for _, f in b.rec.events])
+        self.assertEqual(len(idle), pc.MAX_CONNS)
+
+    def test_slow_drip_bounded_by_one_overall_deadline(self):
+        with mock.patch.object(pc, "IO_TIMEOUT_S", 0.6):
+            b = self.peer("beta")
+            b.start_listener()
+            s = self._connect(b.sock_path)
+            t0 = time.monotonic()
+            for _ in range(5):
+                try:
+                    s.sendall(b" ")
+                except OSError:
+                    break
+                time.sleep(0.25)
+            reply = s.recv(200)
+            self.assertLess(time.monotonic() - t0, 2.5)
+            self.assertIn(b"bad request", reply)
+
+    def test_unlinked_uid_closed_before_reading(self):
+        _write_config(self.cfg, [["beta", "foreign"]])   # ME's uid owns no linked project
+        b = self.peer("beta")
+        b.start_listener()
+        s = self._connect(b.sock_path)
+        self.assertEqual(s.recv(100), b"")       # closed by the listener, nothing read
+        self.assertEqual(b.delivered, [])
+        self.assertIn("uid not linked", [f.get("reason") for _, f in b.rec.events])
+
+    def test_deep_json_answered_not_crashed(self):
+        b = self.peer("beta")
+        b.start_listener()
+        s = self._connect(b.sock_path)
+        s.sendall(b"[" * 20000 + b"\n")
+        self.assertIn(b"bad request", s.recv(200))
+
+    def test_oversized_line_refused(self):
+        b = self.peer("beta")
+        b.start_listener()
+        s = self._connect(b.sock_path)
+        try:
+            s.sendall(b"x" * (pc.MAX_WIRE + 10000))
+        except OSError:
+            pass
+        self.assertIn(b"bad request", s.recv(200))
+
+    def test_log_survives_lone_surrogate(self):
+        path = os.path.join(self.home, "l", "peer.log")
+        pc.Log(path)("deliver", preview="\ud800x")
+        self.assertIn("\\ud800x", Path(path).read_text())
 
 
 class TestMcp(unittest.TestCase):
     def _server(self):
-        log = _Recorder()
-        with tempfile.TemporaryDirectory() as d:
-            _write_config(d, [])
-            peer = pc.Peer(HOST, ME, os.getuid(), "/", d, project_arg="alpha",
-                           sock_dir=d, config_dir=d, log=log)
+        d = _scratch(self, "pcm")
+        _write_config(d, [])
+        peer = pc.Peer(HOST, ME, os.getuid(), "/", d, project_arg="alpha",
+                       sock_dir=d, config_dir=d, log=_Recorder())
         out = io.StringIO()
         return pc.McpServer(peer, out=out), out
 
@@ -262,7 +401,8 @@ class TestMcp(unittest.TestCase):
         res = m[1]["result"]
         self.assertEqual(res["capabilities"]["experimental"], {"claude/channel": {}})
         self.assertEqual(res["protocolVersion"], "2025-11-25")
-        self.assertLess(len(res["instructions"]), 200)
+        self.assertLess(len(res["instructions"]), 300)
+        self.assertIn("not from the owner", res["instructions"])
         self.assertEqual([t["name"] for t in m[2]["result"]["tools"]], ["peers", "peer_send"])
 
     def test_unknown_protocol_falls_back(self):
@@ -299,7 +439,7 @@ class TestMcp(unittest.TestCase):
                 {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
                  "params": {"name": "peers", "arguments": {}}}]) + "\n",
             capture_output=True, text=True, timeout=30, cwd="/",
-            env={**os.environ, "HOME": tempfile.mkdtemp()})
+            env={**os.environ, "HOME": _scratch(self, "pcp")})
         self.assertEqual(proc.returncode, 0, proc.stderr)
         m = [json.loads(x) for x in proc.stdout.splitlines()]
         self.assertEqual([x.get("id") for x in m], ["p", 0, 1])
@@ -315,34 +455,46 @@ class TestRootScript(unittest.TestCase):
         self.assertIn(("airuleset", "peer"), pairs)
         self.assertIn(("claude-plugins-official", "telegram"), pairs)
 
-    def test_tmpfiles_acl_per_account_and_empty_set_clears(self):
-        t = cpc.render_tmpfiles(["fohmixer", "newlevel"])
-        self.assertIn("d /run/claude-peers 1700 root root -", t)
-        self.assertIn("u:fohmixer:rwx,u:newlevel:rwx,m::rwx", t)
-        self.assertIn("u::rwx,g::---,o::---", cpc.render_tmpfiles([]))
+    def test_mount_unit_is_a_small_tmpfs(self):
+        unit = cpc.render_mount_unit()
+        self.assertIn("Where=/run/claude-peers", unit)
+        self.assertIn("size=1m", unit)
+        self.assertIn("nr_inodes=1024", unit)
 
-    def test_bad_account_name_refused(self):
+    def test_bad_or_empty_account_set_refused(self):
         with self.assertRaises(ValueError):
             cpc.render_root_script(["x; rm -rf /"])
+        with self.assertRaises(ValueError):
+            cpc.render_root_script([])
 
-    def _run_fake_root(self, accounts, acl_users):
-        """Execute the REAL rendered script against a scratch root with stubbed
-        root tools (the #1223 lesson: string asserts cannot see logic bugs)."""
-        root = tempfile.mkdtemp()
-        self.addCleanup(lambda: subprocess.run(["rm", "-rf", root], check=False))
+    def _fake_root(self, accounts, extra_acl=""):
+        """Execute the REAL rendered script against a scratch root: real setfacl/
+        getfacl on a scratch dir; only root-only tools are stubbed (#1223 lesson)."""
+        root = _scratch(self, "pcf")
         script = cpc.render_root_script(accounts)
         script = (script.replace("/etc/", root + "/etc/")
-                  .replace(pc.SOCK_DIR, root + "/run/claude-peers"))
-        script = script.replace("cd /\n", "cd %s\n" % root)
+                  .replace(pc.SOCK_DIR, root + "/run/claude-peers")
+                  .replace("cd /\n", "cd %s\n" % root))
         bindir = os.path.join(root, "bin")
         os.makedirs(bindir)
+        log = os.path.join(root, "calls.log")
         stubs = {
             "id": "#!/bin/sh\nexit 0\n",
-            "systemd-tmpfiles": "#!/bin/sh\nmkdir -p %s/run/claude-peers && "
-                                "chmod 1700 %s/run/claude-peers\n" % (root, root),
-            "stat": "#!/bin/sh\necho root:root\n",
-            "getfacl": "#!/bin/sh\necho user::rwx\n%s\necho mask::rwx\n" % "\n".join(
-                "echo user:%s:rwx" % u for u in acl_users),
+            "systemctl": "#!/bin/sh\necho \"systemctl $*\" >> %s\n" % log,
+            "findmnt": "#!/bin/sh\necho tmpfs\n",
+            "systemd-tmpfiles": (
+                "#!/bin/sh\nset -e\necho \"tmpfiles $*\" >> %s\nconf=\"$2\"\n"
+                "dir=$(awk '$1==\"d\"{print $2; exit}' \"$conf\")\nmkdir -p \"$dir\"\n"
+                "chmod 0750 \"$dir\"\n"
+                "setfacl --set \"$(awk '$1==\"a\"{print $7}' \"$conf\")\" \"$dir\"\n"
+                "%s"
+                "awk 'NR>2 && $1==\"d\"{print $2}' \"$conf\" | while read -r s; do "
+                "mkdir -p \"$s\"; chmod 0755 \"$s\"; done\n"
+                % (log, ("setfacl -m %s \"$dir\"\n" % extra_acl) if extra_acl else "")),
+            "stat": ("#!/bin/sh\ncase \"$2\" in\n"
+                     "  '%U:%G %a') echo \"root:root $(/usr/bin/stat -c %a \"$3\")\" ;;\n"
+                     "  '%U %a') echo \"$(basename \"$3\") $(/usr/bin/stat -c %a \"$3\")\" ;;\n"
+                     "  *) exec /usr/bin/stat \"$@\" ;;\nesac\n"),
         }
         for name, body in stubs.items():
             p = os.path.join(bindir, name)
@@ -350,23 +502,66 @@ class TestRootScript(unittest.TestCase):
             os.chmod(p, 0o755)
         env = {**os.environ, "PATH": bindir + ":" + os.environ["PATH"]}
         r = subprocess.run(["bash", "-c", script], capture_output=True, text=True, env=env)
-        return r, root
+        return r, root, log
 
-    def test_rendered_script_writes_files_and_passes_readback(self):
-        r, root = self._run_fake_root(["fohmixer", "newlevel"], ["fohmixer", "newlevel"])
-        self.assertEqual(r.returncode, 0, r.stderr)
+    def test_rendered_script_applies_and_passes_strict_readback(self):
+        r, root, log = self._fake_root([ME, OTHER])
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("peer-channel-root: ok", r.stdout)
         pol = json.loads(Path(root + cpc.POLICY_PATH).read_text())
         self.assertIn({"marketplace": "airuleset", "plugin": "peer"}, pol["allowedChannelPlugins"])
-        self.assertIn("u:fohmixer:rwx", Path(root + cpc.TMPFILES_PATH).read_text())
+        self.assertIn("u:%s:r-x" % ME, Path(root + cpc.TMPFILES_PATH).read_text())
         self.assertEqual(stat.S_IMODE(os.stat(root + cpc.POLICY_PATH).st_mode), 0o644)
+        calls = Path(log).read_text()
+        self.assertIn("daemon-reload", calls)
+        self.assertIn("enable --now run-claude\\x2dpeers.mount", calls)
+        self.assertEqual([x for x in os.listdir(root + "/etc/tmpfiles.d") if x.startswith(".")], [])
 
-    def test_readback_fails_on_extra_acl_user(self):
-        r, _ = self._run_fake_root(["fohmixer"], ["fohmixer", "intruder"])
+    def test_second_run_rewrites_nothing_and_skips_tmpfiles(self):
+        r, root, log = self._fake_root([ME, OTHER])
+        script = (cpc.render_root_script([ME, OTHER]).replace("/etc/", root + "/etc/")
+                  .replace(pc.SOCK_DIR, root + "/run/claude-peers")
+                  .replace("cd /\n", "cd %s\n" % root))
+        Path(log).write_text("")
+        env = {**os.environ, "PATH": os.path.join(root, "bin") + ":" + os.environ["PATH"]}
+        r2 = subprocess.run(["bash", "-c", script], capture_output=True, text=True, env=env)
+        self.assertEqual(r2.returncode, 0, r2.stderr)
+        self.assertIn("changed=[]", r2.stdout)
+        self.assertNotIn("tmpfiles", Path(log).read_text())
+
+    def test_readback_fails_on_extra_acl_entry(self):
+        r, _, _ = self._fake_root([ME], extra_acl="u:%s:r-x" % OTHER)
         self.assertEqual(r.returncode, 4, r.stdout + r.stderr)
-        self.assertIn("ACL users", r.stderr)
+        self.assertIn("ACL mismatch", r.stderr)
 
-    def test_provision_reaches_only_peer_hosts_with_sudo(self):
+    def test_teardown_removes_only_our_files(self):
+        root = _scratch(self, "pct")
+        script = (cpc.render_teardown_script().replace("/etc/", root + "/etc/")
+                  .replace("cd /\n", "cd %s\n" % root))
+        bindir = os.path.join(root, "bin")
+        os.makedirs(bindir)
+        Path(bindir, "systemctl").write_text("#!/bin/sh\nexit 0\n")
+        os.chmod(os.path.join(bindir, "systemctl"), 0o755)
+        env = {**os.environ, "PATH": bindir + ":" + os.environ["PATH"]}
+        r = subprocess.run(["bash", "-c", script], capture_output=True, text=True, env=env)
+        self.assertIn("nothing to tear down", r.stdout)
+        for p in (cpc.TMPFILES_PATH, cpc.POLICY_PATH, cpc.MOUNT_UNIT_PATH):
+            os.makedirs(os.path.dirname(root + p), exist_ok=True)
+            Path(root + p).write_text("x")
+        Path(root, "etc", "keep.conf").write_text("x")
+        r = subprocess.run(["bash", "-c", script], capture_output=True, text=True, env=env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        for p in (cpc.TMPFILES_PATH, cpc.POLICY_PATH, cpc.MOUNT_UNIT_PATH):
+            self.assertFalse(os.path.exists(root + p))
+        self.assertTrue(Path(root, "etc", "keep.conf").exists())
+
+    def _hosts(self):
+        return [{"name": "h1", "host": "1.2.3.4", "admin_user": "newlevel", "sudo": True,
+                 "identity": "~/k"},
+                {"name": "h2", "host": "5.6.7.8", "admin_user": "root", "identity": "~/k"},
+                {"name": "h3", "host": "9.9.9.9"}]
+
+    def test_provision_full_leg_named_teardown_elsewhere_identity_required(self):
         calls = []
 
         class R:
@@ -378,20 +573,19 @@ class TestRootScript(unittest.TestCase):
         doc = {"hosts": {"h1": {"links": [["a", "b"]]}}}
         reg = [{"name": "a", "host": "h1", "account": "ua", "path": "/a"},
                {"name": "b", "host": "h1", "account": "ub", "path": "/b"}]
-        hosts = [{"name": "h1", "host": "1.2.3.4", "admin_user": "newlevel", "sudo": True,
-                  "identity": "~/k"}]
-        self.assertEqual(cpc.provision_peer_channel_root(hosts=hosts, run=run, links_doc=doc,
-                                                         registry=reg), [])
-        self.assertEqual(len(calls), 1)
-        self.assertEqual(calls[0][-2], "newlevel@1.2.3.4")
+        failed = cpc.provision_peer_channel_root(hosts=self._hosts(), run=run, links_doc=doc,
+                                                 registry=reg)
+        self.assertEqual(failed, [("h3", "no-identity")])
+        self.assertEqual([c[-2] for c in calls], ["newlevel@1.2.3.4", "root@5.6.7.8"])
         self.assertTrue(calls[0][-1].startswith("sudo -n bash -c "))
-        self.assertIn("u:ua:rwx,u:ub:rwx", calls[0][-1])
+        self.assertIn("u:ua:r-x,u:ub:r-x", calls[0][-1])
+        self.assertIn("nothing to tear down", calls[1][-1])
 
     def test_provision_refuses_invalid_config(self):
         failed = cpc.provision_peer_channel_root(
-            hosts=[], run=lambda *a, **k: None,
-            links_doc={"hosts": {"h": {"links": [["a", "zz"]]}}},
-            registry=[{"name": "a", "host": "h", "account": "u", "path": "/a"}])
+            hosts=self._hosts(), run=lambda *a, **k: None,
+            links_doc={"hosts": {"h1": {"links": [["a", "zz"]]}}},
+            registry=[{"name": "a", "host": "h1", "account": "u", "path": "/a"}])
         self.assertEqual(failed, [("config", "invalid")])
 
 
@@ -400,60 +594,116 @@ class TestInstallStep(unittest.TestCase):
     REG = [{"name": "a", "host": "h", "account": "ua", "path": "/a"},
            {"name": "b", "host": "h", "account": "ub", "path": "/b"}]
 
-    def _run(self, calls, rc=0):
-        class R:
-            returncode, stdout, stderr = rc, "", ""
+    def _run(self, calls, rcs=None):
+        rcs = rcs or {}
 
         def run(argv, **kw):
-            calls.append(argv[2:])
+            sub = argv[2:]
+            calls.append(sub)
+
+            class R:
+                returncode = rcs.get(sub[0] if sub[0] != "marketplace" else sub[1], 0)
+                stdout, stderr = "", ""
             return R()
         return run
 
-    def test_linked_account_registers_installs_and_marks(self):
-        with tempfile.TemporaryDirectory() as d:
-            calls = []
-            ok = cpc.install_step("ua", "h", d, run=self._run(calls), links_doc=self.DOC,
-                                  registry=self.REG)
-            self.assertTrue(ok)
-            self.assertEqual(calls[0], ["marketplace", "add", str(cpc.MARKETPLACE_DIR)])
-            self.assertEqual(calls[1], ["install", "peer@airuleset", "--scope", "user"])
-            self.assertEqual(Path(d, cpc.MARKER_NAME).read_text().strip(),
-                             "plugin:peer@airuleset")
-
-    def test_failed_install_leaves_no_marker(self):
-        with tempfile.TemporaryDirectory() as d:
-            ok = cpc.install_step("ua", "h", d, run=self._run([], rc=1), links_doc=self.DOC,
-                                  registry=self.REG)
-            self.assertFalse(ok)
-            self.assertFalse(Path(d, cpc.MARKER_NAME).exists())
-
-    def test_unlinked_account_removes_marker_and_uninstalls(self):
-        with tempfile.TemporaryDirectory() as d:
-            Path(d, cpc.MARKER_NAME).write_text("x")
-            os.makedirs(Path(d, "plugins"))
-            Path(d, "plugins", "installed_plugins.json").write_text(
+    def _dir(self, installed=False, market=None):
+        d = Path(_scratch(self, "pci"))
+        (d / "plugins").mkdir()
+        if installed:
+            (d / "plugins" / "installed_plugins.json").write_text(
                 json.dumps({"plugins": {"peer@airuleset": [{}]}}))
-            calls = []
-            self.assertTrue(cpc.install_step("uc", "h", d, run=self._run(calls),
-                                             links_doc=self.DOC, registry=self.REG))
-            self.assertFalse(Path(d, cpc.MARKER_NAME).exists())
-            self.assertEqual(calls, [["uninstall", "peer@airuleset"]])
+        if market:
+            (d / "plugins" / "known_marketplaces.json").write_text(
+                json.dumps({"airuleset": {"source": {"source": "directory", "path": market}}}))
+        return d
 
-    def test_default_runner_inert_under_pytest(self):
-        from unittest import mock
+    def step(self, user, d, calls, rcs=None):
+        return cpc.install_step(user, "h", d, run=self._run(calls, rcs), links_doc=self.DOC,
+                                registry=self.REG)
+
+    def test_linked_account_registers_installs_and_marks(self):
+        d, calls = self._dir(), []
+        self.assertTrue(self.step("ua", d, calls))
+        self.assertEqual(calls, [["marketplace", "add", str(cpc.MARKETPLACE_DIR)],
+                                 ["install", "peer@airuleset", "--scope", "user"]])
+        self.assertEqual((d / cpc.MARKER_NAME).read_text().strip(), "plugin:peer@airuleset")
+
+    def test_already_set_up_makes_no_calls(self):
+        d, calls = self._dir(installed=True, market=str(cpc.MARKETPLACE_DIR)), []
+        self.assertTrue(self.step("ua", d, calls))
+        self.assertEqual(calls, [])
+        self.assertTrue((d / cpc.MARKER_NAME).exists())
+
+    def test_marketplace_at_other_path_is_replaced(self):
+        d, calls = self._dir(installed=True, market="/tmp/old"), []
+        self.assertTrue(self.step("ua", d, calls))
+        self.assertEqual(calls, [["marketplace", "remove", "airuleset"],
+                                 ["marketplace", "add", str(cpc.MARKETPLACE_DIR)]])
+
+    def test_failed_install_removes_a_stale_marker(self):
+        d, calls = self._dir(market=str(cpc.MARKETPLACE_DIR)), []
+        (d / cpc.MARKER_NAME).write_text("stale")
+        self.assertFalse(self.step("ua", d, calls, rcs={"install": 1}))
+        self.assertEqual(calls, [["install", "peer@airuleset", "--scope", "user"]])
+        self.assertFalse((d / cpc.MARKER_NAME).exists())
+
+    def test_failed_marketplace_remove_is_a_failure(self):
+        d, calls = self._dir(market="/tmp/old"), []
+        self.assertFalse(self.step("ua", d, calls, rcs={"remove": 1}))
+        self.assertEqual(calls, [["marketplace", "remove", "airuleset"]])
+
+    def test_unlinked_account_removes_marker_plugin_and_marketplace(self):
+        d, calls = self._dir(installed=True, market=str(cpc.MARKETPLACE_DIR)), []
+        (d / cpc.MARKER_NAME).write_text("x")
+        self.assertTrue(self.step("uc", d, calls))
+        self.assertFalse((d / cpc.MARKER_NAME).exists())
+        self.assertEqual(calls, [["uninstall", "peer@airuleset"],
+                                 ["marketplace", "remove", "airuleset"]])
+
+    def test_failed_uninstall_is_a_failure(self):
+        d, calls = self._dir(installed=True), []
+        self.assertFalse(self.step("uc", d, calls, rcs={"uninstall": 1}))
+
+    def test_identity_comes_from_pwd_not_user_env(self):
+        d, calls = self._dir(), []
+        reg = [{"name": "a", "host": "h", "account": ME, "path": "/a"},
+               {"name": "b", "host": "h", "account": "ub", "path": "/b"}]
+        with mock.patch.dict(os.environ, {"USER": "somebody-else"}):
+            self.assertTrue(cpc.install_step(None, "h", d, run=self._run(calls),
+                                             links_doc=self.DOC, registry=reg))
+        self.assertTrue((d / cpc.MARKER_NAME).exists())
+
+    def test_default_runners_inert_under_pytest(self):
         with mock.patch.dict(os.environ, {"PYTEST_CURRENT_TEST": "x"}):
             self.assertTrue(cpc.install_step())
             self.assertEqual(cpc.provision_peer_channel_root(), [])
 
 
+class TestWiring(unittest.TestCase):
+    def test_install_step_wired_and_latches_failure(self):
+        import airuleset
+        src = inspect.getsource(airuleset.cmd_install)
+        i = src.index('__import__("cli_peer_channel").install_step()')
+        self.assertIn("install_failed = True", src[i:i + 120])
+
+    def test_push_wires_the_root_leg(self):
+        import cli_remote
+        self.assertIn('__import__("cli_peer_channel").provision_peer_channel_root()',
+                      inspect.getsource(cli_remote.cmd_push))
+
+
 class TestLauncher(unittest.TestCase):
-    def _launch(self, mode, marker):
+    def _launch(self, mode, marker, conversation=False):
         import cli_claude_scripts
-        home = tempfile.mkdtemp()
-        self.addCleanup(lambda: subprocess.run(["rm", "-rf", home], check=False))
+        home = _scratch(self, "pcl")
         os.makedirs(os.path.join(home, ".claude"))
         if marker:
             Path(home, ".claude", cpc.MARKER_NAME).write_text(cpc.CHANNEL_ARG)
+        if conversation:
+            key = home.replace("/", "-").replace(".", "-").replace("_", "-")
+            os.makedirs(os.path.join(home, ".claude", "projects", key))
+            Path(home, ".claude", "projects", key, "x.jsonl").write_text("{}\n")
         bindir = os.path.join(home, ".local", "bin")
         os.makedirs(bindir)
         fake = os.path.join(bindir, "claude")
@@ -466,13 +716,17 @@ class TestLauncher(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         return r.stdout.split("\n")
 
-    def test_channel_flag_only_with_marker_and_never_plain(self):
-        args = self._launch("new", True)
-        i = args.index("--channels")
-        self.assertEqual(args[i + 1], "plugin:peer@airuleset")
-        self.assertNotIn("--channels", self._launch("new", False))
+    def test_channel_flag_only_with_marker_every_managed_mode(self):
+        for mode in ("default", "new", "ultracode", "fullscreen"):
+            for conv in (False, True):
+                args = self._launch(mode, True, conv)
+                i = args.index("--channels")
+                self.assertEqual(args[i + 1], "plugin:peer@airuleset", (mode, conv))
+                self.assertEqual("-c" in args, conv and mode != "new", (mode, conv))
+                self.assertNotIn("--channels", self._launch(mode, False, conv), (mode, conv))
+
+    def test_plain_mode_stays_vanilla(self):
         self.assertNotIn("--channels", self._launch("plain", True))
-        self.assertIn("--channels", self._launch("default", True))
 
 
 if __name__ == "__main__":

@@ -2683,3 +2683,35 @@ so it can't burst even on a corrupt gate).
 ### Moved from internals-watchdog.md at the B9 review-6 cap (2026-10-26)
 
 - **#1113 — never type a machine `/goal` into an ACTIVE loop; the janitor recognises its OWN truncated payload by provenance+tail, not only a clean substring.** The #623 `stale-rearm` path typed a 3.7 kB REPLACE into david1–3's LIVE armed loops after a template change (>10× owner regression); the submit was swallowed and the janitor DECLINED the stranded payload because a grid-wrapped box does not reconstruct as a contiguous substring (a mid-token wrap boundary inserts a spurious row-join space, `origin/main`→`origin/ main`). FIX (Approach 1, net goal.py LOC DOWN): (1) `_stale_rearm_decide` is observe-only — one `stale-drift … waits for the next natural arm` journal line deduped per (sid, template hash) via the existing `goal_stale_rearm_tmpl` stamp, NEVER records/types; `_GOAL_STALE_REARM_ORIGIN` leaves `_GOAL_WATCHDOG_REARM_ORIGINS`+`_GOAL_ATTEMPTS_STATE_KEYS` (kept only to recognise a leftover request, the ONE partition-tuple exception, fail-safe to preserve the #400 anchor); a leftover on-disk request drops `drop:stale-rearm-retired` before any gate. (2) `deliver_goal`'s `armed is True` → unconditional `drop:already-armed` for every origin (the #623 carve-out + `drop:already-current` deleted). (3) `stash._box_is_own_leftover(..., provenance=)` gains a truncated-render proof (`_box_tail_row_norm`): with a live `_janitor_watch_seen` mark, accept when the box TAIL row is a SUFFIX of the payload AND the whitespace-STRIPPED box body is a substring of the whitespace-stripped payload (≥80 chars) — whitespace-stripping absorbs the spurious/missing wrap spaces the #737 clean-substring proof misses; consumed by `_log_arm_confirm_fail` + `_janitor_recover`, a foreign draft matches neither. GOTCHAS: a clean WORD-wrap scroll IS a clean substring (own=True today) — the RED fixture MUST character-grid wrap + scroll (hide the `/goal ` head) to reproduce the non-substring `cleanup=declined`. `_janitor_clear_box` convergence on a synthetic grid fixture is FRAGILE (naive grid math leaves 1-char tail rows wasting iters) — assert recognition + never-submit, not the exact backspace count. Design item-3 "tail EQUALS payload tail" is implemented as `endswith` (wrap width unknown at read time). Re-lock every #623/#1092(e)/#675/#1104 stale-rearm-typing test to the removal (the #1096 false-pass class: a leftover-stale-rearm attempt-cap test false-passes post-retirement because the request drops before the cap — re-lock it to the retired-drop; the pane-budget booking re-exercises via a DARK-rearm keystroke into a DARK pane).
+
+## #1266 — rationale comments condensed out of airuleset.py / cli_claude_scripts.py / cli_remote.py (verbatim, 2026-10-29)
+
+The peer-channel wiring (#1266) needed lines in three files at their size-ratchet ceilings; these comments were condensed there and are kept here verbatim.
+
+```text
+    # A still-failing plugin install (after correct marketplace registration)
+    # is now a REQUIRED-step failure, not a silent best-effort one (issue:
+    # push: plugin installs fail on fresh stream accounts, 2026-08-06) — it
+    # latches `install_failed` (declared at step 5c above), which turns
+    # "Install complete." into a loud non-zero exit below, per
+    # script-failure-policy. An unexpected EXCEPTION from either function stays
+    # non-fatal-to-the-whole-install (the outer try/except here guards against a
+    # bug in OUR OWN code, not against the plugin-marketplace failure this ticket
+    # is about — that case is already caught INSIDE each setup_* function and
+    # reflected in its own `ok` return value).
+# #659/#669: the owner_vps headless OAuth-token export that once stood here was
+# REMOVED. login/auth ON a target is the PROJECT claudy's responsibility, and
+# airuleset never touches auth (owner ROZHODNUTÉ #659, #537 machine-identity
+# boundary). The launcher no longer delivers or exports any OAuth token;
+# ~/.claude/.credentials.json (managed by the box's own claudy) is the login on
+# every box, owner VPS included.
+    # 5. Disk-guard ROOT/system-level legs (#841) — install the standard log
+    # ROTATION config (btmp/wtmp logrotate, journald cap, fail2ban hardening) +
+    # the report-only root reporter timer on subdev + gk over `ssh root@<host>`
+    # and on dev1/dev2 via `sudo -n` (#1223, no drain), so the root-owned classes no
+    # per-USER watchdog can reach are ROTATED + SURFACED (never deleted). SAME
+    # non-fatal + LOUD discipline as the resource-guards step above: a
+    # not-yet-authorized root key / read-back mismatch prints
+    # `⚠ DISK-GUARD-ROOT FAILED (<name>)` and never fails the push; the daily
+    # report timer + the per-user watchdog's ≥90 % escalation are the backstops.
+```

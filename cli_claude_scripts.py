@@ -207,7 +207,7 @@ case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) PATH="$HOME/.local/bin:$PATH" ;;
 # #659/#669: no OAuth-token export here — login/auth ON a target is the PROJECT
 # claudy's job (owner ROZHODNUTÉ #659); ~/.claude/.credentials.json is the login.
 # #1266: the peer channel flag only when install enabled it (cli_peer_channel marker).
-_peer=(); [ "$mode" = plain ] || [ ! -f "$HOME/.claude/airuleset-peer-channel.on" ] || _peer=(--channels plugin:peer@airuleset)
+_peer=(); [ ! -f "$HOME/.claude/airuleset-peer-channel.on" ] || _peer=(--channels plugin:peer@airuleset)
 
 _has_conversation() {
   local ccdir="${PWD//\//-}"; ccdir="${ccdir//./-}"; ccdir="${ccdir//_/-}"
