@@ -397,7 +397,9 @@ class TestMintAccount(_Base):
         self.assertEqual(gh.requests, [])
 
     def test_mint_all_covers_exactly_the_github_app_accounts(self):
-        self.assertEqual(pgt.github_app_accounts(), ["fohmixer", "varos"])
+        # #1267: the pending wall-bridge/songplayer are declared but skipped
+        self.assertEqual(pgt.github_app_accounts(),
+                         ["fohmixer", "songplayer", "varos", "wall-bridge"])
         with mock.patch.object(pgt, "mint_account", return_value=0) as m:
             rc = pgt.cmd_project_gh_token(mock.Mock(action="mint", account=None,
                                                     all=True, dry_run=False,
