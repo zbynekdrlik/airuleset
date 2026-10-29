@@ -110,7 +110,11 @@ def validate_links(links_doc, registry, root_hosts=None):
 
 
 def accounts_for_host(host, links_doc=None, registry=None):
-    """Sorted unix accounts that own a linked project on ``host``."""
+    """Sorted unix accounts that own a linked project on ``host``. A declared
+    project account still ``pending`` (no root bootstrap yet) is left out, so
+    the root leg never names a missing account (its exit 3 would fail the
+    whole host, #1267); it joins on the first push after it goes live."""
+    import cli_account_bootstrap as bootstrap
     links_doc = load_links() if links_doc is None else links_doc
     registry = load_registry() if registry is None else registry
     projects = peer_channel.host_projects(registry, host)
@@ -119,7 +123,7 @@ def accounts_for_host(host, links_doc=None, registry=None):
         for name in pair:
             if name in projects:
                 accts.add(projects[name]["account"])
-    return sorted(accts)
+    return sorted(a for a in accts if not bootstrap.is_pending(a))
 
 
 def this_host():

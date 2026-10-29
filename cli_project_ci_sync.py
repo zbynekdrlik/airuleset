@@ -509,11 +509,15 @@ def sync_all(*, run=None, now=None, dry_run=False, clock=time.monotonic,
              started=None):
     """``sync_account`` for every ``github_app`` account under ONE shared
     deadline, ``SYNC_BUDGET_S`` after ``started`` (the process start; default
-    now). One failure never skips the rest."""
+    now). One failure never skips the rest; a ``pending`` account (no root
+    bootstrap yet, #1267) is skipped, its account cannot be read."""
+    import cli_account_bootstrap as bootstrap
     import cli_project_gh_token as pgt
     deadline = (clock() if started is None else started) + SYNC_BUDGET_S
     rc = 0
     for account in pgt.github_app_accounts():
+        if bootstrap.is_pending(account):
+            continue
         rc |= sync_account(account, run=run, now=now, dry_run=dry_run,
                            deadline=deadline, clock=clock)
     return rc

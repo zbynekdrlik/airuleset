@@ -140,8 +140,10 @@ class TestLocalControllerLanePresent(unittest.TestCase):
         # injected AFTER the fleet loop, so it must be RESERVED before the loop —
         # else a future no-fixed-port account whose next-free scan reaches 8891
         # grabs it and the controller-local lane is silently dropped. Reproduced
-        # with a narrow range whose first free slot IS the reserved 8891.
+        # with a narrow range whose first free slot IS the reserved 8891 (its
+        # end tracks the fixed table: #1267 filled 8894/8895).
         ctrl_port = dl._GENERATED_DROP_PORTS[CONTROLLER_KEY]
+        last = max(dl._GENERATED_DROP_PORTS.values()) + 1
         fake_fleet = [
             {"name": "claudy@controller", "host": CONTROLLER_ORIGIN,
              "user": "claudy", "drop": {"port": ctrl_port + 8}},
@@ -150,7 +152,7 @@ class TestLocalControllerLanePresent(unittest.TestCase):
         lanes = dl.build_drop_lanes(
             fake_fleet, seed={}, drop_lane_cls=dg.DropLane,
             controller_tunnel_uuid=dg._CONTROLLER_TUNNEL_UUID,
-            port_base=ctrl_port, port_max=ctrl_port + 4)
+            port_base=ctrl_port, port_max=last)
         self.assertIn(CONTROLLER_KEY, lanes,
                       "controller-local lane was dropped — its port was stolen")
         self.assertEqual(lanes[CONTROLLER_KEY].port, ctrl_port)
