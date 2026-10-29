@@ -697,7 +697,7 @@ WEBTERM_DASHBOARD_TABS = {
     # EXCLUDES montalu7/8, simap1, marek@subdev, stepan@forestshop-dev,
     # admin@forestshop-dev.
     "zbynek": [
-        "ar", "claudy", "fohmixer", "varos",   # #1220 varos@dev2 project account
+        "ar", "claudy", "fohmixer", "varos", "wall-bridge", "songplayer",  # #1220, #1267
         "dev1", "dev2", "gatekeeper",
         "montalu1-subdev", "montalu2-subdev", "montalu3-subdev",
         "montalu4-subdev", "montalu5-subdev", "montalu6-subdev",

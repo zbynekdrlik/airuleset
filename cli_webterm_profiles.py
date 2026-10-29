@@ -617,6 +617,12 @@ def varos_entry(identity, kind="stream"):
                                  "devel/varos/uctovnictvo", identity, kind)
 
 
+def dev1_project_entry(account, identity, kind="stream"):
+    """#1267: a dev1 project account tab (wall-bridge, songplayer; owner only)."""
+    return project_account_entry(account, FOHMIXER_HOST, "dev1",
+                                 "devel/" + account, identity, kind)
+
+
 # The timo lane runs on the CONTROLLER under the `airuleset` account (the #870
 # F4c topology) — Timo himself has NO unix account, NO ssh key and NO password
 # anywhere (webterm-only, #869): his whole authorization is the Cloudflare
@@ -742,6 +748,8 @@ def zbynek_inventory():
         },
         fohmixer_entry(WEBTERM_ZBYNEK_IDENTITY, kind="owner"),   # #1183
         varos_entry(WEBTERM_ZBYNEK_IDENTITY, kind="owner"),      # #1220
+        dev1_project_entry("wall-bridge", WEBTERM_ZBYNEK_IDENTITY, "owner"),  # #1267
+        dev1_project_entry("songplayer", WEBTERM_ZBYNEK_IDENTITY, "owner"),   # #1267
         {
             "id": "dev1",
             "label": "dev1",
