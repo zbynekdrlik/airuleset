@@ -569,8 +569,9 @@ REMOTE_HOSTS.append({
 # #1184 PROJECT accounts (declared in cli_account_bootstrap.SERVICE_ACCOUNTS):
 # push manages each one's airuleset over the push key its root bootstrap
 # installed, and each keeps a generated drop lane (#1237; share from push 2,
-# #1238). `pending` until that root bootstrap ran: push never contacts it, nor
-# does the minter timer or the peer root leg (#1267, `bootstrap.is_pending`).
+# #1238). `pending` until that root bootstrap ran: no ssh to it from push, the
+# minter timer, the CI secret sync or the peer root leg (#1267,
+# `bootstrap.is_pending`); its drop lane's DNS/Access still go live (varos too).
 REMOTE_HOSTS += [
     {"name": "%s@%s" % (user, box), "host": address, "user": user,
      "repo_path": "~/devel/airuleset",

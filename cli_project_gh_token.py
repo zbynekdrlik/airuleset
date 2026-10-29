@@ -296,17 +296,13 @@ def render_delivery_command(repo, expires_at, *, primary=True):
 def account_target(account):
     """The ``REMOTE_HOSTS`` entry that is ``account`` on its declared host."""
     import cli_account_bootstrap as bootstrap
-    import cli_fleet
-    host = bootstrap.account_spec(account)["host"]
-    for remote in cli_fleet.REMOTE_HOSTS:
-        if (remote.get("user") == account
-                and remote["name"].split("@")[-1] == host):
-            if remote.get("pending") or remote.get("paused"):
-                raise MintError("%s is pending/paused in REMOTE_HOSTS"
-                                % remote["name"])
-            return remote
-    raise MintError("no REMOTE_HOSTS entry for %s@%s — add the account's "
-                    "ssh identity entry first" % (account, host))
+    remote = bootstrap.account_remote(account)
+    if remote is None:
+        raise MintError("no REMOTE_HOSTS entry for %s@%s — add the account's ssh "
+                        "identity entry first" % (account, bootstrap.account_spec(account)["host"]))
+    if bootstrap.is_pending(account):
+        raise MintError("%s is pending/paused in REMOTE_HOSTS" % remote["name"])
+    return remote
 
 
 def deliver(remote, repo, token, expires_at, *, run=None, primary=True):
@@ -973,10 +969,11 @@ def cmd_project_gh_token(args):
     if not targets:
         print("project-gh-token: no project account declares github_app: True")
         return 0
+    import cli_account_bootstrap as bootstrap
     rc = 0
     for acct in targets:
-        if every and __import__("cli_account_bootstrap").is_pending(acct):
-            print("project-gh-token: %s: SKIPPED — pending, no root bootstrap yet" % acct)
+        if every and bootstrap.is_pending(acct):
+            print("project-gh-token: %s: SKIPPED — pending/paused, never contacted" % acct)
         elif mint_account(acct, key_path=getattr(args, "key", None),
                           dry_run=dry_run) != 0:
             rc = 1

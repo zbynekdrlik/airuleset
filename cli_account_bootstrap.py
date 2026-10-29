@@ -223,7 +223,7 @@ SERVICE_ACCOUNTS = {
         "host": "dev1",
         "sudo": False,
         "repo": "zbynekdrlik/wall-bridge",   # public: no paid Actions minutes
-        "github_app": True,
+        "github_app": True, "repo_secrets": [],   # accounts verify: declared none
         "tools": ["rust-target:x86_64-pc-windows-gnu"],
         "project_dir": "devel/wall-bridge",
         "tmux_session": "wall-bridge",
@@ -240,7 +240,7 @@ SERVICE_ACCOUNTS = {
         "sudo": False,
         "secrets": ["songplayer_peer_api_key", "songplayer_pp_cf_service_token.json"],
         "repo": "zbynekdrlik/songplayer",
-        "github_app": True,
+        "github_app": True, "repo_secrets": [],   # GEMINI_API_KEY is set already
         "tools": ["rust-target:wasm32-unknown-unknown", "playwright:1.59.1/chromium"],
         "project_dir": "devel/songplayer",
         "tmux_session": "songplayer",
@@ -290,17 +290,24 @@ def fleet_boxes():
     return boxes
 
 
-def is_pending(account):
-    """True when ``account`` is declared but its own ``<account>@<host>``
-    REMOTE_HOSTS entry is still ``pending`` (#1267): no root bootstrap yet, so
-    no unattended job may contact or name it (the minter timer, the peer root
-    leg). Undeclared accounts (``newlevel``) are never pending."""
+def account_remote(account):
+    """The ``cli_fleet.REMOTE_HOSTS`` entry that is the declared ``account`` on
+    its declared host, or None (also for an undeclared account)."""
     import cli_fleet
     if account not in SERVICE_ACCOUNTS:
-        return False
+        return None
     host = account_spec(account)["host"]
-    return any(h.get("user") == account and h["name"].split("@")[-1] == host
-               and h.get("pending") for h in cli_fleet.REMOTE_HOSTS)
+    return next((h for h in cli_fleet.REMOTE_HOSTS if h.get("user") == account
+                 and h["name"].split("@")[-1] == host), None)
+
+
+def is_pending(account):
+    """True when ``account``'s own entry is ``pending`` (no root bootstrap yet)
+    or ``paused`` (#851): no unattended job may contact or name it (the minter
+    timer, the CI secret sync, the peer root leg; #1267). Undeclared accounts
+    (``newlevel``) and declared ones without an entry are never pending."""
+    remote = account_remote(account)
+    return bool(remote and (remote.get("pending") or remote.get("paused")))
 
 
 def _webterm_humans():
