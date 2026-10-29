@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "peer": {
+      "command": "sh",
+      "args": ["-c", "exec python3 -I \"$HOME/devel/airuleset/peer_channel.py\" serve"]
+    }
+  }
+}

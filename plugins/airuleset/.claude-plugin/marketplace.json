@@ -1,0 +1,11 @@
+{
+  "name": "airuleset",
+  "owner": {"name": "airuleset"},
+  "plugins": [
+    {
+      "name": "peer",
+      "source": "./peer",
+      "description": "Cross-account messages between related projects' Claude sessions (channel, #1266)"
+    }
+  ]
+}

@@ -2090,15 +2090,10 @@ def cmd_push(args):
         print("  ⚠ RESOURCE-GUARDS step error (non-fatal): %r" % e,
               file=sys.stderr)
 
-    # 5. Disk-guard ROOT/system-level legs (#841) — install the standard log
-    # ROTATION config (btmp/wtmp logrotate, journald cap, fail2ban hardening) +
-    # the report-only root reporter timer on subdev + gk over `ssh root@<host>`
-    # and on dev1/dev2 via `sudo -n` (#1223, no drain), so the root-owned classes no
-    # per-USER watchdog can reach are ROTATED + SURFACED (never deleted). SAME
-    # non-fatal + LOUD discipline as the resource-guards step above: a
-    # not-yet-authorized root key / read-back mismatch prints
-    # `⚠ DISK-GUARD-ROOT FAILED (<name>)` and never fails the push; the daily
-    # report timer + the per-user watchdog's ≥90 % escalation are the backstops.
+    # 5. Root/system legs, NON-FATAL + LOUD like step 4 (`⚠ … FAILED (<name>)`, never
+    # fails the push): the #841 disk guard (log ROTATION + report-only reporter; root
+    # ssh on subdev/gk, `sudo -n` on dev1/dev2, #1223) and the #1266 peer channel
+    # (shared dir + ACL + managed channel allowlist on every peer-links.json host).
     print(f"\n{'=' * 50}")
     print("Applying disk-guard root/system legs (#841)...")
     try:
@@ -2106,6 +2101,11 @@ def cmd_push(args):
     except Exception as e:  # noqa: BLE001 — best-effort, never break the push
         print("  ⚠ DISK-GUARD-ROOT step error (non-fatal): %r" % e,
               file=sys.stderr)
+    print("Applying peer channel root legs (#1266)...")
+    try:
+        __import__("cli_peer_channel").provision_peer_channel_root()
+    except Exception as e:  # noqa: BLE001 — best-effort, never break the push
+        print("  ⚠ PEER-CHANNEL-ROOT step error (non-fatal): %r" % e, file=sys.stderr)
 
     # 6. Context-baseline push summary (#857) — a read-only call, never blocks
     try:

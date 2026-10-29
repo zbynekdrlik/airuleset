@@ -2171,16 +2171,9 @@ def cmd_install(args):
         print(f"  registry heal error (non-fatal): {e}", file=sys.stderr)
 
     # --- 6. caveman plugin: every machine (enable + stable statusline shim) ---
-    # A still-failing plugin install (after correct marketplace registration)
-    # is now a REQUIRED-step failure, not a silent best-effort one (issue:
-    # push: plugin installs fail on fresh stream accounts, 2026-08-06) — it
-    # latches `install_failed` (declared at step 5c above), which turns
-    # "Install complete." into a loud non-zero exit below, per
-    # script-failure-policy. An unexpected EXCEPTION from either function stays
-    # non-fatal-to-the-whole-install (the outer try/except here guards against a
-    # bug in OUR OWN code, not against the plugin-marketplace failure this ticket
-    # is about — that case is already caught INSIDE each setup_* function and
-    # reflected in its own `ok` return value).
+    # A still-failing plugin install is a REQUIRED-step failure (2026-08-06): it
+    # latches `install_failed` (step 5c) → a loud non-zero exit. An unexpected
+    # EXCEPTION (a bug in OUR code) stays non-fatal via the outer try/except.
     try:
         if not maybe_setup_caveman():
             install_failed = True
@@ -2205,6 +2198,13 @@ def cmd_install(args):
             install_failed = True
     except Exception as e:
         print(f"  playwright MCP provisioning error (non-fatal): {e}", file=sys.stderr)
+
+    # --- 6b-3. peer channel (#1266): plugin + launcher marker iff this account has a link
+    try:
+        if not __import__("cli_peer_channel").install_step():
+            install_failed = True
+    except Exception as e:
+        print(f"  peer channel setup error (non-fatal): {e}", file=sys.stderr)
 
     # --- 6c. subagent status line: model+effort in the agent strip (#538) ---
     # Native subagentStatusLine (CC v2.1.205+): surfaces each inline

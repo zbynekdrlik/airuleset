@@ -1,0 +1,5 @@
+{
+  "name": "peer",
+  "version": "1.0.0",
+  "description": "Cross-account messages between related projects' Claude sessions (channel, #1266)"
+}
