@@ -32,6 +32,7 @@ import cli_webterm_profiles as profiles  # noqa: E402
 ZBYNEK_ORDER = [
     "ar", "claudy", "fohmixer",   # #1183 fohmixer@dev1 project account
     "varos",   # #1220 varos@dev2 project account
+    "wall-bridge", "songplayer",   # #1267 dev1 project accounts
     "dev1", "dev2", "gatekeeper",
     "montalu1-subdev", "montalu2-subdev", "montalu3-subdev",
     "montalu4-subdev", "montalu5-subdev", "montalu6-subdev",
@@ -46,7 +47,8 @@ ZBYNEK_EXCLUDED = [
 ]
 # The owner's expected tab ALIASES, in his order (spinbike -> "sb").
 ZBYNEK_ALIAS_ORDER = [
-    "ar", "claudy", "fohmixer", "varos", "dev1", "dev2", "gk", "m1", "m2", "m3", "m4", "m5", "m6",
+    "ar", "claudy", "fohmixer", "varos", "wall-bri", "songplay",   # 8-char cut
+    "dev1", "dev2", "gk", "m1", "m2", "m3", "m4", "m5", "m6",
     "d1", "d2", "d3", "d4", "miva", "sb",
 ]
 

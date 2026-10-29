@@ -579,8 +579,8 @@ REMOTE_HOSTS += [
     for user, box, address, pending in (
         ("fohmixer", "dev1", "100.104.8.125", False),      # #1183, live 29.9.
         ("varos", "dev2", "100.82.64.27", False),          # #1220, live 8.10.
-        ("wall-bridge", "dev1", "100.104.8.125", True),    # #1267
-        ("songplayer", "dev1", "100.104.8.125", True),     # #1267 (migration)
+        ("wall-bridge", "dev1", "100.104.8.125", False),   # #1267, live 29.10.
+        ("songplayer", "dev1", "100.104.8.125", False),    # #1267, live 29.10.
     )
 ]
 

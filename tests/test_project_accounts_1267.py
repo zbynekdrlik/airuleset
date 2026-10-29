@@ -13,6 +13,9 @@ unattended controller paths used to name every declared account anyway:
   wall-bridge would fail the whole dev1 leg on every push.
 
 `cli_account_bootstrap.is_pending` is the one predicate both now honour.
+
+Both bootstraps ran on dev1 on 29.10. (uid 1003/1004), so both entries are
+LIVE now; the pending-path tests below re-mark them pending with `_pending()`.
 """
 import io
 import sys
@@ -38,6 +41,14 @@ DEV1 = "100.104.8.125"
 def _entry(user):
     (h,) = [h for h in cli_fleet.REMOTE_HOSTS if h.get("user") == user]
     return h
+
+
+def _pending():
+    """REMOTE_HOSTS with both #1267 accounts marked pending again (the state
+    before their root bootstrap), so the skip paths keep their coverage."""
+    return mock.patch.object(cli_fleet, "REMOTE_HOSTS", [
+        dict(h, pending=True) if h.get("user") in NEW else h
+        for h in cli_fleet.REMOTE_HOSTS])
 
 
 class TestDeclaration(unittest.TestCase):
@@ -94,14 +105,16 @@ class TestDeclaration(unittest.TestCase):
 
 class TestFleet(unittest.TestCase):
 
-    def test_pending_push_targets_on_dev1(self):
+    def test_live_push_targets_on_dev1(self):
+        # flipped live after the 29.10. root bootstraps
         ident = "~/.sec" + "rets/airuleset_push_ed25519"
         for acct in NEW:
             h = _entry(acct)
             self.assertEqual(h["name"], acct + "@dev1")
             self.assertEqual(h["host"], DEV1)
             self.assertEqual(h["identity"], ident)
-            self.assertIs(h["pending"], True)
+            self.assertIs(h["pending"], False, acct)
+            self.assertFalse(bootstrap.is_pending(acct), acct)
 
     def test_live_project_accounts_unchanged(self):
         ident = "~/.sec" + "rets/airuleset_push_ed25519"
@@ -124,8 +137,9 @@ class TestFleet(unittest.TestCase):
             self.assertEqual(lane.topology, "controller")
 
     def test_is_pending(self):
-        for acct in NEW:
-            self.assertTrue(bootstrap.is_pending(acct), acct)
+        with _pending():
+            for acct in NEW:
+                self.assertTrue(bootstrap.is_pending(acct), acct)
         # live accounts, a declared account with no fleet entry, the legacy
         # account and an unknown name are never pending
         for acct in ("fohmixer", "varos", "camera-box", "newlevel", "nobody"):
@@ -141,8 +155,9 @@ class TestFleet(unittest.TestCase):
         self.assertIsNone(bootstrap.account_remote("camera-box"))   # no entry
 
     def test_is_pending_reads_the_accounts_own_host(self):
-        other = [dict(h, name="wall-bridge@dev2") if h.get("user") == "wall-bridge"
-                 else h for h in cli_fleet.REMOTE_HOSTS]
+        other = [dict(h, name="wall-bridge@dev2", pending=True)
+                 if h.get("user") == "wall-bridge" else h
+                 for h in cli_fleet.REMOTE_HOSTS]
         with mock.patch.object(cli_fleet, "REMOTE_HOSTS", other):
             self.assertFalse(bootstrap.is_pending("wall-bridge"))
 
@@ -176,7 +191,8 @@ class TestMinterSkipsPending(unittest.TestCase):
     def test_mint_all_skips_pending_accounts_loudly(self):
         self.assertEqual(pgt.github_app_accounts(),
                          ["fohmixer", "songplayer", "varos", "wall-bridge"])
-        with mock.patch.object(ci_sync, "run_after_mint", return_value=0):
+        with _pending(), \
+                mock.patch.object(ci_sync, "run_after_mint", return_value=0):
             rc, minted, out = self._mint_all()
         self.assertEqual(rc, 0)
         self.assertEqual(minted, ["fohmixer", "varos"])
@@ -184,9 +200,7 @@ class TestMinterSkipsPending(unittest.TestCase):
             self.assertIn("project-gh-token: %s: SKIPPED — pending" % acct, out)
 
     def test_a_live_account_is_minted_again(self):
-        live = [dict(h, pending=False) for h in cli_fleet.REMOTE_HOSTS]
-        with mock.patch.object(cli_fleet, "REMOTE_HOSTS", live), \
-                mock.patch.object(ci_sync, "run_after_mint", return_value=0):
+        with mock.patch.object(ci_sync, "run_after_mint", return_value=0):
             rc, minted, out = self._mint_all()
         self.assertEqual(minted, ["fohmixer", "songplayer", "varos", "wall-bridge"])
         self.assertNotIn("SKIPPED", out)
@@ -216,15 +230,15 @@ class TestPeerLinks(unittest.TestCase):
         self.assertEqual(cpc.validate_links(cpc.load_links(), cpc.load_registry()), [])
 
     def test_root_leg_names_only_existing_accounts(self):
-        # camera-box and songplayer run under newlevel today; wall-bridge is
-        # pending, so the root script never hits its `account missing` exit 3
-        accts = cpc.accounts_for_host("dev1")
+        # camera-box and songplayer run under newlevel today; a pending
+        # wall-bridge never reaches the root script's `account missing` exit 3
+        with _pending():
+            accts = cpc.accounts_for_host("dev1")
         self.assertEqual(accts, ["newlevel"])
         self.assertNotIn("wall-bridge", cpc.render_root_script(accts))
 
     def test_wall_bridge_joins_once_live(self):
-        with mock.patch.object(bootstrap, "is_pending", return_value=False):
-            self.assertEqual(cpc.accounts_for_host("dev1"), ["newlevel", "wall-bridge"])
+        self.assertEqual(cpc.accounts_for_host("dev1"), ["newlevel", "wall-bridge"])
 
 
 if __name__ == "__main__":

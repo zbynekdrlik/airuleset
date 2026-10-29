@@ -599,10 +599,15 @@ def project_account_entry(account, host, box, project_dir, identity, kind="strea
     }
 
 
+def dev1_project_entry(account, identity, kind="stream"):
+    """#1183/#1267: a dev1 project account tab (`devel/<account>`)."""
+    return project_account_entry(account, FOHMIXER_HOST, "dev1",
+                                 "devel/" + account, identity, kind)
+
+
 def fohmixer_entry(identity, kind="stream"):
     """#1183: the fohmixer@dev1 project account tab."""
-    return project_account_entry("fohmixer", FOHMIXER_HOST, "dev1",
-                                 "devel/fohmixer", identity, kind)
+    return dev1_project_entry("fohmixer", identity, kind)
 
 
 # dev2's tailscale IP, DUPLICATED from cli_fleet's `varos@dev2` REMOTE_HOSTS
@@ -742,6 +747,8 @@ def zbynek_inventory():
         },
         fohmixer_entry(WEBTERM_ZBYNEK_IDENTITY, kind="owner"),   # #1183
         varos_entry(WEBTERM_ZBYNEK_IDENTITY, kind="owner"),      # #1220
+        dev1_project_entry("wall-bridge", WEBTERM_ZBYNEK_IDENTITY, "owner"),  # #1267
+        dev1_project_entry("songplayer", WEBTERM_ZBYNEK_IDENTITY, "owner"),   # #1267
         {
             "id": "dev1",
             "label": "dev1",
