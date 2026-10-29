@@ -30,7 +30,8 @@ class FohmixerGoLive(unittest.TestCase):
         self.assertEqual(row["path"], "/home/fohmixer/devel/fohmixer")
 
     def test_legacy_ceiling_went_down(self):
-        self.assertEqual(cli_accounts.LEGACY_CEILING, 24)
+        # fohmixer brought it to 24; later migrations only lower it (#1267: 23)
+        self.assertLessEqual(cli_accounts.LEGACY_CEILING, 24)
 
     def test_fleet_entry_exists_and_is_classified(self):
         entry = next(h for h in cli_fleet.REMOTE_HOSTS

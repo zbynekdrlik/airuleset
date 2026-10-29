@@ -171,11 +171,12 @@ class TestRegistry(unittest.TestCase):
         self.assertEqual(row["path"], "/home/wall-bridge/devel/wall-bridge")
         self.assertFalse(cli_accounts.is_legacy_account(row["account"]))
 
-    def test_songplayer_row_waits_for_the_cutover(self):
-        # the registry says where the checkout lives NOW; the live newlevel
-        # session is mapped by account + path until the cutover flips it
+    def test_songplayer_row_moved_at_the_cutover(self):
+        # 29.10.2026 cutover: the session moved (transfer-session), so the
+        # registry names the project account and its checkout
         (row,) = [e for e in cpc.load_registry() if e["name"] == "songplayer"]
-        self.assertEqual(row["account"], "newlevel")
+        self.assertEqual(row["account"], "songplayer")
+        self.assertEqual(row["path"], "/home/songplayer/devel/songplayer")
 
 
 class TestMinterSkipsPending(unittest.TestCase):
@@ -238,7 +239,8 @@ class TestPeerLinks(unittest.TestCase):
         self.assertNotIn("wall-bridge", cpc.render_root_script(accts))
 
     def test_wall_bridge_joins_once_live(self):
-        self.assertEqual(cpc.accounts_for_host("dev1"), ["newlevel", "wall-bridge"])
+        self.assertEqual(cpc.accounts_for_host("dev1"),
+                         ["newlevel", "songplayer", "wall-bridge"])
 
 
 if __name__ == "__main__":
