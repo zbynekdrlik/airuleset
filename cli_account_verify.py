@@ -76,16 +76,22 @@ if [ -n __SESS__ ] && tmux has-session -t =__SESS__ 2>/dev/null; then
   echo session=yes
   echo "default_command=$(tmux show-options -gv default-command 2>/dev/null)"
   for p in $(tmux list-panes -s -t =__SESS__ -F '#{pane_pid}' 2>/dev/null); do
-    echo "pane=$p $(ps -o etimes= -p "$p" | tr -d ' ') $(tr '\0' ' ' < /proc/$p/cmdline 2>/dev/null)"
+    echo "pane=$p $(ps -o etimes= -p "$p" | tr -d ' ') $(tr '\0\n' '  ' < /proc/$p/cmdline 2>/dev/null)"
     c=$(pgrep -n -P "$p" 2>/dev/null || true); q=${c:-$p}; src=pane; [ -z "$c" ] || src=child
     e=$(tr '\0' '\n' 2>/dev/null < /proc/$q/environ || true)
     lb=0; case ":$(sed -n 's/^PATH=//p' <<<"$e"):" in *":$HOME/.local/bin:"*) lb=1;; esac
     echo "paneenv=$p $src $(sed -n 's/^RUSTUP_HOME=//p' <<<"$e"):$lb"
-    [ -z "$c" ] || echo "panechild=$p $(tr '\0' ' ' < /proc/$c/cmdline 2>/dev/null)"
+    [ -z "$c" ] || echo "panechild=$p $(tr '\0\n' '  ' < /proc/$c/cmdline 2>/dev/null)"
   done
   echo "profile_age=$(( $(date +%s) - $(stat -c %Y "$HOME/.profile" 2>/dev/null || date +%s) ))"
-  echo "bashrc_age=$(( $(date +%s) - $(stat -c %Y "$HOME/.bashrc" 2>/dev/null || date +%s) ))"
+  la="$HOME/.claude/"__SINCE__; [ -e "$la" ] || la="$HOME/.bashrc"
+  echo "launcher_age=$(( $(date +%s) - $(stat -L -c %Y "$la" 2>/dev/null || date +%s) ))"
   if grep -qxF __LAUNCHER__ "$HOME/.bashrc" 2>/dev/null; then echo launcher=yes; else echo launcher=no; fi
+  for f in .bash_profile .bash_login; do
+    [ -e "$HOME/$f" ] || continue
+    if grep -v '^[[:space:]]*#' "$HOME/$f" | grep -q '\.bashrc'; then echo "loginrc=$f ok"; else echo "loginrc=$f skips"; fi
+    break
+  done
 else
   echo session=no
 fi
@@ -162,7 +168,7 @@ def declared_pins(spec):
 def render_probe(account, spec):
     """The bash probe run AS the account (in a login shell)."""
     from cli_account_session import project_key
-    from cli_bashrc_appliers import ULTRACODE_BASHRC_BLOCK
+    from cli_bashrc_appliers import LAUNCHER_SINCE_NAME, ULTRACODE_BASHRC_BLOCK
     from cli_playwright_mcp import PLAYWRIGHT_CHROMIUM_BUILD
     project = spec.get("project_dir") or "."
     pins = declared_pins(spec)[1]
@@ -177,7 +183,8 @@ def render_probe(account, spec):
         "__KEY__": shlex.quote(project_key("/home/%s/%s" % (account, project))),
         "__LAUNCHER__": shlex.quote(next(
             ln for ln in ULTRACODE_BASHRC_BLOCK.splitlines()
-            if ln.startswith("claude() "))),
+            if ln.startswith("claude() "))),     # tests pin it to the block
+        "__SINCE__": shlex.quote(LAUNCHER_SINCE_NAME),
     }
     out = _PROBE
     for k, v in subs.items():
@@ -243,20 +250,29 @@ def _age(s, key):
         return None
 
 
-def _launcher_problem(pid, age, child, bashrc_age, respawn):
+def _is_claude(argv):
+    """argv of a Claude Code process: the native ``claude`` binary, or an npm
+    install's ``node …/claude`` / ``node …/cli.js``."""
+    base = [a.rsplit("/", 1)[-1] for a in argv[:2]]
+    return bool(base) and (base[0] == "claude" or (
+        base[0] in ("node", "nodejs") and base[1:] in (["claude"], ["cli.js"])))
+
+
+def _launcher_problem(pid, age, child, launcher_age, respawn):
     """#1267: a pane's ``claude`` must reach the launcher. A running claude
     child came through it iff its argv carries the launcher-only
-    ``--dangerously-skip-permissions``; an idle shell has the ``claude()``
-    function iff it started after ``~/.bashrc`` was last written."""
+    ``--dangerously-skip-permissions``; any other pane shell has the
+    ``claude()`` function iff it started after the launcher landed in
+    ``~/.bashrc`` (install's ``airuleset-launcher-since`` stamp, else the
+    ``~/.bashrc`` mtime) — a busy pane (vim, a dev server) is no exception."""
     argv = child.split()
-    if argv:
-        if argv[0].rsplit("/", 1)[-1] != "claude":
-            return None
+    if _is_claude(argv):
         if "--dangerously-skip-permissions" in argv:
             return None
-        return ("pane %s runs a bare claude, not via the launcher (no -c, no "
-                "peer channel) — end it, then %s" % (pid, respawn))
-    if bashrc_age is not None and age.isdigit() and int(age) > bashrc_age:
+        return ("pane %s runs claude not via the launcher (a bare binary or "
+                "claude-plain: no -c, no peer channel) — end it, then %s"
+                % (pid, respawn))
+    if launcher_age is not None and age.isdigit() and int(age) > launcher_age:
         return ("pane %s started before ~/.bashrc got the claude() launcher "
                 "(a typed claude runs the bare binary) — %s" % (pid, respawn))
     return None
@@ -267,7 +283,7 @@ def _pane_problems(s, respawn):
     toolchain env (``_pane_fresh``: such a pane still runs its old PATH), or
     whose ``claude`` skips the launcher (``_launcher_problem``)."""
     out = []
-    profile_age, bashrc_age = _age(s, "profile_age"), _age(s, "bashrc_age")
+    profile_age, launcher_age = _age(s, "profile_age"), _age(s, "launcher_age")
     tmux = s.get("tmux", {})
     env = dict((ln.split(" ", 1) + [""])[:2] for ln in tmux.get("paneenv") or [])
     child = dict((ln.split(" ", 1) + [""])[:2] for ln in tmux.get("panechild") or [])
@@ -280,7 +296,7 @@ def _pane_problems(s, respawn):
             out.append("pane %s runs without the toolchain env (#1201 block) "
                        "— respawn it (`tmux respawn-pane -k -t <pane>` or "
                        "`exec bash -l` inside)" % pid)
-        why = _launcher_problem(pid, age, child.get(pid, ""), bashrc_age, respawn)
+        why = _launcher_problem(pid, age, child.get(pid, ""), launcher_age, respawn)
         if why:
             out.append(why)
     return out
@@ -309,6 +325,10 @@ def _check_tmux(account, spec, s, home):
     if _one(s, "tmux", "launcher") != "yes":
         bad.append("~/.bashrc lacks the claude() launcher function — run "
                    "`airuleset.py install` as the account, then respawn the panes")
+    login_rc = _one(s, "tmux", "loginrc").split()
+    if login_rc[1:] == ["skips"]:
+        bad.append("~/%s never sources ~/.bashrc, so a login pane has no claude() "
+                   "launcher — source it there or remove the file" % login_rc[0])
     cwd = "/home/%s/%s" % (account, spec.get("project_dir") or "")
     respawn = "respawn: `tmux respawn-pane -k -t %s -c %s \"exec bash -l\"`" % (
         spec["tmux_session"], cwd.rstrip("/"))
@@ -432,7 +452,9 @@ def _check_webterm(account, spec, s):
     humans = sorted(spec.get("webterm_sessions") or {})
     if not humans:
         return True, "no webterm human declared"
-    address = bootstrap.fleet_boxes()[spec["host"]]
+    address = bootstrap.fleet_boxes().get(spec["host"])
+    if address is None:
+        return False, "host %r is not a fleet box" % spec["host"]
     bad = []
     for human in humans:
         want = spec["webterm_sessions"][human]["preferred"]
@@ -533,6 +555,9 @@ def _claudy_registration(box, user, address, claudy_read):
                if isinstance(e, dict) and e.get("name") == box]
     if not entries:
         bad.append("%s is not in claudy's hosts.json" % box)
+    elif len(entries) > 1:
+        bad.append("%s has %d duplicate entries in claudy's hosts.json" % (
+            box, len(entries)))
     elif (entries[0].get("user"), entries[0].get("host")) != (user, address):
         bad.append("claudy's hosts.json entry %s points at %s@%s, not %s@%s" % (
             box, entries[0].get("user"), entries[0].get("host"), user, address))
@@ -557,8 +582,12 @@ def _check_login(account, spec, s, claudy_read):
     if not email:
         bad.append("~/.claude.json has no oauthAccount.emailAddress")
     box = "%s@%s" % (account, spec["host"])
-    bad += _claudy_registration(box, account, bootstrap.fleet_boxes()[spec["host"]],
-                                claudy_read)
+    address = bootstrap.fleet_boxes().get(spec["host"])
+    if address is None:
+        bad.append("host %r is not a fleet box (cli_account_bootstrap.fleet_boxes)"
+                   % spec["host"])
+    else:
+        bad += _claudy_registration(box, account, address, claudy_read)
     return (not bad), "; ".join(bad) or "logged in as %s, %s leased by claudy" % (
         email, box)
 

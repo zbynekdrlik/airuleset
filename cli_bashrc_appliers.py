@@ -83,10 +83,7 @@ _RETIRED_CLAUDE_FILES = ("airuleset-tmux-window-menu.sh", "airuleset-tool-oom.sh
 # Canonical dup of the two ultracode marker sentinels -- byte-identical to
 # airuleset.ULTRACODE_MARK_* (which stay resident for tests). Needed at
 # import time by ULTRACODE_BASHRC_BLOCK below; see the module docstring.
-# The "ultracode" in the marker NAME is now HISTORICAL and FROZEN (owner
-# directive 2026-08-30, #751, removed the ultracode launch flag): renaming these
-# sentinels would orphan the existing block in every deployed ~/.bashrc and make
-# a `push` double-write a second block, so the name stays as-is. Do NOT "tidy".
+# The "ultracode" NAME is FROZEN (#751): a rename orphans every deployed block.
 ULTRACODE_MARK_START = "# >>> airuleset: ultracode default >>>"
 ULTRACODE_MARK_END = "# <<< airuleset: ultracode default <<<"
 
@@ -107,6 +104,7 @@ ULTRACODE_BASHRC_BLOCK = (
     f'claude-history() {{ python3 "$HOME/.claude/{CLAUDE_HISTORY_SCRIPT_DEST.name}" "$@"; }}\n'
     f"{ULTRACODE_MARK_END}"
 )
+LAUNCHER_SINCE_NAME = "airuleset-launcher-since"   # #1267, see apply_ultracode_launcher
 
 
 def apply_ultracode_launcher(bashrc_path: Path = None, script_path: Path = None,
@@ -142,12 +140,10 @@ def apply_ultracode_launcher(bashrc_path: Path = None, script_path: Path = None,
     treatment.
 
     The ~/.bashrc block is idempotent (replaces the marked block if present,
-    else appends it) and holds ONLY thin wrapper functions with no flag
-    literals. Returns True iff the ~/.bashrc file changed.
-
-    #1202: the launcher is rendered with `user`'s (default: this account's)
-    declared window cwds, arming its resume guard; an account with no declared
-    window gets an empty list (no guard)."""
+    else appends it), holds ONLY thin wrapper functions with no flag literals,
+    and gets the #1267 LAUNCHER_SINCE_NAME stamp (when the claude() line first
+    landed: what `accounts verify` ages a pane against, never a later rewrite).
+    Returns True iff ~/.bashrc changed. #1202: `user`'s cwds arm the resume guard."""
     import re
     import airuleset
     bpath = bashrc_path or airuleset.BASHRC
@@ -215,6 +211,8 @@ def apply_ultracode_launcher(bashrc_path: Path = None, script_path: Path = None,
                   file=sys.stderr)
 
     existing = bpath.read_text() if bpath.exists() else ""
+    had = any(ln.startswith("claude() ") for ln in existing.splitlines())
+    since, prev = spath.parent / LAUNCHER_SINCE_NAME, bpath.stat().st_mtime if had else None
     if ULTRACODE_MARK_START in existing and ULTRACODE_MARK_END in existing:
         pattern = re.compile(
             re.escape(ULTRACODE_MARK_START) + r".*?" + re.escape(ULTRACODE_MARK_END),
@@ -225,8 +223,10 @@ def apply_ultracode_launcher(bashrc_path: Path = None, script_path: Path = None,
         new = f"{existing}{sep}\n{ULTRACODE_BASHRC_BLOCK}\n"
     if new != existing:
         bpath.write_text(new)
-        return True
-    return False
+    if not had or not since.exists():   # stamp: now, or the pre-#1267 line's age
+        since.touch()
+        os.utime(since, None if prev is None else (prev, prev))
+    return new != existing
 
 
 # --- #651: tmux attach-or-create interactive helpers -----------------------
