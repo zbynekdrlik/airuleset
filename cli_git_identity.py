@@ -10,7 +10,9 @@ noreply from now on, never ask again — "netreba z toho robit vedu".
 What this does, and nothing more:
   * resolves the gh user's noreply identity ONCE (``gh api user`` →
     ``<id>+<login>@users.noreply.github.com``, name = the account name or the
-    login) and caches it in ``~/.claude/git-identity.json``;
+    login) and caches it in ``~/.claude/git-identity.json`` — except on a
+    #1184 project account, whose App-token gh cannot answer ``gh api user``:
+    it uses the owner's identity (``OWNER_GH_ID``/``OWNER_GH_LOGIN``, #1267);
   * for each checkout whose ``origin`` is a PUBLIC GitHub repo, sets the LOCAL
     ``user.name``/``user.email`` when absent or different;
   * never writes global config, never touches a private (or unknown-
@@ -36,6 +38,12 @@ import time
 import cli_onboard_exec as _x
 
 NOREPLY_DOMAIN = "users.noreply.github.com"
+# The owner's GitHub account (#1267). A #1184 project account works only on the
+# owner's repos but runs gh through an App-token shim that cannot answer
+# `gh api user`, so its identity comes from here. Drift-locked: the login ==
+# airuleset.MAINTAINER_GH_LOGIN, the email == the value live on fohmixer.
+OWNER_GH_ID = 26905282
+OWNER_GH_LOGIN = "zbynekdrlik"
 CACHE_FILE = "git-identity.json"
 VISIBILITY_TTL_S = 24 * 3600
 IDENTITY_TTL_S = 7 * 24 * 3600      # a box's gh login can change accounts
@@ -121,6 +129,12 @@ def identity_from_user(user):
             "%d+%s@%s" % (uid, login, NOREPLY_DOMAIN))
 
 
+def owner_identity():
+    """The owner's (name, noreply email), built the same way as a
+    ``gh api user`` answer (the account name is null → the login)."""
+    return identity_from_user({"id": OWNER_GH_ID, "login": OWNER_GH_LOGIN})
+
+
 def noreply_identity(cache, run=None, now=None):
     """The cached noreply identity, else ``gh api user`` once (and cache it
     for IDENTITY_TTL_S)."""
@@ -176,8 +190,10 @@ def _local(path, key, host, run):
 # --------------------------------------------------------------------------- #
 # One checkout.
 # --------------------------------------------------------------------------- #
-def ensure(path, cache, host=None, run=None, dry_run=False, now=None):
+def ensure(path, cache, host=None, run=None, dry_run=False, now=None,
+           identity=None):
     """Bring ONE checkout to the noreply identity if it is a public GitHub repo.
+    ``identity`` (name, email) replaces the ``gh api user`` lookup (#1267).
 
     Returns (status, detail); status is ``not-ours`` / ``not-github`` / ``ok``
     / ``private`` / ``would-set`` / ``set``. Raises IdentityError on a gh/git failure."""
@@ -186,7 +202,7 @@ def ensure(path, cache, host=None, run=None, dry_run=False, now=None):
     slug = origin_slug(path, host=host, run=run)
     if not slug:
         return "not-github", "no GitHub origin"
-    name, email = noreply_identity(cache, run=run, now=now)
+    name, email = identity or noreply_identity(cache, run=run, now=now)
     if (_local(path, "user.email", host, run) == email
             and _local(path, "user.name", host, run) == name):
         return "ok", "%s already %s" % (slug, email)
@@ -207,13 +223,14 @@ def ensure(path, cache, host=None, run=None, dry_run=False, now=None):
 # --------------------------------------------------------------------------- #
 # Entry points: install (every checkout on the box) and onboard (one project).
 # --------------------------------------------------------------------------- #
-def apply(roots, home, run=None, now=None):
+def apply(roots, home, run=None, now=None, identity=None):
     """Run ``ensure`` over every checkout root; one cache load/save."""
     cache = load_cache(home)
     counts, changed, errors = {}, [], []
     for root in roots:
         try:
-            status, detail = ensure(root, cache, run=run, now=now)
+            status, detail = ensure(root, cache, run=run, now=now,
+                                    identity=identity)
         except IdentityUnavailable as e:
             errors.append(str(e))
             break
@@ -239,20 +256,31 @@ def _app_shim_box():
     return cli_gh_rate.is_app_shim_box()
 
 
-def install_step(home, roots, run=None, app_shim=None):
+def _project_account():
+    import cli_project_toolchain
+    return cli_project_toolchain.runs_as_project_account()
+
+
+def install_step(home, roots, run=None, app_shim=None, project_account=None):
     """``cmd_install`` hook: ONE summary line, a stderr WARNING per failure.
     Never raises. With the real runner under a test run it touches nothing
-    (the #1190 ``PYTEST_CURRENT_TEST`` guard shape). On an app-token-shim
-    stream box (issue 888) ``gh api user`` can never answer, so the step is a
-    quiet one-line skip there instead of a WARNING on every install."""
+    (the #1190 ``PYTEST_CURRENT_TEST`` guard shape). On an app-token-shim box
+    ``gh api user`` can never answer: a live #1184 project account then uses
+    the owner's identity (#1267 — it only works on the owner's repos), while a
+    stream box (issue 888, external developers) keeps a quiet one-line skip
+    instead of a WARNING on every install."""
     if run is None and _under_test():
         print("  Git identity: skipped under test (no real checkout touched)")
         return None
     try:
+        identity = None
         if (app_shim or _app_shim_box)():
-            print("  Git identity: skipped — app-token gh box has no user identity")
-            return None
-        result = apply(roots() if callable(roots) else roots, home, run=run)
+            if not (project_account or _project_account)():
+                print("  Git identity: skipped — app-token gh box has no user identity")
+                return None
+            identity = owner_identity()
+        result = apply(roots() if callable(roots) else roots, home, run=run,
+                       identity=identity)
     except Exception as e:  # noqa: BLE001 — install must never break on this
         print("  Git identity: FAILED (%r) — install continues" % (e,),
               file=sys.stderr)
