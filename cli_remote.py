@@ -1990,7 +1990,7 @@ def cmd_push(args):
         _fp_before = _tracked_tree_fingerprint(REPO_DIR)
         test_result = subprocess.run(
             [sys.executable, "-m", "unittest", "discover", "-s", "tests"],
-            cwd=str(REPO_DIR), env=test_env,
+            cwd=str(REPO_DIR), env=test_env, stdin=subprocess.DEVNULL,  # not push's stdin (#1137)
         )
         _fp_after = _tracked_tree_fingerprint(REPO_DIR)
         # #548 point 3 — measure the leak INSIDE the with (before _suite_tmp is
