@@ -599,10 +599,15 @@ def project_account_entry(account, host, box, project_dir, identity, kind="strea
     }
 
 
+def dev1_project_entry(account, identity, kind="stream"):
+    """#1183/#1267: a dev1 project account tab (`devel/<account>`)."""
+    return project_account_entry(account, FOHMIXER_HOST, "dev1",
+                                 "devel/" + account, identity, kind)
+
+
 def fohmixer_entry(identity, kind="stream"):
     """#1183: the fohmixer@dev1 project account tab."""
-    return project_account_entry("fohmixer", FOHMIXER_HOST, "dev1",
-                                 "devel/fohmixer", identity, kind)
+    return dev1_project_entry("fohmixer", identity, kind)
 
 
 # dev2's tailscale IP, DUPLICATED from cli_fleet's `varos@dev2` REMOTE_HOSTS
@@ -615,12 +620,6 @@ def varos_entry(identity, kind="stream"):
     East accounting), on the owner's and marek's dashboards."""
     return project_account_entry("varos", VAROS_HOST, "dev2",
                                  "devel/varos/uctovnictvo", identity, kind)
-
-
-def dev1_project_entry(account, identity, kind="stream"):
-    """#1267: a dev1 project account tab (wall-bridge, songplayer; owner only)."""
-    return project_account_entry(account, FOHMIXER_HOST, "dev1",
-                                 "devel/" + account, identity, kind)
 
 
 # The timo lane runs on the CONTROLLER under the `airuleset` account (the #870
