@@ -56,7 +56,8 @@ class TestDeclaration(unittest.TestCase):
             self.assertEqual(spec["tmux_session"], acct)
             self.assertEqual(spec["webterm_sessions"], {
                 "zbynek": {"preferred": acct, "start_dir_chain": ["devel/" + acct]}})
-            self.assertNotIn("repo_secrets", spec, acct)   # nothing to sync
+            # declared empty: `accounts verify` needs the allow-list declared
+            self.assertEqual(spec["repo_secrets"], [], acct)
             self.assertNotIn("code_only", spec, acct)
 
     def test_wall_bridge_cross_builds_for_windows_and_holds_no_secret(self):
@@ -129,6 +130,15 @@ class TestFleet(unittest.TestCase):
         # account and an unknown name are never pending
         for acct in ("fohmixer", "varos", "camera-box", "newlevel", "nobody"):
             self.assertFalse(bootstrap.is_pending(acct), acct)
+
+    def test_a_paused_account_is_never_contacted_either(self):
+        paused = [dict(h, paused="dispute 29.10.") if h.get("user") == "fohmixer"
+                  else h for h in cli_fleet.REMOTE_HOSTS]
+        with mock.patch.object(cli_fleet, "REMOTE_HOSTS", paused):
+            self.assertTrue(bootstrap.is_pending("fohmixer"))
+            self.assertEqual(bootstrap.account_remote("fohmixer")["user"], "fohmixer")
+        self.assertIsNone(bootstrap.account_remote("newlevel"))
+        self.assertIsNone(bootstrap.account_remote("camera-box"))   # no entry
 
     def test_is_pending_reads_the_accounts_own_host(self):
         other = [dict(h, name="wall-bridge@dev2") if h.get("user") == "wall-bridge"
