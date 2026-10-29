@@ -5,7 +5,7 @@ One copy runs per Claude Code session, started by the ``peer@airuleset`` plugin
 (``plugins/airuleset/peer/.mcp.json``) as an MCP stdio server. It:
 
 * declares the ``claude/channel`` capability, so an inbound peer message is pushed
-  into the running session as ``<channel source="peer" from="<project>">`` (a native
+  into the running session as ``<channel source="plugin:peer:peer" from="<project>">`` (a native
   channel event: never typed into the prompt, never a file the session polls);
 * exposes two tools, ``peers`` and ``peer_send(to, text)``;
 * listens on ``/run/claude-peers/<project>.<pid>.sock``, a root-made shared dir
@@ -52,9 +52,9 @@ PROJECT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 SOCK_NAME_RE = re.compile(r"^([A-Za-z0-9][A-Za-z0-9_-]{0,63})\.(\d{1,10})\.sock$")
 PROTOCOLS = ("2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05")
 DEFAULT_PROTOCOL = "2025-06-18"
-INSTRUCTIONS = ('Messages from related projects\' Claude sessions arrive as '
-                '<channel source="peer" from="P">. Reply with peer_send(to=P) '
-                'only when an answer is needed.')
+INSTRUCTIONS = ('Messages from related projects\' Claude sessions arrive as a peer '
+                '<channel ... from="P">. Reply with peer_send(to=P) only when an '
+                'answer is needed.')
 TOOLS = [
     {"name": "peers",
      "description": "List related projects and whether a Claude session is live.",
