@@ -323,7 +323,8 @@ class TestFleetBurnSkipsPendingHosts(TestCase):
         # #960: a brand-NEW account provisioned as `pending` until its root
         # bootstrap runs (claudy@controller) is a legitimate pending entry
         # that is NOT a rename target -- enumerate such accounts explicitly.
-        new_pending_accounts = {"claudy", "varos"}   # varos: #1220 project account
+        # varos: #1220; wall-bridge, songplayer: #1267 project accounts
+        new_pending_accounts = {"claudy", "varos", "wall-bridge", "songplayer"}
         self.assertTrue(
             still_pending.issubset({new for _o, new in RENAMES} | new_pending_accounts),
             "unexpected pending entries: %s" % still_pending)
