@@ -14,7 +14,9 @@ Checks (``CHECKS``):
 
   tmux             the declared session exists, every pane is a LOGIN shell,
                    the login PATH has ``~/.local/bin`` and ``claude --version``
-                   works;
+                   works; ``~/.bashrc`` holds the ``claude()`` launcher, no idle
+                   pane shell predates it and a pane's running claude came
+                   through it (#1267);
   gh-token         ``project-gh-token verify`` (own repo + airuleset issues write);
   secret-sync      the CI secret allow-list is declared (the request path);
   ruff / rust / playwright
@@ -34,18 +36,25 @@ Checks (``CHECKS``):
                    ``--no-transfer`` for a project born in its account;
   drop             (#1237) a declared drop lane, the box's go-live marker
                    equal to it, live in the controller's go-live cache, and an
-                   active filedrop.service: secret request / upload / share.
+                   active filedrop.service: secret request / upload / share;
+  login            (#1267) the account holds a Claude login (credentials file +
+                   ``oauthAccount`` email; never the token) and claudy hands it
+                   one: ``<acct>@<host>`` in BOTH claudy files, read on the
+                   controller as claudy (unreadable = FAIL).
 
 Stdlib only; every airuleset module is imported lazily. ``run`` (the ssh
-call) and ``gh_verify`` are injectable for the tests.
+call), ``gh_verify`` and ``claudy_read`` are injectable for the tests.
 """
+import json
 import re
 import shlex
 import subprocess
 import sys
 
 CHECKS = ("tmux", "gh-token", "secret-sync", "ruff", "rust", "playwright",
-          "home-duplicates", "git-identity", "webterm", "session", "drop")
+          "home-duplicates", "git-identity", "webterm", "session", "drop",
+          "login")
+CLAUDY_CONFIG_DIR = "/home/claudy/.config/claudy"
 NOREPLY_SUFFIX = "@users.noreply.github.com"
 PROBE_TIMEOUT_S = 180
 # A per-account toolchain copy the shared one replaces (#1201 cleanup).
@@ -67,13 +76,22 @@ if [ -n __SESS__ ] && tmux has-session -t =__SESS__ 2>/dev/null; then
   echo session=yes
   echo "default_command=$(tmux show-options -gv default-command 2>/dev/null)"
   for p in $(tmux list-panes -s -t =__SESS__ -F '#{pane_pid}' 2>/dev/null); do
-    echo "pane=$p $(ps -o etimes= -p "$p" | tr -d ' ') $(tr '\0' ' ' < /proc/$p/cmdline 2>/dev/null)"
+    echo "pane=$p $(ps -o etimes= -p "$p" | tr -d ' ') $(tr '\0\n' '  ' < /proc/$p/cmdline 2>/dev/null)"
     c=$(pgrep -n -P "$p" 2>/dev/null || true); q=${c:-$p}; src=pane; [ -z "$c" ] || src=child
     e=$(tr '\0' '\n' 2>/dev/null < /proc/$q/environ || true)
     lb=0; case ":$(sed -n 's/^PATH=//p' <<<"$e"):" in *":$HOME/.local/bin:"*) lb=1;; esac
     echo "paneenv=$p $src $(sed -n 's/^RUSTUP_HOME=//p' <<<"$e"):$lb"
+    [ -z "$c" ] || echo "panechild=$p $(tr '\0\n' '  ' < /proc/$c/cmdline 2>/dev/null)"
   done
   echo "profile_age=$(( $(date +%s) - $(stat -c %Y "$HOME/.profile" 2>/dev/null || date +%s) ))"
+  la="$HOME/.claude/"__SINCE__; [ -e "$la" ] || la="$HOME/.bashrc"
+  echo "launcher_age=$(( $(date +%s) - $(stat -L -c %Y "$la" 2>/dev/null || date +%s) ))"
+  if grep -qxF __LAUNCHER__ "$HOME/.bashrc" 2>/dev/null; then echo launcher=yes; else echo launcher=no; fi
+  for f in .bash_profile .bash_login; do
+    [ -e "$HOME/$f" ] || continue
+    if grep -v '^[[:space:]]*#' "$HOME/$f" | grep -q '\.bashrc'; then echo "loginrc=$f ok"; else echo "loginrc=$f skips"; fi
+    break
+  done
 else
   echo session=no
 fi
@@ -124,6 +142,14 @@ if [ -r "$HOME/.cloudflared/airuleset-drop.conf" ]; then
   sed -n 's/^\(host\|port\)=/marker_\1=/p' "$HOME/.cloudflared/airuleset-drop.conf"
 fi
 echo "filedrop=$(XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}" systemctl --user is-active filedrop.service 2>&1 | head -1)"
+echo @@login
+if [ -s "$HOME/.claude/.credentials.json" ]; then echo creds=yes; else echo creds=no; fi
+echo "email=$(python3 -I -c 'import json, os
+try:
+    a = json.load(open(os.path.expanduser("~/.claude.json"))).get("oauthAccount") or {}
+    print(str(a.get("emailAddress") or "").splitlines()[0])
+except Exception:
+    pass' 2>/dev/null)"
 echo @@end
 """
 
@@ -142,6 +168,7 @@ def declared_pins(spec):
 def render_probe(account, spec):
     """The bash probe run AS the account (in a login shell)."""
     from cli_account_session import project_key
+    from cli_bashrc_appliers import LAUNCHER_SINCE_NAME, ULTRACODE_BASHRC_BLOCK
     from cli_playwright_mcp import PLAYWRIGHT_CHROMIUM_BUILD
     project = spec.get("project_dir") or "."
     pins = declared_pins(spec)[1]
@@ -154,6 +181,10 @@ def render_probe(account, spec):
         "__DUPS__": " ".join(shlex.quote(d) for d in HOME_DUPLICATES),
         "__REPO__": shlex.quote(spec.get("repo") or "-"),
         "__KEY__": shlex.quote(project_key("/home/%s/%s" % (account, project))),
+        "__LAUNCHER__": shlex.quote(next(
+            ln for ln in ULTRACODE_BASHRC_BLOCK.splitlines()
+            if ln.startswith("claude() "))),     # tests pin it to the block
+        "__SINCE__": shlex.quote(LAUNCHER_SINCE_NAME),
     }
     out = _PROBE
     for k, v in subs.items():
@@ -212,24 +243,62 @@ def _pane_fresh(evidence, age, profile_age):
     return profile_age is not None and age.isdigit() and int(age) <= profile_age
 
 
-def _pane_problems(s):
-    """Every pane that is not a login shell, or that runs without the #1201
-    toolchain env (``_pane_fresh``): such a pane still runs its old PATH."""
-    out = []
+def _age(s, key):
     try:
-        profile_age = int(_one(s, "tmux", "profile_age"))
+        return int(_one(s, "tmux", key))
     except ValueError:
-        profile_age = None
-    env = dict((ln.split(" ", 1) + [""])[:2]
-               for ln in s.get("tmux", {}).get("paneenv") or [])
-    for line in s.get("tmux", {}).get("pane") or []:
+        return None
+
+
+def _is_claude(argv):
+    """argv of a Claude Code process: the native ``claude`` binary, or an npm
+    install's ``node …/claude`` / ``node …/cli.js``."""
+    base = [a.rsplit("/", 1)[-1] for a in argv[:2]]
+    return bool(base) and (base[0] == "claude" or (
+        base[0] in ("node", "nodejs") and base[1:] in (["claude"], ["cli.js"])))
+
+
+def _launcher_problem(pid, age, child, launcher_age, respawn):
+    """#1267: a pane's ``claude`` must reach the launcher. A running claude
+    child came through it iff its argv carries the launcher-only
+    ``--dangerously-skip-permissions``; any other pane shell has the
+    ``claude()`` function iff it started after the launcher landed in
+    ``~/.bashrc`` (install's ``airuleset-launcher-since`` stamp, else the
+    ``~/.bashrc`` mtime) — a busy pane (vim, a dev server) is no exception."""
+    argv = child.split()
+    if _is_claude(argv):
+        if "--dangerously-skip-permissions" in argv:
+            return None
+        return ("pane %s runs claude not via the launcher (a bare binary or "
+                "claude-plain: no -c, no peer channel) — end it, then %s"
+                % (pid, respawn))
+    if launcher_age is not None and age.isdigit() and int(age) > launcher_age:
+        return ("pane %s started before ~/.bashrc got the claude() launcher "
+                "(a typed claude runs the bare binary) — %s" % (pid, respawn))
+    return None
+
+
+def _pane_problems(s, respawn):
+    """Every pane that is not a login shell, that runs without the #1201
+    toolchain env (``_pane_fresh``: such a pane still runs its old PATH), or
+    whose ``claude`` skips the launcher (``_launcher_problem``)."""
+    out = []
+    profile_age, launcher_age = _age(s, "profile_age"), _age(s, "launcher_age")
+    tmux = s.get("tmux", {})
+    env = dict((ln.split(" ", 1) + [""])[:2] for ln in tmux.get("paneenv") or [])
+    child = dict((ln.split(" ", 1) + [""])[:2] for ln in tmux.get("panechild") or [])
+    for line in tmux.get("pane") or []:
         pid, age, cmd = (line.split(" ", 2) + ["", ""])[:3]
         if not _is_login(cmd):
             out.append("pane %s is not a login shell (%s)" % (pid, cmd.strip()))
-        elif not _pane_fresh(env.get(pid, ""), age, profile_age):
+            continue
+        if not _pane_fresh(env.get(pid, ""), age, profile_age):
             out.append("pane %s runs without the toolchain env (#1201 block) "
                        "— respawn it (`tmux respawn-pane -k -t <pane>` or "
                        "`exec bash -l` inside)" % pid)
+        why = _launcher_problem(pid, age, child.get(pid, ""), launcher_age, respawn)
+        if why:
+            out.append(why)
     return out
 
 
@@ -243,7 +312,7 @@ class _Home:
                 and path != self.home and not path.startswith(self.home + "/"))
 
 
-def _check_tmux(spec, s, home):
+def _check_tmux(account, spec, s, home):
     if not spec.get("tmux_session"):
         return False, "no tmux_session declared"
     if _one(s, "tmux", "session") != "yes":
@@ -253,7 +322,17 @@ def _check_tmux(spec, s, home):
     if dc and not _is_login(dc.replace("exec ", "")):
         bad.append("default-command %r is not a login shell" % dc)
     panes = s.get("tmux", {}).get("pane") or []
-    bad += _pane_problems(s)
+    if _one(s, "tmux", "launcher") != "yes":
+        bad.append("~/.bashrc lacks the claude() launcher function — run "
+                   "`airuleset.py install` as the account, then respawn the panes")
+    login_rc = _one(s, "tmux", "loginrc").split()
+    if login_rc[1:] == ["skips"]:
+        bad.append("~/%s never sources ~/.bashrc, so a login pane has no claude() "
+                   "launcher — source it there or remove the file" % login_rc[0])
+    cwd = "/home/%s/%s" % (account, spec.get("project_dir") or "")
+    respawn = "respawn: `tmux respawn-pane -k -t %s -c %s \"exec bash -l\"`" % (
+        spec["tmux_session"], cwd.rstrip("/"))
+    bad += _pane_problems(s, respawn)
     if not panes:
         bad.append("no pane")
     local_bin = home.home + "/.local/bin"
@@ -373,7 +452,9 @@ def _check_webterm(account, spec, s):
     humans = sorted(spec.get("webterm_sessions") or {})
     if not humans:
         return True, "no webterm human declared"
-    address = bootstrap.fleet_boxes()[spec["host"]]
+    address = bootstrap.fleet_boxes().get(spec["host"])
+    if address is None:
+        return False, "host %r is not a fleet box" % spec["host"]
     bad = []
     for human in humans:
         want = spec["webterm_sessions"][human]["preferred"]
@@ -444,7 +525,75 @@ def _check_drop(account, s):
     return (not bad), "; ".join(bad) or "%s live (secret / upload / share)" % lane.host
 
 
-def evaluate(account, spec, sections, *, gh_rc, no_transfer=False):
+def read_claudy_file(name, *, run=None):
+    """One claudy config file's text, read on the controller AS claudy
+    (``sudo -n``: never a password prompt). Raises ``OSError`` on a refusal."""
+    path = "%s/%s" % (CLAUDY_CONFIG_DIR, name)
+    try:
+        r = (run or subprocess.run)(["sudo", "-n", "-u", "claudy", "cat", path],
+                                    capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError) as e:
+        raise OSError("sudo -n -u claudy cat %s: %s" % (path, type(e).__name__))
+    if r.returncode != 0:
+        raise OSError("sudo -n -u claudy cat %s: rc=%d %s" % (
+            path, r.returncode, (r.stderr or "").strip()[:200]))
+    return r.stdout
+
+
+def _claudy_registration(box, user, address, claudy_read):
+    """Why claudy would NOT hand ``box`` a login, or ``[]``. claudy pushes
+    credentials only to a box in BOTH ``hosts.json`` (where to ssh) and
+    ``auto_switch.json`` (which boxes get a lease)."""
+    try:
+        hosts = json.loads(claudy_read("hosts.json"))
+        auto = json.loads(claudy_read("auto_switch.json"))
+    except (OSError, ValueError) as e:
+        return ["cannot read claudy's registration on this host (%s) — run "
+                "verify on the controller" % e]
+    bad = []
+    entries = [e for e in (hosts if isinstance(hosts, list) else [])
+               if isinstance(e, dict) and e.get("name") == box]
+    if not entries:
+        bad.append("%s is not in claudy's hosts.json" % box)
+    elif len(entries) > 1:
+        bad.append("%s has %d duplicate entries in claudy's hosts.json" % (
+            box, len(entries)))
+    elif (entries[0].get("user"), entries[0].get("host")) != (user, address):
+        bad.append("claudy's hosts.json entry %s points at %s@%s, not %s@%s" % (
+            box, entries[0].get("user"), entries[0].get("host"), user, address))
+    boxes = auto.get("boxes") if isinstance(auto, dict) else None
+    if not any(isinstance(b, dict) and b.get("box") == box
+               for b in (boxes if isinstance(boxes, list) else [])):
+        bad.append("%s is not in claudy's auto_switch.json boxes" % box)
+    if bad:
+        bad.append("fix: add it to both %s/hosts.json + auto_switch.json, same "
+                   "shape as fohmixer@dev1 ({name, host, user, identity} + "
+                   "{box, priority: 10})" % CLAUDY_CONFIG_DIR)
+    return bad
+
+
+def _check_login(account, spec, s, claudy_read):
+    """#1267: songplayer/wall-bridge passed verify with no Claude login."""
+    import cli_account_bootstrap as bootstrap
+    bad = []
+    if _one(s, "login", "creds") != "yes":
+        bad.append("~/.claude/.credentials.json is missing or empty")
+    email = _one(s, "login", "email")
+    if not email:
+        bad.append("~/.claude.json has no oauthAccount.emailAddress")
+    box = "%s@%s" % (account, spec["host"])
+    address = bootstrap.fleet_boxes().get(spec["host"])
+    if address is None:
+        bad.append("host %r is not a fleet box (cli_account_bootstrap.fleet_boxes)"
+                   % spec["host"])
+    else:
+        bad += _claudy_registration(box, account, address, claudy_read)
+    return (not bad), "; ".join(bad) or "logged in as %s, %s leased by claudy" % (
+        email, box)
+
+
+def evaluate(account, spec, sections, *, gh_rc, no_transfer=False,
+             claudy_read=None):
     """``[(check, ok, detail)]`` in ``CHECKS`` order."""
     home = _Home(_one(sections, "env", "home") or "/home/" + account)
     s = sections
@@ -456,7 +605,7 @@ def evaluate(account, spec, sections, *, gh_rc, no_transfer=False):
         gh = ((gh_rc == 0), "project-gh-token verify %s" % (
             "OK" if gh_rc == 0 else "FAILED (rc=%s, its own lines above)" % gh_rc))
     results = {
-        "tmux": _check_tmux(spec, s, home),
+        "tmux": _check_tmux(account, spec, s, home),
         "gh-token": gh,
         "secret-sync": _check_secret_sync(spec),
         "ruff": _check_ruff(s, home, ruff_pin),
@@ -467,6 +616,7 @@ def evaluate(account, spec, sections, *, gh_rc, no_transfer=False):
         "webterm": _check_webterm(account, spec, s),
         "session": _check_session(account, spec, s, no_transfer),
         "drop": _check_drop(account, s),
+        "login": _check_login(account, spec, s, claudy_read or read_claudy_file),
     }
     return [(name,) + tuple(results[name]) for name in CHECKS]
 
@@ -495,7 +645,8 @@ def _ssh_probe(account, spec, run):
     return sections, None
 
 
-def verify_account(account, *, run=None, gh_verify=None, no_transfer=False):
+def verify_account(account, *, run=None, gh_verify=None, no_transfer=False,
+                   claudy_read=None):
     """Run every check AS ``account``; print one line each; 0 = all OK."""
     import cli_account_bootstrap as bootstrap
     if account not in bootstrap.SERVICE_ACCOUNTS:
@@ -511,9 +662,10 @@ def verify_account(account, *, run=None, gh_verify=None, no_transfer=False):
             return gh_token.verify_account(acct, run=run)
     gh_rc = gh_verify(account) if spec.get("github_app") is True else None
     sections, err = _ssh_probe(account, spec, run)
-    results = evaluate(account, spec, sections, gh_rc=gh_rc, no_transfer=no_transfer)
+    results = evaluate(account, spec, sections, gh_rc=gh_rc,
+                       no_transfer=no_transfer, claudy_read=claudy_read)
     remote = {"tmux", "ruff", "rust", "playwright", "home-duplicates",
-              "git-identity", "webterm", "session", "drop"}
+              "git-identity", "webterm", "session", "drop", "login"}
     failed = 0
     for name, ok, detail in results:
         if err and name in remote:

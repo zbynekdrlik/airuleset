@@ -9,6 +9,7 @@ live in a directory OUTSIDE the fake home; a per-account copy is a stub inside
 it.
 """
 import io
+import json
 import os
 import shlex
 import subprocess
@@ -34,6 +35,7 @@ import cli_webterm_only as wo  # noqa: E402
 
 _FAKE_TIMO = "ssh-ed25519 " + "AAAA" + "X" * 64 + " webterm-timo-controller"
 _NOREPLY = "12345+zbynekdrlik@users.noreply.github.com"
+LAUNCHER_LINE = 'claude() { "$HOME/.claude/airuleset-claude-launch.sh" default "$@"; }'
 
 
 def _stub(path, body):
@@ -116,6 +118,12 @@ class _World:
         (self.home / ".profile").write_text("# the #1201 block landed before the pane\n")
         old = time.time() - 3600
         os.utime(self.home / ".profile", (old, old))
+        # 1267: the claude() launcher landed before the pane; a Claude login
+        (self.home / ".bashrc").write_text(LAUNCHER_LINE + "\n")
+        os.utime(self.home / ".bashrc", (old, old))
+        (claude / ".credentials.json").write_text('{"claudeAiOauth": {}}\n')
+        (self.home / ".claude.json").write_text(
+            '{"oauthAccount": {"emailAddress": "acct@example.com"}}\n')
         subprocess.run(["git", "init", "-q", str(self.project)], check=True)
         ssh = self.home / ".ssh"
         ssh.mkdir()
@@ -174,6 +182,15 @@ class _Base(unittest.TestCase):
         self.gh_rc = 0
         self.golive = {"drop-dev1-fohmixer.newlevel.media": 8893}   # 1237
         self.fd_ports = {"dev1/fohmixer": 8791}       # 1237: the /s/ share route
+        self.claudy = {                               # 1267: claudy's registration
+            "hosts.json": [{"name": "fohmixer@dev1", "host": "100.104.8.125",
+                            "user": "fohmixer", "identity": "/x/id"}],
+            "auto_switch.json": {"boxes": [{"box": "fohmixer@dev1", "priority": 10}]}}
+
+    def claudy_read(self, name):
+        if name not in self.claudy:
+            raise OSError("sudo -n -u claudy cat %s: permission denied" % name)
+        return json.dumps(self.claudy[name])
 
     def verify(self, **kw):
         out, err = io.StringIO(), io.StringIO()
@@ -184,7 +201,8 @@ class _Base(unittest.TestCase):
                            lambda path=None: dict(self.fd_ports)), \
                 redirect_stdout(out), redirect_stderr(err):
             rc = verify.verify_account("fohmixer", run=self.w.run,
-                                       gh_verify=lambda a: self.gh_rc, **kw)
+                                       gh_verify=lambda a: self.gh_rc,
+                                       claudy_read=self.claudy_read, **kw)
         self.out = out.getvalue()
         self.err = err.getvalue()
         return rc
