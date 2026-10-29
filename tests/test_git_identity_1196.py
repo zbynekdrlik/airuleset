@@ -256,7 +256,8 @@ class TestReviewFixes(_Base):
         out, err = io.StringIO(), io.StringIO()
         with redirect_stdout(out), redirect_stderr(err):
             self.gi.install_step(home=self.home, roots=[pub], run=run,
-                                 app_shim=lambda: True)
+                                 app_shim=lambda: True,
+                                 project_account=lambda: False)
         self.assertEqual(run.gh_calls, [])
         self.assertEqual(local(pub, "user.email"), "")
         self.assertIn("app-token", out.getvalue())
