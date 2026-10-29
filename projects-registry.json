@@ -157,6 +157,17 @@
     "account": "newlevel"
   },
   {
+    "name": "wall-bridge",
+    "host": "dev1",
+    "path": "/home/wall-bridge/devel/wall-bridge",
+    "branch_model": "2-branch",
+    "default_branch": "main",
+    "work_branch": "dev",
+    "overrides": [],
+    "onboarded": null,
+    "account": "wall-bridge"
+  },
+  {
     "name": "spinbike",
     "host": "spinbike-vps",
     "path": "~/devel/spinbike",

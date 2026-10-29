@@ -2,7 +2,16 @@
   "_doc": "Peer channel allowlist (#1266). Per host: undirected pairs of projects-registry.json project names whose Claude sessions may message each other over the peer@airuleset channel. A pair not listed here is refused by both ends. Accounts named by a link get the shared-dir ACL, the plugin and the launcher --channels flag on that host. The owner names the links.",
   "hosts": {
     "dev1": {
-      "links": []
+      "links": [
+        [
+          "songplayer",
+          "wall-bridge"
+        ],
+        [
+          "camera-box",
+          "songplayer"
+        ]
+      ]
     }
   }
 }

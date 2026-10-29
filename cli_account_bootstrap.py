@@ -217,6 +217,38 @@ SERVICE_ACCOUNTS = {
             for human in ("zbynek", "marek")
         },
     },
+    # #1267 (owner 29.10.): the SNV LED wall Spout bridge, a Windows binary
+    # cross-built on dev1 (mingw is system-wide; no rust-toolchain.toml).
+    "wall-bridge": {
+        "host": "dev1",
+        "sudo": False,
+        "repo": "zbynekdrlik/wall-bridge",   # public: no paid Actions minutes
+        "github_app": True,
+        "tools": ["rust-target:x86_64-pc-windows-gnu"],
+        "project_dir": "devel/wall-bridge",
+        "tmux_session": "wall-bridge",
+        "webterm_sessions": {
+            "zbynek": {"preferred": "wall-bridge",
+                       "start_dir_chain": ["devel/wall-bridge"]},
+        },
+    },
+    # #1267 (migrate-on-touch): SongPlayer, out of `newlevel`. Pins from its CI
+    # (stable + wasm32) and e2e lockfile; no ruff pin: CI's 0.5.7 would clash
+    # with fohmixer's on the box's one shared venv (open question on #1267).
+    "songplayer": {
+        "host": "dev1",
+        "sudo": False,
+        "secrets": ["songplayer_peer_api_key", "songplayer_pp_cf_service_token.json"],
+        "repo": "zbynekdrlik/songplayer",
+        "github_app": True,
+        "tools": ["rust-target:wasm32-unknown-unknown", "playwright:1.59.1/chromium"],
+        "project_dir": "devel/songplayer",
+        "tmux_session": "songplayer",
+        "webterm_sessions": {
+            "zbynek": {"preferred": "songplayer",
+                       "start_dir_chain": ["devel/songplayer"]},
+        },
+    },
 }
 
 
@@ -256,6 +288,19 @@ def fleet_boxes():
         box = h["name"].split("@")[-1]
         boxes.setdefault(box, h["host"])
     return boxes
+
+
+def is_pending(account):
+    """True when ``account`` is declared but its own ``<account>@<host>``
+    REMOTE_HOSTS entry is still ``pending`` (#1267): no root bootstrap yet, so
+    no unattended job may contact or name it (the minter timer, the peer root
+    leg). Undeclared accounts (``newlevel``) are never pending."""
+    import cli_fleet
+    if account not in SERVICE_ACCOUNTS:
+        return False
+    host = account_spec(account)["host"]
+    return any(h.get("user") == account and h["name"].split("@")[-1] == host
+               and h.get("pending") for h in cli_fleet.REMOTE_HOSTS)
 
 
 def _webterm_humans():

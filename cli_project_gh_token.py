@@ -25,7 +25,8 @@ This leaf is the controller-side minter:
     <owner>__<name>`` (0600) + ``.expires`` + ``.app`` sidecars + the ABSOLUTE
     ``primary`` symlink, each written atomically;
   * a controller systemd ``--user`` timer (``setup_timer``) re-mints every
-    account declaring ``github_app: True`` every 30 minutes (tokens live 1 h);
+    ``github_app: True`` account every 30 min (tokens live 1 h), skipping a
+    ``pending`` one (no root bootstrap yet, #1267) with one SKIPPED line;
   * #1199: from the SAME installation it also mints an issues-only token for
     ``zbynekdrlik/airuleset`` (``issues: write`` + ``metadata: read``),
     delivered as ``zbynekdrlik__airuleset`` beside ``primary`` (never as it),
@@ -33,16 +34,13 @@ This leaf is the controller-side minter:
     from the installation is one loud SKIP line (an owner action), never a
     failure of the project token.
 
-The token never reaches stdout, stderr, a log, argv or the state file. The
-controller keeps a token-free state record per account
-(``~/.claude/project-gh-token/<acct>.json``) that ``accounts status`` reads.
-
-The account side is ``render_gh_app_shim``: the script the #1184 bootstrap
-installs at ``~/.local/bin/gh-app-shim``. It is the SAME slot the odoo-erp
-App shim occupies on the stream boxes, so the #1040/#1087 rate-guard installer
-chains its wrapper over it (``gh -> gh-app-shim -> the real gh``). It is NOT
-``gh-upstream``: the installer treats a ``#!`` script there as the #1051
-exec-loop residue and un-wraps it.
+The token never reaches stdout, stderr, a log, argv or the state file; the
+token-free per-account record (``~/.claude/project-gh-token/<acct>.json``)
+feeds ``accounts status``. The account side is ``render_gh_app_shim``, which
+the #1184 bootstrap installs at ``~/.local/bin/gh-app-shim``: the odoo-erp
+App-shim slot, so the #1040/#1087 rate-guard chains its wrapper over it (``gh
+-> gh-app-shim -> the real gh``). Never ``gh-upstream``: the installer reads a
+``#!`` script there as #1051 exec-loop residue and un-wraps it.
 
 Stdlib only; ``cli_account_bootstrap`` / ``cli_fleet`` / ``cli_remote`` /
 ``cli_filedrop_watchdog`` / ``watchdog.reaper`` are imported lazily.
@@ -977,8 +975,10 @@ def cmd_project_gh_token(args):
         return 0
     rc = 0
     for acct in targets:
-        if mint_account(acct, key_path=getattr(args, "key", None),
-                        dry_run=dry_run) != 0:
+        if every and __import__("cli_account_bootstrap").is_pending(acct):
+            print("project-gh-token: %s: SKIPPED — pending, no root bootstrap yet" % acct)
+        elif mint_account(acct, key_path=getattr(args, "key", None),
+                          dry_run=dry_run) != 0:
             rc = 1
     return rc | (ci_sync.run_after_mint(dry_run, started) if every else 0)
 

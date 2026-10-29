@@ -566,31 +566,22 @@ REMOTE_HOSTS.append({
     "pending": False,
 })
 
-# #1183/#1184 (2026-09-29): the first PROJECT account — fohmixer@dev1, declared in
-# cli_account_bootstrap.SERVICE_ACCOUNTS (no sudo, no secrets). Push
-# manages its airuleset through the push key the bootstrap installed. #1237:
-# its drop lane carries secret request / upload / share (share from push 2, #1238).
-REMOTE_HOSTS.append({
-    "name": "fohmixer@dev1",
-    "host": "100.104.8.125",
-    "user": "fohmixer",
-    "repo_path": "~/devel/airuleset",
-    "identity": "~/.secrets/airuleset_push_ed25519",
-    "pending": False,
-})
-
-# #1220 (2026-10-08): the varos PROJECT account on dev2 (Varos East accounting),
-# bootstrapped 8.10. (root render rc 0, install as varos rc 0), so push manages
-# it. NO `drop.disabled`: its generated controller-tunnel drop lane carries the
-# Fio token `secret request` and receipt-scan `upload`.
-REMOTE_HOSTS.append({
-    "name": "varos@dev2",
-    "host": "100.82.64.27",
-    "user": "varos",
-    "repo_path": "~/devel/airuleset",
-    "identity": "~/.secrets/airuleset_push_ed25519",
-    "pending": False,
-})
+# #1184 PROJECT accounts (declared in cli_account_bootstrap.SERVICE_ACCOUNTS):
+# push manages each one's airuleset over the push key its root bootstrap
+# installed, and each keeps a generated drop lane (#1237; share from push 2,
+# #1238). `pending` until that root bootstrap ran: push never contacts it, nor
+# does the minter timer or the peer root leg (#1267, `bootstrap.is_pending`).
+REMOTE_HOSTS += [
+    {"name": "%s@%s" % (user, box), "host": address, "user": user,
+     "repo_path": "~/devel/airuleset",
+     "identity": "~/.secrets/airuleset_push_ed25519", "pending": pending}
+    for user, box, address, pending in (
+        ("fohmixer", "dev1", "100.104.8.125", False),      # #1183, live 29.9.
+        ("varos", "dev2", "100.82.64.27", False),          # #1220, live 8.10.
+        ("wall-bridge", "dev1", "100.104.8.125", True),    # #1267
+        ("songplayer", "dev1", "100.104.8.125", True),     # #1267 (migration)
+    )
+]
 
 
 def is_paused(remote):
@@ -1042,7 +1033,7 @@ AUTHORITY_BY_USER = {
 # would misclassify the controller as a sub-dev stream downstream).
 FULL_AUTHORITY_USERS = frozenset(
     {"newlevel", "gatekeeper", "admin", "stepan", "airuleset", "claudy",
-     "fohmixer", "varos"})
+     "fohmixer", "varos", "wall-bridge", "songplayer"})
 
 
 # Webterm OBSERVER accounts (airuleset#867). An account that exists ONLY to run a
