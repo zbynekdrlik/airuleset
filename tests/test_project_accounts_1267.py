@@ -241,7 +241,7 @@ class TestPeerLinks(unittest.TestCase):
         with _pending():
             accts = cpc.accounts_for_host("dev1")
         self.assertEqual(accts, ["dante-asio", "dante-stack", "fohmixer", "iemmixer", "newlevel"])
-        self.assertNotIn("wall-bridge", cpc.render_root_script(accts))
+        self.assertNotIn("wall-bridge", cpc.render_tmpfiles(accts))
 
     def test_wall_bridge_joins_once_live(self):
         self.assertEqual(cpc.accounts_for_host("dev1"),
