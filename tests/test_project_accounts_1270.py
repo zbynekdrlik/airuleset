@@ -56,6 +56,10 @@ class TestLinks(unittest.TestCase):
         self.assertNotIn(frozenset(("iemmixer", "camera-box")), self.links)
         self.assertNotIn(frozenset(("iemmixer", "dante-asio")), self.links)
 
+    def test_the_two_mixers_talk_about_their_shared_band_data(self):
+        # owner 30.10.: "prepoj cez peers fohmixer a iemmixer"
+        self.assertIn("band", self.links[frozenset(("fohmixer", "iemmixer"))])
+
     def test_a_bug_goes_to_the_dante_session(self):
         self.assertIn("bug", self.links[frozenset(("dante-stack", "iemmixer"))])
 
