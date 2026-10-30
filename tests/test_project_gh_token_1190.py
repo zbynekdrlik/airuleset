@@ -399,14 +399,16 @@ class TestMintAccount(_Base):
     def test_mint_all_covers_exactly_the_github_app_accounts(self):
         # #1267: wall-bridge/songplayer are live since 29.10.
         self.assertEqual(pgt.github_app_accounts(),
-                         ["fohmixer", "songplayer", "varos", "wall-bridge"])
+                         ["dante-asio", "dante-stack", "fohmixer", "iemmixer", "songplayer", "varos",
+                          "wall-bridge"])
         with mock.patch.object(pgt, "mint_account", return_value=0) as m:
             rc = pgt.cmd_project_gh_token(mock.Mock(action="mint", account=None,
                                                     all=True, dry_run=False,
                                                     key=None))
         self.assertEqual(rc, 0)
         self.assertEqual([c.args[0] for c in m.call_args_list],
-                         ["fohmixer", "songplayer", "varos", "wall-bridge"])
+                         ["dante-asio", "dante-stack", "fohmixer", "iemmixer", "songplayer", "varos",
+                          "wall-bridge"])
 
     def test_mint_all_fails_when_any_account_fails(self):
         with mock.patch.dict(bootstrap.SERVICE_ACCOUNTS["camera-box"],
