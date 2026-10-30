@@ -229,8 +229,7 @@ class TestMinterSkipsPending(unittest.TestCase):
 class TestPeerLinks(unittest.TestCase):
 
     def test_the_owner_named_links(self):
-        links = cpc.load_links()["hosts"]["dev1"]["links"]
-        pairs = [link["pair"] for link in links]        # #1270: links carry a topic
+        pairs = cpc.load_links()["hosts"]["dev1"]["links"]
         self.assertIn(["songplayer", "wall-bridge"], pairs)
         self.assertIn(["camera-box", "songplayer"], pairs)
         self.assertEqual(cpc.validate_links(cpc.load_links(), cpc.load_registry()), [])

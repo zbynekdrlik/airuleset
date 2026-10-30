@@ -42,8 +42,8 @@ class TestDeclaration(unittest.TestCase):
 class TestLinks(unittest.TestCase):
 
     def setUp(self):
-        self.links = {frozenset(x["pair"]): x["topic"]
-                      for x in cpc.load_links()["hosts"]["dev1"]["links"]}
+        self.links = {frozenset(k.split("|")): v
+                      for k, v in cpc.load_links()["hosts"]["dev1"]["topics"].items()}
 
     def test_the_committed_links_are_valid(self):
         self.assertEqual(cpc.validate_links(cpc.load_links(), cpc.load_registry()), [])

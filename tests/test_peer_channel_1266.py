@@ -36,14 +36,14 @@ class _Recorder:
         return [e for e, _ in self.events]
 
 
-def _write_config(d, links):
+def _write_config(d, links, topics=None):
     reg = [{"name": "alpha", "host": HOST, "account": ME, "path": "~/devel/alpha"},
            {"name": "beta", "host": HOST, "account": ME, "path": "~/devel/beta"},
            {"name": "gamma", "host": HOST, "account": ME, "path": "~/devel/gamma"},
            {"name": "foreign", "host": HOST, "account": OTHER, "path": "/srv/foreign"},
            {"name": "elsewhere", "host": "otherhost", "account": ME, "path": "~/x"}]
     Path(d, pc.REGISTRY_FILE).write_text(json.dumps(reg))
-    Path(d, pc.LINKS_FILE).write_text(json.dumps({"hosts": {HOST: {"links": links}}}))
+    Path(d, pc.LINKS_FILE).write_text(json.dumps({"hosts": {HOST: {"links": links, "topics": topics or {}}}}))
 
 
 def _scratch(testcase, prefix):
@@ -79,10 +79,17 @@ class TestConfig(unittest.TestCase):
     def test_a_link_without_a_topic_is_refused(self):
         reg = [{"name": "a", "host": "h", "path": "/a", "account": "a"},
                {"name": "b", "host": "h", "path": "/b", "account": "b"}]
-        for link in (["a", "b"], {"pair": ["a", "b"]}, {"pair": ["a", "b"], "topic": " "},
-                     {"pair": ["a", "b"], "topic": "x" * 201}):
-            errs = cpc.validate_links({"hosts": {"h": {"links": [link]}}}, reg, root_hosts={"h"})
-            self.assertTrue(any("topic" in e for e in errs), (link, errs))
+        for topics in (None, {}, {"a|b": " "}, {"a|b": "x" * 201}, {"b|a": "wrong order"}):
+            entry = {"links": [["a", "b"]]}
+            if topics is not None:
+                entry["topics"] = topics
+            errs = cpc.validate_links({"hosts": {"h": entry}}, reg, root_hosts={"h"})
+            self.assertTrue(any("topic" in e for e in errs), (topics, errs))
+
+    def test_a_reader_of_bare_pairs_keeps_working(self):
+        # #1270 review: running sessions keep old code; the link list stays bare pairs
+        for link in cpc.load_links()["hosts"]["dev1"]["links"]:
+            self.assertIsInstance(link, list)
 
     def test_committed_links_valid_against_registry_and_root_hosts(self):
         self.assertEqual(cpc.validate_links(cpc.load_links(), cpc.load_registry()), [])
@@ -102,7 +109,7 @@ class TestConfig(unittest.TestCase):
         reg = [{"name": "a", "host": "h", "account": "ua", "path": "/a"},
                {"name": "b", "host": "h", "account": "ub", "path": "/b"},
                {"name": "c", "host": "h", "account": "uc", "path": "/c"}]
-        doc = {"hosts": {"h": {"links": [{"pair": ["a", "b"], "topic": "t"}]}}}
+        doc = {"hosts": {"h": {"links": [["a", "b"]], "topics": {"a|b": "t"}}}}
         self.assertEqual(cpc.accounts_for_host("h", doc, reg), ["ua", "ub"])
         self.assertEqual(cpc.accounts_for_host("x", doc, reg), [])
 
@@ -434,8 +441,8 @@ class TestMcp(unittest.TestCase):
     def test_instructions_name_each_link_and_its_topic(self):
         # #1270 owner: a project must know who it may talk to and about what
         d = _scratch(self, "pct")
-        _write_config(d, [{"pair": ["alpha", "beta"], "topic": "clock contract"},
-                          {"pair": ["alpha", "gamma"], "topic": "shared PC restarts"}])
+        _write_config(d, [["alpha", "beta"], ["alpha", "gamma"]],
+                      {"alpha|beta": "clock contract", "alpha|gamma": "shared PC restarts"})
         peer = pc.Peer(HOST, ME, os.getuid(), "/", d, project_arg="alpha",
                        sock_dir=d, config_dir=d, log=_Recorder())
         out = io.StringIO()
@@ -616,7 +623,7 @@ class TestRootScript(unittest.TestCase):
         def run(argv, **kw):
             calls.append(argv)
             return R()
-        doc = {"hosts": {"h1": {"links": [{"pair": ["a", "b"], "topic": "t"}]}}}
+        doc = {"hosts": {"h1": {"links": [["a", "b"]], "topics": {"a|b": "t"}}}}
         reg = [{"name": "a", "host": "h1", "account": "ua", "path": "/a"},
                {"name": "b", "host": "h1", "account": "ub", "path": "/b"}]
         failed = cpc.provision_peer_channel_root(hosts=self._hosts(), run=run, links_doc=doc,
@@ -630,13 +637,13 @@ class TestRootScript(unittest.TestCase):
     def test_provision_refuses_invalid_config(self):
         failed = cpc.provision_peer_channel_root(
             hosts=self._hosts(), run=lambda *a, **k: None,
-            links_doc={"hosts": {"h1": {"links": [{"pair": ["a", "zz"], "topic": "t"}]}}},
+            links_doc={"hosts": {"h1": {"links": [["a", "zz"]], "topics": {"a|zz": "t"}}}},
             registry=[{"name": "a", "host": "h1", "account": "u", "path": "/a"}])
         self.assertEqual(failed, [("config", "invalid")])
 
 
 class TestInstallStep(unittest.TestCase):
-    DOC = {"hosts": {"h": {"links": [{"pair": ["a", "b"], "topic": "t"}]}}}
+    DOC = {"hosts": {"h": {"links": [["a", "b"]], "topics": {"a|b": "t"}}}}
     REG = [{"name": "a", "host": "h", "account": "ua", "path": "/a"},
            {"name": "b", "host": "h", "account": "ub", "path": "/b"}]
 
