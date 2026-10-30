@@ -211,9 +211,8 @@ def build_drop_lanes(remote_hosts, *, seed, drop_lane_cls,
     _ctrl_port = _GENERATED_DROP_PORTS.get((CONTROLLER_NODENAME, CONTROLLER_NODENAME))
     if _ctrl_port is not None:
         used_ports.add(_ctrl_port)
-    # #1220: every FIXED port (the table + any entry's own `drop.port`) is held
-    # back from next-free, so an account that sorts first never takes a port a
-    # later account owns (varos@dev2 took forestshop admin's 8880).
+    # #1220: every FIXED port (table + an entry's `drop.port`) is held back from
+    # next-free: varos@dev2, sorted first, took forestshop admin's 8880.
     fixed_ports = set(_GENERATED_DROP_PORTS.values()) | _RESERVED_PORTS | {
         (e.get("drop") or {}).get("port") for e in remote_hosts
         if isinstance((e.get("drop") or {}).get("port"), int)}
