@@ -656,7 +656,7 @@
     "tests/test_webterm_rendered_artifact_870.py": 242,
     "tests/test_webterm_short_viewport_798.py": 306,
     "tests/test_webterm_stream_footer_672.py": 107,
-    "tests/test_webterm_template_extraction_694.py": 93,
+    "tests/test_webterm_template_extraction_694.py": 94,
     "tests/test_webterm_theme.py": 158,
     "tests/test_webterm_ttyd_wildcard_bind_681.py": 168,
     "tests/test_webterm_tunnel.py": 234,

@@ -238,6 +238,24 @@ class TestTabLayoutRoute(unittest.TestCase):
                 await self._teardown(h)
         _run(go())
 
+    def test_the_dashboard_inlines_the_stored_layout(self):
+        async def go():
+            h = await self._harness()
+            try:
+                h.dash_path.write_text("<script>const L = /*wt-tab-layout*/null;</script>")
+                req = (b"GET / HTTP/1.1\r\nHost: 127.0.0.1:%d\r\n"
+                       b"Cookie: webterm_session=%s\r\n\r\n" % (h.port, h.tok.encode()))
+                self.assertIn(b"/*wt-tab-layout*/null;", await h.request(req))
+                lay = {"order": ["s1", "s0"], "hidden": ["s0"]}
+                (Path(h.tmp) / "tab-layout.json").write_text(json.dumps(lay))
+                r = await h.request(req)
+                self.assertIn(b"/*wt-tab-layout*/" + json.dumps(lay).encode() + b";", r)
+                (Path(h.tmp) / "tab-layout.json").write_text('{"order": ["</script>"]}')
+                self.assertIn(b"/*wt-tab-layout*/null;", await h.request(req))
+            finally:
+                await self._teardown(h)
+        _run(go())
+
     def test_a_corrupt_file_is_served_as_empty(self):
         async def go():
             h = await self._harness()
@@ -262,6 +280,23 @@ class TestTemplateStructure1269(unittest.TestCase):
 
     def setUp(self):
         self.html = _render()
+
+    def test_tabmenu_module_is_a_pure_constant_leaf(self):
+        import ast
+        src = (REPO / "cli_webterm_tabmenu.py").read_text(encoding="utf-8")
+        banned = (ast.Import, ast.ImportFrom, ast.FunctionDef,
+                  ast.AsyncFunctionDef, ast.ClassDef)
+        self.assertEqual([type(n).__name__ for n in ast.walk(ast.parse(src))
+                          if isinstance(n, banned)], [])
+        import cli_webterm_tabmenu as tm
+        self.assertIn(tm.TABMENU_CSS, self.html)
+        self.assertIn(tm.TABMENU_JS, self.html)
+        # the JS shares the main <script>: activate/onHotkey call into it
+        main = self.html[self.html.index("<script>"):self.html.index("</script>")]
+        self.assertIn(tm.TABMENU_JS, main)
+
+    def test_the_gateway_mark_is_in_the_page_once(self):
+        self.assertEqual(self.html.count(g.TAB_LAYOUT_MARK.decode() + "null"), 1)
 
     def test_bar_has_a_scrolling_tab_strip_and_a_menu_item(self):
         self.assertIn('<div id="tabs">', self.html)
