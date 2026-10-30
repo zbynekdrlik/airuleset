@@ -97,13 +97,13 @@ def validate_links(links_doc, registry, root_hosts=None):
             errors.append("%s: 'links' must be a list" % host)
             continue
         projects = peer_channel.host_projects(registry, host)
-        for link in raw:
-            pair = link.get("pair") if isinstance(link, dict) else link
+        topics = entry.get("topics") if isinstance(entry.get("topics"), dict) else {}
+        for pair in raw:
             if not (isinstance(pair, list) and len(pair) == 2
                     and all(isinstance(x, str) for x in pair)):
-                errors.append("%s: malformed link %r" % (host, link))
+                errors.append("%s: malformed link %r" % (host, pair))
                 continue
-            topic = link.get("topic") if isinstance(link, dict) else None
+            topic = topics.get(peer_channel.topic_key(pair))
             if not (isinstance(topic, str) and topic.strip() and len(topic) <= MAX_TOPIC):
                 errors.append("%s: %r needs a topic of 1-%d chars" % (host, pair, MAX_TOPIC))
             if pair[0] == pair[1]:

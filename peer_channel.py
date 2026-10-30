@@ -139,25 +139,28 @@ def host_links(links_doc, host):
     entry = hosts.get(host) if isinstance(hosts, dict) else None
     raw = entry.get("links") if isinstance(entry, dict) else None
     pairs = set()
-    for link in raw if isinstance(raw, list) else []:
-        pair = link.get("pair") if isinstance(link, dict) else link
+    for pair in raw if isinstance(raw, list) else []:
         if (isinstance(pair, list) and len(pair) == 2 and all(isinstance(x, str) for x in pair)
                 and pair[0] != pair[1]):
             pairs.add(frozenset(pair))
     return pairs
 
 
+def topic_key(pair):
+    return "|".join(sorted(pair))
+
+
 def host_link_topics(links_doc, host):
-    """#1270: {frozenset({a, b}): topic} for the links of ``host`` with a topic."""
+    """#1270: {frozenset({a, b}): topic}. A sibling of ``links``, never inside it:
+    a running session keeps its old code and reads ``links`` as bare pairs."""
     hosts = links_doc.get("hosts") if isinstance(links_doc, dict) else None
     entry = hosts.get(host) if isinstance(hosts, dict) else None
-    raw = entry.get("links") if isinstance(entry, dict) else None
+    raw = entry.get("topics") if isinstance(entry, dict) else None
     out = {}
-    for link in raw if isinstance(raw, list) else []:
-        topic = link.get("topic") if isinstance(link, dict) else None
-        pair = host_links({"hosts": {host: {"links": [link]}}}, host)
-        if isinstance(topic, str) and topic.strip() and pair:
-            out[next(iter(pair))] = topic.strip()
+    for pair in host_links(links_doc, host):
+        topic = raw.get(topic_key(pair)) if isinstance(raw, dict) else None
+        if isinstance(topic, str) and topic.strip():
+            out[pair] = topic.strip()
     return out
 
 
