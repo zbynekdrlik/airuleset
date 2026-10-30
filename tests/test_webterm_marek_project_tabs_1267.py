@@ -41,8 +41,13 @@ class TestMarekProjectTabs(unittest.TestCase):
         html = w.render_dashboard_html(
             profiles.marek_inventory(), ttyd_base="/t", human="marek",
             term_grid=(176, 51))
-        for acct in ACCOUNTS:
-            self.assertIn('<span class="al">%s</span>' % acct, html)
+        # the alias comes from the ONE #592 source (8-char cap: "wall-bri", "songplay")
+        owner = w.render_dashboard_html(
+            profiles.zbynek_inventory(), ttyd_base="/t", human="zbynek",
+            term_grid=(176, 51))
+        for alias in ("wall-bri", "songplay"):
+            self.assertIn('<span class="al">%s</span>' % alias, owner)
+            self.assertIn('<span class="al">%s</span>' % alias, html)
 
     def test_owner_and_marek_share_the_project_session(self):
         for acct in ACCOUNTS:
