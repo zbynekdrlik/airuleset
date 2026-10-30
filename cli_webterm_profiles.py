@@ -437,8 +437,8 @@ def marek_inventory():
         },
         fohmixer_entry(WEBTERM_MAREK_IDENTITY),   # #1183 project account
         varos_entry(WEBTERM_MAREK_IDENTITY),      # #1220 project account
-        dev1_project_entry("wall-bridge", WEBTERM_MAREK_IDENTITY),   # #1267 owner 30.10.
-        dev1_project_entry("songplayer", WEBTERM_MAREK_IDENTITY),    # #1267 owner 30.10.
+        *(dev1_project_entry(a, WEBTERM_MAREK_IDENTITY)            # #1267, #1270 owner 30.10.
+          for a in ("wall-bridge", "songplayer", "dante-stack", "dante-asio")),
         {
             "id": "dev1",
             "label": "dev1 (marek sessions)",
@@ -749,8 +749,8 @@ def zbynek_inventory():
         },
         fohmixer_entry(WEBTERM_ZBYNEK_IDENTITY, kind="owner"),   # #1183
         varos_entry(WEBTERM_ZBYNEK_IDENTITY, kind="owner"),      # #1220
-        dev1_project_entry("wall-bridge", WEBTERM_ZBYNEK_IDENTITY, "owner"),  # #1267
-        dev1_project_entry("songplayer", WEBTERM_ZBYNEK_IDENTITY, "owner"),   # #1267
+        *(dev1_project_entry(a, WEBTERM_ZBYNEK_IDENTITY, "owner")  # #1267, #1270
+          for a in ("wall-bridge", "songplayer", "dante-stack", "dante-asio")),
         {
             "id": "dev1",
             "label": "dev1",

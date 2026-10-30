@@ -581,8 +581,8 @@ REMOTE_HOSTS += [
         ("varos", "dev2", "100.82.64.27", False),          # #1220, live 8.10.
         ("wall-bridge", "dev1", "100.104.8.125", False),   # #1267, live 29.10.
         ("songplayer", "dev1", "100.104.8.125", False),    # #1267, live 29.10.
-        ("dante-stack", "dev1", "100.104.8.125", True),    # #1270
-        ("dante-asio", "dev1", "100.104.8.125", True),     # #1270
+        ("dante-stack", "dev1", "100.104.8.125", False),   # #1270, live 30.10.
+        ("dante-asio", "dev1", "100.104.8.125", False),    # #1270, live 30.10.
         ("iemmixer", "dev1", "100.104.8.125", True),       # #1270
     )
 ]
