@@ -114,7 +114,33 @@ def validate_github_app(spec, account=None, declared=()):
         return ["github_app: True needs the repo the token is scoped to"]
     if "code_only" in spec and not isinstance(spec["code_only"], bool):
         return ["code_only must be True or False (#1220, gates.codeonly)"]
-    return validate_repo_secrets(spec, account, declared)
+    return validate_repo_secrets(spec, account, declared) + validate_extra_repos(
+        spec, account, declared)
+
+
+def validate_extra_repos(spec, account=None, declared=()):
+    """#1270: repos the account's ONE token also covers. Same owner as ``repo``;
+    never airuleset (its issues-only token is the design), never the account's
+    own repo, never another account's: that would open its secret-sync queue."""
+    extras = spec.get("extra_repos", [])
+    if not isinstance(extras, list):
+        return ["extra_repos must be a list of owner/name"]
+    repo = str(spec.get("repo") or "").lower()
+    taken = {str(raw.get("repo", "")).lower(): other for other, raw in dict(declared).items()
+             if other != account and isinstance(raw, dict)}
+    errs, seen = [], set()
+    for extra in extras:
+        low = str(extra).lower()
+        if not (isinstance(extra, str) and re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", extra)):
+            errs.append("extra_repos: %r is not owner/name" % (extra,))
+        elif low.split("/")[0] != repo.split("/")[0]:
+            errs.append("extra_repos: %s has another owner than %s" % (extra, spec.get("repo")))
+        elif low == "zbynekdrlik/airuleset" or low == repo or low in seen:
+            errs.append("extra_repos: %s is airuleset, the account's own repo or a duplicate" % extra)
+        elif low in taken:
+            errs.append("extra_repos: %s is the repo of %r" % (extra, taken[low]))
+        seen.add(low)
+    return errs
 
 
 def is_secret_name(name):

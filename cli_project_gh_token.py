@@ -60,6 +60,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+from cli_project_gh_shim import _SHIM, PROJECT_SHIM_MARKER  # noqa: F401  (re-export)
+
 APP_ID = 5131368
 APP_SLUG = "newlevel-project-accounts"
 APP_INSTALL_URL = "https://github.com/apps/%s/installations/new" % APP_SLUG
@@ -212,7 +214,7 @@ def find_installation(repo, jwt, *, urlopen=None):
 
 
 def mint_token(installation_id, repo, jwt, *, permissions=None, extra=(), urlopen=None):
-    """A 1-hour installation token scoped to exactly ``repo``:
+    """A 1-hour installation token scoped to exactly ``repo`` plus ``extra``:
     ``{"token", "expires_at"}``. Refuses a malformed token or a token whose
     reported repository scope is not exactly this repo. With ``permissions``
     (#1199) the token is down-scoped to them and GitHub's reported
@@ -220,6 +222,8 @@ def mint_token(installation_id, repo, jwt, *, permissions=None, extra=(), urlope
     wanted = [repo] + list(extra)             # #1270: declared extra_repos
     for r in wanted:
         token_file_name(r)                    # validates owner/name
+    if AIRULESET_REPO in [r.lower() for r in extra]:
+        raise MintError("airuleset is never an extra repo (its token is issues-only)")
     body = {"repositories": [r.split("/", 1)[1] for r in wanted]}
     if permissions is not None:
         body["permissions"] = dict(permissions)
@@ -238,7 +242,7 @@ def mint_token(installation_id, repo, jwt, *, permissions=None, extra=(), urlope
     if scope != sorted(r.lower() for r in wanted):
         raise MintError("mint for %s returned a token scoped to %s, not to "
                         "exactly %s — refusing to deliver it"
-                        % (repo, scope or "all repositories", repo))
+                        % (repo, scope or "all repositories", ", ".join(wanted)))
     if "administration" in (data.get("permissions") or {}):   # #1220: visibility
         raise MintError("mint for %s returned an administration token — refused" % repo)
     if permissions is not None and data.get("permissions") != dict(permissions):
@@ -362,7 +366,11 @@ def status_line(account, now=None, directory=None):
     if st.get("ok"):
         exp = st.get("expires_at", "?")
         left = _minutes_left(exp, now)
-        return "gh-token: expires %s%s" % (exp, left)
+        scope = " (also %s)" % ", ".join((st.get("scope") or [])[1:]) if st.get(
+            "scope", [])[1:] else ""
+        skipped = st.get("extra_skipped") or []
+        return "gh-token: expires %s%s%s%s" % (
+            exp, left, scope, " SKIPPED %s" % ", ".join(skipped) if skipped else "")
     last = st.get("last_ok_expires_at")
     return "gh-token: FAILED %s — %s%s" % (
         st.get("at", "?"), st.get("error", "?"),
@@ -485,17 +493,31 @@ def mint_account(account, *, key_path=None, dry_run=False, now=None, run=None,
         remote = account_target(account)
         jwt = build_jwt(key_path, now=now)
         installation = find_installation(repo, jwt, urlopen=urlopen)
+        extras = list(spec.get("extra_repos") or [])
         if dry_run:
+            for extra in extras:
+                if find_installation(extra, jwt, urlopen=urlopen) != installation:
+                    raise MintError("%s is on another installation than %s" % (extra, repo))
             print("project-gh-token: %s: DRY RUN — App %s installation %d covers "
-                  "%s; would mint a token for that repo only and deliver it to "
+                  "%s; would mint a token scoped to exactly that and deliver it to "
                   "%s (%s@%s:~/%s/%s), plus an issues-only token for %s (~/%s/%s)"
-                  % (account, APP_SLUG, installation, repo, remote["name"],
+                  % (account, APP_SLUG, installation, ", ".join([repo] + extras), remote["name"],
                      remote["user"], remote["host"], TOKEN_DIR_REL,
                      token_file_name(repo), AIRULESET_REPO, TOKEN_DIR_REL,
                      token_file_name(AIRULESET_REPO)))
             return 0
-        minted = mint_token(installation, repo, jwt, urlopen=urlopen,
-                            extra=spec.get("extra_repos") or ())
+        skipped = []
+        try:
+            minted = mint_token(installation, repo, jwt, urlopen=urlopen, extra=extras)
+        except MintError as e:
+            if not extras or e.status not in (404, 422):
+                raise
+            # #1270 review: an extra repo the App cannot reach never takes the
+            # account's own token and its airuleset issues token down with it.
+            skipped, extras = extras, []
+            print("project-gh-token: %s: SKIPPED %s — %s. OWNER ACTION: add it at %s"
+                  % (account, ", ".join(skipped), e, APP_INSTALL_URL), file=sys.stderr)
+            minted = mint_token(installation, repo, jwt, urlopen=urlopen)
         deliver(remote, repo, minted["token"], minted["expires_at"], run=run)
     except MintError as e:
         return _fail(account, repo, str(e), now, dry_run, directory)
@@ -515,6 +537,7 @@ def mint_account(account, *, key_path=None, dry_run=False, now=None, run=None,
         air_rc, air = 1, {"ok": False, "at": _iso(now),
                           "error": "unexpected %s" % type(e).__name__}
     _write_state(account, {"ok": True, "account": account, "repo": repo,
+                           "scope": [repo] + extras, "extra_skipped": skipped,
                            "installation_id": installation,
                            "expires_at": minted["expires_at"],
                            "minted_at": _iso(now), "target": remote["name"],
@@ -529,87 +552,6 @@ def mint_account(account, *, key_path=None, dry_run=False, now=None, run=None,
 # The rate-guard installer (cli_gh_rate Cases 2/4) chains at once ONLY over
 # this shim, because it execs the real binary itself; an odoo-style App shim
 # re-resolves `gh` on PATH and keeps its #1087 Case A path.
-PROJECT_SHIM_MARKER = "airuleset project-account GitHub App token shim (#1190)"
-# (the same literal as cli_gh_rate.PROJECT_APP_SHIM_MARKER, test-locked)
-
-_SHIM = r"""#!/usr/bin/env bash
-# airuleset project-account GitHub App token shim (#1190) — MANAGED by the
-# #1184 account bootstrap (cli_project_gh_token.render_gh_app_shim); do not
-# edit. The rate-guard wrapper at ~/.local/bin/gh chains over it
-# (gh -> gh-app-shim -> the real gh, cli_gh_rate #1087). The controller
-# minter (airuleset.py project-gh-token) delivers a 1-hour token scoped to this
-# account's repo into ~/.config/gh-app-tokens/primary every 30 minutes, and
-# (#1199) an issues-only token for zbynekdrlik/airuleset beside it.
-set -u
-_dir="$HOME/.config/gh-app-tokens"
-# #1199: a call that targets zbynekdrlik/airuleset (a -R/--repo value, or a
-# `gh api` path under repos/zbynekdrlik/airuleset, or a POSITIONAL airuleset
-# issue/PR URL) uses the issues-only airuleset token; everything else uses
-# primary. Only a -R/--repo VALUE, an api path or a positional URL decides,
-# so title/body text (a URL included) never routes.
-_is_air() {
-  local v="${1,,}"
-  v="${v#https://}"; v="${v#http://}"; v="${v#www.}"; v="${v#github.com/}"
-  v="${v%/}"; v="${v%.git}"
-  [ "$v" = "zbynekdrlik/airuleset" ]
-}
-_tok="primary"
-_prev=""
-_sub="${1:-}"
-for _a in "$@"; do
-  case "$_prev" in -R|--repo) _is_air "$_a" && _tok="zbynekdrlik__airuleset" ;; esac
-  case "$_a" in
-    --repo=*) _is_air "${_a#--repo=}" && _tok="zbynekdrlik__airuleset" ;;
-    -R?*) _is_air "${_a#-R}" && _tok="zbynekdrlik__airuleset" ;;
-  esac
-  case "$_prev" in
-    -*) ;;    # a flag's value (--body/--title <url>) never routes
-    *) case "${_a,,}" in
-         https://github.com/zbynekdrlik/airuleset/issues/*|https://github.com/zbynekdrlik/airuleset/pull/*)
-           _tok="zbynekdrlik__airuleset" ;;
-       esac ;;
-  esac
-  if [ "$_sub" = api ]; then
-    _p="${_a,,}"; _p="${_p#https://api.github.com}"; _p="${_p#/}"
-    case "$_p" in
-      repos/zbynekdrlik/airuleset|repos/zbynekdrlik/airuleset/*|"repos/zbynekdrlik/airuleset?"*)
-        _tok="zbynekdrlik__airuleset" ;;
-    esac
-  fi
-  _prev="$_a"
-done
-if [ "$_tok" != primary ] && [ ! -r "$_dir/$_tok" ]; then
-  echo "gh: no airuleset issues token at $_dir/$_tok — the App newlevel-project-accounts must include zbynekdrlik/airuleset and the controller must mint it; see \`airuleset.py accounts status\` on the controller (#1199)" >&2
-  _tok="primary"
-fi
-if [ -r "$_dir/$_tok" ]; then
-  IFS= read -r GH_TOKEN < "$_dir/$_tok" || true
-  export GH_TOKEN
-  _exp="$(cat "$(readlink -f "$_dir/$_tok").expires" 2>/dev/null || true)"
-  if [ -n "$_exp" ] && [ "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \> "$_exp" ]; then
-    echo "gh: project-account token $_tok expired at $_exp — the controller timer (project-gh-token.timer) is not refreshing it (#1190)" >&2
-  fi
-else
-  echo "gh: no project-account token at $_dir/primary — run on the controller: airuleset.py project-gh-token mint <account> (#1190)" >&2
-fi
-# The REAL gh binary: never a #! script (the rate-guard wrapper or this shim),
-# so no exec loop (#1051).
-_is_real() { [ -f "$1" ] && [ -x "$1" ] && [ "$(head -c2 "$1" 2>/dev/null)" != "#!" ]; }
-_real=""
-if _is_real "$HOME/.local/bin/gh-upstream"; then
-  _real="$HOME/.local/bin/gh-upstream"
-else
-  IFS=':' read -ra _parts <<< "${PATH:-}"
-  for _d in "${_parts[@]}"; do
-    [ -n "$_d" ] || continue
-    if _is_real "$_d/gh"; then _real="$_d/gh"; break; fi
-  done
-fi
-[ -n "$_real" ] || { echo "gh: no real gh binary found (project-account App shim, #1190)" >&2; exit 127; }
-exec "$_real" "$@"
-"""
-
-
 def render_gh_app_shim():
     """The account's ``~/.local/bin/gh-app-shim`` (see the module docstring)."""
     return _SHIM
@@ -837,17 +779,17 @@ def verify_account(account, *, run=None):
     gh_path, sections = _probe_sections(r.stdout)
     primary = sections.get("primary", ([], None))
     got = [ln.strip().lower() for ln in primary[0] if ln.strip()]
+    wanted = [repo] + (spec.get("extra_repos") or [])
     repo_ok = (r.returncode == 0 and gh_path.endswith("/.local/bin/gh")
-               and primary[1] == "0"
-               and sorted(got) == sorted(r.lower() for r in [repo] + (spec.get("extra_repos") or [])))
+               and primary[1] == "0" and sorted(got) == sorted(x.lower() for x in wanted))
     air_ok, air_why = airuleset_write_verdict(sections)
     if repo_ok and air_ok:
         print("project-gh-token verify: %s OK — gh = %s, the token sees exactly "
-              "%s; airuleset issues: %s" % (account, gh_path, repo, air_why))
+              "%s; airuleset issues: %s" % (account, gh_path, ", ".join(wanted), air_why))
         return 0
     print("project-gh-token verify: %s FAILED (rc=%d) — gh resolves to %r, the "
-          "token sees %r (want exactly [%r]); airuleset issues: %s%s" % (
-              account, r.returncode, gh_path, got, repo,
+          "token sees %r (want exactly %r); airuleset issues: %s%s" % (
+              account, r.returncode, gh_path, got, wanted,
               "OK" if air_ok else "MISSING — " + air_why,
               (": " + (r.stderr or "").strip()[:300]) if r.stderr else ""),
           file=sys.stderr)
