@@ -465,8 +465,8 @@ class TestWiring(unittest.TestCase):
                                   side_effect=lambda **k: order.append("sync") or 0) as s:
             rc = pgt.cmd_project_gh_token(self.ns())
         self.assertEqual(rc, 0)
-        # fohmixer, songplayer, varos, wall-bridge (#1267 live 29.10.)
-        self.assertEqual(order, ["mint"] * 4 + ["sync"])
+        # + dante-stack, dante-asio (#1270 live 30.10.)
+        self.assertEqual(order, ["mint"] * 6 + ["sync"])
         self.assertEqual(s.call_args.kwargs.get("dry_run"), False)
 
     def test_a_sync_crash_is_loud_but_never_breaks_the_mint(self):
@@ -476,7 +476,7 @@ class TestWiring(unittest.TestCase):
                                   side_effect=RuntimeError("x")), \
                 redirect_stderr(err):
             rc = pgt.cmd_project_gh_token(self.ns())
-        self.assertEqual(m.call_count, 4)
+        self.assertEqual(m.call_count, 6)
         self.assertEqual(rc, 1)
         self.assertIn("secret-sync", err.getvalue())
 
