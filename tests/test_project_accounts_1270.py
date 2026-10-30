@@ -63,6 +63,9 @@ class TestLinks(unittest.TestCase):
     def test_a_bug_goes_to_the_dante_session(self):
         self.assertIn("bug", self.links[frozenset(("dante-stack", "iemmixer"))])
 
+    def test_songplayer_reports_dante_bugs_to_dante_stack(self):
+        self.assertIn("Dante bug", self.links[frozenset(("dante-stack", "songplayer"))])
+
 
 if __name__ == "__main__":
     unittest.main()

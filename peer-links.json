@@ -34,6 +34,10 @@
         [
           "fohmixer",
           "iemmixer"
+        ],
+        [
+          "dante-stack",
+          "songplayer"
         ]
       ],
       "topics": {
@@ -44,6 +48,7 @@
         "camera-box|dante-stack": "dantesync only: new versions and clock faults",
         "dante-stack|fohmixer": "the Dante side of the FOH PC: clock, devices, a Dante bug seen from fohmixer",
         "dante-asio|fohmixer": "the shared FOH PC: who holds the audio devices, CPU pinning, restarts of Ableton",
+        "dante-stack|songplayer": "dantesync and genlock on the SongPlayer PCs, the ASIO output through Dante Virtual Soundcard: a Dante bug goes to dante-stack",
         "fohmixer|iemmixer": "band lineups and channel names shared by the two mixers; a change in one mixer that affects the other"
       }
     }
