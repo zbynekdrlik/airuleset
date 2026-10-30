@@ -377,6 +377,14 @@ def status_line(account, now=None, directory=None):
         " (last token expires %s)" % last if last else "")
 
 
+def peer_status_line(account, directory=None):
+    """``peer issues: N OK; not delivered: <repos>`` for ``accounts status`` (#1270)."""
+    peers = (read_state(account, directory) or {}).get("peers") or {}
+    missing = sorted(r for r, st in peers.items() if not st.get("ok"))
+    line = "peer issues: %d OK" % (len(peers) - len(missing))
+    return line + ("; not delivered: %s" % ", ".join(missing) if missing else "")
+
+
 def airuleset_status_line(account, now=None, directory=None):
     """``airuleset issues: OK | MISSING (<why>)`` for ``accounts status``
     (#1199): OK only while a delivered, exactly-issues-scoped airuleset token
@@ -424,6 +432,8 @@ def _fail(account, repo, error, now, dry_run, directory):
                                    else prev.get("last_ok_expires_at"))}
         if isinstance(prev.get("airuleset"), dict):
             record["airuleset"] = prev["airuleset"]
+        if isinstance(prev.get("peers"), dict):
+            record["peers"] = prev["peers"]
         _write_state(account, record, directory)
     return 1
 
@@ -471,12 +481,20 @@ def mint_issues_token(account, repo, installation, jwt, remote, now, *,
                "status": status}
 
 
-def mint_peer_tokens(account, repo, installation, jwt, remote, now, *, urlopen=None, run=None):
+def mint_peer_tokens(account, repo, installation, jwt, remote, now, *, exclude=(),
+                     urlopen=None, run=None):
     """#1270: an issues-only token per linked peer repo, so a session can file a
-    ticket on the project it talks to. One failure never stops the others."""
+    ticket on the project it talks to. One failure never stops the others.
+    ``exclude`` = the repos its own token covers: a peer file would shadow it."""
     import cli_peer_channel
     rc, records = 0, {}
-    for target in cli_peer_channel.peer_repos(account):
+    try:
+        targets = cli_peer_channel.peer_repos(account)
+    except (OSError, ValueError) as e:
+        print("project-gh-token: %s: FAILED peer repos — %s" % (account, type(e).__name__),
+              file=sys.stderr)
+        return 1, records
+    for target in (t for t in targets if t not in exclude):
         try:
             one, records[target] = mint_issues_token(
                 account, repo, installation, jwt, remote, now,
@@ -557,6 +575,7 @@ def mint_account(account, *, key_path=None, dry_run=False, now=None, run=None,
         air_rc, air = 1, {"ok": False, "at": _iso(now),
                           "error": "unexpected %s" % type(e).__name__}
     peer_rc, peers = mint_peer_tokens(account, repo, installation, jwt, remote, now,
+                                      exclude=spec.get("extra_repos") or (),
                                       urlopen=urlopen, run=run)
     _write_state(account, {"ok": True, "account": account, "repo": repo,
                            "scope": [repo] + extras, "extra_skipped": skipped,

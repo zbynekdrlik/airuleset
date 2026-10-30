@@ -320,13 +320,14 @@ def render_root_script(accounts, links_doc=None, registry=None):
         _heredoc(MOUNT_UNIT_PATH, render_mount_unit()),
         _heredoc(TMPFILES_PATH, render_tmpfiles(accounts)),
         _heredoc(POLICY_PATH, render_policy()),
+        "TMPFILES_CHANGED=\"$CHANGED\"\n",     # a snapshot change needs no ACL re-apply
         _heredoc(SNAPSHOT_LINKS, json.dumps(links_doc, ensure_ascii=False, indent=2) + "\n"),
         _heredoc(SNAPSHOT_REGISTRY, json.dumps(registry, ensure_ascii=False, indent=2) + "\n"),
         "case \"$CHANGED\" in *peers.mount*) systemctl daemon-reload ;; esac\n",
         "systemctl enable --now %s\n" % unit,
         # tmpfiles re-applies the ACL; skip it when nothing changed (no transient
         # mask reset under live sessions) unless a dir is missing (fresh boot state)
-        "need=''; [ -n \"$CHANGED\" ] && need=1\n",
+        "need=''; [ -n \"$TMPFILES_CHANGED\" ] && need=1\n",
         "for a in %s; do [ -d %s/\"$a\" ] || need=1; done\n" % (want, d),
         "[ -z \"$need\" ] || systemd-tmpfiles --create %s\n" % TMPFILES_PATH,
         "[ \"$(findmnt -no FSTYPE %s)\" = tmpfs ] || "
@@ -380,6 +381,9 @@ def provision_peer_channel_root(hosts=None, run=None, links_doc=None, registry=N
         print("  ⚠ PEER-CHANNEL-ROOT FAILED: peer-links.json invalid: %s" % "; ".join(errors),
               file=sys.stderr)
         return [("config", "invalid")]
+    if only and only not in {h.get("name") for h in hosts}:
+        print("  ⚠ PEER-CHANNEL-ROOT FAILED: unknown host %s" % only, file=sys.stderr)
+        return [(only, "unknown host")]
     named = set(links_doc.get("hosts", {}))
     failed = []
     for h in hosts:
@@ -427,7 +431,19 @@ def status_lines(host=None, claude_dir=None, links_doc=None, registry=None):
                  "installed" if _plugin_installed(claude_dir) else "absent"),
              "shared dir %s: %s" % (SOCK_DIR, "present" if os.path.isdir(SOCK_DIR) else "missing")]
     lines += ["config error: %s" % e for e in validate_links(links_doc, registry)]
+    if _snapshot_differs(links_doc, registry):
+        lines.append("snapshot %s differs from the checkout: run root-apply" % SNAPSHOT_DIR)
     return lines
+
+
+def _snapshot_differs(links_doc, registry):
+    """#1270: the runtime reads the snapshot once it exists, so a failed root leg
+    leaves the old links live while the checkout shows the new ones."""
+    try:
+        return (load_links(os.path.join(SNAPSHOT_DIR, peer_channel.LINKS_FILE)) != links_doc
+                or load_registry(os.path.join(SNAPSHOT_DIR, peer_channel.REGISTRY_FILE)) != registry)
+    except (OSError, ValueError):
+        return False
 
 
 def uncommitted_config():

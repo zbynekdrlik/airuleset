@@ -40,7 +40,11 @@ Checks (``CHECKS``):
   login            (#1267) the account holds a Claude login (credentials file +
                    ``oauthAccount`` email; never the token) and claudy hands it
                    one: ``<acct>@<host>`` in BOTH claudy files, read on the
-                   controller as claudy (unreadable = FAIL).
+                   controller as claudy (unreadable = FAIL);
+  handover         (#1270) the declared handover file has every section;
+  old-checkout     (#1270) no copy of the account's repos is left in the
+                   host's ``newlevel`` ``~/devel``: its branches and stashes
+                   are checked and saved, then it moves to an archive.
 
 Stdlib only; every airuleset module is imported lazily. ``run`` (the ssh
 call), ``gh_verify`` and ``claudy_read`` are injectable for the tests.
@@ -53,7 +57,7 @@ import sys
 
 CHECKS = ("tmux", "gh-token", "secret-sync", "ruff", "rust", "playwright",
           "home-duplicates", "git-identity", "webterm", "session", "drop",
-          "login", "handover")
+          "login", "handover", "old-checkout")
 CLAUDY_CONFIG_DIR = "/home/claudy/.config/claudy"
 NOREPLY_SUFFIX = "@users.noreply.github.com"
 PROBE_TIMEOUT_S = 180
@@ -629,7 +633,7 @@ def _check_handover(spec, s):
 
 
 def evaluate(account, spec, sections, *, gh_rc, no_transfer=False,
-             claudy_read=None):
+             claudy_read=None, old_checkout=(True, "not checked")):
     """``[(check, ok, detail)]`` in ``CHECKS`` order."""
     home = _Home(_one(sections, "env", "home") or "/home/" + account)
     s = sections
@@ -654,6 +658,7 @@ def evaluate(account, spec, sections, *, gh_rc, no_transfer=False,
         "drop": _check_drop(account, s),
         "login": _check_login(account, spec, s, claudy_read or read_claudy_file),
         "handover": _check_handover(spec, s),
+        "old-checkout": old_checkout,
     }
     return [(name,) + tuple(results[name]) for name in CHECKS]
 
@@ -682,6 +687,36 @@ def _ssh_probe(account, spec, run):
     return sections, None
 
 
+def check_old_checkout(account, spec, run):
+    """#1270: ``(ok, detail)`` for the checkouts a migration left in newlevel. A
+    clone from GitHub carries no local branch, stash or ignored file."""
+    import cli_fleet
+    import cli_remote
+    entry = next((h for h in cli_fleet.REMOTE_HOSTS
+                  if h["name"] == spec["host"] and h.get("user") == "newlevel"), None)
+    if entry is None:
+        return True, "no newlevel account on %s" % spec["host"]
+    prefix, _why = cli_remote._ssh_prefix(entry, True)
+    if prefix is None:
+        return False, "%s has no pinned ssh identity" % entry["name"]
+    repos = [spec["repo"]] + list(spec.get("extra_repos") or [])
+    names = " ".join(shlex.quote(r.split("/", 1)[1]) for r in repos)
+    cmd = 'for d in %s; do [ ! -e "$HOME/devel/$d" ] || echo "$d"; done' % names
+    try:
+        r = run(prefix + ["newlevel@%s" % entry["host"], cmd], input="",
+                capture_output=True, text=True, timeout=PROBE_TIMEOUT_S)
+    except (OSError, subprocess.SubprocessError) as e:
+        return False, "ssh failed (%s)" % type(e).__name__
+    if r.returncode != 0:
+        return False, "ssh rc=%d" % r.returncode
+    left = r.stdout.split()
+    if left:
+        return False, ("still in newlevel ~/devel: %s. Save its branches and stashes "
+                       "(git log --branches --not --remotes), then move it to an "
+                       "archive" % ", ".join(left))
+    return True, "none of %s in newlevel ~/devel" % names
+
+
 def verify_account(account, *, run=None, gh_verify=None, no_transfer=False,
                    claudy_read=None):
     """Run every check AS ``account``; print one line each; 0 = all OK."""
@@ -699,8 +734,9 @@ def verify_account(account, *, run=None, gh_verify=None, no_transfer=False,
             return gh_token.verify_account(acct, run=run)
     gh_rc = gh_verify(account) if spec.get("github_app") is True else None
     sections, err = _ssh_probe(account, spec, run)
-    results = evaluate(account, spec, sections, gh_rc=gh_rc,
-                       no_transfer=no_transfer, claudy_read=claudy_read)
+    old = check_old_checkout(account, spec, run) if spec.get("repo") else (True, "no repo")
+    results = evaluate(account, spec, sections, gh_rc=gh_rc, no_transfer=no_transfer,
+                       claudy_read=claudy_read, old_checkout=old)
     remote = {"tmux", "ruff", "rust", "playwright", "home-duplicates",
               "git-identity", "webterm", "session", "drop", "login", "handover"}
     failed = 0

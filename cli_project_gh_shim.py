@@ -28,7 +28,11 @@ _route() {
   case "$v" in zbynekdrlik/*) n="${v#zbynekdrlik/}" ;; *) return 0 ;; esac
   case "$n" in ""|.*|*[!a-z0-9._-]*) return 0 ;; esac
   if [ "$n" = airuleset ]; then _tok="zbynekdrlik__airuleset"
-  elif [ -r "$_dir/zbynekdrlik__$n" ]; then _tok="zbynekdrlik__$n"; fi
+  elif [ -r "$_dir/zbynekdrlik__$n" ]; then
+    # #1270: a removed link leaves a file that only expires; primary may still read
+    local e; e="$(cat "$(readlink -f "$_dir/zbynekdrlik__$n").expires" 2>/dev/null || true)"
+    [ -n "$e" ] && [ "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \> "$e" ] || _tok="zbynekdrlik__$n"
+  fi
 }
 _tok="primary"
 _prev=""

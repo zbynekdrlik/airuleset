@@ -47,13 +47,13 @@
   {
     "name": "dantesync",
     "host": "dev1",
-    "path": "~/devel/dantesync",
+    "path": "/home/dante-stack/devel/dantesync",
     "branch_model": "2-branch",
     "default_branch": "master",
     "work_branch": "dev",
     "overrides": [],
     "onboarded": null,
-    "account": "newlevel"
+    "account": "dante-stack"
   },
   {
     "name": "devbridge",
@@ -126,13 +126,13 @@
   {
     "name": "reaperiem",
     "host": "dev1",
-    "path": "~/devel/reaperiem",
+    "path": "/home/iemmixer/devel/reaperiem",
     "branch_model": "2-branch",
     "default_branch": "main",
     "work_branch": "dev",
     "overrides": [],
     "onboarded": null,
-    "account": "newlevel"
+    "account": "iemmixer"
   },
   {
     "name": "remoteos-mcp",

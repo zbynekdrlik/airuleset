@@ -47,8 +47,7 @@ LEGACY_FREEZE_DATE = "2026-09-29"
 # declared project account: the 24 `newlevel` rows + odoo-erp in `gatekeeper`).
 # It must EQUAL the live count (test-locked), so a migration lowers it in the
 # same change; raising it is a visible, reviewable edit that the freeze forbids.
-# 23: #1270 owner order, mikrotik is an existing newlevel project, no new one.
-LEGACY_CEILING = 23
+LEGACY_CEILING = 21
 
 # `--legacy-ok` must name the ticket that carries the migration bookkeeping:
 # `#N` or `owner/repo#N` (a bare number is ambiguous — refused).
@@ -305,6 +304,7 @@ def cmd_accounts(args):
             import cli_project_gh_token as gh_token
             print("      %s" % gh_token.status_line(name))
             print("      %s" % gh_token.airuleset_status_line(name))   # #1199
+            print("      %s" % gh_token.peer_status_line(name))        # #1270
             import cli_project_ci_sync as ci_sync   # #1199: the CI secret relay
             print("      %s" % ci_sync.status_line(name))
     print("legacy projects (no declared project account): %d (ceiling %d, "
