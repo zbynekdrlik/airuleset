@@ -55,6 +55,9 @@ MOUNT_UNIT = "run-claude\\x2dpeers.mount"          # systemd-escape -p --suffix=
 MOUNT_UNIT_PATH = "/etc/systemd/system/" + MOUNT_UNIT
 TMPFILES_PATH = "/etc/tmpfiles.d/50-airuleset-peer-channel.conf"
 POLICY_PATH = "/etc/claude-code/managed-settings.d/50-airuleset-peer-channel.json"
+SNAPSHOT_DIR = peer_channel.SNAPSHOT_DIR
+SNAPSHOT_LINKS = os.path.join(SNAPSHOT_DIR, peer_channel.LINKS_FILE)
+SNAPSHOT_REGISTRY = os.path.join(SNAPSHOT_DIR, peer_channel.REGISTRY_FILE)
 # Anthropic's own channel plugins (claude-plugins-official external_plugins). A
 # managed allowedChannelPlugins REPLACES the default allowlist, so they are kept.
 OFFICIAL_CHANNEL_PLUGINS = ("discord", "fakechat", "imessage", "telegram")
@@ -277,12 +280,15 @@ def _heredoc(dest, content):
     return "_install %s <<'%s'\n%s%s\n" % (shlex.quote(dest), mark, content, mark)
 
 
-def render_root_script(accounts):
-    """Idempotent root script: mount unit + tmpfiles + policy drop-in, applied
-    only when changed, then a strict read-back. Exit 3 = a named account does not
-    exist, 4 = read-back mismatch."""
+def render_root_script(accounts, links_doc=None, registry=None):
+    """Idempotent root script: mount unit + tmpfiles + policy drop-in + the host
+    snapshot of the links and registry (#1270), applied only when changed, then a
+    strict read-back. Exit 3 = a named account does not exist, 4 = read-back
+    mismatch."""
     if not accounts:
         raise ValueError("no linked account: use render_teardown_script")
+    links_doc = load_links() if links_doc is None else links_doc
+    registry = load_registry() if registry is None else registry
     for a in accounts:
         if not peer_channel.PROJECT_RE.match(a):
             raise ValueError("bad account name %r" % a)
@@ -296,6 +302,8 @@ def render_root_script(accounts):
         _heredoc(MOUNT_UNIT_PATH, render_mount_unit()),
         _heredoc(TMPFILES_PATH, render_tmpfiles(accounts)),
         _heredoc(POLICY_PATH, render_policy()),
+        _heredoc(SNAPSHOT_LINKS, json.dumps(links_doc, ensure_ascii=False, indent=2) + "\n"),
+        _heredoc(SNAPSHOT_REGISTRY, json.dumps(registry, ensure_ascii=False, indent=2) + "\n"),
         "case \"$CHANGED\" in *peers.mount*) systemctl daemon-reload ;; esac\n",
         "systemctl enable --now %s\n" % unit,
         # tmpfiles re-applies the ACL; skip it when nothing changed (no transient
@@ -327,11 +335,12 @@ def render_teardown_script():
     return ("set -euo pipefail\ncd /\n"
             "[ -e %s ] || [ -e %s ] || { echo 'peer-channel-root: nothing to tear down'; exit 0; }\n"
             "systemctl disable --now %s >/dev/null 2>&1 || true\n"
-            "rm -f %s %s %s\nsystemctl daemon-reload\n"
+            "rm -f %s %s %s %s %s\nsystemctl daemon-reload\n"
             "echo 'peer-channel-root: torn down'\n"
             % (shlex.quote(TMPFILES_PATH), shlex.quote(POLICY_PATH), unit,
                shlex.quote(MOUNT_UNIT_PATH), shlex.quote(TMPFILES_PATH),
-               shlex.quote(POLICY_PATH)))
+               shlex.quote(POLICY_PATH), shlex.quote(SNAPSHOT_LINKS),
+               shlex.quote(SNAPSHOT_REGISTRY)))
 
 
 def provision_peer_channel_root(hosts=None, run=None, links_doc=None, registry=None,
@@ -365,7 +374,8 @@ def provision_peer_channel_root(hosts=None, run=None, links_doc=None, registry=N
             failed.append((name, "no-identity"))
             continue
         accounts = accounts_for_host(name, links_doc, registry) if name in named else []
-        script = render_root_script(accounts) if accounts else render_teardown_script()
+        script = (render_root_script(accounts, links_doc, registry) if accounts
+                  else render_teardown_script())
         remote = ("sudo -n " if h.get("sudo") else "") + "bash -c " + shlex.quote(script)
         argv = ["ssh", "-i", os.path.expanduser(h["identity"]), "-o", "BatchMode=yes",
                 "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=15",
@@ -402,7 +412,15 @@ def status_lines(host=None, claude_dir=None, links_doc=None, registry=None):
     return lines
 
 
-def main(argv=None):
+def uncommitted_config():
+    """Peer config files that differ from HEAD: a link goes live only as committed."""
+    r = subprocess.run(["git", "-C", str(REPO_DIR), "status", "--porcelain", "--",
+                        peer_channel.LINKS_FILE, peer_channel.REGISTRY_FILE],
+                       capture_output=True, text=True, check=True)
+    return [ln[3:] for ln in r.stdout.splitlines()]
+
+
+def main(argv=None, dirty=uncommitted_config, apply=provision_peer_channel_root):
     import argparse
     ap = argparse.ArgumentParser(description="peer channel managed side (#1266)")
     ap.add_argument("action", choices=["status", "render-root", "root-apply"])
@@ -414,7 +432,11 @@ def main(argv=None):
     if a.action == "render-root":
         sys.stdout.write(render_root_script(accounts_for_host(a.host or this_host())))
         return 0
-    return 1 if provision_peer_channel_root(only=a.host) else 0
+    uncommitted = dirty()
+    if uncommitted:
+        print("root-apply refused: commit %s first" % ", ".join(uncommitted), file=sys.stderr)
+        return 1
+    return 1 if apply(only=a.host) else 0
 
 
 if __name__ == "__main__":

@@ -24,12 +24,12 @@ class TestConfigDir(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             for name in (peer_channel.LINKS_FILE, peer_channel.REGISTRY_FILE):
                 Path(d, name).write_text("{}")
-            self.assertEqual(peer_channel.config_dir(d), d)
+            self.assertEqual(peer_channel.active_config_dir(d), d)
 
     def test_a_partial_snapshot_falls_back_to_the_checkout(self):
         with tempfile.TemporaryDirectory() as d:
             Path(d, peer_channel.LINKS_FILE).write_text("{}")
-            self.assertEqual(peer_channel.config_dir(d), peer_channel.CONFIG_DIR)
+            self.assertEqual(peer_channel.active_config_dir(d), peer_channel.CONFIG_DIR)
 
 
 class TestRootSnapshot(unittest.TestCase):

@@ -53,6 +53,7 @@ from collections import deque
 
 SOCK_DIR = "/run/claude-peers"
 CONFIG_DIR = os.path.dirname(os.path.abspath(__file__))
+SNAPSHOT_DIR = "/etc/airuleset/peer"    # #1270: root-owned, written by the root leg
 REGISTRY_FILE = "projects-registry.json"
 LINKS_FILE = "peer-links.json"
 CHANNEL_ARG = "plugin:peer@airuleset"
@@ -114,6 +115,14 @@ class Log:
 # --------------------------------------------------------------------------- #
 # Config: registry (project -> host/account/path) + links (allowlist)
 # --------------------------------------------------------------------------- #
+def active_config_dir(snapshot=SNAPSHOT_DIR):
+    """Where this host's links and registry live: the root leg's snapshot, so a
+    link goes live without a checkout update, else the checkout."""
+    if all(os.path.isfile(os.path.join(snapshot, f)) for f in (LINKS_FILE, REGISTRY_FILE)):
+        return snapshot
+    return CONFIG_DIR
+
+
 def load_json(path):
     with open(path, encoding="utf-8") as f:
         return json.load(f)
@@ -263,10 +272,10 @@ def _user_uid(user):
 # --------------------------------------------------------------------------- #
 class Peer:
     def __init__(self, host, user, uid, cwd, home, project_arg=None,
-                 sock_dir=SOCK_DIR, config_dir=CONFIG_DIR, log=None,
+                 sock_dir=SOCK_DIR, config_dir=None, log=None,
                  notify=None, clock=time.monotonic, armed=True):
         self.host, self.user, self.uid = host, user, uid
-        self.sock_dir, self.config_dir = sock_dir, config_dir
+        self.sock_dir, self.config_dir = sock_dir, config_dir or active_config_dir()
         self.own_dir = os.path.join(sock_dir, user)
         self.log = log or Log(os.path.join(home, ".claude", "logs", "peer-channel.log"))
         self.notify = notify or (lambda text, meta: None)
