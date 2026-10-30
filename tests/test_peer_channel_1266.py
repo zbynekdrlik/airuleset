@@ -413,6 +413,16 @@ class TestMcp(unittest.TestCase):
         self.assertIn("not from the owner", res["instructions"])
         self.assertEqual([t["name"] for t in m[2]["result"]["tools"]], ["peers", "peer_send"])
 
+    def test_messages_before_initialized_are_bounded(self):
+        # #1269 review: at 100k chars per message the pre-handshake buffer is capped
+        srv, out = self._server()
+        for i in range(pc.PENDING_MAX + 10):
+            srv.channel_event("m%d" % i, {})
+        srv.handle({"jsonrpc": "2.0", "method": "notifications/initialized"})
+        got = [m["params"]["content"] for m in self._msgs(out)]
+        self.assertEqual(len(got), pc.PENDING_MAX)
+        self.assertEqual(got[-1], "m%d" % (pc.PENDING_MAX + 9))     # the newest are kept
+
     def test_unknown_protocol_falls_back(self):
         srv, out = self._server()
         srv.handle({"jsonrpc": "2.0", "id": 0, "method": "initialize",
