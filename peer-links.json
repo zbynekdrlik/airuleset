@@ -30,6 +30,10 @@
         [
           "dante-asio",
           "fohmixer"
+        ],
+        [
+          "fohmixer",
+          "iemmixer"
         ]
       ],
       "topics": {
@@ -39,7 +43,8 @@
         "dante-stack|iemmixer": "the shared Dante crates and dantesync: a Dante bug goes to dante-stack, iemmixer only moves the stack version",
         "camera-box|dante-stack": "dantesync only: new versions and clock faults",
         "dante-stack|fohmixer": "the Dante side of the FOH PC: clock, devices, a Dante bug seen from fohmixer",
-        "dante-asio|fohmixer": "the shared FOH PC: who holds the audio devices, CPU pinning, restarts of Ableton"
+        "dante-asio|fohmixer": "the shared FOH PC: who holds the audio devices, CPU pinning, restarts of Ableton",
+        "fohmixer|iemmixer": "band lineups and channel names shared by the two mixers; a change in one mixer that affects the other"
       }
     }
   }
