@@ -696,9 +696,7 @@ def check_old_checkout(account, spec, run):
                   if h["name"] == spec["host"] and h.get("user") == "newlevel"), None)
     if entry is None:
         return True, "no newlevel account on %s" % spec["host"]
-    prefix, _why = cli_remote._ssh_prefix(entry, True)
-    if prefix is None:
-        return False, "%s has no pinned ssh identity" % entry["name"]
+    prefix, _why = cli_remote._ssh_prefix(entry, False)     # dev2 logs in by password
     repos = [spec["repo"]] + list(spec.get("extra_repos") or [])
     names = " ".join(shlex.quote(r.split("/", 1)[1]) for r in repos)
     cmd = 'for d in %s; do [ ! -e "$HOME/devel/$d" ] || echo "$d"; done' % names
