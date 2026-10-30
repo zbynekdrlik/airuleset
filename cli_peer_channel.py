@@ -55,6 +55,7 @@ MOUNT_UNIT = "run-claude\\x2dpeers.mount"          # systemd-escape -p --suffix=
 MOUNT_UNIT_PATH = "/etc/systemd/system/" + MOUNT_UNIT
 TMPFILES_PATH = "/etc/tmpfiles.d/50-airuleset-peer-channel.conf"
 POLICY_PATH = "/etc/claude-code/managed-settings.d/50-airuleset-peer-channel.json"
+GITHUB_OWNER = "zbynekdrlik"
 SNAPSHOT_DIR = peer_channel.SNAPSHOT_DIR
 SNAPSHOT_LINKS = os.path.join(SNAPSHOT_DIR, peer_channel.LINKS_FILE)
 SNAPSHOT_REGISTRY = os.path.join(SNAPSHOT_DIR, peer_channel.REGISTRY_FILE)
@@ -132,6 +133,23 @@ def accounts_for_host(host, links_doc=None, registry=None):
             if name in projects:
                 accts.add(projects[name]["account"])
     return sorted(a for a in accts if not bootstrap.is_pending(a))
+
+
+def peer_repos(account, links_doc=None, registry=None):
+    """#1270: the sorted GitHub repos of the projects linked to ``account``'s
+    projects, on any host. A project with no repo (``no-git``) has none."""
+    links_doc = load_links() if links_doc is None else links_doc
+    registry = load_registry() if registry is None else registry
+    repos = set()
+    for host in links_doc.get("hosts", {}):
+        projects = peer_channel.host_projects(registry, host)
+        own = {n for n, p in projects.items() if p["account"] == account}
+        for name in own:
+            for other in peer_channel.linked_to(peer_channel.host_links(links_doc, host), name):
+                row = projects.get(other)
+                if row and row["account"] != account and "no-git" not in row.get("overrides", ()):
+                    repos.add("%s/%s" % (GITHUB_OWNER, other))
+    return sorted(repos)
 
 
 def this_host():

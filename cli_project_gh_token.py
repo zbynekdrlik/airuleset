@@ -428,46 +428,66 @@ def _fail(account, repo, error, now, dry_run, directory):
     return 1
 
 
-def mint_airuleset(account, repo, installation, jwt, remote, now, *,
-                   urlopen=None, run=None):
-    """#1199: mint + deliver the issues-only airuleset token from the SAME
-    installation. Returns ``(rc, record)``; the record is token-free.
-    airuleset missing from the installation (HTTP 404/422, or a project repo
-    under another owner) is ONE loud SKIP line with rc 0: it is an owner
-    action, never a failure of the project token. Any other failure is loud
-    and rc 1."""
-    owner = AIRULESET_REPO.split("/", 1)[0]
+def mint_issues_token(account, repo, installation, jwt, remote, now, *,
+                      target=AIRULESET_REPO, urlopen=None, run=None):
+    """#1199: mint + deliver an issues-only token for ``target`` (airuleset, or
+    #1270 a linked peer's repo) from the SAME installation. Returns ``(rc,
+    record)``; the record is token-free. ``target`` missing from the
+    installation (HTTP 404/422, or a project repo under another owner) is ONE
+    loud SKIP line with rc 0: it is an owner action, never a failure of the
+    project token. Any other failure is loud and rc 1."""
+    owner = target.split("/", 1)[0]
+    label = target.split("/", 1)[1]
     settings = INSTALLATION_SETTINGS_URL % installation
     if repo.split("/", 1)[0].lower() != owner:
         why = ("%s is not in the App installation (the project repo %s is "
-               "under another owner)" % (AIRULESET_REPO, repo))
+               "under another owner)" % (target, repo))
         status = None
     else:
         try:
-            minted = mint_token(installation, AIRULESET_REPO, jwt,
+            minted = mint_token(installation, target, jwt,
                                 permissions=AIRULESET_PERMISSIONS,
                                 urlopen=urlopen)
-            deliver(remote, AIRULESET_REPO, minted["token"],
+            deliver(remote, target, minted["token"],
                     minted["expires_at"], run=run, primary=False)
         except MintError as e:
             if e.status not in (404, 422):
-                print("project-gh-token: %s: FAILED airuleset issues token — %s"
-                      % (account, e), file=sys.stderr)
+                print("project-gh-token: %s: FAILED %s issues token — %s"
+                      % (account, label, e), file=sys.stderr)
                 return 1, {"ok": False, "at": _iso(now), "error": str(e)}
             status = e.status
             why = ("%s is not in the App installation, or the App lacks Issues: "
-                   "Read & write (%s)" % (AIRULESET_REPO, e))
+                   "Read & write (%s)" % (target, e))
         else:
-            print("project-gh-token: %s: airuleset issues token delivered to %s, "
-                  "expires %s" % (account, remote["name"], minted["expires_at"]))
+            print("project-gh-token: %s: %s issues token delivered to %s, "
+                  "expires %s" % (account, label, remote["name"], minted["expires_at"]))
             return 0, {"ok": True, "expires_at": minted["expires_at"],
                        "minted_at": _iso(now)}
-    why += (" — OWNER ACTION at %s: add airuleset under Repository access, and "
-            "grant the App Issues: Read & write if it asks" % settings)
-    print("project-gh-token: %s: SKIPPED the airuleset issues token — %s (#1199)"
-          % (account, why), file=sys.stderr)
+    why += (" — OWNER ACTION at %s: add %s under Repository access, and "
+            "grant the App Issues: Read & write if it asks" % (settings, label))
+    print("project-gh-token: %s: SKIPPED the %s issues token — %s (#1199)"
+          % (account, label, why), file=sys.stderr)
     return 0, {"ok": False, "skipped": True, "at": _iso(now), "error": why,
                "status": status}
+
+
+def mint_peer_tokens(account, repo, installation, jwt, remote, now, *, urlopen=None, run=None):
+    """#1270: an issues-only token per linked peer repo, so a session can file a
+    ticket on the project it talks to. One failure never stops the others."""
+    import cli_peer_channel
+    rc, records = 0, {}
+    for target in cli_peer_channel.peer_repos(account):
+        try:
+            one, records[target] = mint_issues_token(
+                account, repo, installation, jwt, remote, now,
+                target=target, urlopen=urlopen, run=run)
+        except Exception as e:  # noqa: BLE001 — the project token is already live
+            print("project-gh-token: %s: FAILED %s issues token — unexpected %s"
+                  % (account, target, type(e).__name__), file=sys.stderr)
+            one, records[target] = 1, {"ok": False, "at": _iso(now),
+                                       "error": "unexpected %s" % type(e).__name__}
+        rc = rc or one
+    return rc, records
 
 
 def mint_account(account, *, key_path=None, dry_run=False, now=None, run=None,
@@ -529,21 +549,23 @@ def mint_account(account, *, key_path=None, dry_run=False, now=None, run=None,
           "expires %s" % (account, repo, installation, remote["name"],
                           minted["expires_at"]))
     try:
-        air_rc, air = mint_airuleset(account, repo, installation, jwt, remote,
-                                     now, urlopen=urlopen, run=run)
+        air_rc, air = mint_issues_token(account, repo, installation, jwt, remote,
+                                        now, urlopen=urlopen, run=run)
     except Exception as e:  # noqa: BLE001 — the project token is already live
         print("project-gh-token: %s: FAILED airuleset issues token — unexpected "
               "%s" % (account, type(e).__name__), file=sys.stderr)
         air_rc, air = 1, {"ok": False, "at": _iso(now),
                           "error": "unexpected %s" % type(e).__name__}
+    peer_rc, peers = mint_peer_tokens(account, repo, installation, jwt, remote, now,
+                                      urlopen=urlopen, run=run)
     _write_state(account, {"ok": True, "account": account, "repo": repo,
                            "scope": [repo] + extras, "extra_skipped": skipped,
                            "installation_id": installation,
                            "expires_at": minted["expires_at"],
                            "minted_at": _iso(now), "target": remote["name"],
-                           "airuleset": air},
+                           "airuleset": air, "peers": peers},
                  directory)
-    return air_rc
+    return air_rc or peer_rc
 
 
 # --------------------------------------------------------------------------- #

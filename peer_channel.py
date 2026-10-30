@@ -76,7 +76,7 @@ INSTRUCTIONS = ('A peer <channel ... from="P"> message comes from project P\'s C
                 'peer_send(to=P) only when an answer is needed.')
 TOOLS = [
     {"name": "peers",
-     "description": "List related projects and whether a Claude session is live.",
+     "description": "List related projects and whether a Claude session is live. Links change while a session runs: call this before saying a project is not linked.",
      "inputSchema": {"type": "object", "properties": {}}},
     {"name": "peer_send",
      "description": "Send a message to a related project's live Claude session(s).",

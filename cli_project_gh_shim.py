@@ -12,41 +12,46 @@ _SHIM = r"""#!/usr/bin/env bash
 # (gh -> gh-app-shim -> the real gh, cli_gh_rate #1087). The controller
 # minter (airuleset.py project-gh-token) delivers a 1-hour token scoped to this
 # account's repo into ~/.config/gh-app-tokens/primary every 30 minutes, and
-# (#1199) an issues-only token for zbynekdrlik/airuleset beside it.
+# (#1199, #1270) an issues-only token beside it for zbynekdrlik/airuleset and
+# for each linked peer's repo.
 set -u
 _dir="$HOME/.config/gh-app-tokens"
-# #1199: a call that targets zbynekdrlik/airuleset (a -R/--repo value, or a
-# `gh api` path under repos/zbynekdrlik/airuleset, or a POSITIONAL airuleset
-# issue/PR URL) uses the issues-only airuleset token; everything else uses
+# #1199: a call that targets zbynekdrlik/airuleset, or (#1270) a repo with a
+# token file here (a -R/--repo value, a `gh api` path under repos/<repo>, or a
+# POSITIONAL issue/PR URL), uses that issues-only token; everything else uses
 # primary. Only a -R/--repo VALUE, an api path or a positional URL decides,
 # so title/body text (a URL included) never routes.
-_is_air() {
-  local v="${1,,}"
+_route() {
+  local v="${1,,}" n
   v="${v#https://}"; v="${v#http://}"; v="${v#www.}"; v="${v#github.com/}"
   v="${v%/}"; v="${v%.git}"
-  [ "$v" = "zbynekdrlik/airuleset" ]
+  case "$v" in zbynekdrlik/*) n="${v#zbynekdrlik/}" ;; *) return 0 ;; esac
+  case "$n" in ""|.*|*[!a-z0-9._-]*) return 0 ;; esac
+  if [ "$n" = airuleset ]; then _tok="zbynekdrlik__airuleset"
+  elif [ -r "$_dir/zbynekdrlik__$n" ]; then _tok="zbynekdrlik__$n"; fi
 }
 _tok="primary"
 _prev=""
 _sub="${1:-}"
 for _a in "$@"; do
-  case "$_prev" in -R|--repo) _is_air "$_a" && _tok="zbynekdrlik__airuleset" ;; esac
+  case "$_prev" in -R|--repo) _route "$_a" ;; esac
   case "$_a" in
-    --repo=*) _is_air "${_a#--repo=}" && _tok="zbynekdrlik__airuleset" ;;
-    -R?*) _is_air "${_a#-R}" && _tok="zbynekdrlik__airuleset" ;;
+    --repo=*) _route "${_a#--repo=}" ;;
+    -R?*) _route "${_a#-R}" ;;
   esac
   case "$_prev" in
     -*) ;;    # a flag's value (--body/--title <url>) never routes
     *) case "${_a,,}" in
-         https://github.com/zbynekdrlik/airuleset/issues/*|https://github.com/zbynekdrlik/airuleset/pull/*)
-           _tok="zbynekdrlik__airuleset" ;;
+         https://github.com/zbynekdrlik/*/issues/*|https://github.com/zbynekdrlik/*/pull/*)
+           _p="${_a,,}"; _p="${_p#https://github.com/zbynekdrlik/}"
+           _route "zbynekdrlik/${_p%%/*}" ;;
        esac ;;
   esac
   if [ "$_sub" = api ]; then
     _p="${_a,,}"; _p="${_p#https://api.github.com}"; _p="${_p#/}"
     case "$_p" in
-      repos/zbynekdrlik/airuleset|repos/zbynekdrlik/airuleset/*|"repos/zbynekdrlik/airuleset?"*)
-        _tok="zbynekdrlik__airuleset" ;;
+      repos/zbynekdrlik/*)
+        _p="${_p#repos/zbynekdrlik/}"; _p="${_p%%/*}"; _route "zbynekdrlik/${_p%%\?*}" ;;
     esac
   fi
   _prev="$_a"
