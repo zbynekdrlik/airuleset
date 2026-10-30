@@ -72,7 +72,7 @@ _NEVER_PROJECT_ACCOUNTS = frozenset({"newlevel", "root", "airuleset",
 _ALLOWED_KEYS = frozenset({
     "host", "sudo", "sudo_reason", "sudo_commands",
     "secrets", "webterm_sessions", "system_packages", "repo",
-    "project_dir", "tmux_session", "github_app", "repo_secrets", "tools", "code_only", "handover",
+    "project_dir", "tmux_session", "github_app", "repo_secrets", "tools", "code_only", "handover", "extra_repos",
 })
 
 # The defaults every declaration inherits. They are the SAFE direction: no
@@ -239,6 +239,7 @@ SERVICE_ACCOUNTS = {
         "host": "dev1",
         "sudo": False,
         "repo": "zbynekdrlik/dante-stack",   # public: iemmixer's CI fetches it keyless
+        "extra_repos": ["zbynekdrlik/dantesync"],   # the one Dante expert keeps it too
         "github_app": True, "repo_secrets": [],
         "tools": ["rust-toolchain:1.98.1", "pipx:netaudio"],
         "project_dir": "devel/dante-stack",
@@ -267,6 +268,7 @@ SERVICE_ACCOUNTS = {
         "host": "dev1",
         "sudo": False,
         "repo": "zbynekdrlik/iemmixer",
+        "extra_repos": ["zbynekdrlik/iemmixer-ops"],   # private site data, its own repo
         "github_app": True, "repo_secrets": ["DENYLIST"],
         "tools": ["rust-toolchain:1.98.1", "rust-component:llvm-tools-preview",
                   "rust-target:wasm32-unknown-unknown", "playwright:1.58.2/chromium",
@@ -400,6 +402,9 @@ def validate_account(account, raw):
                                      and not handover.startswith("/")
                                      and ".." not in handover.split("/")):
         errs.append("handover must be a relative .md path in the repo")
+    for extra in raw.get("extra_repos") or []:
+        if not (isinstance(extra, str) and re.fullmatch(r"[\w.-]+/[\w.-]+", extra)):
+            errs.append("extra_repos: %r is not owner/name" % (extra,))
     for key in sorted(set(raw) - _ALLOWED_KEYS):
         errs.append("unknown declaration key %r" % key)
     spec = copy.deepcopy(_DEFAULTS)

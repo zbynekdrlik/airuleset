@@ -211,15 +211,16 @@ def find_installation(repo, jwt, *, urlopen=None):
     return data["id"]
 
 
-def mint_token(installation_id, repo, jwt, *, permissions=None, urlopen=None):
+def mint_token(installation_id, repo, jwt, *, permissions=None, extra=(), urlopen=None):
     """A 1-hour installation token scoped to exactly ``repo``:
     ``{"token", "expires_at"}``. Refuses a malformed token or a token whose
     reported repository scope is not exactly this repo. With ``permissions``
     (#1199) the token is down-scoped to them and GitHub's reported
     permissions must equal them exactly."""
-    token_file_name(repo)                     # validates owner/name
-    name = repo.split("/", 1)[1]
-    body = {"repositories": [name]}
+    wanted = [repo] + list(extra)             # #1270: declared extra_repos
+    for r in wanted:
+        token_file_name(r)                    # validates owner/name
+    body = {"repositories": [r.split("/", 1)[1] for r in wanted]}
     if permissions is not None:
         body["permissions"] = dict(permissions)
     status, data = _api("POST", "/app/installations/%d/access_tokens"
@@ -234,7 +235,7 @@ def mint_token(installation_id, repo, jwt, *, permissions=None, urlopen=None):
         raise MintError("mint for %s returned a malformed expires_at" % repo)
     scope = sorted(str(r.get("full_name", "")).lower()
                    for r in data.get("repositories") or [] if isinstance(r, dict))
-    if scope != [repo.lower()]:
+    if scope != sorted(r.lower() for r in wanted):
         raise MintError("mint for %s returned a token scoped to %s, not to "
                         "exactly %s — refusing to deliver it"
                         % (repo, scope or "all repositories", repo))
@@ -493,7 +494,8 @@ def mint_account(account, *, key_path=None, dry_run=False, now=None, run=None,
                      token_file_name(repo), AIRULESET_REPO, TOKEN_DIR_REL,
                      token_file_name(AIRULESET_REPO)))
             return 0
-        minted = mint_token(installation, repo, jwt, urlopen=urlopen)
+        minted = mint_token(installation, repo, jwt, urlopen=urlopen,
+                            extra=spec.get("extra_repos") or ())
         deliver(remote, repo, minted["token"], minted["expires_at"], run=run)
     except MintError as e:
         return _fail(account, repo, str(e), now, dry_run, directory)
@@ -810,8 +812,8 @@ def verify_account(account, *, run=None):
     import cli_account_bootstrap as bootstrap
     import cli_remote
     run = run or subprocess.run
-    repo = bootstrap.account_spec(account).get("repo") if (
-        account in bootstrap.SERVICE_ACCOUNTS) else None
+    spec = bootstrap.account_spec(account) if account in bootstrap.SERVICE_ACCOUNTS else {}
+    repo = spec.get("repo")
     try:
         token_file_name(repo)
         remote = account_target(account)
@@ -836,7 +838,8 @@ def verify_account(account, *, run=None):
     primary = sections.get("primary", ([], None))
     got = [ln.strip().lower() for ln in primary[0] if ln.strip()]
     repo_ok = (r.returncode == 0 and gh_path.endswith("/.local/bin/gh")
-               and primary[1] == "0" and got == [repo.lower()])
+               and primary[1] == "0"
+               and sorted(got) == sorted(r.lower() for r in [repo] + (spec.get("extra_repos") or [])))
     air_ok, air_why = airuleset_write_verdict(sections)
     if repo_ok and air_ok:
         print("project-gh-token verify: %s OK — gh = %s, the token sees exactly "
