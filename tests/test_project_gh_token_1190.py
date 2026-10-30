@@ -177,6 +177,10 @@ class _Base(unittest.TestCase):
         self.home = self.base / "acct-home"
         self.home.mkdir()
         self.state = self.base / "state"
+        # the live peer links would add mints: their own suite is #1270's
+        patcher = mock.patch("cli_peer_channel.peer_repos", return_value=[])
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def mint(self, account="fohmixer", gh=None, ssh=None, **kw):
         gh = gh if gh is not None else FakeGitHub()

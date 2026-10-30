@@ -2,7 +2,6 @@
 mozne? ... to sa mi nie uplne zda"): a project account files issues on the repos
 of its linked peers. An issues-only token per peer repo, routed by gh-app-shim;
 contents stay on the account's own repo."""
-import os
 import shutil
 import stat
 import subprocess
@@ -131,10 +130,11 @@ class TestShimRouting(unittest.TestCase):
                          "seen tok-primary")
 
 
-class TestInstructions(unittest.TestCase):
+class TestPeersTool(unittest.TestCase):
 
     def test_a_session_checks_peers_before_saying_not_linked(self):
-        self.assertIn("call peers", peer_channel.INSTRUCTIONS)
+        tool = next(t for t in peer_channel.TOOLS if t["name"] == "peers")
+        self.assertIn("before saying a project is not linked", tool["description"])
 
 
 if __name__ == "__main__":
