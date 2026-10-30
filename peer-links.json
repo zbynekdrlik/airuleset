@@ -1,16 +1,22 @@
 {
-  "_doc": "Peer channel allowlist (#1266). Per host: undirected pairs of projects-registry.json project names whose Claude sessions may message each other over the peer@airuleset channel. A pair not listed here is refused by both ends. Accounts named by a link get the shared-dir ACL, the plugin and the launcher --channels flag on that host. The owner names the links.",
+  "_doc": "Peer channel allowlist (#1266). Per host: undirected pairs of projects-registry.json project names whose Claude sessions may message each other over the peer@airuleset channel, each with a required topic (#1270): the one subject that pair talks about, told to both sessions at every start. A pair not listed here is refused by both ends. Accounts named by a link get the shared-dir ACL, the plugin and the launcher --channels flag on that host. The owner names the links.",
   "hosts": {
     "dev1": {
       "links": [
-        [
-          "songplayer",
-          "wall-bridge"
-        ],
-        [
-          "camera-box",
-          "songplayer"
-        ]
+        {
+          "pair": [
+            "songplayer",
+            "wall-bridge"
+          ],
+          "topic": "the SNV LED wall on the Resolume PC: Arena, Spout outputs, starting a scene, what SongPlayer does to Arena"
+        },
+        {
+          "pair": [
+            "camera-box",
+            "songplayer"
+          ],
+          "topic": "the NDI SP-program sender contract, genlock and the burn-id chain, the rig lease for deploys"
+        }
       ]
     }
   }
