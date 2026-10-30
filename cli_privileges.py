@@ -184,7 +184,7 @@ PRIVILEGES: List[Privilege] = [
         kind=KIND_SSH_KEY,
         local_path="~/.secrets/webterm_marek_ed25519",
         reach="dedicated webterm ssh key for marek's OBSERVE lane tabs on the "
-              "controller (montalu/miva/dev/gk/forestshop targets — never the "
+              "controller (montalu/miva/dev/gk/forestshop + project accounts — never the "
               "fleet gatekeeper key)",
         rotation="F4b DONE: generated on the controller (2026-09-06), "
                  "distributed with forced-command entries.",
