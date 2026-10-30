@@ -583,7 +583,7 @@ REMOTE_HOSTS += [
         ("songplayer", "dev1", "100.104.8.125", False),    # #1267, live 29.10.
         ("dante-stack", "dev1", "100.104.8.125", False),   # #1270, live 30.10.
         ("dante-asio", "dev1", "100.104.8.125", False),    # #1270, live 30.10.
-        ("iemmixer", "dev1", "100.104.8.125", True),       # #1270
+        ("iemmixer", "dev1", "100.104.8.125", False),      # #1270, live 30.10.
     )
 ]
 
