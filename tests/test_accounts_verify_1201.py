@@ -141,6 +141,8 @@ class _World:
 
     def run(self, argv, **kw):
         """The fake ssh: execute the probe command (``bash -lc <probe>``)."""
+        if argv[-1].startswith("for d in "):    # #1270 old-checkout: nothing left
+            return subprocess.CompletedProcess(argv, 0, "", "")
         self.calls.append(argv)
         if self.probe_rc is not None:
             return subprocess.CompletedProcess(argv, self.probe_rc, "", "ssh: refused")
