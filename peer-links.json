@@ -16,6 +16,41 @@
             "songplayer"
           ],
           "topic": "the NDI SP-program sender contract, genlock and the burn-id chain, the rig lease for deploys"
+        },
+        {
+          "pair": [
+            "dante-stack",
+            "dante-asio"
+          ],
+          "topic": "the shared Dante crates: a Dante bug in dante-asio goes here, dante-asio only moves the stack version"
+        },
+        {
+          "pair": [
+            "dante-stack",
+            "iemmixer"
+          ],
+          "topic": "the shared Dante crates and dantesync: a Dante bug goes to dante-stack, iemmixer only moves the stack version"
+        },
+        {
+          "pair": [
+            "dante-stack",
+            "camera-box"
+          ],
+          "topic": "dantesync only: new versions and clock faults"
+        },
+        {
+          "pair": [
+            "dante-stack",
+            "fohmixer"
+          ],
+          "topic": "the Dante side of the FOH PC: clock, devices, a Dante bug seen from fohmixer"
+        },
+        {
+          "pair": [
+            "dante-asio",
+            "fohmixer"
+          ],
+          "topic": "the shared FOH PC: who holds the audio devices, CPU pinning, restarts of Ableton"
         }
       ]
     }

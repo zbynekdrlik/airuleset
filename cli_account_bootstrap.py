@@ -232,6 +232,52 @@ SERVICE_ACCOUNTS = {
             for human in ("zbynek", "marek")
         },
     },
+    # #1270 (owner 30.10.): the Dante family. dante-stack is the one expert for
+    # all Dante code; dante-asio its first consumer (created outside airuleset
+    # by the iemmixer session); iemmixer migrates out of `newlevel`.
+    "dante-stack": {
+        "host": "dev1",
+        "sudo": False,
+        "repo": "zbynekdrlik/dante-stack",   # public: iemmixer's CI fetches it keyless
+        "github_app": True, "repo_secrets": [],
+        "tools": ["rust-toolchain:1.98.1", "pipx:netaudio"],
+        "project_dir": "devel/dante-stack",
+        "tmux_session": "dante-stack",
+        "handover": "docs/HANDOVER.md",
+        "webterm_sessions": {
+            human: {"preferred": "dante-stack", "start_dir_chain": ["devel/dante-stack"]}
+            for human in ("zbynek", "marek")
+        },
+    },
+    "dante-asio": {
+        "host": "dev1",
+        "sudo": False,
+        "repo": "zbynekdrlik/dante-asio",
+        "github_app": True, "repo_secrets": [],
+        "tools": ["rust-toolchain:1.98.1", "pipx:netaudio"],
+        "project_dir": "devel/dante-asio",
+        "tmux_session": "dante-asio",
+        "handover": "docs/HANDOVER.md",
+        "webterm_sessions": {
+            human: {"preferred": "dante-asio", "start_dir_chain": ["devel/dante-asio"]}
+            for human in ("zbynek", "marek")
+        },
+    },
+    "iemmixer": {
+        "host": "dev1",
+        "sudo": False,
+        "repo": "zbynekdrlik/iemmixer",
+        "github_app": True, "repo_secrets": ["DENYLIST"],
+        "tools": ["rust-toolchain:1.98.1", "rust-component:llvm-tools-preview",
+                  "rust-target:wasm32-unknown-unknown", "playwright:1.58.2/chromium",
+                  "pipx:netaudio"],
+        "project_dir": "devel/iemmixer",
+        "tmux_session": "iemmixer",
+        "webterm_sessions": {
+            human: {"preferred": "iemmixer", "start_dir_chain": ["devel/iemmixer"]}
+            for human in ("zbynek", "marek")
+        },
+    },
     # #1267 (migrate-on-touch): SongPlayer, out of `newlevel`. Pins from its CI
     # (stable + wasm32) and e2e lockfile; no ruff pin: CI's 0.5.7 would clash
     # with fohmixer's on the box's one shared venv (open question on #1267).
