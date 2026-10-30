@@ -251,7 +251,7 @@ class TestTabLayoutRoute(unittest.TestCase):
 
 def _inv(n=NTABS):
     return [{"id": "s%d" % i, "label": "s%d" % i, "kind": "owner", "local": False,
-             "host": "10.0.0.%d" % (i + 1), "user": "u"} for i in range(n)]
+             "host": "10.0.0.%d" % (i + 1), "user": "s%d" % i} for i in range(n)]
 
 
 def _render(n=NTABS):
