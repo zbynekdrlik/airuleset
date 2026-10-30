@@ -52,11 +52,12 @@ class TestOwnerTabs(unittest.TestCase):
         self.assertEqual(aliases[i + 1:i + 3], ["wall-bri", "songplay"])
 
     def test_no_other_dashboard_gets_them(self):
+        # owner 30.10. (#1267): marek gets them too -> test_webterm_marek_project_tabs_1267
         for human, tabs in w.WEBTERM_DASHBOARD_TABS.items():
-            if human != "zbynek":
+            if human not in ("zbynek", "marek"):
                 for acct in NEW:
                     self.assertNotIn(acct, tabs, human)
-        for inv in (profiles.marek_inventory, profiles.david_inventory,
+        for inv in (profiles.david_inventory,
                     profiles.dominika_inventory, profiles.timo_inventory):
             for acct in NEW:
                 self.assertEqual(_tab(inv(), acct), [], inv.__name__)
@@ -75,7 +76,7 @@ class TestDriftLocks(unittest.TestCase):
     def test_tabs_match_the_declaration(self):
         for acct in NEW:
             spec = bootstrap.account_spec(acct)
-            self.assertEqual(set(spec["webterm_sessions"]), {"zbynek"}, acct)
+            self.assertEqual(set(spec["webterm_sessions"]), {"zbynek", "marek"}, acct)
             (e,) = _tab(profiles.zbynek_inventory(), acct)
             sess = spec["webterm_sessions"]["zbynek"]
             self.assertEqual(e["preferred"], sess["preferred"], acct)
@@ -87,8 +88,8 @@ class TestDriftLocks(unittest.TestCase):
         for acct in NEW:
             forced = [k for k in bootstrap.desired_keys_for_service_account(acct)
                       if k.startswith("restrict,")]
-            self.assertEqual(len(forced), 1, acct)
-            self.assertIn(blob, forced[0], acct)
+            self.assertEqual(len(forced), 2, acct)          # + marek (owner 30.10.)
+            self.assertTrue(any(blob in k for k in forced), acct)
 
 
 if __name__ == "__main__":

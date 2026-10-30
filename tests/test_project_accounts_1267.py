@@ -65,8 +65,9 @@ class TestDeclaration(unittest.TestCase):
             self.assertEqual(spec["repo"], "zbynekdrlik/" + acct)
             self.assertEqual(spec["project_dir"], "devel/" + acct)
             self.assertEqual(spec["tmux_session"], acct)
-            self.assertEqual(spec["webterm_sessions"], {
-                "zbynek": {"preferred": acct, "start_dir_chain": ["devel/" + acct]}})
+            self.assertEqual(spec["webterm_sessions"], {   # owner 30.10.: marek too
+                h: {"preferred": acct, "start_dir_chain": ["devel/" + acct]}
+                for h in ("zbynek", "marek")})
             # declared empty: `accounts verify` needs the allow-list declared
             self.assertEqual(spec["repo_secrets"], [], acct)
             self.assertNotIn("code_only", spec, acct)
