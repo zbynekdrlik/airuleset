@@ -45,6 +45,13 @@ class TestOldCheckout(unittest.TestCase):
     def test_a_failed_ssh_is_no_pass(self):
         self.assertFalse(verify.check_old_checkout("dante-stack", SPEC, self._run(rc=255))[0])
 
+    def test_dev2_with_no_pinned_identity_is_checked_not_failed(self):
+        # varos read "dev2 has no pinned ssh identity" live: newlevel@dev2 logs in by password
+        spec = {"host": "dev2", "repo": "zbynekdrlik/varos"}
+        ok, detail = verify.check_old_checkout("varos", spec, self._run())
+        self.assertTrue(ok, detail)
+        self.assertIn("newlevel@", " ".join(self.calls[0]))
+
     def test_it_is_a_check(self):
         self.assertIn("old-checkout", verify.CHECKS)
 
