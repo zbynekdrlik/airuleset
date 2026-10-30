@@ -57,12 +57,13 @@ REGISTRY_FILE = "projects-registry.json"
 LINKS_FILE = "peer-links.json"
 CHANNEL_ARG = "plugin:peer@airuleset"
 LOG_MAX_BYTES = 5 * 1024 * 1024
-MAX_TEXT = 4000
+MAX_TEXT = 100_000                  # #1269: one long reply stays one message (was 4000)
 MAX_WIRE = 6 * MAX_TEXT + 1024      # a JSON \uXXXX escape is 6 bytes per char
 IO_TIMEOUT_S = 5.0                  # one OVERALL deadline per connection
 SEND_BUDGET_S = 12.0                # all sockets of one peer_send / peers call
 MAX_CONNS = 8
 RATE_MAX = 20
+PENDING_MAX = 50                    # #1269: messages held before the MCP handshake ends
 RATE_WINDOW_S = 600
 PROJECT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 SOCK_NAME_RE = re.compile(r"^([A-Za-z0-9][A-Za-z0-9_-]{0,63})\.(\d{1,10})\.sock$")
@@ -614,7 +615,7 @@ class McpServer:
             if self.ready:
                 self._write_locked(msg)
             else:
-                self.pending.append(msg)
+                self.pending = (self.pending + [msg])[-PENDING_MAX:]
 
     def handle(self, msg):
         if not isinstance(msg, dict):

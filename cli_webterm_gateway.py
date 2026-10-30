@@ -68,7 +68,9 @@ import argparse
 import asyncio
 import hmac
 import ipaddress
+import json
 import os
+import re
 import secrets
 import socket
 import string
@@ -94,6 +96,13 @@ RL_WINDOW_S = 60
 # Caps against a header/body flood on an unauthenticated socket.
 MAX_HEAD_BYTES = 64 * 1024
 MAX_LOGIN_BODY = 8 * 1024
+# #1269: the per-dashboard tab layout (order + hidden set, by session id) the
+# owner arranges in the bar. Stored next to index.html, so each lane has its own.
+TAB_LAYOUT_FILE = "tab-layout.json"
+TAB_LAYOUT_MARK = b"/*wt-tab-layout*/"     # the template's `WT_TAB_LAYOUT = /*wt-tab-layout*/null`
+MAX_TAB_LAYOUT_BODY = 8 * 1024
+TAB_LAYOUT_MAX_IDS = 200
+_TAB_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._@-]{0,63}$")
 RELAY_CHUNK = 64 * 1024
 # Slowloris guard (#584 review): bound how long an UNauthenticated peer may take
 # to send its request head / login body. A peer that dribbles bytes forever (or
@@ -529,6 +538,29 @@ def parse_login_form(body_bytes):
     return (parsed.get("username", [""])[0], parsed.get("password", [""])[0])
 
 
+def parse_tab_layout(body_bytes):
+    """#1269: a validated `{"order": [...], "hidden": [...]}` from a JSON body,
+    or None. Only those two keys; each a list of distinct session ids matching
+    `_TAB_ID_RE`, at most TAB_LAYOUT_MAX_IDS. Never raises."""
+    try:
+        data = json.loads(body_bytes)
+    except Exception:
+        return None
+    if not isinstance(data, dict) or set(data) - {"order", "hidden"}:
+        return None
+    out = {}
+    for key in ("order", "hidden"):
+        ids = data.get(key, [])
+        if not isinstance(ids, list) or len(ids) > TAB_LAYOUT_MAX_IDS:
+            return None
+        if not all(isinstance(i, str) and _TAB_ID_RE.fullmatch(i) for i in ids):
+            return None
+        if len(set(ids)) != len(ids):
+            return None
+        out[key] = ids
+    return out
+
+
 # --------------------------------------------------------------------------- #
 # The gateway — asyncio connection handler + transparent relay.
 # --------------------------------------------------------------------------- #
@@ -613,9 +645,22 @@ class Gateway:
 
     def _dashboard_bytes(self):
         try:
-            return Path(self.dash_index).read_bytes()
+            page = Path(self.dash_index).read_bytes()
         except OSError:
             return b"<!DOCTYPE html><p>dashboard not generated yet</p>"
+        # #1269: inline the stored tab layout, so the bar is arranged before the
+        # first paint. Validated ids only (charset-limited), never raw file bytes.
+        layout = self._tab_layout()
+        if layout is None:
+            return page
+        return page.replace(TAB_LAYOUT_MARK + b"null",
+                            TAB_LAYOUT_MARK + json.dumps(layout).encode("ascii"), 1)
+
+    def _tab_layout(self):
+        try:
+            return parse_tab_layout((self.dash_dir / TAB_LAYOUT_FILE).read_bytes())
+        except OSError:
+            return None
 
     def _is_proxy_path(self, target):
         """A request whose path belongs to ttyd (the base path or under it)."""
@@ -726,6 +771,9 @@ class Gateway:
         if path == "/u-status":
             await self._route_u_status(writer, headers)
             return
+        if path == "/tab-layout":
+            await self._route_tab_layout(reader, writer, method, headers)
+            return
         if self._is_proxy_path(target):
             await self._route_proxy(reader, writer, head, headers)
             return
@@ -830,6 +878,63 @@ class Gateway:
         await self._send(writer, http_response(
             "200 OK", body, extra_headers=["Cache-Control: no-store"],
             content_type="application/json; charset=utf-8"))
+
+    async def _route_tab_layout(self, reader, writer, method, headers):
+        # #1269: GET serves the stored layout (an absent or corrupt file reads as
+        # empty), POST replaces it. Auth-gated exactly like `/`; a POST is also
+        # same-origin JSON only (origin_allowed, the CSWSH check), so a foreign
+        # page can neither send it as a "simple" form nor from another origin.
+        if not self._authed(headers):
+            if self.trust_access_header:
+                await self._send(writer, self._access_denied())
+            else:
+                await self._send(writer, self._redirect("/login"))
+            return
+        path = self.dash_dir / TAB_LAYOUT_FILE
+        if method == "GET":
+            body = json.dumps(self._tab_layout() or {"order": [], "hidden": []})
+            await self._send(writer, http_response(
+                "200 OK", body, extra_headers=["Cache-Control: no-store"],
+                content_type="application/json; charset=utf-8"))
+            return
+        if method != "POST":
+            await self._send(writer, http_response("405 Method Not Allowed", "no"))
+            return
+        if not origin_allowed(headers, self.origins):
+            await self._send(writer, http_response("403 Forbidden", "cross-origin"))
+            return
+        ctype = (header_get(headers, "content-type") or "").split(";", 1)[0]
+        if ctype.strip().lower() != "application/json":
+            await self._send(writer, http_response("415 Unsupported Media Type", "json only"))
+            return
+        try:
+            length = int(header_get(headers, "content-length") or "0")
+        except ValueError:
+            length = -1
+        if length > MAX_TAB_LAYOUT_BODY:
+            await self._send(writer, http_response("413 Payload Too Large", "too large"))
+            return
+        layout = parse_tab_layout(
+            await self._read_body(reader, headers, MAX_TAB_LAYOUT_BODY))
+        if layout is None:
+            await self._send(writer, http_response("400 Bad Request", "bad layout"))
+            return
+        tmp = path.with_name(".%s.%d.tmp" % (TAB_LAYOUT_FILE, os.getpid()))
+        try:
+            fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump(layout, fh)
+            os.replace(str(tmp), str(path))
+        except OSError as e:
+            sys.stderr.write("webterm-gateway: tab layout write failed: %r\n" % e)
+            try:
+                tmp.unlink()
+            except OSError:
+                pass                                # never created / already gone
+            await self._send(writer, http_response("500 Internal Server Error", "write failed"))
+            return
+        await self._send(writer, http_response("204 No Content", b"",
+                                               content_type="text/plain"))
 
     def _u_status_body(self):
         """The current aggregate U JSON (bytes). When the feature is OFF (no

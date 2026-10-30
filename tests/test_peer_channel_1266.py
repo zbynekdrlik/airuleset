@@ -282,6 +282,14 @@ class TestDelivery(_Env):
         self.assertTrue(a.send("beta", "ok\x1b[31mred\x07\nline2")[0])
         self.assertEqual(b.delivered[-1][0], "ok[31mred\nline2")
 
+    def test_a_long_reply_is_one_message(self):
+        # #1269 owner (30.10.): songplayer split a 4000+ char answer into parts
+        a, b = self.peer("alpha"), self.peer("beta")
+        b.start_listener()
+        text = "stav bridge ľščťž " * 2000          # 36000 chars, non-ASCII escapes
+        self.assertTrue(a.send("beta", text)[0])
+        self.assertEqual(b.delivered[-1][0], text)
+
     def test_peers_lists_live_and_offline(self):
         a, b = self.peer("alpha"), self.peer("beta")
         ok, out = a.list_peers()
@@ -404,6 +412,16 @@ class TestMcp(unittest.TestCase):
         self.assertLess(len(res["instructions"]), 300)
         self.assertIn("not from the owner", res["instructions"])
         self.assertEqual([t["name"] for t in m[2]["result"]["tools"]], ["peers", "peer_send"])
+
+    def test_messages_before_initialized_are_bounded(self):
+        # #1269 review: at 100k chars per message the pre-handshake buffer is capped
+        srv, out = self._server()
+        for i in range(pc.PENDING_MAX + 10):
+            srv.channel_event("m%d" % i, {})
+        srv.handle({"jsonrpc": "2.0", "method": "notifications/initialized"})
+        got = [m["params"]["content"] for m in self._msgs(out)]
+        self.assertEqual(len(got), pc.PENDING_MAX)
+        self.assertEqual(got[-1], "m%d" % (pc.PENDING_MAX + 9))     # the newest are kept
 
     def test_unknown_protocol_falls_back(self):
         srv, out = self._server()
