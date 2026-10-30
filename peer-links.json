@@ -38,6 +38,10 @@
         [
           "dante-stack",
           "songplayer"
+        ],
+        [
+          "iemmixer",
+          "mikrotik"
         ]
       ],
       "topics": {
@@ -49,6 +53,7 @@
         "dante-stack|fohmixer": "the Dante side of the FOH PC: clock, devices, a Dante bug seen from fohmixer",
         "dante-asio|fohmixer": "the shared FOH PC: who holds the audio devices, CPU pinning, restarts of Ableton",
         "dante-stack|songplayer": "dantesync and genlock on the SongPlayer PCs, the ASIO output through Dante Virtual Soundcard: a Dante bug goes to dante-stack",
+        "iemmixer|mikrotik": "the SNV network under the IEM mixer: Dante VLAN 70, QoS, multicast, switch ports and link faults",
         "fohmixer|iemmixer": "band lineups and channel names shared by the two mixers; a change in one mixer that affects the other"
       }
     }

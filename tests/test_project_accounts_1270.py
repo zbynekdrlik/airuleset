@@ -63,6 +63,10 @@ class TestLinks(unittest.TestCase):
     def test_a_bug_goes_to_the_dante_session(self):
         self.assertIn("bug", self.links[frozenset(("dante-stack", "iemmixer"))])
 
+    def test_iemmixer_talks_to_mikrotik_about_the_network(self):
+        # owner 30.10.: "prepoj iemmixer s projektom mikrotik na dev1 newlevel"
+        self.assertIn("VLAN", self.links[frozenset(("iemmixer", "mikrotik"))])
+
     def test_songplayer_reports_dante_bugs_to_dante_stack(self):
         self.assertIn("Dante bug", self.links[frozenset(("dante-stack", "songplayer"))])
 

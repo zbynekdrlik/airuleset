@@ -34,6 +34,17 @@
     "account": "newlevel"
   },
   {
+    "name": "mikrotik",
+    "host": "dev1",
+    "path": "~/devel/mikrotik",
+    "branch_model": "2-branch",
+    "default_branch": "main",
+    "work_branch": "dev",
+    "overrides": ["no-git"],
+    "onboarded": "2026-03-20",
+    "account": "newlevel"
+  },
+  {
     "name": "dantesync",
     "host": "dev1",
     "path": "~/devel/dantesync",

@@ -47,7 +47,8 @@ LEGACY_FREEZE_DATE = "2026-09-29"
 # declared project account: the 24 `newlevel` rows + odoo-erp in `gatekeeper`).
 # It must EQUAL the live count (test-locked), so a migration lowers it in the
 # same change; raising it is a visible, reviewable edit that the freeze forbids.
-LEGACY_CEILING = 22
+# 23: #1270 owner order, mikrotik is an existing newlevel project, no new one.
+LEGACY_CEILING = 23
 
 # `--legacy-ok` must name the ticket that carries the migration bookkeeping:
 # `#N` or `owner/repo#N` (a bare number is ambiguous — refused).
