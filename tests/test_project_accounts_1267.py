@@ -198,14 +198,14 @@ class TestMinterSkipsPending(unittest.TestCase):
                 mock.patch.object(ci_sync, "run_after_mint", return_value=0):
             rc, minted, out = self._mint_all()
         self.assertEqual(rc, 0)
-        self.assertEqual(minted, ["fohmixer", "varos"])
+        self.assertEqual(minted, ["dante-asio", "dante-stack", "fohmixer", "varos"])
         for acct in NEW:
             self.assertIn("project-gh-token: %s: SKIPPED — pending" % acct, out)
 
     def test_a_live_account_is_minted_again(self):
         with mock.patch.object(ci_sync, "run_after_mint", return_value=0):
             rc, minted, out = self._mint_all()
-        self.assertEqual(minted, ["fohmixer", "songplayer", "varos", "wall-bridge"])
+        self.assertEqual(minted, ["dante-asio", "dante-stack", "fohmixer", "songplayer", "varos", "wall-bridge"])
         self.assertNotIn("wall-bridge: SKIPPED", out)
 
     def test_an_explicit_mint_is_never_skipped(self):
@@ -239,12 +239,13 @@ class TestPeerLinks(unittest.TestCase):
         # wall-bridge never reaches the root script's `account missing` exit 3
         with _pending():
             accts = cpc.accounts_for_host("dev1")
-        self.assertEqual(accts, ["fohmixer", "newlevel"])
+        self.assertEqual(accts, ["dante-asio", "dante-stack", "fohmixer", "newlevel"])
         self.assertNotIn("wall-bridge", cpc.render_root_script(accts))
 
     def test_wall_bridge_joins_once_live(self):
         self.assertEqual(cpc.accounts_for_host("dev1"),
-                         ["fohmixer", "newlevel", "songplayer", "wall-bridge"])
+                         ["dante-asio", "dante-stack", "fohmixer", "newlevel", "songplayer",
+                          "wall-bridge"])
 
 
 if __name__ == "__main__":

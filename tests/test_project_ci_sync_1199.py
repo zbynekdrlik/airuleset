@@ -512,7 +512,7 @@ class TestWiring(unittest.TestCase):
         with mock.patch.object(_sync(), "sync_account", return_value=0) as s:
             _sync().sync_all(run=lambda *a, **k: None)
         self.assertEqual([c.args[0] for c in s.call_args_list],
-                         ["fohmixer", "songplayer", "varos", "wall-bridge"])
+                         ["dante-asio", "dante-stack", "fohmixer", "songplayer", "varos", "wall-bridge"])
 
 
 # --------------------------------------------------------------------------- #
