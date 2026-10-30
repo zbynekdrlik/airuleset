@@ -59,6 +59,7 @@ from cli_tmux_revive import TMUX_REVIVE_SH  # #1256: revive before create
 # the `@@…@@` single-pass substitution contract stays in render_dashboard_html.
 from cli_webterm_dash_template import DASHBOARD_TEMPLATE as _DASHBOARD_TEMPLATE
 from cli_webterm_keybar import KEYBAR_CSS, KEYBAR_HTML
+from cli_webterm_tabmenu import TABMENU_CSS, TABMENU_JS
 
 REPO_DIR = Path(__file__).resolve().parent
 CLAUDE_DIR = Path.home() / ".claude"
@@ -1144,12 +1145,13 @@ def render_dashboard_html(inventory, ttyd_base=None, term_grid=None, human=None,
     subst = {"@@BUTTONS@@": buttons, "@@CFG_JSON@@": _json_for_script(cfg),
              # #643: the Campbell palette as an xterm.js theme object literal.
              "@@THEME_JSON@@": _json_for_script(CAMPBELL_THEME),
-             "@@KEYBAR_CSS@@": KEYBAR_CSS, "@@KEYBAR_HTML@@": KEYBAR_HTML}  # #1159
+             "@@KEYBAR_CSS@@": KEYBAR_CSS, "@@KEYBAR_HTML@@": KEYBAR_HTML,  # #1159
+             "@@TABMENU_CSS@@": TABMENU_CSS, "@@TABMENU_JS@@": TABMENU_JS}  # #1269
     # SINGLE PASS over the TEMPLATE — inserted content (an inventory label in a
     # button, the config JSON, the theme object) is never re-scanned, so a label
     # that happens to equal a `@@…@@` sentinel can't splice a later substitution
     # into itself.
-    return re.sub(r"@@(?:BUTTONS|CFG_JSON|THEME_JSON|KEYBAR_CSS|KEYBAR_HTML)@@",
+    return re.sub(r"@@(?:BUTTONS|CFG_JSON|THEME_JSON|KEYBAR_CSS|KEYBAR_HTML|TABMENU_CSS|TABMENU_JS)@@",
                   lambda mo: subst[mo.group(0)], _DASHBOARD_TEMPLATE)
 
 

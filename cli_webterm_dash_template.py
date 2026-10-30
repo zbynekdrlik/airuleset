@@ -41,9 +41,12 @@ html, body { height: 100%; margin: 0; }
 body { display: flex; flex-direction: column; background: #0C0C0C; color: #CCCCCC;
   font: 13px/1.3 "Cascadia Mono", "Cascadia Code", Consolas, "DejaVu Sans Mono", Menlo, Monaco, "Liberation Mono", monospace;
   overflow: hidden; }
+/* #1269: #tabs scrolls, #tabbar does not (its #tabmenu drop-down is never clipped) */
 #tabbar { display: flex; align-items: stretch; gap: 2px; padding: 4px 6px 0;
-  background: #0C0C0C; border-bottom: 1px solid #2b2b2b; overflow-x: auto;
-  flex: 0 0 auto; white-space: nowrap; }
+  background: #0C0C0C; border-bottom: 1px solid #2b2b2b;
+  flex: 0 0 auto; white-space: nowrap; position: relative; z-index: 2; }
+#tabs { display: flex; align-items: stretch; gap: 2px; overflow-x: auto;
+  flex: 1 1 auto; min-width: 0; white-space: nowrap; }
 .tab { display: inline-flex; align-items: center; gap: 6px; cursor: pointer;
   padding: 9px 12px 9px 16px; border: 1px solid transparent; border-bottom: none; /* #661: left 12->16px; #691 rework: top/bottom 6->9px = real vertical breathing so nothing touches the top edge (owner: "zhora a zdola skoro vobec"; taller tab explicitly OK) */
   border-radius: 7px 7px 0 0; background: #1b1b1b; color: #CCCCCC;
@@ -85,6 +88,7 @@ body { display: flex; flex-direction: column; background: #0C0C0C; color: #CCCCC
    vysvetlivky". */
 .tab.wt-offline .ico { color: #666666; }
 .tab .al { overflow: hidden; text-overflow: ellipsis; }
+@@TABMENU_CSS@@
 #frames { position: relative; flex: 1 1 auto; overflow: hidden; /* #700: clips the stretch spill */ }
 #frames iframe.term { position: absolute; inset: 0; width: 100%; height: 100%;
   border: 0; background: #0C0C0C; }
@@ -97,11 +101,17 @@ body { display: flex; flex-direction: column; background: #0C0C0C; color: #CCCCC
 </head>
 <body>
 <div id="tabbar">
+<div id="tabs">
 @@BUTTONS@@
+</div>
+<button id="tabmore" type="button"><span class="mico">&#9662;</span><span class="al"></span></button>
+<div id="tabmenu" hidden></div>
 </div>
 <div id="frames"></div>
 <script>
 const CFG = @@CFG_JSON@@;
+// #1269: the stored tab layout, inlined by the gateway on `/` (else null = default bar)
+const WT_TAB_LAYOUT = /*wt-tab-layout*/null;
 // #672 REWORK (owner ruling 2026-08-25): ONE canonical grid for every tab, so
 // CFG.term_cols/term_rows are a plain constant (no per-tab defineProperty
 // getter). fitFixedGrid/fillFixedGrid read them unchanged; the foreign-stream
@@ -191,7 +201,7 @@ function activate(idx) {
   }
   document.querySelectorAll('.tab').forEach((t) => {
     const on = +t.dataset.idx === idx;
-    t.classList.toggle('active', on);
+    t.classList.toggle('active', on && !t.hidden);   // #1269: a hidden tab shows on #tabmore
     // #582: keep the active tab visible even when the bar has scrolled past it
     // (e.g. a Ctrl+Alt+9 jump to a tab scrolled off-screen). #674 removed the
     // ◀ ▶ cycle buttons, so tab clicks + Ctrl+Alt+1..9 are the switch paths now.
@@ -199,6 +209,7 @@ function activate(idx) {
     if (on) t.scrollIntoView?.({ inline: 'nearest', block: 'nearest' });
   });
   current = idx;
+  syncTabMenu();                             // #1269: menu item label/active + rows
   // #1164 superseded the #886 fontSize kick: xterm stays paused until shown, so the
   // fit waits for the show signal instead (fitShown / watchShown below).
   made[idx].__wtFitDirty = true;             // #1164: every activation re-fits, once SHOWN
@@ -219,9 +230,10 @@ function activate(idx) {
 function onHotkey(e) {
   if (!(e.ctrlKey && e.altKey)) return;
   if (e.key >= '1' && e.key <= '9') {
-    const idx = parseInt(e.key, 10) - 1;
-    if (idx < CFG.sessions.length) {
-      e.preventDefault(); e.stopPropagation(); activate(idx);
+    const vis = visibleTabIdx();             // #1269: the Nth tab IN THE BAR
+    const n = parseInt(e.key, 10) - 1;
+    if (n < vis.length) {
+      e.preventDefault(); e.stopPropagation(); activate(vis[n]);
     }
   }
 }
@@ -787,6 +799,7 @@ function applyFixedGrid(f) {                     // poll for window.term, attach
 }
 document.querySelectorAll('.tab').forEach((t) =>
   t.addEventListener('click', () => activate(+t.dataset.idx)));
+@@TABMENU_JS@@
 // #674: the prev/next cycle arrows and the ? help toggle are removed; #1158 then
 // removed fullscreen too. Tab switching stays via tab clicks + Ctrl+Alt+1..9 (onHotkey).
 // #671 REWORK (owner ruling 2026-08-25): the copy/paste footer hint strip + its
@@ -808,7 +821,10 @@ window.addEventListener('beforeunload', (e) => {
 // removed ("len zavadzia"); Layer 1 above still guards a stray Ctrl+W.
 window.addEventListener('keydown', onHotkey);   // Ctrl+Alt+1..9 when the bar is focused
 preloadAll();                           // #586: connect every tab up front (instant switching)
-if (CFG.sessions.length) activate(0);   // land in the first terminal, not a landing page
+applyTabLayout(WT_TAB_LAYOUT || tabLayout);   // #1269: the stored bar, before the landing tab
+// land in the first terminal OF THE BAR, not a landing page
+if (CFG.sessions.length) activate(visibleTabIdx()[0] ?? 0);
+document.body.dataset.wtLayout = 'ready';
 // #798: drive a re-fit of the ACTIVE tab from a PARENT-side ResizeObserver on #frames
 // (the real slot). An over-fit tab grows its iframe to an EXPLICIT box, which then goes
 // deaf to a genuine viewport change via the child's own 'resize' (the box no longer
@@ -845,7 +861,7 @@ function applyUStatus(map) {
 function pollUStatus() {
   fetch('/u-status', { credentials: 'same-origin', cache: 'no-store' })
     .then((r) => (r.ok ? r.json() : null))
-    .then((d) => { if (d && d.u) applyUStatus(d.u); })
+    .then((d) => { if (d && d.u) { applyUStatus(d.u); syncTabMenu(); } })   // #1269: hidden U -> #tabmore
     .catch(() => {});                     // absent/failed -> leave the dots as-is
 }
 if (CFG.u_status) {     // #677 owner; #703 lane (per-tenant scoped gateway map)
