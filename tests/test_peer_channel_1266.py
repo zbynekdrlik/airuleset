@@ -282,6 +282,14 @@ class TestDelivery(_Env):
         self.assertTrue(a.send("beta", "ok\x1b[31mred\x07\nline2")[0])
         self.assertEqual(b.delivered[-1][0], "ok[31mred\nline2")
 
+    def test_a_long_reply_is_one_message(self):
+        # #1269 owner (30.10.): songplayer split a 4000+ char answer into parts
+        a, b = self.peer("alpha"), self.peer("beta")
+        b.start_listener()
+        text = "stav bridge ľščťž " * 2000          # 36000 chars, non-ASCII escapes
+        self.assertTrue(a.send("beta", text)[0])
+        self.assertEqual(b.delivered[-1][0], text)
+
     def test_peers_lists_live_and_offline(self):
         a, b = self.peer("alpha"), self.peer("beta")
         ok, out = a.list_peers()
