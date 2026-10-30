@@ -34,9 +34,9 @@
     "account": "newlevel"
   },
   {
-    "name": "dantetimesync",
+    "name": "dantesync",
     "host": "dev1",
-    "path": "~/devel/dantetimesync",
+    "path": "~/devel/dantesync",
     "branch_model": "2-branch",
     "default_branch": "master",
     "work_branch": "dev",
@@ -340,5 +340,27 @@
       ]
     },
     "account": "gatekeeper"
+  },
+  {
+    "name": "dante-stack",
+    "host": "dev1",
+    "path": "/home/dante-stack/devel/dante-stack",
+    "branch_model": "2-branch",
+    "default_branch": "main",
+    "work_branch": "dev",
+    "overrides": [],
+    "onboarded": null,
+    "account": "dante-stack"
+  },
+  {
+    "name": "dante-asio",
+    "host": "dev1",
+    "path": "/home/dante-asio/devel/dante-asio",
+    "branch_model": "2-branch",
+    "default_branch": "main",
+    "work_branch": "dev",
+    "overrides": [],
+    "onboarded": null,
+    "account": "dante-asio"
   }
 ]

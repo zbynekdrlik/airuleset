@@ -192,7 +192,8 @@ class TestMinterSkipsPending(unittest.TestCase):
 
     def test_mint_all_skips_pending_accounts_loudly(self):
         self.assertEqual(pgt.github_app_accounts(),
-                         ["fohmixer", "songplayer", "varos", "wall-bridge"])
+                         ["dante-asio", "dante-stack", "fohmixer", "iemmixer", "songplayer", "varos",
+                          "wall-bridge"])
         with _pending(), \
                 mock.patch.object(ci_sync, "run_after_mint", return_value=0):
             rc, minted, out = self._mint_all()
@@ -205,7 +206,7 @@ class TestMinterSkipsPending(unittest.TestCase):
         with mock.patch.object(ci_sync, "run_after_mint", return_value=0):
             rc, minted, out = self._mint_all()
         self.assertEqual(minted, ["fohmixer", "songplayer", "varos", "wall-bridge"])
-        self.assertNotIn("SKIPPED", out)
+        self.assertNotIn("wall-bridge: SKIPPED", out)
 
     def test_an_explicit_mint_is_never_skipped(self):
         with mock.patch.object(pgt, "mint_account", return_value=1) as m:
@@ -221,14 +222,16 @@ class TestMinterSkipsPending(unittest.TestCase):
                                   side_effect=lambda a: a == "varos"):
             ci_sync.sync_all(run=lambda *a, **k: None)
         self.assertEqual([c.args[0] for c in s.call_args_list],
-                         ["fohmixer", "songplayer", "wall-bridge"])
+                         ["dante-asio", "dante-stack", "fohmixer", "iemmixer", "songplayer",
+                          "wall-bridge"])
 
 
 class TestPeerLinks(unittest.TestCase):
 
     def test_the_owner_named_links(self):
-        self.assertEqual(cpc.load_links()["hosts"]["dev1"]["links"],
-                         [["songplayer", "wall-bridge"], ["camera-box", "songplayer"]])
+        pairs = cpc.load_links()["hosts"]["dev1"]["links"]
+        self.assertIn(["songplayer", "wall-bridge"], pairs)
+        self.assertIn(["camera-box", "songplayer"], pairs)
         self.assertEqual(cpc.validate_links(cpc.load_links(), cpc.load_registry()), [])
 
     def test_root_leg_names_only_existing_accounts(self):
@@ -236,12 +239,12 @@ class TestPeerLinks(unittest.TestCase):
         # wall-bridge never reaches the root script's `account missing` exit 3
         with _pending():
             accts = cpc.accounts_for_host("dev1")
-        self.assertEqual(accts, ["newlevel"])
+        self.assertEqual(accts, ["fohmixer", "newlevel"])
         self.assertNotIn("wall-bridge", cpc.render_root_script(accts))
 
     def test_wall_bridge_joins_once_live(self):
         self.assertEqual(cpc.accounts_for_host("dev1"),
-                         ["newlevel", "songplayer", "wall-bridge"])
+                         ["fohmixer", "newlevel", "songplayer", "wall-bridge"])
 
 
 if __name__ == "__main__":

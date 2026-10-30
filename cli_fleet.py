@@ -581,6 +581,9 @@ REMOTE_HOSTS += [
         ("varos", "dev2", "100.82.64.27", False),          # #1220, live 8.10.
         ("wall-bridge", "dev1", "100.104.8.125", False),   # #1267, live 29.10.
         ("songplayer", "dev1", "100.104.8.125", False),    # #1267, live 29.10.
+        ("dante-stack", "dev1", "100.104.8.125", True),    # #1270
+        ("dante-asio", "dev1", "100.104.8.125", True),     # #1270
+        ("iemmixer", "dev1", "100.104.8.125", True),       # #1270
     )
 ]
 
@@ -1034,7 +1037,8 @@ AUTHORITY_BY_USER = {
 # would misclassify the controller as a sub-dev stream downstream).
 FULL_AUTHORITY_USERS = frozenset(
     {"newlevel", "gatekeeper", "admin", "stepan", "airuleset", "claudy",
-     "fohmixer", "varos", "wall-bridge", "songplayer"})
+     "fohmixer", "varos", "wall-bridge", "songplayer",
+     "dante-stack", "dante-asio", "iemmixer"})
 
 
 # Webterm OBSERVER accounts (airuleset#867). An account that exists ONLY to run a

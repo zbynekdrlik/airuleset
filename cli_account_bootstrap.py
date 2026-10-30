@@ -72,7 +72,7 @@ _NEVER_PROJECT_ACCOUNTS = frozenset({"newlevel", "root", "airuleset",
 _ALLOWED_KEYS = frozenset({
     "host", "sudo", "sudo_reason", "sudo_commands",
     "secrets", "webterm_sessions", "system_packages", "repo",
-    "project_dir", "tmux_session", "github_app", "repo_secrets", "tools", "code_only",
+    "project_dir", "tmux_session", "github_app", "repo_secrets", "tools", "code_only", "handover",
 })
 
 # The defaults every declaration inherits. They are the SAFE direction: no
@@ -232,6 +232,52 @@ SERVICE_ACCOUNTS = {
             for human in ("zbynek", "marek")
         },
     },
+    # #1270 (owner 30.10.): the Dante family. dante-stack is the one expert for
+    # all Dante code; dante-asio its first consumer (created outside airuleset
+    # by the iemmixer session); iemmixer migrates out of `newlevel`.
+    "dante-stack": {
+        "host": "dev1",
+        "sudo": False,
+        "repo": "zbynekdrlik/dante-stack",   # public: iemmixer's CI fetches it keyless
+        "github_app": True, "repo_secrets": [],
+        "tools": ["rust-toolchain:1.98.1", "pipx:netaudio"],
+        "project_dir": "devel/dante-stack",
+        "tmux_session": "dante-stack",
+        "handover": "docs/HANDOVER.md",
+        "webterm_sessions": {
+            human: {"preferred": "dante-stack", "start_dir_chain": ["devel/dante-stack"]}
+            for human in ("zbynek", "marek")
+        },
+    },
+    "dante-asio": {
+        "host": "dev1",
+        "sudo": False,
+        "repo": "zbynekdrlik/dante-asio",
+        "github_app": True, "repo_secrets": [],
+        "tools": ["rust-toolchain:1.98.1", "pipx:netaudio"],
+        "project_dir": "devel/dante-asio",
+        "tmux_session": "dante-asio",
+        "handover": "docs/HANDOVER.md",
+        "webterm_sessions": {
+            human: {"preferred": "dante-asio", "start_dir_chain": ["devel/dante-asio"]}
+            for human in ("zbynek", "marek")
+        },
+    },
+    "iemmixer": {
+        "host": "dev1",
+        "sudo": False,
+        "repo": "zbynekdrlik/iemmixer",
+        "github_app": True, "repo_secrets": ["DENYLIST"],
+        "tools": ["rust-toolchain:1.98.1", "rust-component:llvm-tools-preview",
+                  "rust-target:wasm32-unknown-unknown", "playwright:1.58.2/chromium",
+                  "pipx:netaudio"],
+        "project_dir": "devel/iemmixer",
+        "tmux_session": "iemmixer",
+        "webterm_sessions": {
+            human: {"preferred": "iemmixer", "start_dir_chain": ["devel/iemmixer"]}
+            for human in ("zbynek", "marek")
+        },
+    },
     # #1267 (migrate-on-touch): SongPlayer, out of `newlevel`. Pins from its CI
     # (stable + wasm32) and e2e lockfile; no ruff pin: CI's 0.5.7 would clash
     # with fohmixer's on the box's one shared venv (open question on #1267).
@@ -349,6 +395,11 @@ def validate_account(account, raw):
                     "accounts are never a project account)" % (account,))
     if not isinstance(raw, dict):
         return errs + ["declaration must be a dict"]
+    handover = raw.get("handover")
+    if handover is not None and not (isinstance(handover, str) and handover.endswith(".md")
+                                     and not handover.startswith("/")
+                                     and ".." not in handover.split("/")):
+        errs.append("handover must be a relative .md path in the repo")
     for key in sorted(set(raw) - _ALLOWED_KEYS):
         errs.append("unknown declaration key %r" % key)
     spec = copy.deepcopy(_DEFAULTS)

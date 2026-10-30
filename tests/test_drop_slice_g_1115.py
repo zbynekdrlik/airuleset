@@ -146,7 +146,7 @@ class TestLocalControllerLanePresent(unittest.TestCase):
         last = max(dl._GENERATED_DROP_PORTS.values()) + 1
         fake_fleet = [
             {"name": "claudy@controller", "host": CONTROLLER_ORIGIN,
-             "user": "claudy", "drop": {"port": ctrl_port + 8}},
+             "user": "claudy", "drop": {"port": last + 1}},
             {"name": "newbox", "host": "100.99.99.99", "user": "newuser"},
         ]
         lanes = dl.build_drop_lanes(

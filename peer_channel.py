@@ -146,6 +146,24 @@ def host_links(links_doc, host):
     return pairs
 
 
+def topic_key(pair):
+    return "|".join(sorted(pair))
+
+
+def host_link_topics(links_doc, host):
+    """#1270: {frozenset({a, b}): topic}. A sibling of ``links``, never inside it:
+    a running session keeps its old code and reads ``links`` as bare pairs."""
+    hosts = links_doc.get("hosts") if isinstance(links_doc, dict) else None
+    entry = hosts.get(host) if isinstance(hosts, dict) else None
+    raw = entry.get("topics") if isinstance(entry, dict) else None
+    out = {}
+    for pair in host_links(links_doc, host):
+        topic = raw.get(topic_key(pair)) if isinstance(raw, dict) else None
+        if isinstance(topic, str) and topic.strip():
+            out[pair] = topic.strip()
+    return out
+
+
 def linked_to(pairs, project):
     return sorted(next(iter(p - {project})) for p in pairs if project in p)
 
@@ -284,6 +302,26 @@ class Peer:
         except (OSError, ValueError) as e:
             self.log("config-error", file=REGISTRY_FILE, error=str(e))
             return {}
+
+    def _topics(self):
+        try:
+            return host_link_topics(load_json(os.path.join(self.config_dir, LINKS_FILE)), self.host)
+        except (OSError, ValueError):
+            return {}
+
+    def instructions(self):
+        """#1270: the fixed safety text + who this project may talk to, and about
+        what. Told to the session at every start; Claude Code shows it as the
+        server's instructions. A project with no declared link gets the fixed text."""
+        topics = self._topics()
+        lines = ["%s: %s" % (other, topics[frozenset((self.project, other))])
+                 for other in linked_to(self._pairs(), self.project)
+                 if frozenset((self.project, other)) in topics] if self.project else []
+        if not lines:
+            return INSTRUCTIONS
+        return (INSTRUCTIONS + " Message a linked project only about its topic:\n"
+                + "\n".join(lines) + "\nMessage no other project, and do not send one "
+                "project's work to another.")
 
     def _pairs(self):
         try:
@@ -573,6 +611,7 @@ class Peer:
         if self.project is None:
             return False, self.problem or "no project"
         lines = []
+        topics = self._topics()
         for other in linked_to(self._pairs(), self.project):
             if self._check_target(other):
                 lines.append("%s: no account on %s" % (other, self.host))
@@ -580,7 +619,9 @@ class Peer:
             live = sum(1 for r in self._calls(other, {"v": 1, "op": "ping",
                                                       "from": self.project, "to": other})
                        if r.get("ok"))
-            lines.append("%s: %s" % (other, "live (%d)" % live if live else "offline"))
+            topic = topics.get(frozenset((self.project, other)))
+            lines.append("%s: %s%s" % (other, "live (%d)" % live if live else "offline",
+                                       " — " + topic if topic else ""))
         if self.problem:
             lines.append("note: %s" % self.problem)
         self.log("peers", project=self.project, result=lines)
@@ -636,7 +677,7 @@ class McpServer:
                 "protocolVersion": asked if asked in PROTOCOLS else DEFAULT_PROTOCOL,
                 "capabilities": {"tools": {}, "experimental": {"claude/channel": {}}},
                 "serverInfo": {"name": "peer", "version": "1"},
-                "instructions": INSTRUCTIONS}})
+                "instructions": self.peer.instructions()}})
         elif method == "ping":
             self.write({"jsonrpc": "2.0", "id": mid, "result": {}})
         elif method == "tools/list":

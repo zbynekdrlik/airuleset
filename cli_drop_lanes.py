@@ -87,8 +87,8 @@ _GENERATED_DROP_PORTS = {
     ("airuleset", "airuleset"): 8891,
     ("dev2", "varos"): 8892,              # #1220 project account
     ("dev1", "fohmixer"): 8893,           # #1237 project account
-    ("dev1", "songplayer"): 8894,         # #1267 project accounts
-    ("dev1", "wall-bridge"): 8895,
+    ("dev1", "songplayer"): 8894, ("dev1", "wall-bridge"): 8895,   # #1267 project accounts
+    ("dev1", "dante-stack"): 8896, ("dev1", "dante-asio"): 8897, ("dev1", "iemmixer"): 8898,  # #1270
 }
 
 

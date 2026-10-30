@@ -1,5 +1,5 @@
 {
-  "_doc": "Peer channel allowlist (#1266). Per host: undirected pairs of projects-registry.json project names whose Claude sessions may message each other over the peer@airuleset channel. A pair not listed here is refused by both ends. Accounts named by a link get the shared-dir ACL, the plugin and the launcher --channels flag on that host. The owner names the links.",
+  "_doc": "Peer channel allowlist (#1266). Per host: undirected pairs of projects-registry.json project names whose Claude sessions may message each other over the peer@airuleset channel, each with a required topic (#1270): the one subject that pair talks about, told to both sessions at every start. A pair not listed here is refused by both ends. Accounts named by a link get the shared-dir ACL, the plugin and the launcher --channels flag on that host. The owner names the links.",
   "hosts": {
     "dev1": {
       "links": [
@@ -10,8 +10,37 @@
         [
           "camera-box",
           "songplayer"
+        ],
+        [
+          "dante-stack",
+          "dante-asio"
+        ],
+        [
+          "dante-stack",
+          "iemmixer"
+        ],
+        [
+          "dante-stack",
+          "camera-box"
+        ],
+        [
+          "dante-stack",
+          "fohmixer"
+        ],
+        [
+          "dante-asio",
+          "fohmixer"
         ]
-      ]
+      ],
+      "topics": {
+        "songplayer|wall-bridge": "the SNV LED wall on the Resolume PC: Arena, Spout outputs, starting a scene, what SongPlayer does to Arena",
+        "camera-box|songplayer": "the NDI SP-program sender contract, genlock and the burn-id chain, the rig lease for deploys",
+        "dante-asio|dante-stack": "the shared Dante crates: a Dante bug in dante-asio goes here, dante-asio only moves the stack version",
+        "dante-stack|iemmixer": "the shared Dante crates and dantesync: a Dante bug goes to dante-stack, iemmixer only moves the stack version",
+        "camera-box|dante-stack": "dantesync only: new versions and clock faults",
+        "dante-stack|fohmixer": "the Dante side of the FOH PC: clock, devices, a Dante bug seen from fohmixer",
+        "dante-asio|fohmixer": "the shared FOH PC: who holds the audio devices, CPU pinning, restarts of Ableton"
+      }
     }
   }
 }

@@ -42,6 +42,7 @@ import peer_channel
 
 REPO_DIR = Path(__file__).resolve().parent
 LINKS_PATH = REPO_DIR / peer_channel.LINKS_FILE
+MAX_TOPIC = 200                 # #1270: told to the session in the MCP instructions
 REGISTRY_PATH = REPO_DIR / peer_channel.REGISTRY_FILE
 MARKETPLACE_DIR = REPO_DIR / "plugins" / "airuleset"
 MCP_JSON_PATH = MARKETPLACE_DIR / "peer" / ".mcp.json"
@@ -96,11 +97,15 @@ def validate_links(links_doc, registry, root_hosts=None):
             errors.append("%s: 'links' must be a list" % host)
             continue
         projects = peer_channel.host_projects(registry, host)
+        topics = entry.get("topics") if isinstance(entry.get("topics"), dict) else {}
         for pair in raw:
             if not (isinstance(pair, list) and len(pair) == 2
                     and all(isinstance(x, str) for x in pair)):
                 errors.append("%s: malformed link %r" % (host, pair))
                 continue
+            topic = topics.get(peer_channel.topic_key(pair))
+            if not (isinstance(topic, str) and topic.strip() and len(topic) <= MAX_TOPIC):
+                errors.append("%s: %r needs a topic of 1-%d chars" % (host, pair, MAX_TOPIC))
             if pair[0] == pair[1]:
                 errors.append("%s: self link %r" % (host, pair[0]))
             for name in pair:
