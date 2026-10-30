@@ -6,7 +6,6 @@ import json
 import sys
 import unittest
 import urllib.error
-from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
