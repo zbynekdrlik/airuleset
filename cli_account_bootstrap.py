@@ -402,9 +402,6 @@ def validate_account(account, raw):
                                      and not handover.startswith("/")
                                      and ".." not in handover.split("/")):
         errs.append("handover must be a relative .md path in the repo")
-    for extra in raw.get("extra_repos") or []:
-        if not (isinstance(extra, str) and re.fullmatch(r"[\w.-]+/[\w.-]+", extra)):
-            errs.append("extra_repos: %r is not owner/name" % (extra,))
     for key in sorted(set(raw) - _ALLOWED_KEYS):
         errs.append("unknown declaration key %r" % key)
     spec = copy.deepcopy(_DEFAULTS)
