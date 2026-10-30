@@ -407,8 +407,7 @@ class TestMintAccount(_Base):
                                                     key=None))
         self.assertEqual(rc, 0)
         self.assertEqual([c.args[0] for c in m.call_args_list],
-                         ["dante-asio", "dante-stack", "fohmixer", "iemmixer", "songplayer", "varos",
-                          "wall-bridge"])
+                         ["fohmixer", "songplayer", "varos", "wall-bridge"])
 
     def test_mint_all_fails_when_any_account_fails(self):
         with mock.patch.dict(bootstrap.SERVICE_ACCOUNTS["camera-box"],
