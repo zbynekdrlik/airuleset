@@ -78,6 +78,11 @@
           },
           {
             "type": "command",
+            "command": "bash ~/devel/airuleset/hooks/block-repo-create-outside-airuleset.sh",
+            "timeout": 5
+          },
+          {
+            "type": "command",
             "command": "bash ~/devel/airuleset/hooks/block-history-rewrite.sh",
             "timeout": 5
           },

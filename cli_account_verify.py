@@ -53,7 +53,7 @@ import sys
 
 CHECKS = ("tmux", "gh-token", "secret-sync", "ruff", "rust", "playwright",
           "home-duplicates", "git-identity", "webterm", "session", "drop",
-          "login")
+          "login", "handover")
 CLAUDY_CONFIG_DIR = "/home/claudy/.config/claudy"
 NOREPLY_SUFFIX = "@users.noreply.github.com"
 PROBE_TIMEOUT_S = 180
@@ -64,6 +64,12 @@ HOME_DUPLICATES = (".rustup", ".cargo/bin", ".cache/ms-playwright/chromium*",
                    ".cache/ms-playwright/firefox*", ".cache/ms-playwright/webkit*",
                    ".cache/ms-playwright/ffmpeg*",
                    ".local/pipx/venvs", ".local/share/pipx/venvs")
+# #1270: what a new session needs in order to continue handed-over work without
+# the owner. Each comes from a real gap on wall-bridge / songplayer (see the ticket).
+HANDOVER_SECTIONS = ("Status", "Machines", "What else acts on the machines",
+                     "How to run a test", "Site facts", "Runners", "Backlog",
+                     "Knowledge left in other projects")
+HANDOVER_MIN_CHARS = 20
 _LOGIN_FLAG = re.compile(r"-[A-Za-z]*l[A-Za-z]*")
 _SHELLS = ("bash", "sh", "zsh", "dash")
 
@@ -150,6 +156,16 @@ try:
     print(str(a.get("emailAddress") or "").splitlines()[0])
 except Exception:
     pass' 2>/dev/null)"
+echo @@handover
+if [ -r "$HOME"/__PROJECT__/__HANDOVER__ ]; then
+  python3 -I -c 'import re, sys
+text = open(sys.argv[1], encoding="utf-8", errors="replace").read()
+parts = re.split(r"(?m)^## +(.+?)[ \t]*$", text)
+for title, body in zip(parts[1::2], parts[2::2]):
+    print("section=%s|%d" % (title, len(body.strip())))' "$HOME"/__PROJECT__/__HANDOVER__
+else
+  echo missing=yes
+fi
 echo @@end
 """
 
@@ -177,6 +193,7 @@ def render_probe(account, spec):
                                for v, b in sorted(pins.items())),
         "__SESS__": shlex.quote(spec.get("tmux_session") or ""),
         "__PROJECT__": shlex.quote(project),
+        "__HANDOVER__": shlex.quote(spec.get("handover") or "-"),
         "__BUILD__": shlex.quote(PLAYWRIGHT_CHROMIUM_BUILD),
         "__DUPS__": " ".join(shlex.quote(d) for d in HOME_DUPLICATES),
         "__REPO__": shlex.quote(spec.get("repo") or "-"),
@@ -592,6 +609,25 @@ def _check_login(account, spec, s, claudy_read):
         email, box)
 
 
+def _check_handover(spec, s):
+    """#1270: the file a new session starts from. Shape only: the supervisor
+    reads the text before go-live."""
+    doc = spec.get("handover")
+    if not doc:
+        return True, "not declared"
+    if (s.get("handover") or {}).get("missing"):
+        return False, "%s is missing in the checkout" % doc
+    sizes = {}
+    for row in (s.get("handover") or {}).get("section") or []:
+        title, _, size = row.rpartition("|")
+        sizes[title] = int(size) if size.isdigit() else 0
+    bad = ["%s (%s)" % (t, "missing" if t not in sizes else "empty")
+           for t in HANDOVER_SECTIONS if sizes.get(t, 0) < HANDOVER_MIN_CHARS]
+    if bad:
+        return False, "%s lacks: %s" % (doc, ", ".join(bad))
+    return True, "%s has all %d sections" % (doc, len(HANDOVER_SECTIONS))
+
+
 def evaluate(account, spec, sections, *, gh_rc, no_transfer=False,
              claudy_read=None):
     """``[(check, ok, detail)]`` in ``CHECKS`` order."""
@@ -617,6 +653,7 @@ def evaluate(account, spec, sections, *, gh_rc, no_transfer=False,
         "session": _check_session(account, spec, s, no_transfer),
         "drop": _check_drop(account, s),
         "login": _check_login(account, spec, s, claudy_read or read_claudy_file),
+        "handover": _check_handover(spec, s),
     }
     return [(name,) + tuple(results[name]) for name in CHECKS]
 
@@ -665,7 +702,7 @@ def verify_account(account, *, run=None, gh_verify=None, no_transfer=False,
     results = evaluate(account, spec, sections, gh_rc=gh_rc,
                        no_transfer=no_transfer, claudy_read=claudy_read)
     remote = {"tmux", "ruff", "rust", "playwright", "home-duplicates",
-              "git-identity", "webterm", "session", "drop", "login"}
+              "git-identity", "webterm", "session", "drop", "login", "handover"}
     failed = 0
     for name, ok, detail in results:
         if err and name in remote:

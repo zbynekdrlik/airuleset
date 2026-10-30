@@ -72,7 +72,7 @@ _NEVER_PROJECT_ACCOUNTS = frozenset({"newlevel", "root", "airuleset",
 _ALLOWED_KEYS = frozenset({
     "host", "sudo", "sudo_reason", "sudo_commands",
     "secrets", "webterm_sessions", "system_packages", "repo",
-    "project_dir", "tmux_session", "github_app", "repo_secrets", "tools", "code_only",
+    "project_dir", "tmux_session", "github_app", "repo_secrets", "tools", "code_only", "handover",
 })
 
 # The defaults every declaration inherits. They are the SAFE direction: no
@@ -349,6 +349,11 @@ def validate_account(account, raw):
                     "accounts are never a project account)" % (account,))
     if not isinstance(raw, dict):
         return errs + ["declaration must be a dict"]
+    handover = raw.get("handover")
+    if handover is not None and not (isinstance(handover, str) and handover.endswith(".md")
+                                     and not handover.startswith("/")
+                                     and ".." not in handover.split("/")):
+        errs.append("handover must be a relative .md path in the repo")
     for key in sorted(set(raw) - _ALLOWED_KEYS):
         errs.append("unknown declaration key %r" % key)
     spec = copy.deepcopy(_DEFAULTS)
