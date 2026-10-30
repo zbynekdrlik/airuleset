@@ -59,7 +59,7 @@ class TestParseTabLayout(unittest.TestCase):
             self.assertIsNone(g.parse_tab_layout(raw), raw)
 
     def test_rejects_bad_ids(self):
-        for bad in ("", "a b", "../x", "x" * 65, "<script>", "-lead"):
+        for bad in ("", "a b", "../x", "x" * 65, "<script>", "-lead", "dev1\n"):
             raw = json.dumps({"order": [bad]}).encode()
             self.assertIsNone(g.parse_tab_layout(raw), bad)
 
@@ -445,6 +445,29 @@ const NOISE = [/\[ttyd\] maybe unknown option: arg=/, /GL Driver Message/, /GPU 
   await touch('touchEnd', 0, 0);
   await sleep(300);
   out.touchAfter = await state(tp);
+  await tctx.close();
+
+  // review 🔴: a drag released over the terminal must end, and a button-less
+  // hover over the bar afterwards must not move anything
+  const dctx = await b.newContext({ viewport: { width: 1600, height: 900 } });
+  const lr3 = await dctx.request.post(BASE + '/login', { form: { username: 'u', password: 'p' }, maxRedirects: 0 });
+  if (lr3.status() !== 303) throw new Error('login failed ' + lr3.status());
+  const dp = await open(dctx, 'offbar');
+  const dv = (await state(dp)).visible;
+  const a = await center(dp, tabSel(dv[1])), z = await center(dp, tabSel(dv[0]));
+  await dp.mouse.move(a.x, a.y); await dp.mouse.down();
+  await dp.mouse.move(z.r.x + 4, z.y, { steps: 10 });
+  await dp.mouse.move(z.r.x + 4, z.y + 300, { steps: 10 });     // down into the terminal
+  await dp.mouse.up();
+  await sleep(300);
+  out.offbarReleased = await state(dp);
+  out.offbarDragging = await dp.evaluate(() => document.querySelectorAll('#tabs .tab.dragging').length);
+  out.offbarSaved = await waitSaved(dp, s => (s.order || [])[0] === dv[1]);
+  const last = await center(dp, tabSel(out.offbarReleased.visible[out.offbarReleased.visible.length - 1]));
+  await dp.mouse.move(last.x, last.y, { steps: 10 });               // hover, no button
+  await dp.mouse.move(z.r.x + 4, z.y, { steps: 10 });
+  await sleep(200);
+  out.offbarHover = await state(dp);
   await b.close();
   process.stdout.write(JSON.stringify(out));
 })().catch(e => { console.error('DRIVER-ERR', e && e.stack || e); process.exit(1); });
@@ -549,6 +572,12 @@ class TestTabLayoutRealBrowser1269(unittest.TestCase):
         before = self.out["touchInitial"]["visible"]
         after = self.out["touchAfter"]["visible"]
         self.assertEqual(after, [before[-1]] + before[:-1])
+
+    def test_a_drag_released_over_the_terminal_ends_and_saves(self):
+        released = self.out["offbarReleased"]["visible"]
+        self.assertEqual(self.out["offbarDragging"], 0)
+        self.assertEqual(self.out["offbarSaved"]["order"][:2], released[:2])
+        self.assertEqual(self.out["offbarHover"]["visible"], released)
 
     def test_console_is_clean(self):
         self.assertEqual(self.out["consoleHits"], [])
