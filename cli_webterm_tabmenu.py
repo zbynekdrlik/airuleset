@@ -65,11 +65,14 @@ let tabLayout = { order: CFG.sessions.map((s) => s.id), hidden: [] };
 let tabDrag = null;
 let lastPointerType = 'mouse';
 let tabSaveChain = Promise.resolve();
+let tabUnknown = { order: [], hidden: [] };   // stored ids of tabs not in this page: kept on save
 function tabEls() { return [...tabsEl.querySelectorAll('.tab')]; }
 function visibleTabIdx() { return tabEls().filter((t) => !t.hidden).map((t) => +t.dataset.idx); }
 function applyTabLayout(l) {
   const ids = CFG.sessions.map((s) => s.id);
   const known = new Set(ids);
+  tabUnknown = { order: (l.order || []).filter((id) => !known.has(id)),
+                 hidden: (l.hidden || []).filter((id) => !known.has(id)) };
   const order = (l.order || []).filter((id) => known.has(id));
   ids.forEach((id) => { if (!order.includes(id)) order.push(id); });   // a new tab joins the bar
   tabLayout = { order: order, hidden: (l.hidden || []).filter((id) => known.has(id)) };
@@ -85,11 +88,14 @@ function applyTabLayout(l) {
 }
 function saveTabLayout() {
   tabLayout.order = tabEls().map((t) => CFG.sessions[+t.dataset.idx].id);
-  const body = JSON.stringify(tabLayout);
+  const body = JSON.stringify({ order: tabLayout.order.concat(tabUnknown.order),
+                                hidden: tabLayout.hidden.concat(tabUnknown.hidden) });
+  const failed = (why) => console.warn('webterm: tab layout not saved (' + why + ')');
   // serialized: the last change always lands last
   tabSaveChain = tabSaveChain.then(() => fetch('/tab-layout', { method: 'POST',
     credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: body }))
-    .catch(() => {});
+    .then((r) => { if (!r.ok) failed('HTTP ' + r.status); })
+    .catch((err) => failed(err && err.message));
 }
 function setTabHidden(idx, hide) {
   const id = CFG.sessions[idx].id;
@@ -107,15 +113,27 @@ function syncTabMenu() {
   moreEl.querySelector('.al').textContent = curHidden ? cur.alias : '';
   moreEl.title = curHidden ? cur.title : '';
   moreEl.classList.toggle('has-u', !!tabsEl.querySelector('.tab[hidden].has-u'));
-  menuEl.textContent = '';
-  tabLayout.order.filter((id) => tabLayout.hidden.includes(id)).forEach((id) => {
-    const idx = CFG.sessions.findIndex((s) => s.id === id);
-    const s = CFG.sessions[idx];
+  const hiddenIds = tabLayout.order.filter((id) => tabLayout.hidden.includes(id));
+  // rebuild the rows only when the hidden set changes, so a U poll never swaps
+  // a row out from under a press (the click would land on #tabmenu)
+  if (menuEl.dataset.key !== hiddenIds.join(' ')) buildTabMenu(hiddenIds);
+  [...menuEl.children].forEach((row) => {
+    const idx = +row.dataset.idx;
     const t = tabsEl.querySelector('.tab[data-idx="' + idx + '"]');
-    const row = document.createElement('div');
-    row.className = 'mrow';
     row.classList.toggle('active', idx === current);
     row.classList.toggle('has-u', !!(t && t.classList.contains('has-u')));
+  });
+  if (!menuEl.children.length) closeTabMenu();
+}
+function buildTabMenu(hiddenIds) {
+  menuEl.textContent = '';
+  menuEl.dataset.key = hiddenIds.join(' ');
+  hiddenIds.forEach((id) => {
+    const idx = CFG.sessions.findIndex((s) => s.id === id);
+    const s = CFG.sessions[idx];
+    const row = document.createElement('div');
+    row.className = 'mrow';
+    row.dataset.idx = idx;
     const ico = document.createElement('span');
     ico.className = 'ico'; ico.textContent = '\u25B8';
     const open = document.createElement('button');
@@ -130,7 +148,6 @@ function syncTabMenu() {
     row.append(ico, open, pin);
     menuEl.appendChild(row);
   });
-  if (!menuEl.children.length) closeTabMenu();
 }
 // #1269: the click that ends a drag must not switch tabs -- stopped in the
 // capture phase, before the tab's own click listener.
@@ -175,13 +192,17 @@ function tabDragOver(x, y) {
 window.addEventListener('pointermove', (e) => {
   const d = tabDrag;
   if (!d || e.pointerId !== d.id) return;
+  // a release outside this document (over a terminal iframe) sends no pointerup
+  if (e.pointerType === 'mouse' && !(e.buttons & 1)) { endTabDrag(e, false); return; }
   const far = Math.abs(e.clientX - d.x) > 6 || Math.abs(e.clientY - d.y) > 6;
   if (!d.on) {
     if (!far) return;
     if (!d.armed) { clearTimeout(d.timer); tabDrag = null; return; }   // a touch swipe
     d.on = true;
     d.t.classList.add('dragging');
-    try { d.t.setPointerCapture(e.pointerId); } catch (err) { /* already gone */ }
+    // capture on the strip, never on the tab: moving the tab in the DOM drops
+    // a capture held by the tab itself, and then the release goes to the terminal
+    try { tabsEl.setPointerCapture(e.pointerId); } catch (err) { /* already gone */ }
   }
   const o = tabDragOver(e.clientX, e.clientY);
   moreEl.classList.toggle('drop', o.more);

@@ -553,7 +553,7 @@ def parse_tab_layout(body_bytes):
         ids = data.get(key, [])
         if not isinstance(ids, list) or len(ids) > TAB_LAYOUT_MAX_IDS:
             return None
-        if not all(isinstance(i, str) and _TAB_ID_RE.match(i) for i in ids):
+        if not all(isinstance(i, str) and _TAB_ID_RE.fullmatch(i) for i in ids):
             return None
         if len(set(ids)) != len(ids):
             return None
@@ -927,6 +927,10 @@ class Gateway:
             os.replace(str(tmp), str(path))
         except OSError as e:
             sys.stderr.write("webterm-gateway: tab layout write failed: %r\n" % e)
+            try:
+                tmp.unlink()
+            except OSError:
+                pass                                # never created / already gone
             await self._send(writer, http_response("500 Internal Server Error", "write failed"))
             return
         await self._send(writer, http_response("204 No Content", b"",
