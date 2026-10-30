@@ -67,6 +67,7 @@ DROP_HOST_GK = "drop-gk.newlevel.media"  # gatekeeper box (#1111)
 # above the 7 hand-authored ports (8870-8876) inside the 8870-8909 range. A lock
 # test asserts fleet-wide uniqueness; a future account with no entry here (and no
 # `drop` block) auto-allocates the next free in-range port (still deterministic).
+_RESERVED_PORTS = {8898}        # #1272: dantesync binds it as root on dev1
 _GENERATED_DROP_PORTS = {
     ("airuleset", "claudy"): 8877,
     ("dev1", "newlevel"): 8878,
@@ -88,7 +89,7 @@ _GENERATED_DROP_PORTS = {
     ("dev2", "varos"): 8892,              # #1220 project account
     ("dev1", "fohmixer"): 8893,           # #1237 project account
     ("dev1", "songplayer"): 8894, ("dev1", "wall-bridge"): 8895,   # #1267 project accounts
-    ("dev1", "dante-stack"): 8896, ("dev1", "dante-asio"): 8897, ("dev1", "iemmixer"): 8898,  # #1270
+    ("dev1", "dante-stack"): 8896, ("dev1", "dante-asio"): 8897, ("dev1", "iemmixer"): 8899,  # #1270
 }
 
 
@@ -213,7 +214,7 @@ def build_drop_lanes(remote_hosts, *, seed, drop_lane_cls,
     # #1220: every FIXED port (the table + any entry's own `drop.port`) is held
     # back from next-free, so an account that sorts first never takes a port a
     # later account owns (varos@dev2 took forestshop admin's 8880).
-    fixed_ports = set(_GENERATED_DROP_PORTS.values()) | {
+    fixed_ports = set(_GENERATED_DROP_PORTS.values()) | _RESERVED_PORTS | {
         (e.get("drop") or {}).get("port") for e in remote_hosts
         if isinstance((e.get("drop") or {}).get("port"), int)}
 
