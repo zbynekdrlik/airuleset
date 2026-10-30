@@ -718,7 +718,8 @@ WEBTERM_DASHBOARD_TABS = {
     "marek": [
         "montalu1-subdev", "montalu2-subdev",
         "miva1-subdev", "montalu4-subdev",
-        "ar", "claudy", "fohmixer", "varos", "dev1", "dev2", "gatekeeper",
+        "ar", "claudy", "fohmixer", "varos", "wall-bridge", "songplayer",  # #1267
+        "dev1", "dev2", "gatekeeper",
         "forestshop",
     ],
     # david.newlevel.media -- David's working accounts. The david GATEWAY renders
