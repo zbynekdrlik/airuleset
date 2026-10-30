@@ -437,6 +437,8 @@ def marek_inventory():
         },
         fohmixer_entry(WEBTERM_MAREK_IDENTITY),   # #1183 project account
         varos_entry(WEBTERM_MAREK_IDENTITY),      # #1220 project account
+        dev1_project_entry("wall-bridge", WEBTERM_MAREK_IDENTITY),   # #1267 owner 30.10.
+        dev1_project_entry("songplayer", WEBTERM_MAREK_IDENTITY),    # #1267 owner 30.10.
         {
             "id": "dev1",
             "label": "dev1 (marek sessions)",

@@ -227,9 +227,9 @@ SERVICE_ACCOUNTS = {
         "tools": ["rust-target:x86_64-pc-windows-gnu"],
         "project_dir": "devel/wall-bridge",
         "tmux_session": "wall-bridge",
-        "webterm_sessions": {
-            "zbynek": {"preferred": "wall-bridge",
-                       "start_dir_chain": ["devel/wall-bridge"]},
+        "webterm_sessions": {     # owner 30.10.: marek too
+            human: {"preferred": "wall-bridge", "start_dir_chain": ["devel/wall-bridge"]}
+            for human in ("zbynek", "marek")
         },
     },
     # #1267 (migrate-on-touch): SongPlayer, out of `newlevel`. Pins from its CI
@@ -244,9 +244,9 @@ SERVICE_ACCOUNTS = {
         "tools": ["rust-target:wasm32-unknown-unknown", "playwright:1.59.1/chromium"],
         "project_dir": "devel/songplayer",
         "tmux_session": "songplayer",
-        "webterm_sessions": {
-            "zbynek": {"preferred": "songplayer",
-                       "start_dir_chain": ["devel/songplayer"]},
+        "webterm_sessions": {     # owner 30.10.: marek too
+            human: {"preferred": "songplayer", "start_dir_chain": ["devel/songplayer"]}
+            for human in ("zbynek", "marek")
         },
     },
 }

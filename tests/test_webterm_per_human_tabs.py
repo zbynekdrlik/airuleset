@@ -138,8 +138,8 @@ class TestExclusiveTabListMechanism(unittest.TestCase):
         self.assertEqual(got, [
             "montalu1-subdev", "montalu2-subdev",
             "miva1-subdev", "montalu4-subdev",
-            "ar", "claudy", "fohmixer", "varos", "dev1", "dev2", "gatekeeper",
-            "forestshop",
+            "ar", "claudy", "fohmixer", "varos", "wall-bridge", "songplayer",  # #1267
+            "dev1", "dev2", "gatekeeper", "forestshop",
         ])
         html = w.render_dashboard_html(
             profiles.marek_inventory(), ttyd_base="/t", human="marek",
@@ -148,7 +148,8 @@ class TestExclusiveTabListMechanism(unittest.TestCase):
         # montalu1->m1, montalu2->m2, miva1->miva, montalu4->m4, dev1, dev2,
         # gatekeeper->gk, forestshop->fs — from the SINGLE #592 cli_aliases source.
         self.assertEqual(aliases, ["m1", "m2", "miva", "m4", "ar", "claudy",
-                                   "fohmixer", "varos", "dev1", "dev2", "gk", "fs"])
+                                   "fohmixer", "varos", "wall-bri", "songplay",
+                                   "dev1", "dev2", "gk", "fs"])
         # No marek-subdev (dead stream) on the dashboard.
         self.assertNotIn('title="marek@subdev"', html)
 
