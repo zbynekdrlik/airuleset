@@ -86,8 +86,7 @@ _GENERATED_DROP_PORTS = {
     # #1115 slice G: the LOCAL controller account (not a REMOTE_HOSTS target, so
     # never reached by the fleet loop — read by _add_controller_local_lane).
     ("airuleset", "airuleset"): 8891,
-    ("dev2", "varos"): 8892,              # #1220 project account
-    ("dev1", "fohmixer"): 8893,           # #1237 project account
+    ("dev2", "varos"): 8892, ("dev1", "fohmixer"): 8893,   # #1220, #1237 project accounts
     ("dev1", "songplayer"): 8894, ("dev1", "wall-bridge"): 8895,   # #1267 project accounts
     ("dev1", "dante-stack"): 8896, ("dev1", "dante-asio"): 8897, ("dev1", "iemmixer"): 8899,  # #1270
     ("dev1", "dcontroller"): 8900,        # #1273
