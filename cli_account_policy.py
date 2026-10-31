@@ -99,6 +99,17 @@ def validate_sudo(spec, account, declared=()):
     return errs
 
 
+def validate_rtprio(spec):
+    """#1281: an optional real-time priority ceiling, 1..89. pipewire's 95 and
+    the kernel's own threads stay above any project account."""
+    if "rtprio" not in spec:
+        return []
+    value = spec["rtprio"]
+    if type(value) is not int or not 1 <= value <= 89:
+        return ["rtprio must be an integer from 1 to 89, got %r" % (value,)]
+    return []
+
+
 def sudo_label(sudo):
     """``no`` / ``yes`` (scoped binaries) / ``commands`` (#1186 scripts)."""
     return sudo if sudo == "commands" else ("yes" if sudo else "no")

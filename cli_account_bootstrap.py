@@ -72,7 +72,7 @@ _NEVER_PROJECT_ACCOUNTS = frozenset({"newlevel", "root", "airuleset",
 _ALLOWED_KEYS = frozenset({
     "host", "sudo", "sudo_reason", "sudo_commands",
     "secrets", "webterm_sessions", "system_packages", "repo",
-    "project_dir", "tmux_session", "github_app", "repo_secrets", "tools", "code_only", "handover", "statuses_write", "extra_repos",
+    "project_dir", "tmux_session", "github_app", "repo_secrets", "tools", "code_only", "handover", "statuses_write", "extra_repos", "rtprio",
 })
 
 # The defaults every declaration inherits. They are the SAFE direction: no
@@ -237,7 +237,7 @@ SERVICE_ACCOUNTS = {
     # by the iemmixer session); iemmixer migrates out of `newlevel`.
     "dstack": {
         "host": "dev1",
-        "sudo": False,
+        "sudo": False, "rtprio": 50,   # #1281: SCHED_FIFO threads, HIL latency gate
         "repo": "zbynekdrlik/dstack",   # public: iemmixer's CI fetches it keyless
         "extra_repos": ["zbynekdrlik/dantesync"],   # the one Dante expert keeps it too
         "github_app": True, "repo_secrets": [],
@@ -430,7 +430,7 @@ def validate_account(account, raw):
     if spec["host"] not in boxes:
         errs.append("host %r is not a fleet box (known: %s)"
                     % (spec["host"], ", ".join(sorted(boxes))))
-    errs += policy.validate_sudo(spec, account, declared=SERVICE_ACCOUNTS)
+    errs += policy.validate_sudo(spec, account, declared=SERVICE_ACCOUNTS) + policy.validate_rtprio(spec)
     secrets = spec["secrets"]
     if not isinstance(secrets, (list, tuple)):
         errs.append("secrets must be a list")
@@ -704,7 +704,7 @@ def render_root_bootstrap(account):
     # 3a-3d: the privilege boundary (#1184, cli_account_hardening) lands
     # BEFORE step 5 installs any key, so a failed step never leaves a
     # loginable, unbounded account.
-    script += hardening.render_sudo_step(account, spec)
+    script += hardening.render_sudo_step(account, spec) + hardening.render_rtprio_step(account, spec)
     script += hardening.render_reach_teardown_step(account)
     script += hardening.render_lockout_step()
     script += hardening.render_isolation_check_step()

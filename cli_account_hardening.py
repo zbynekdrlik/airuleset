@@ -70,6 +70,9 @@ SUDO_DENY_BASENAMES = frozenset({
 })
 
 
+LIMITS_DIR = "/etc/security/limits.d"
+
+
 def sudo_command_problem(cmd):
     """None when ``cmd`` is an acceptable scoped sudo command, else why not."""
     if not SUDO_CMD_RE.fullmatch(cmd) or "/../" in cmd or "/./" in cmd:
@@ -241,6 +244,21 @@ def render_sudo_step(account, spec):
         '        *) echo "ERROR: $BIN is not root-owned + non-group/other-writable" >&2; exit 1 ;;\n'
         "    esac\n"
         "done\n" % " ".join(binaries)) + _SUDOERS_INSTALL % (header, rule)
+
+
+def render_rtprio_step(account, spec):
+    """Step 3a-rt (#1281): the DECLARED real-time limit, applied by pam_limits
+    at the next login. No ``rtprio`` key renders nothing."""
+    if "rtprio" not in spec:
+        return ""
+    return textwrap.dedent("""\
+
+        # 3a-rt. Real-time limit (#1281)
+        printf '%s - rtprio {value}\\n' "$ACCOUNT" > "{path}"
+        chmod 0644 "{path}"
+        echo "  rtprio: $(cat "{path}")"
+    """).format(value=spec["rtprio"],
+                path="%s/90-%s-rtprio.conf" % (LIMITS_DIR, account))
 
 
 def nft_table_name(account):
