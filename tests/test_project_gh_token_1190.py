@@ -143,7 +143,7 @@ class FakeGitHub:
                 return self._air(url)
             return _Resp(201, {
                 "token": self.token, "expires_at": EXPIRES,
-                "permissions": {"contents": "write"},
+                "permissions": (body or {}).get("permissions", {"contents": "write"}),
                 "repositories": [{"name": r.split("/")[1], "full_name": r}
                                  for r in self.scoped_to]})
         raise AssertionError("unexpected request %s %s" % (req.get_method(), url))

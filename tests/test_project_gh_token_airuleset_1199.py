@@ -73,7 +73,8 @@ class TestAirMint(base._Base):
         rc, out, err, gh, ssh = self.mint(gh=base.FakeGitHub(air="ok"))
         self.assertEqual(rc, 0, err)
         posts = [r for r in gh.requests if r["method"] == "POST"]
-        self.assertEqual(posts[0]["body"], {"repositories": ["fohmixer"]})
+        self.assertEqual(posts[0]["body"], {"repositories": ["fohmixer"],
+                                            "permissions": base.pgt.PROJECT_PERMISSIONS})
         self.assertEqual(posts[1]["body"], {
             "repositories": ["airuleset"],
             "permissions": {"issues": "write", "metadata": "read"}})

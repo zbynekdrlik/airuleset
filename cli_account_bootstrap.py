@@ -72,7 +72,7 @@ _NEVER_PROJECT_ACCOUNTS = frozenset({"newlevel", "root", "airuleset",
 _ALLOWED_KEYS = frozenset({
     "host", "sudo", "sudo_reason", "sudo_commands",
     "secrets", "webterm_sessions", "system_packages", "repo",
-    "project_dir", "tmux_session", "github_app", "repo_secrets", "tools", "code_only", "handover", "extra_repos",
+    "project_dir", "tmux_session", "github_app", "repo_secrets", "tools", "code_only", "handover", "statuses_write", "extra_repos",
 })
 
 # The defaults every declaration inherits. They are the SAFE direction: no
@@ -282,7 +282,7 @@ SERVICE_ACCOUNTS = {
     "iemmixer": {
         "host": "dev1",
         "sudo": False,
-        "secrets": ["cloudflare-iemmixer"],   # #1272: fohmixer's ACME token, owner 31.10.
+        "secrets": ["cloudflare-iemmixer"], "statuses_write": True,   # #1272, owner 31.10.
         "repo": "zbynekdrlik/iemmixer",
         "extra_repos": ["zbynekdrlik/iemmixer-ops"],   # private site data, its own repo
         "github_app": True, "repo_secrets": ["DENYLIST"],

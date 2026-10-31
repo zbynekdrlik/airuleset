@@ -77,6 +77,10 @@ INSTALLATION_SETTINGS_URL = "https://github.com/settings/installations/%d"
 # #1199: the second, issues-only token every project account gets
 AIRULESET_REPO = "zbynekdrlik/airuleset"
 AIRULESET_PERMISSIONS = {"issues": "write", "metadata": "read"}
+# #1272: a repo token's declared scope, so an App change never widens it silently
+PROJECT_PERMISSIONS = {"actions": "write", "checks": "read", "contents": "write",
+                       "issues": "write", "metadata": "read", "pull_requests": "write",
+                       "statuses": "read", "workflows": "write"}
 TIMER_UNIT = "project-gh-token.timer"
 SERVICE_UNIT = "project-gh-token.service"
 REPO_DIR = Path(__file__).resolve().parent
@@ -211,6 +215,13 @@ def find_installation(repo, jwt, *, urlopen=None):
         raise MintError("installation lookup for %s failed (HTTP %d: %s)"
                         % (repo, status, _message(data)))
     return data["id"]
+
+
+def project_permissions(spec):
+    """The repo token's permissions; ``statuses_write`` is the one per-account
+    addition (#1272, iemmixer's hardware gates)."""
+    return {**PROJECT_PERMISSIONS,
+            **({"statuses": "write"} if spec.get("statuses_write") else {})}
 
 
 def mint_token(installation_id, repo, jwt, *, permissions=None, extra=(), urlopen=None):
@@ -545,8 +556,10 @@ def mint_account(account, *, key_path=None, dry_run=False, now=None, run=None,
                      token_file_name(AIRULESET_REPO)))
             return 0
         skipped = []
+        permissions = project_permissions(bootstrap.account_spec(account))
         try:
-            minted = mint_token(installation, repo, jwt, urlopen=urlopen, extra=extras)
+            minted = mint_token(installation, repo, jwt, urlopen=urlopen, extra=extras,
+                                permissions=permissions)
         except MintError as e:
             if not extras or e.status not in (404, 422):
                 raise
@@ -555,7 +568,8 @@ def mint_account(account, *, key_path=None, dry_run=False, now=None, run=None,
             skipped, extras = extras, []
             print("project-gh-token: %s: SKIPPED %s — %s. OWNER ACTION: add it at %s"
                   % (account, ", ".join(skipped), e, APP_INSTALL_URL), file=sys.stderr)
-            minted = mint_token(installation, repo, jwt, urlopen=urlopen)
+            minted = mint_token(installation, repo, jwt, urlopen=urlopen,
+                                permissions=permissions)
         deliver(remote, repo, minted["token"], minted["expires_at"], run=run)
     except MintError as e:
         return _fail(account, repo, str(e), now, dry_run, directory)

@@ -40,7 +40,7 @@ class _Resp:
 def _urlopen(names, sent):
     def fake(req, timeout=None):
         sent.append(json.loads(req.data))
-        return _Resp(201, {"token": TOKEN, "expires_at": EXPIRES, "permissions": {"contents": "write"},
+        return _Resp(201, {"token": TOKEN, "expires_at": EXPIRES, "permissions": sent[-1].get("permissions", {}),
                            "repositories": [{"full_name": "o/" + n} for n in names]})
     return fake
 
