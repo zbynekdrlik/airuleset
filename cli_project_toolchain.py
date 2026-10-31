@@ -21,6 +21,7 @@ before anything is rendered into a root script):
   ``rust-toolchain:<channel>``     a toolchain in the shared ``/opt/rust``
   ``rust-component:<name>``        added to the account's toolchains (or stable)
   ``rust-target:<triple>``         likewise
+  ``cargo:<crate>[@<ver>]``        ``cargo install`` into the shared cargo bin
   ``playwright:<ver>/<browser>``   browsers in ``/opt/ms-playwright``; ``pinned``
                                    is ``cli_playwright_mcp.PLAYWRIGHT_PW_VERSION``
 
@@ -73,6 +74,8 @@ _KIND_RE = {
     "rust-toolchain": re.compile(r"[a-z0-9][a-z0-9.-]*"),
     "rust-component": re.compile(r"[a-z0-9][a-z0-9-]*"),
     "rust-target": re.compile(r"[a-z0-9_][a-z0-9_.-]*"),
+    "cargo": re.compile(r"(?P<crate>[A-Za-z0-9][A-Za-z0-9_-]*)"
+                        r"(@(?P<ver>[0-9][A-Za-z0-9.+-]*))?"),
     "playwright": re.compile(r"(?P<ver>%s|\d+\.\d+\.\d+(-[A-Za-z0-9.-]+)?)/"
                              r"(?P<browser>chromium|chromium-headless-shell|"
                              r"firefox|webkit)" % PINNED),
@@ -113,7 +116,8 @@ def parse_tool(entry):
     if not m:
         raise ValueError("tool %r is not one of pipx:<pkg>[==<ver>], "
                          "rust-toolchain:<channel>, rust-component:<name>, "
-                         "rust-target:<triple>, playwright:<ver>/<browser>"
+                         "rust-target:<triple>, cargo:<crate>[@<ver>], "
+                         "playwright:<ver>/<browser>"
                          % (entry,))
     return kind, m
 
@@ -200,7 +204,8 @@ def plan(spec):
             ver = PLAYWRIGHT_PW_VERSION if m.group("ver") == PINNED else m.group("ver")
             if m.group("browser") not in browsers.setdefault(ver, []):
                 browsers[ver].append(m.group("browser"))
-    return {"pipx": sorted(pipx.items()), "rust": rust,
+    cargo = sorted((m.group("crate"), m.group("ver")) for k, m in own if k == "cargo")
+    return {"pipx": sorted(pipx.items()), "rust": rust, "cargo": cargo,
             "playwright": sorted(browsers.items())}
 
 
@@ -322,6 +327,15 @@ def _playwright_lines(browsers, pw_dir):
     return "".join(out)
 
 
+def _cargo_lines(tools, cargo_bin):
+    """``cargo install`` per declared tool; a built binary stays (#1275)."""
+    return "".join(
+        "[ -x %s/%s ] || %s/cargo +%s install --locked %s%s\n"
+        % (cargo_bin, crate, cargo_bin, DEFAULT_TOOLCHAIN,
+           "--version %s " % shlex.quote(ver) if ver else "", shlex.quote(crate))
+        for crate, ver in tools)
+
+
 def render_system_step(spec, *, rust_root=RUST_ROOT, pipx_home=PIPX_HOME,
                        pipx_bin=PIPX_BIN_DIR, pw_dir=PLAYWRIGHT_DIR):
     """Root bootstrap step 12 (the LAST step): install the baseline + the
@@ -338,6 +352,7 @@ def render_system_step(spec, *, rust_root=RUST_ROOT, pipx_home=PIPX_HOME,
                               rust_bin=shlex.quote(cargo_home + "/bin"),
                               rust_root=shlex.quote(rust_root))
             + _rust_lines(p["rust"], cargo_home + "/bin")
+            + _cargo_lines(p["cargo"], cargo_home + "/bin")
             + "chmod -R a+rX,go-w %s\n" % shlex.quote(rust_root))
     return ("\n# 12. Shared project toolchain, system-wide + read-only (#1201)\n"
             + _subshell("pipx venvs (ruff, …)", pipx)
