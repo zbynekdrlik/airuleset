@@ -32,7 +32,7 @@ import cli_webterm_profiles as profiles  # noqa: E402
 ZBYNEK_ORDER = [
     "ar", "claudy", "fohmixer",   # #1183 fohmixer@dev1 project account
     "varos",   # #1220 varos@dev2 project account
-    "wall-bridge", "songplayer", "dante-stack", "dante-asio", "iemmixer",   # #1267, #1270 dev1 project accounts
+    "wall-bridge", "songplayer", "dante-stack", "dante-asio", "iemmixer", "dcontroller",   # #1267, #1270 dev1 project accounts
     "dev1", "dev2", "gatekeeper",
     "montalu1-subdev", "montalu2-subdev", "montalu3-subdev",
     "montalu4-subdev", "montalu5-subdev", "montalu6-subdev",
@@ -47,7 +47,7 @@ ZBYNEK_EXCLUDED = [
 ]
 # The owner's expected tab ALIASES, in his order (spinbike -> "sb").
 ZBYNEK_ALIAS_ORDER = [
-    "ar", "claudy", "fohmixer", "varos", "wall-bri", "songplay", "dante-st", "dante-as", "iemmixer",   # 8-char cut
+    "ar", "claudy", "fohmixer", "varos", "wall-bri", "songplay", "dante-st", "dante-as", "iemmixer", "dcontrol",   # 8-char cut
     "dev1", "dev2", "gk", "m1", "m2", "m3", "m4", "m5", "m6",
     "d1", "d2", "d3", "d4", "miva", "sb",
 ]
@@ -139,7 +139,7 @@ class TestExclusiveTabListMechanism(unittest.TestCase):
             "montalu1-subdev", "montalu2-subdev",
             "miva1-subdev", "montalu4-subdev",
             "ar", "claudy", "fohmixer", "varos", "wall-bridge", "songplayer",  # #1267
-            "dante-stack", "dante-asio", "iemmixer", "dev1", "dev2", "gatekeeper", "forestshop",
+            "dante-stack", "dante-asio", "iemmixer", "dcontroller", "dev1", "dev2", "gatekeeper", "forestshop",
         ])
         html = w.render_dashboard_html(
             profiles.marek_inventory(), ttyd_base="/t", human="marek",
@@ -149,7 +149,7 @@ class TestExclusiveTabListMechanism(unittest.TestCase):
         # gatekeeper->gk, forestshop->fs — from the SINGLE #592 cli_aliases source.
         self.assertEqual(aliases, ["m1", "m2", "miva", "m4", "ar", "claudy",
                                    "fohmixer", "varos", "wall-bri", "songplay",
-                                   "dante-st", "dante-as", "iemmixer", "dev1", "dev2", "gk", "fs"])
+                                   "dante-st", "dante-as", "iemmixer", "dcontrol", "dev1", "dev2", "gk", "fs"])
         # No marek-subdev (dead stream) on the dashboard.
         self.assertNotIn('title="marek@subdev"', html)
 

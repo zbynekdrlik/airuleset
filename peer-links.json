@@ -40,6 +40,10 @@
           "songplayer"
         ],
         [
+          "dante-stack",
+          "dcontroller"
+        ],
+        [
           "iemmixer",
           "mikrotik"
         ]
@@ -47,6 +51,7 @@
       "topics": {
         "songplayer|wall-bridge": "the SNV LED wall on the Resolume PC: Arena, Spout outputs, starting a scene, what SongPlayer does to Arena",
         "camera-box|songplayer": "the NDI SP-program sender contract, genlock and the burn-id chain, the rig lease for deploys",
+        "dante-stack|dcontroller": "the Dante protocol: a protocol need or bug in dcontroller goes to dante-stack, dcontroller only moves the stack version",
         "dante-asio|dante-stack": "the shared Dante crates: a Dante bug in dante-asio goes here, dante-asio only moves the stack version",
         "dante-stack|iemmixer": "the shared Dante crates and dantesync: a Dante bug goes to dante-stack, iemmixer only moves the stack version",
         "camera-box|dante-stack": "dantesync only: new versions and clock faults",

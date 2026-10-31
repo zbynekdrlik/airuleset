@@ -134,7 +134,7 @@ class TestAuthorityResolution(TestCase):
             set(airuleset.FULL_AUTHORITY_USERS),
             {"newlevel", "gatekeeper", "admin", "stepan", "airuleset", "claudy",
              "fohmixer", "varos", "wall-bridge", "songplayer",
-             "dante-stack", "dante-asio", "iemmixer"})
+             "dante-stack", "dante-asio", "iemmixer", "dcontroller"})
 
     def test_full_authority_users_disjoint_from_stream_table(self):
         # airuleset#827: the two registries must be DISJOINT — a full account is

@@ -264,6 +264,21 @@ SERVICE_ACCOUNTS = {
             for human in ("zbynek", "marek")
         },
     },
+    # #1273 (owner 31.10.): a web Dante controller, an application on dante-stack.
+    "dcontroller": {
+        "host": "dev1",
+        "sudo": False,
+        "repo": "zbynekdrlik/dcontroller",   # public: site facts stay out of git
+        "github_app": True, "repo_secrets": [],
+        "tools": ["rust-toolchain:1.98.1", "rust-target:wasm32-unknown-unknown"],
+        "project_dir": "devel/dcontroller",
+        "tmux_session": "dcontroller",
+        "handover": "docs/HANDOVER.md",
+        "webterm_sessions": {
+            human: {"preferred": "dcontroller", "start_dir_chain": ["devel/dcontroller"]}
+            for human in ("zbynek", "marek")
+        },
+    },
     "iemmixer": {
         "host": "dev1",
         "sudo": False,

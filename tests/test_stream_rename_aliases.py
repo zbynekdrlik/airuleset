@@ -324,7 +324,7 @@ class TestFleetBurnSkipsPendingHosts(TestCase):
         # bootstrap runs (claudy@controller) is a legitimate pending entry
         # that is NOT a rename target -- enumerate such accounts explicitly.
         new_pending_accounts = {"claudy", "varos", "wall-bridge", "songplayer",
-                                "dante-stack", "dante-asio", "iemmixer"}  # #1220, #1267, #1270
+                                "dante-stack", "dante-asio", "iemmixer", "dcontroller"}  # #1220, #1267, #1270
         self.assertTrue(
             still_pending.issubset({new for _o, new in RENAMES} | new_pending_accounts),
             "unexpected pending entries: %s" % still_pending)

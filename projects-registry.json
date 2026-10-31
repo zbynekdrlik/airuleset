@@ -373,5 +373,16 @@
     "overrides": [],
     "onboarded": null,
     "account": "dante-asio"
+  },
+  {
+    "name": "dcontroller",
+    "host": "dev1",
+    "path": "/home/dcontroller/devel/dcontroller",
+    "branch_model": "2-branch",
+    "default_branch": "main",
+    "work_branch": "dev",
+    "overrides": [],
+    "onboarded": "2026-10-31",
+    "account": "dcontroller"
   }
 ]
