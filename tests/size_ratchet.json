@@ -436,7 +436,7 @@
     "tests/test_owner_decision_digest.py": 160,
     "tests/test_owner_key_provisioning.py": 380,
     "tests/test_owner_session_audit_660.py": 129,
-    "tests/test_owner_stop_fixes_1257.py": 992,
+    "tests/test_owner_stop_fixes_1257.py": 995,
     "tests/test_owner_stop_review5_1257.py": 255,
     "tests/test_owner_stop_review6_1257.py": 309,
     "tests/test_owner_stray_creator_660.py": 218,

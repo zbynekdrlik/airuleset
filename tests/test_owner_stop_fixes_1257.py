@@ -345,6 +345,9 @@ def _spawn(testcase, argv):
     proc = subprocess.Popen(argv)
     testcase.addCleanup(proc.wait)
     testcase.addCleanup(proc.kill)
+    deadline = time.time() + 5      # /proc cmdline lags Popen until the exec (issue 1266)
+    while time.time() < deadline and argv[-1] not in Path("/proc/%d/cmdline" % proc.pid).read_text():
+        time.sleep(0.01)
     return str(proc.pid)
 
 
