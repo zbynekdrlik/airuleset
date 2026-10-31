@@ -454,11 +454,75 @@ def uncommitted_config():
     return [ln[3:] for ln in r.stdout.splitlines()]
 
 
+def _account_reachable(account):
+    import cli_account_bootstrap as bootstrap
+    remote = bootstrap.account_remote(account)
+    return bool(remote) and not bootstrap.is_pending(account)
+
+
+def relay_for(to, links_doc=None, registry=None, usable=_account_reachable):
+    """#1272: ``(project, account, path)`` of a project linked to ``to`` whose
+    account the controller reaches, or None."""
+    links_doc = load_links() if links_doc is None else links_doc
+    registry = load_registry() if registry is None else registry
+    for host in links_doc.get("hosts", {}):
+        projects = peer_channel.host_projects(registry, host)
+        if to not in projects:
+            continue
+        for other in peer_channel.linked_to(peer_channel.host_links(links_doc, host), to):
+            row = projects.get(other)
+            if row and usable(row["account"]):
+                return other, row["account"], row["path"]
+    return None
+
+
+_TELL_SCRIPT = """import json, os, pwd, socket, sys
+home = os.path.expanduser("~")
+sys.path.insert(0, os.path.join(home, "devel/airuleset"))
+import peer_channel as pc
+req = json.loads(%r)
+me = pwd.getpwuid(os.getuid()).pw_name
+print(pc.Peer(socket.gethostname(), me, os.getuid(), req["path"], home, armed=False)
+      .send(req["to"], req["text"]))
+"""
+
+
+def _ssh_for(account):
+    import cli_account_bootstrap as bootstrap
+    import cli_remote
+    prefix, reason = cli_remote._ssh_prefix(bootstrap.account_remote(account), True)
+    if prefix is None:
+        raise SystemExit("tell: no ssh path to %s: %s" % (account, reason))
+    remote = bootstrap.account_remote(account)
+    return prefix + ["%s@%s" % (remote["user"], remote["host"])]
+
+
+def tell(to, text, relay, ssh=_ssh_for, run=subprocess.run):
+    """#1272: put ``text`` into the live session of ``to``. Rc 0 only when the
+    channel reports delivery, because a ticket alone reaches no running session."""
+    if relay is None:
+        print("tell: no linked project of %s is reachable" % to, file=sys.stderr)
+        return 1
+    project, account, path = relay
+    body = "From airuleset, not from the %s session (sent over its link). %s" % (project, text)
+    doc = json.dumps({"to": to, "path": path, "text": body})
+    r = run(ssh(account) + ["python3", "-I", "-"], input=_TELL_SCRIPT % doc,
+            text=True, capture_output=True, timeout=30)
+    out = (r.stdout or "").strip()
+    if r.returncode or not out.startswith("(True"):
+        print("tell: %s NOT told: %s" % (to, out or (r.stderr or "").strip()), file=sys.stderr)
+        return 1
+    print("tell: %s %s" % (to, out))
+    return 0
+
+
 def main(argv=None, dirty=uncommitted_config, apply=provision_peer_channel_root):
     import argparse
     ap = argparse.ArgumentParser(description="peer channel managed side (#1266)")
-    ap.add_argument("action", choices=["status", "render-root", "root-apply"])
+    ap.add_argument("action", choices=["status", "render-root", "root-apply", "tell"])
     ap.add_argument("--host")
+    ap.add_argument("--to", help="tell: the project whose live session gets the text")
+    ap.add_argument("--file", help="tell: the file holding the text")
     a = ap.parse_args(argv)
     if a.action == "status":
         print("\n".join(status_lines(a.host)))
@@ -466,6 +530,8 @@ def main(argv=None, dirty=uncommitted_config, apply=provision_peer_channel_root)
     if a.action == "render-root":
         sys.stdout.write(render_root_script(accounts_for_host(a.host or this_host())))
         return 0
+    if a.action == "tell":
+        return tell(a.to, Path(a.file).read_text(encoding="utf-8"), relay_for(a.to))
     uncommitted = dirty()
     if uncommitted:
         print("root-apply refused: commit %s first" % ", ".join(uncommitted), file=sys.stderr)

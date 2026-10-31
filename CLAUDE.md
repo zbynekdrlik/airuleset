@@ -65,6 +65,10 @@ the `scripts/size_ratchet.py` ratchet), and the on-demand
 goes into the matching `internals-<area>.md`** (not the router, not the archive); when
 that file nears the ~50 KB cap, move its oldest lessons into the archive.
 
+## Before closing a ticket
+
+Name every project the change touches and tell its session: `python3 cli_peer_channel.py tell --to <project> --file <text>`. A ticket comment reaches no running session (owner 31.10.2026, #1272).
+
 ## Rule intake gate — before ADDING any new always-on module
 
 Every new rule originates from a real problem — but it must land on the RIGHT surface, not reflexively in the always-on profile (content loads context every turn of every project; the gate picks the surface, never drops the content):
