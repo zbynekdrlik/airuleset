@@ -57,7 +57,7 @@ import sys
 
 CHECKS = ("tmux", "gh-token", "secret-sync", "ruff", "rust", "playwright",
           "home-duplicates", "git-identity", "webterm", "session", "drop",
-          "login", "handover", "old-checkout")
+          "login", "handover", "rtprio", "old-checkout")
 CLAUDY_CONFIG_DIR = "/home/claudy/.config/claudy"
 NOREPLY_SUFFIX = "@users.noreply.github.com"
 PROBE_TIMEOUT_S = 180
@@ -160,6 +160,8 @@ try:
     print(str(a.get("emailAddress") or "").splitlines()[0])
 except Exception:
     pass' 2>/dev/null)"
+echo @@rtprio
+echo "hard=$(ulimit -Hr)"
 echo @@handover
 if [ -r "$HOME"/__PROJECT__/__HANDOVER__ ]; then
   python3 -I -c 'import re, sys
@@ -613,6 +615,15 @@ def _check_login(account, spec, s, claudy_read):
         email, box)
 
 
+def _check_rtprio(spec, s):
+    """#1281: a new login carries the declared real-time limit."""
+    want = spec.get("rtprio")
+    got = _one(s, "rtprio", "hard")
+    if want is None:
+        return got == "0", "none declared, login has %s" % (got or "?")
+    return got == str(want), "declared %s, login has %s" % (want, got or "?")
+
+
 def _check_handover(spec, s):
     """#1270: the file a new session starts from. Shape only: the supervisor
     reads the text before go-live."""
@@ -658,6 +669,7 @@ def evaluate(account, spec, sections, *, gh_rc, no_transfer=False,
         "drop": _check_drop(account, s),
         "login": _check_login(account, spec, s, claudy_read or read_claudy_file),
         "handover": _check_handover(spec, s),
+        "rtprio": _check_rtprio(spec, s),
         "old-checkout": old_checkout,
     }
     return [(name,) + tuple(results[name]) for name in CHECKS]
@@ -736,7 +748,7 @@ def verify_account(account, *, run=None, gh_verify=None, no_transfer=False,
     results = evaluate(account, spec, sections, gh_rc=gh_rc, no_transfer=no_transfer,
                        claudy_read=claudy_read, old_checkout=old)
     remote = {"tmux", "ruff", "rust", "playwright", "home-duplicates",
-              "git-identity", "webterm", "session", "drop", "login", "handover"}
+              "git-identity", "webterm", "session", "drop", "login", "handover", "rtprio"}
     failed = 0
     for name, ok, detail in results:
         if err and name in remote:

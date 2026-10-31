@@ -183,7 +183,8 @@ def _project_accounts():
                      "sudo_commands": list(spec.get("sudo_commands") or []),
                      "secrets": list(spec["secrets"]),
                      "webterm": sorted(spec["webterm_sessions"]),
-                     "github_app": spec.get("github_app") is True}
+                     "github_app": spec.get("github_app") is True,
+                     "rtprio": spec.get("rtprio")}
     return out
 
 

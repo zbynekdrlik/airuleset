@@ -100,13 +100,14 @@ def validate_sudo(spec, account, declared=()):
 
 
 def validate_rtprio(spec):
-    """#1281: an optional real-time priority ceiling, 1..89. pipewire's 95 and
-    the kernel's own threads stay above any project account."""
+    """#1281: an optional real-time priority ceiling, 1..49. Threaded IRQs and
+    the fleet's timing daemons run SCHED_FIFO 50 on dev1, and FIFO does not
+    preempt at equal priority, so a project thread stays strictly below them."""
     if "rtprio" not in spec:
         return []
     value = spec["rtprio"]
-    if type(value) is not int or not 1 <= value <= 89:
-        return ["rtprio must be an integer from 1 to 89, got %r" % (value,)]
+    if type(value) is not int or not 1 <= value <= 49:
+        return ["rtprio must be an integer from 1 to 49, got %r" % (value,)]
     return []
 
 

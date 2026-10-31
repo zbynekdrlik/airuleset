@@ -247,17 +247,18 @@ def render_sudo_step(account, spec):
 
 
 def render_rtprio_step(account, spec):
-    """Step 3a-rt (#1281): the DECLARED real-time limit, applied by pam_limits
-    at the next login. No ``rtprio`` key renders nothing."""
+    """Step 3d-rt (#1281): the DECLARED real-time limit, applied by pam_limits
+    at the next login. No ``rtprio`` key removes the file: a dropped
+    declaration must not leave the grant behind. ``%d``: only an integer."""
     if "rtprio" not in spec:
-        return ""
+        return '\n# 3d-rt. No declared real-time limit (#1281)\nrm -f "%s/90-$ACCOUNT-rtprio.conf"\n' % LIMITS_DIR
     return textwrap.dedent("""\
 
-        # 3a-rt. Real-time limit (#1281)
+        # 3d-rt. Real-time limit (#1281)
         printf '%s - rtprio {value}\\n' "$ACCOUNT" > "{path}"
         chmod 0644 "{path}"
         echo "  rtprio: $(cat "{path}")"
-    """).format(value=spec["rtprio"],
+    """).format(value="%d" % spec["rtprio"],
                 path="%s/90-%s-rtprio.conf" % (LIMITS_DIR, account))
 
 
