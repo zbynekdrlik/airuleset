@@ -270,7 +270,8 @@ SERVICE_ACCOUNTS = {
         "sudo": False,
         "repo": "zbynekdrlik/dcontroller",   # public: site facts stay out of git
         "github_app": True, "repo_secrets": [],
-        "tools": ["rust-toolchain:1.98.1", "rust-target:wasm32-unknown-unknown", "cargo:trunk"],
+        "tools": ["rust-toolchain:1.98.1", "rust-target:wasm32-unknown-unknown", "cargo:trunk",
+                  "playwright:1.64.1/chromium"], "secrets": ["cloudflared-dcontroller-token"],
         "project_dir": "devel/dcontroller",
         "tmux_session": "dcontroller",
         "handover": "docs/HANDOVER.md",

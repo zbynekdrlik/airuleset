@@ -24,6 +24,8 @@ class TestDcontroller(unittest.TestCase):
         self.assertEqual(set(spec["webterm_sessions"]), {"zbynek", "marek"})
         self.assertEqual(spec["handover"], "docs/HANDOVER.md")
         self.assertIn("rust-target:wasm32-unknown-unknown", spec["tools"])
+        self.assertIn("playwright:1.64.1/chromium", spec["tools"])
+        self.assertEqual(spec["secrets"], ["cloudflared-dcontroller-token"])
 
     def test_drop_lane_port_is_unique_and_not_reserved(self):
         port = drop._GENERATED_DROP_PORTS[("dev1", "dcontroller")]
