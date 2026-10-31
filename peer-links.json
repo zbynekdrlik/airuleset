@@ -54,7 +54,7 @@
         "dcontroller|dstack": "the Dante protocol: a protocol need or bug in dcontroller goes to dstack, dcontroller only moves the stack version",
         "dasio|dstack": "the shared Dante crates: a Dante bug in dasio goes here, dasio only moves the stack version",
         "dstack|iemmixer": "the shared Dante crates and dantesync: a Dante bug goes to dstack, iemmixer only moves the stack version",
-        "camera-box|dstack": "dantesync only: new versions and clock faults",
+        "camera-box|dstack": "dantesync, and Dante RX on the editing PC (the intercom and OBS through dstack): a Dante need or bug goes to dstack, camera-box only moves the stack version",
         "dstack|fohmixer": "the Dante side of the FOH PC: clock, devices, a Dante bug seen from fohmixer",
         "dasio|fohmixer": "the shared FOH PC: who holds the audio devices, CPU pinning, restarts of Ableton",
         "dstack|songplayer": "dantesync and genlock on the SongPlayer PCs, the ASIO output through Dante Virtual Soundcard: a Dante bug goes to dstack",
