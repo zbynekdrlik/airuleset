@@ -1,4 +1,4 @@
-"""#1270: dante-asio, dante-stack and iemmixer are declared project accounts on
+"""#1270: dasio, dstack and iemmixer are declared project accounts on
 dev1 (owner 30.10.: two new projects plus iemmixer out of `newlevel`), and the
 peer links between them name what each pair talks about."""
 import sys
@@ -11,7 +11,7 @@ import cli_account_bootstrap as bootstrap  # noqa: E402
 import cli_drop_lanes as drop  # noqa: E402
 import cli_peer_channel as cpc  # noqa: E402
 
-NEW = ("dante-asio", "dante-stack", "iemmixer")
+NEW = ("dasio", "dstack", "iemmixer")
 
 
 class TestDeclaration(unittest.TestCase):
@@ -29,7 +29,7 @@ class TestDeclaration(unittest.TestCase):
             self.assertIn(("dev1", acct), drop._GENERATED_DROP_PORTS)
 
     def test_new_sessions_start_from_a_handover_document(self):
-        for acct in ("dante-asio", "dante-stack"):
+        for acct in ("dasio", "dstack"):
             self.assertEqual(bootstrap.account_spec(acct)["handover"], "docs/HANDOVER.md")
 
     def test_iemmixer_keeps_its_ci_secret_and_pins(self):
@@ -49,26 +49,26 @@ class TestLinks(unittest.TestCase):
         self.assertEqual(cpc.validate_links(cpc.load_links(), cpc.load_registry()), [])
 
     def test_dante_stack_is_the_hub_for_dante_questions(self):
-        for other in ("dante-asio", "iemmixer", "camera-box", "fohmixer"):
-            self.assertIn(frozenset(("dante-stack", other)), self.links, other)
+        for other in ("dasio", "iemmixer", "camera-box", "fohmixer"):
+            self.assertIn(frozenset(("dstack", other)), self.links, other)
 
     def test_consumers_are_not_linked_to_each_other_for_dante(self):
         self.assertNotIn(frozenset(("iemmixer", "camera-box")), self.links)
-        self.assertNotIn(frozenset(("iemmixer", "dante-asio")), self.links)
+        self.assertNotIn(frozenset(("iemmixer", "dasio")), self.links)
 
     def test_the_two_mixers_talk_about_their_shared_band_data(self):
         # owner 30.10.: "prepoj cez peers fohmixer a iemmixer"
         self.assertIn("band", self.links[frozenset(("fohmixer", "iemmixer"))])
 
     def test_a_bug_goes_to_the_dante_session(self):
-        self.assertIn("bug", self.links[frozenset(("dante-stack", "iemmixer"))])
+        self.assertIn("bug", self.links[frozenset(("dstack", "iemmixer"))])
 
     def test_iemmixer_talks_to_mikrotik_about_the_network(self):
         # owner 30.10.: "prepoj iemmixer s projektom mikrotik na dev1 newlevel"
         self.assertIn("VLAN", self.links[frozenset(("iemmixer", "mikrotik"))])
 
     def test_songplayer_reports_dante_bugs_to_dante_stack(self):
-        self.assertIn("Dante bug", self.links[frozenset(("dante-stack", "songplayer"))])
+        self.assertIn("Dante bug", self.links[frozenset(("dstack", "songplayer"))])
 
 
 if __name__ == "__main__":

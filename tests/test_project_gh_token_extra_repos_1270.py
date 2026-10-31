@@ -1,5 +1,5 @@
 """#1270: an account may declare `extra_repos`: repositories its ONE token also
-covers (iemmixer + its private ops repo, dante-stack + dantesync). The scope
+covers (iemmixer + its private ops repo, dstack + dantesync). The scope
 check stays exact: a token wider or narrower than the declaration is refused."""
 import io
 import json
@@ -64,7 +64,7 @@ class TestExtraRepos(unittest.TestCase):
     def test_the_declarations(self):
         self.assertEqual(bootstrap.account_spec("iemmixer")["extra_repos"],
                          ["zbynekdrlik/iemmixer-ops"])
-        self.assertEqual(bootstrap.account_spec("dante-stack")["extra_repos"],
+        self.assertEqual(bootstrap.account_spec("dstack")["extra_repos"],
                          ["zbynekdrlik/dantesync"])
 
     def test_a_bad_extra_repo_is_refused(self):

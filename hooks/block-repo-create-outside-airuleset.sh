@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Hook: PreToolUse(Bash) — BLOCK creating a GitHub repository from any session
-# whose checkout is not airuleset (#1270: the iemmixer session created dante-asio
+# whose checkout is not airuleset (#1270: the iemmixer session created dasio
 # by itself under `newlevel`, with no account, registry row, webterm lane or
 # channels). A new project goes through airuleset. Reads .tool_input.command and
 # .cwd on STDIN. Exit 2 = block. Bypass (rare, logged): # airuleset:repo-create-ok <reason>

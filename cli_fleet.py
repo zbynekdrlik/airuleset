@@ -581,8 +581,8 @@ REMOTE_HOSTS += [
         ("varos", "dev2", "100.82.64.27", False),          # #1220, live 8.10.
         ("wall-bridge", "dev1", "100.104.8.125", False),   # #1267, live 29.10.
         ("songplayer", "dev1", "100.104.8.125", False),    # #1267, live 29.10.
-        ("dante-stack", "dev1", "100.104.8.125", False),   # #1270, live 30.10.
-        ("dante-asio", "dev1", "100.104.8.125", False),    # #1270, live 30.10.
+        ("dstack", "dev1", "100.104.8.125", False),   # #1270, live 30.10.
+        ("dasio", "dev1", "100.104.8.125", False),    # #1270, live 30.10.
         ("iemmixer", "dev1", "100.104.8.125", False),      # #1270, live 30.10.
         ("dcontroller", "dev1", "100.104.8.125", False),   # #1273, live 31.10.
     )
@@ -1039,7 +1039,7 @@ AUTHORITY_BY_USER = {
 FULL_AUTHORITY_USERS = frozenset(
     {"newlevel", "gatekeeper", "admin", "stepan", "airuleset", "claudy",
      "fohmixer", "varos", "wall-bridge", "songplayer",
-     "dante-stack", "dante-asio", "iemmixer", "dcontroller"})
+     "dstack", "dasio", "iemmixer", "dcontroller"})
 
 
 # Webterm OBSERVER accounts (airuleset#867). An account that exists ONLY to run a

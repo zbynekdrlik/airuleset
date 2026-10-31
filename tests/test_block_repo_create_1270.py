@@ -1,6 +1,6 @@
 """#1270: a session outside airuleset cannot create a GitHub repository.
 
-The iemmixer session created dante-asio by itself under `newlevel`. A new
+The iemmixer session created dasio by itself under `newlevel`. A new
 project goes through airuleset (`onboard-project` + a project account)."""
 import json
 import subprocess

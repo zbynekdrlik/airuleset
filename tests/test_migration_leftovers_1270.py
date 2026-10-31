@@ -18,7 +18,7 @@ import cli_peer_channel as cpc  # noqa: E402
 import cli_project_gh_token as tok  # noqa: E402
 import peer_channel  # noqa: E402
 
-SPEC = {"host": "dev1", "repo": "zbynekdrlik/dante-stack", "extra_repos": ["zbynekdrlik/dantesync"]}
+SPEC = {"host": "dev1", "repo": "zbynekdrlik/dstack", "extra_repos": ["zbynekdrlik/dantesync"]}
 
 
 class TestOldCheckout(unittest.TestCase):
@@ -32,18 +32,18 @@ class TestOldCheckout(unittest.TestCase):
         return run
 
     def test_a_listed_leftover_fails(self):
-        ok, detail = verify.check_old_checkout("dante-stack", SPEC, self._run("dantesync\n"))
+        ok, detail = verify.check_old_checkout("dstack", SPEC, self._run("dantesync\n"))
         self.assertFalse(ok)
         self.assertIn("dantesync", detail)
 
     def test_no_leftover_passes_and_names_each_repo(self):
-        ok, _ = verify.check_old_checkout("dante-stack", SPEC, self._run())
+        ok, _ = verify.check_old_checkout("dstack", SPEC, self._run())
         self.assertTrue(ok)
         self.assertIn("newlevel@", " ".join(self.calls[0]))
-        self.assertIn("dante-stack dantesync", self.calls[0][-1])
+        self.assertIn("dstack dantesync", self.calls[0][-1])
 
     def test_a_failed_ssh_is_no_pass(self):
-        self.assertFalse(verify.check_old_checkout("dante-stack", SPEC, self._run(rc=255))[0])
+        self.assertFalse(verify.check_old_checkout("dstack", SPEC, self._run(rc=255))[0])
 
     def test_dev2_with_no_pinned_identity_is_checked_not_failed(self):
         # varos read "dev2 has no pinned ssh identity" live: newlevel@dev2 logs in by password

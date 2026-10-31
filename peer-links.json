@@ -12,23 +12,23 @@
           "songplayer"
         ],
         [
-          "dante-stack",
-          "dante-asio"
+          "dasio",
+          "dstack"
         ],
         [
-          "dante-stack",
+          "dstack",
           "iemmixer"
         ],
         [
-          "dante-stack",
-          "camera-box"
+          "camera-box",
+          "dstack"
         ],
         [
-          "dante-stack",
+          "dstack",
           "fohmixer"
         ],
         [
-          "dante-asio",
+          "dasio",
           "fohmixer"
         ],
         [
@@ -36,12 +36,12 @@
           "iemmixer"
         ],
         [
-          "dante-stack",
+          "dstack",
           "songplayer"
         ],
         [
-          "dante-stack",
-          "dcontroller"
+          "dcontroller",
+          "dstack"
         ],
         [
           "iemmixer",
@@ -51,13 +51,13 @@
       "topics": {
         "songplayer|wall-bridge": "the SNV LED wall on the Resolume PC: Arena, Spout outputs, starting a scene, what SongPlayer does to Arena",
         "camera-box|songplayer": "the NDI SP-program sender contract, genlock and the burn-id chain, the rig lease for deploys",
-        "dante-stack|dcontroller": "the Dante protocol: a protocol need or bug in dcontroller goes to dante-stack, dcontroller only moves the stack version",
-        "dante-asio|dante-stack": "the shared Dante crates: a Dante bug in dante-asio goes here, dante-asio only moves the stack version",
-        "dante-stack|iemmixer": "the shared Dante crates and dantesync: a Dante bug goes to dante-stack, iemmixer only moves the stack version",
-        "camera-box|dante-stack": "dantesync only: new versions and clock faults",
-        "dante-stack|fohmixer": "the Dante side of the FOH PC: clock, devices, a Dante bug seen from fohmixer",
-        "dante-asio|fohmixer": "the shared FOH PC: who holds the audio devices, CPU pinning, restarts of Ableton",
-        "dante-stack|songplayer": "dantesync and genlock on the SongPlayer PCs, the ASIO output through Dante Virtual Soundcard: a Dante bug goes to dante-stack",
+        "dcontroller|dstack": "the Dante protocol: a protocol need or bug in dcontroller goes to dstack, dcontroller only moves the stack version",
+        "dasio|dstack": "the shared Dante crates: a Dante bug in dasio goes here, dasio only moves the stack version",
+        "dstack|iemmixer": "the shared Dante crates and dantesync: a Dante bug goes to dstack, iemmixer only moves the stack version",
+        "camera-box|dstack": "dantesync only: new versions and clock faults",
+        "dstack|fohmixer": "the Dante side of the FOH PC: clock, devices, a Dante bug seen from fohmixer",
+        "dasio|fohmixer": "the shared FOH PC: who holds the audio devices, CPU pinning, restarts of Ableton",
+        "dstack|songplayer": "dantesync and genlock on the SongPlayer PCs, the ASIO output through Dante Virtual Soundcard: a Dante bug goes to dstack",
         "iemmixer|mikrotik": "the SNV network under the IEM mixer: Dante VLAN 70, QoS, multicast, switch ports and link faults",
         "fohmixer|iemmixer": "band lineups and channel names shared by the two mixers; a change in one mixer that affects the other"
       }

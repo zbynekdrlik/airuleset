@@ -39,7 +39,7 @@ class TestPeerRepos(unittest.TestCase):
         self.assertEqual(cpc.peer_repos("nobody", LINKS, REGISTRY), [])
 
     def test_the_live_declaration_gives_dante_stack_songplayer(self):
-        self.assertIn("zbynekdrlik/songplayer", cpc.peer_repos("dante-stack"))
+        self.assertIn("zbynekdrlik/songplayer", cpc.peer_repos("dstack"))
 
 
 class TestMintPeers(unittest.TestCase):

@@ -232,39 +232,39 @@ SERVICE_ACCOUNTS = {
             for human in ("zbynek", "marek")
         },
     },
-    # #1270 (owner 30.10.): the Dante family. dante-stack is the one expert for
-    # all Dante code; dante-asio its first consumer (created outside airuleset
+    # #1270 (owner 30.10.): the Dante family. dstack is the one expert for
+    # all Dante code; dasio its first consumer (created outside airuleset
     # by the iemmixer session); iemmixer migrates out of `newlevel`.
-    "dante-stack": {
+    "dstack": {
         "host": "dev1",
         "sudo": False,
-        "repo": "zbynekdrlik/dante-stack",   # public: iemmixer's CI fetches it keyless
+        "repo": "zbynekdrlik/dstack",   # public: iemmixer's CI fetches it keyless
         "extra_repos": ["zbynekdrlik/dantesync"],   # the one Dante expert keeps it too
         "github_app": True, "repo_secrets": [],
         "tools": ["rust-toolchain:1.98.1", "pipx:netaudio"],
-        "project_dir": "devel/dante-stack",
-        "tmux_session": "dante-stack",
+        "project_dir": "devel/dstack",
+        "tmux_session": "dstack",
         "handover": "docs/HANDOVER.md",
         "webterm_sessions": {
-            human: {"preferred": "dante-stack", "start_dir_chain": ["devel/dante-stack"]}
+            human: {"preferred": "dstack", "start_dir_chain": ["devel/dstack"]}
             for human in ("zbynek", "marek")
         },
     },
-    "dante-asio": {
+    "dasio": {
         "host": "dev1",
         "sudo": False,
-        "repo": "zbynekdrlik/dante-asio",
+        "repo": "zbynekdrlik/dasio",
         "github_app": True, "repo_secrets": [],
         "tools": ["rust-toolchain:1.98.1", "pipx:netaudio"],
-        "project_dir": "devel/dante-asio",
-        "tmux_session": "dante-asio",
+        "project_dir": "devel/dasio",
+        "tmux_session": "dasio",
         "handover": "docs/HANDOVER.md",
         "webterm_sessions": {
-            human: {"preferred": "dante-asio", "start_dir_chain": ["devel/dante-asio"]}
+            human: {"preferred": "dasio", "start_dir_chain": ["devel/dasio"]}
             for human in ("zbynek", "marek")
         },
     },
-    # #1273 (owner 31.10.): a web Dante controller, an application on dante-stack.
+    # #1273 (owner 31.10.): a web Dante controller, an application on dstack.
     "dcontroller": {
         "host": "dev1",
         "sudo": False,
@@ -282,6 +282,7 @@ SERVICE_ACCOUNTS = {
     "iemmixer": {
         "host": "dev1",
         "sudo": False,
+        "secrets": ["cloudflare-iemmixer"],   # #1272: fohmixer's ACME token, owner 31.10.
         "repo": "zbynekdrlik/iemmixer",
         "extra_repos": ["zbynekdrlik/iemmixer-ops"],   # private site data, its own repo
         "github_app": True, "repo_secrets": ["DENYLIST"],

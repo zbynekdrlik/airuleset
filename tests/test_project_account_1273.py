@@ -1,5 +1,5 @@
 """#1273: dcontroller is a declared project account on dev1 (owner 31.10.: a web
-Dante controller in its own project), peer of dante-stack, which owns the
+Dante controller in its own project), peer of dstack, which owns the
 protocol."""
 import sys
 import unittest
@@ -31,13 +31,13 @@ class TestDcontroller(unittest.TestCase):
         ports = list(drop._GENERATED_DROP_PORTS.values())
         self.assertEqual(ports.count(port), 1)
 
-    def test_only_peer_is_dante_stack_with_a_topic(self):
+    def test_only_peer_is_dstack_with_a_topic(self):
         doc = cpc.load_links()
         self.assertEqual(cpc.validate_links(doc, cpc.load_registry()), [])
         pairs = [p for p in doc["hosts"]["dev1"]["links"] if "dcontroller" in p]
-        self.assertEqual(pairs, [["dante-stack", "dcontroller"]])
-        self.assertIn("dante-stack",
-                      doc["hosts"]["dev1"]["topics"]["dante-stack|dcontroller"])
+        self.assertEqual(pairs, [["dcontroller", "dstack"]])
+        self.assertIn("dstack",
+                      doc["hosts"]["dev1"]["topics"]["dcontroller|dstack"])
 
 
 if __name__ == "__main__":
