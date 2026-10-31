@@ -254,8 +254,7 @@ class RepointOnRealTmux(unittest.TestCase):
                               env=self.env)
 
     def owner(self):
-        pids = self.tmux("list-sessions", "-F", "#{pid}").stdout.split()
-        return int(pids[0]) if pids else None   # between the two servers: no socket
+        return next(map(int, self.tmux("list-sessions", "-F", "#{pid}").stdout.split()), None)
 
     def test_socket_returns_to_the_claude_server(self):
         r = self.tmux("-f", "/dev/null", "new-session", "-d", "-s", "a",
