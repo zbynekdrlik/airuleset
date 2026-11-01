@@ -93,6 +93,7 @@ def validate_links(links_doc, registry, root_hosts=None):
     hosts = links_doc.get("hosts") if isinstance(links_doc, dict) else None
     if not isinstance(hosts, dict):
         return ["peer-links.json: missing 'hosts' object"]
+    errors += _bridge_errors(links_doc)
     for host, entry in sorted(hosts.items()):
         if host not in root_hosts:
             errors.append("%s: not a root-leg host (DISK_GUARD_ROOT_HOSTS)" % host)
@@ -115,6 +116,23 @@ def validate_links(links_doc, registry, root_hosts=None):
             for name in pair:
                 if name not in projects:
                     errors.append("%s: %r is not a registry project on %s" % (host, name, host))
+    return errors
+
+
+def _bridge_errors(links_doc):
+    """#1266: a bridge with a missing field would kill its thread at session start."""
+    errors = []
+    for name, spec in (links_doc.get("bridges") or {}).items():
+        if not (peer_channel.PROJECT_RE.match(name) and isinstance(spec, dict)
+                and spec.get("account") and spec.get("path") and spec.get("hosts")):
+            errors.append("bridge %s: needs account, path and hosts" % name)
+            continue
+        for host, far in spec["hosts"].items():
+            if host not in links_doc["hosts"]:
+                errors.append("bridge %s: %s is not a links host" % (name, host))
+            if not (isinstance(far, dict)
+                    and all(far.get(k) for k in ("account", "ssh", "identity", "path"))):
+                errors.append("bridge %s/%s: needs account, ssh, identity and path" % (name, host))
     return errors
 
 
@@ -381,7 +399,11 @@ def apply_home_policy(run=subprocess.run, links_doc=None):
               + _heredoc(POLICY_PATH, render_policy())
               + "python3 -I -c 'import json,sys; json.load(open(sys.argv[1]))' %s\n" % POLICY_PATH
               + "echo \"peer-channel-home: ok changed=[${CHANGED# }]\"\n")
-    r = run(["sudo", "-n", "bash", "-c", script], capture_output=True, text=True, timeout=60)
+    try:
+        r = run(["sudo", "-n", "bash", "-c", script], capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError) as e:
+        print("  ⚠ PEER-CHANNEL-HOME FAILED: %r" % (e,), file=sys.stderr)
+        return [("home", repr(e))]
     out = ((r.stdout or "") + (r.stderr or "")).strip()
     if r.returncode:
         print("  ⚠ PEER-CHANNEL-HOME FAILED rc=%s: %s" % (r.returncode, out[:400]), file=sys.stderr)
@@ -413,7 +435,7 @@ def provision_peer_channel_root(hosts=None, run=None, links_doc=None, registry=N
         print("  ⚠ PEER-CHANNEL-ROOT FAILED: unknown host %s" % only, file=sys.stderr)
         return [(only, "unknown host")]
     named = set(links_doc.get("hosts", {}))
-    failed = [] if only else apply_home_policy(run, links_doc)
+    failed = apply_home_policy(run, links_doc)
     for h in hosts:
         name = h.get("name", "?")
         if only and name != only:

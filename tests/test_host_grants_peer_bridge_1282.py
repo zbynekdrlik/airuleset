@@ -95,7 +95,7 @@ class TestRender(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             bin_dir = Path(tmp, "bin")
             self._run("", tmp)
-            (bin_dir / "nmcli").write_text("#!/bin/sh\n")
+            (bin_dir / "nmcli").write_text("#!/bin/sh\nexit 10\n")
             r = self._run(step.replace("nmcli -g", "%s/nmcli -g" % bin_dir), tmp, stubs=())
             self.assertEqual(r.returncode, 0, r.stderr)
             self.assertIn("dispatcher applies it", r.stdout)
@@ -229,6 +229,78 @@ class TestBridge(_Env):
         self.assertFalse(ok)
         self.assertIn("down", text)
 
+    def test_the_ssh_call_is_a_fixed_command(self):
+        home = pc.BridgeHome("home", self.SPEC, self.home, True, log=_Recorder())
+        argv = home._argv(self.SPEC["hosts"][HOST])
+        self.assertEqual(argv[0], "ssh")
+        self.assertIn("BatchMode=yes", argv)
+        self.assertEqual(argv[-2], "u@h")
+        self.assertEqual(argv[-1], 'exec python3 -I "$HOME/x/peer_channel.py" bridge --project home')
+
+    def test_a_failed_ssh_is_retried_and_logged(self):
+        calls = []
+
+        def spawn(*a, **k):
+            calls.append(a)
+            if len(calls) == 1:
+                raise OSError("no ssh")
+            return _Child(self.far)
+
+        rec = _Recorder()
+        home = pc.BridgeHome("home", self.SPEC, self.home, True, log=rec, spawn=spawn, retry_s=0.01)
+        self.addCleanup(home.close)
+        home.start_listener()
+        for _ in range(300):
+            if home.children:
+                break
+            time.sleep(0.01)
+        self.assertEqual(len(calls), 2)
+        self.assertIn("bridge-failed", rec.names())
+
+    def test_a_bad_line_does_not_end_the_bridge(self):
+        home = pc.BridgeHome("home", self.SPEC, self.home, True, log=_Recorder())
+        seen = []
+        home.notify = lambda text, meta: seen.append(text)
+        home._read(mock.Mock(stdout=["not json\n", "[1]\n", '{"t":"reply","id":[1]}\n',
+                                     json.dumps({"t": "msg", "text": "after"}) + "\n"]))
+        self.assertEqual(seen, ["after"])
+
+    def test_a_dropped_bridge_wakes_a_waiting_call(self):
+        home = pc.BridgeHome("home", self.SPEC, self.home, True, log=_Recorder())
+        home.children[HOST] = mock.Mock()
+        result = []
+        t = threading.Thread(target=lambda: result.append(home._call(HOST, {"op": "peers"})))
+        t.start()
+        for _ in range(200):
+            if home.waiting:
+                break
+            time.sleep(0.01)
+        home._drop_waiters()
+        t.join(5)
+        self.assertEqual(result, [(False, "bridge dropped, outcome unknown")])
+
+    def test_silence_closes_the_far_end(self):
+        far_in = os.fdopen(os.pipe()[0])     # never written, never closed: a dead network
+        aborted = threading.Event()
+        peer = self.far
+        t = threading.Thread(target=pc.run_bridge, daemon=True, kwargs=dict(
+            peer=peer, inp=far_in, out=open(os.devnull, "w"), silence_s=0.05,
+            abort=aborted.set))
+        t.start()
+        self.assertTrue(aborted.wait(5))
+        self.assertIsNone(peer.listener)
+        self.assertIn("bridge-silent", peer.log.names())
+
+    def test_a_far_end_that_cannot_listen_exits_nonzero(self):
+        peer = pc.Peer(HOST, ME, os.getuid(), "/", self.home, project_arg="gamma",
+                       sock_dir=self.sock, config_dir=self.cfg, log=_Recorder(), armed=True)
+        self.assertEqual(pc.run_bridge(peer, inp=[], out=open(os.devnull, "w")), 1)
+
+    def test_the_session_starts_knowing_its_links(self):
+        with mock.patch.object(pc, "active_config_dir", return_value=self.cfg):
+            text = pc.BridgeHome("home", self.SPEC, self.home, True, log=_Recorder()).instructions()
+        self.assertIn("alpha (%s)" % HOST, text)
+
     def test_only_the_home_directory_is_the_home_end(self):
         doc = {"bridges": {"home": {"account": ME, "path": "/srv/home"}}}
         with mock.patch("os.path.realpath", side_effect=lambda p: p):
@@ -257,6 +329,17 @@ class TestManagedSide(unittest.TestCase):
         run = mock.Mock(return_value=mock.Mock(returncode=1, stdout="", stderr="no sudo"))
         self.assertEqual(cpc.apply_home_policy(run, doc), [("home", "rc=1")])
         self.assertIn(cpc.POLICY_PATH, run.call_args[0][0][-1])
+
+    def test_a_bridge_with_a_missing_field_is_refused(self):
+        links = {"hosts": {"h": {"links": []}},
+                 "bridges": {"x": {"account": "a", "path": "~/x", "hosts": {"h": {"ssh": "u@h"}}}}}
+        errors = cpc.validate_links(links, [], {"h"})
+        self.assertTrue([e for e in errors if "needs account, ssh" in e], errors)
+
+    def test_home_policy_timeout_does_not_stop_the_root_leg(self):
+        doc = {"bridges": {"x": {"account": ME}}}
+        run = mock.Mock(side_effect=subprocess.TimeoutExpired("sudo", 60))
+        self.assertEqual(cpc.apply_home_policy(run, doc)[0][0], "home")
 
     def test_a_foreign_account_gets_no_home_policy(self):
         run = mock.Mock()

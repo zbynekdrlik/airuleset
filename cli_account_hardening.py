@@ -308,7 +308,7 @@ def _render_noqueue(account, conn):
     return textwrap.dedent("""\
         printf '%s' {script} > "{path}"
         chmod 0755 "{path}"
-        dev=$(nmcli -g GENERAL.DEVICES connection show {conn})
+        dev=$(nmcli -g GENERAL.DEVICES connection show {conn} 2>/dev/null || true)
         if [ -n "$dev" ]; then tc qdisc replace dev "$dev" root noqueue; fi
         echo "  noqueue: ${{dev:-connection down, the dispatcher applies it}}"
     """).format(script=shlex.quote(script), path=path, conn=shlex.quote(conn))

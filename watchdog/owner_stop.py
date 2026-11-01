@@ -188,9 +188,8 @@ def scan(entries, rec=None, machine_clears=()):
 
 def _tail(path):
     from watchdog import transcripts
-    entries = transcripts._read_jsonl_byte_tail(str(path), TAIL_BYTES, 1 << 30)
-    return [e for e in entries if isinstance(e, dict)
-            and e.get("type") in ("user", "system")][-TAIL_ENTRIES:]
+    return [e for e in transcripts._read_jsonl_byte_tail(str(path), TAIL_BYTES, 1 << 30)
+            if isinstance(e, dict) and e.get("type") in ("user", "system")][-TAIL_ENTRIES:]
 
 
 def _whole(path, entries):
@@ -219,8 +218,7 @@ def _evaluate(ctx):
         return None, []
     state, prev = ctx.get("state"), ctx.get("prev")
     entries = _tail(tpath)
-    latch, saw, found = scan(entries, ctx.get("rec"),
-                             _machine_clears(state, tpath.stem))
+    latch, saw, found = scan(entries, ctx.get("rec"), _machine_clears(state, tpath.stem))
     if not saw and prev and _whole(tpath, entries):
         inherited = scan(_tail(prev), ctx.get("prev_rec"),
                          _machine_clears(state, prev.stem))[0]

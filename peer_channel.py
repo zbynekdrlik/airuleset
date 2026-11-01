@@ -29,11 +29,8 @@ Trust model (the account is the boundary):
   project, and the pair must be a link in ``peer-links.json``;
 * the SENDER only considers entries of the target account's own subdir that are
   sockets owned by that account, and re-checks ``SO_PEERCRED`` of the listener;
-* a project on another box (#1266, today the airuleset session on the controller)
-  is reached through a BRIDGE: that session's own server keeps ``ssh <box>
-  peer_channel.py bridge`` open, and the far end is an ordinary ``Peer`` on the
-  box, with all the checks above. The socket lives exactly as long as the session,
-  so "live" and "delivered" stay true;
+* a session on another box (#1266, the controller) keeps ``ssh <box> peer_channel.py
+  bridge`` open; the far end is an ordinary ``Peer`` there, with all the checks above;
 * bounded resources: at most ``MAX_CONNS`` connections in flight, one overall
   deadline per connection, a capped line, a per-sender rate limit (two sessions
   cannot ping-pong tokens forever).
@@ -63,12 +60,17 @@ SNAPSHOT_DIR = "/etc/airuleset/peer"    # #1270: root-owned, written by the root
 REGISTRY_FILE = "projects-registry.json"
 LINKS_FILE = "peer-links.json"
 CHANNEL_ARG = "plugin:peer@airuleset"
+NOT_ARMED = "session was not launched with --channels " + CHANNEL_ARG
 LOG_MAX_BYTES = 5 * 1024 * 1024
 MAX_TEXT = 100_000                  # #1269: one long reply stays one message (was 4000)
 MAX_WIRE = 6 * MAX_TEXT + 1024      # a JSON \uXXXX escape is 6 bytes per char
 IO_TIMEOUT_S = 5.0                  # one OVERALL deadline per connection
 SEND_BUDGET_S = 12.0                # all sockets of one peer_send / peers call
-BRIDGE_RETRY_S = 15.0               # #1266: ssh reconnect pause, never a tight loop
+BRIDGE_RETRY_S = 15.0               # #1266: first ssh reconnect pause, doubles up to the max
+BRIDGE_RETRY_MAX_S = 300.0          # a refused key must not trip fail2ban on the box
+BRIDGE_STABLE_S = 60.0              # a bridge that lived this long resets the pause
+BRIDGE_BEAT_S = 30.0                # sshd sees a dead client only after hours
+BRIDGE_SILENCE_S = 90.0             # the far end exits after this much stdin silence
 MAX_CONNS = 8
 RATE_MAX = 20
 PENDING_MAX = 50                    # #1269: messages held before the MCP handshake ends
@@ -135,11 +137,15 @@ def load_json(path):
         return json.load(f)
 
 
+def _bridges(links_doc):
+    found = links_doc.get("bridges") if isinstance(links_doc, dict) else None
+    return found if isinstance(found, dict) else {}
+
+
 def bridge_rows(links_doc, host):
     """#1266: {project: entry} of the bridged projects with a far end on ``host``."""
-    bridges = links_doc.get("bridges") if isinstance(links_doc, dict) else None
     out = {}
-    for name, spec in (bridges if isinstance(bridges, dict) else {}).items():
+    for name, spec in _bridges(links_doc).items():
         far = (spec.get("hosts") or {}).get(host) if isinstance(spec, dict) else None
         if isinstance(far, dict) and far.get("account"):
             out[name] = {"name": name, "host": host, "account": far["account"],
@@ -150,8 +156,7 @@ def bridge_rows(links_doc, host):
 def bridge_home(links_doc, user, cwd, home):
     """#1266: (project, spec) when this session runs in a bridged project's home
     account and directory, else None."""
-    bridges = links_doc.get("bridges") if isinstance(links_doc, dict) else None
-    for name, spec in (bridges if isinstance(bridges, dict) else {}).items():
+    for name, spec in _bridges(links_doc).items():
         if isinstance(spec, dict) and resolve_project({name: spec}, user, cwd, home):
             return name, spec
     return None
@@ -668,13 +673,24 @@ class Peer:
                       else "no related projects linked to %s" % self.project)
 
 
-# --------------------------------------------------------------------------- #
-# Bridge (#1266): a session on one box <-> an ordinary Peer on another, over ssh
-# --------------------------------------------------------------------------- #
-def run_bridge(peer, inp=None, out=None):
+# -- Bridge (#1266): a session on one box <-> an ordinary Peer on another, over ssh --
+def run_bridge(peer, inp=None, out=None, silence_s=BRIDGE_SILENCE_S, abort=None):
     """The far end. stdout carries ``msg`` lines and ``reply`` lines, stdin carries
-    ``send`` and ``peers`` calls. Stdin EOF (the session ended) closes the socket."""
+    ``send``, ``peers`` and ``hb`` lines. Stdin EOF (the session ended) or stdin
+    silence (the controller or the network died, so no EOF comes) closes the
+    socket, because a sender would otherwise read "delivered" for a lost message.
+    Rc 1 when the socket cannot listen: the home end retries."""
     out, lock = out or sys.stdout, threading.Lock()
+    seen = [time.monotonic()]
+    done = threading.Event()
+
+    def stop_on_silence():
+        while not done.wait(min(silence_s / 4, 5.0)):
+            if time.monotonic() - seen[0] > silence_s:
+                peer.log("bridge-silent", project=peer.project)
+                peer.close()
+                (abort or (lambda: os._exit(1)))()
+                return
 
     def emit(obj):
         with lock:
@@ -682,18 +698,26 @@ def run_bridge(peer, inp=None, out=None):
             out.flush()
 
     peer.notify = lambda text, meta: emit({"t": "msg", "text": text, "meta": meta})
-    peer.start_listener()
-    for line in inp or sys.stdin:
-        try:
-            req = json.loads(line)
-        except (ValueError, RecursionError):
-            peer.log("bad-bridge-line", chars=len(line))
-            continue
-        if not isinstance(req, dict):
-            continue
-        ok, text = (peer.send(req.get("to"), req.get("text")) if req.get("op") == "send"
-                    else peer.list_peers())
-        emit({"t": "reply", "id": req.get("id"), "ok": ok, "text": text})
+    if not peer.start_listener():
+        peer.log("bridge-refused", project=peer.project, reason=peer.problem)
+        return 1
+    threading.Thread(target=stop_on_silence, daemon=True).start()
+    try:
+        for line in inp or sys.stdin:
+            seen[0] = time.monotonic()
+            try:
+                req = json.loads(line)
+            except (ValueError, RecursionError):
+                peer.log("bad-bridge-line", chars=len(line))
+                continue
+            if not isinstance(req, dict) or req.get("op") == "hb":
+                continue
+            ok, text = (peer.send(req.get("to"), req.get("text")) if req.get("op") == "send"
+                        else peer.list_peers())
+            emit({"t": "reply", "id": req.get("id"), "ok": ok, "text": text})
+    finally:
+        done.set()
+    return 0
 
 
 class BridgeHome:
@@ -702,19 +726,31 @@ class BridgeHome:
     the events and a sender would read "delivered" for a lost message."""
 
     def __init__(self, project, spec, home, armed, log=None, spawn=subprocess.Popen,
-                 retry_s=BRIDGE_RETRY_S):
+                 retry_s=BRIDGE_RETRY_S, beat_s=BRIDGE_BEAT_S):
         self.project, self.home, self.armed = project, home, armed
         self.hosts = spec.get("hosts") or {}
         self.log = log or Log(os.path.join(home, ".claude", "logs", "peer-channel.log"))
         self.notify = lambda text, meta: None
-        self.spawn, self.retry_s = spawn, retry_s
+        self.spawn, self.retry_s, self.beat_s = spawn, retry_s, beat_s
         self.lock = threading.Lock()
+        self.write_lock = threading.Lock()
+        self.stop = threading.Event()
         self.children, self.waiting = {}, {}
         self.next_id, self.closed = 0, False
         self.log("start", project=project, armed=armed, bridge=sorted(self.hosts))
 
     def instructions(self):
-        return INSTRUCTIONS
+        """Who may write here, per box, so the session starts knowing its links."""
+        try:
+            links = load_json(os.path.join(active_config_dir(), LINKS_FILE))
+        except (OSError, ValueError):
+            return INSTRUCTIONS
+        lines = []
+        for host in sorted(self.hosts):
+            topics = host_link_topics(links, host)
+            lines += ["%s (%s): %s" % (o, host, topics.get(frozenset((self.project, o)), "-"))
+                      for o in linked_to(host_links(links, host), self.project)]
+        return INSTRUCTIONS + ("\nLinked projects:\n" + "\n".join(lines) if lines else "")
 
     def start_listener(self):
         if not self.armed:
@@ -722,7 +758,24 @@ class BridgeHome:
             return False
         for host in self.hosts:
             threading.Thread(target=self._run, args=(host,), daemon=True).start()
+        threading.Thread(target=self._beat, daemon=True).start()
         return True
+
+    def _beat(self):
+        while not self.stop.wait(self.beat_s):
+            with self.lock:
+                children = list(self.children.values())
+            for child in children:
+                self._write(child, {"op": "hb"})
+
+    def _write(self, child, obj):
+        try:
+            with self.write_lock:
+                child.stdin.write(json.dumps(obj) + "\n")
+                child.stdin.flush()
+            return True
+        except (OSError, ValueError):
+            return False
 
     def _argv(self, far):
         script = "%s/peer_channel.py" % far["path"].replace("~", "$HOME", 1)
@@ -732,24 +785,40 @@ class BridgeHome:
                 far["ssh"], 'exec python3 -I "%s" bridge --project %s' % (script, self.project)]
 
     def _run(self, host):
+        pause = self.retry_s
         while not self.closed:
+            began = time.monotonic()
             try:
-                child = self.spawn(self._argv(self.hosts[host]), stdin=subprocess.PIPE,
-                                   stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                                   text=True, bufsize=1)
-            except OSError as e:
-                self.log("bridge-failed", host=host, error=str(e))
-            else:
-                with self.lock:
-                    self.children[host] = child
-                self.log("bridge-up", host=host)
-                self._read(child)
-                with self.lock:
-                    self.children.pop(host, None)
-                child.wait()
-                self.log("bridge-down", host=host, rc=child.returncode)
-            if not self.closed:
-                time.sleep(self.retry_s)
+                self._session(host)
+            except Exception as e:     # noqa: BLE001 -- a bad line never ends the reconnects
+                self.log("bridge-failed", host=host, error=repr(e))
+            self._drop_waiters()
+            if time.monotonic() - began >= BRIDGE_STABLE_S:
+                pause = self.retry_s
+            if self.stop.wait(pause):
+                return
+            pause = min(pause * 2, BRIDGE_RETRY_MAX_S)
+
+    def _session(self, host):
+        child = self.spawn(self._argv(self.hosts[host]), stdin=subprocess.PIPE,
+                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                           text=True, encoding="utf-8", errors="replace", bufsize=1)
+        with self.lock:
+            self.children[host] = child
+        self.log("bridge-up", host=host)
+        try:
+            self._read(child)
+        finally:
+            with self.lock:
+                self.children.pop(host, None)
+            child.terminate()
+            child.wait()
+            self.log("bridge-down", host=host, rc=child.returncode)
+
+    def _drop_waiters(self):
+        for slot in list(self.waiting.values()):
+            slot[1] = {"ok": False, "text": "bridge dropped, outcome unknown"}
+            slot[0].set()
 
     def _read(self, child):
         for line in child.stdout:
@@ -764,7 +833,7 @@ class BridgeHome:
                 self.notify(clean_text(str(msg.get("text"))), msg.get("meta") or {})
                 self.log("deliver", project=self.project, meta=msg.get("meta"))
             elif msg.get("t") == "reply":
-                slot = self.waiting.get(msg.get("id"))
+                slot = self.waiting.get(msg.get("id")) if isinstance(msg.get("id"), int) else None
                 if slot:
                     slot[1] = msg
                     slot[0].set()
@@ -779,34 +848,30 @@ class BridgeHome:
         slot = [threading.Event(), None]
         self.waiting[req["id"]] = slot
         try:
-            child.stdin.write(json.dumps(req) + "\n")
-            child.stdin.flush()
+            if not self._write(child, req):
+                return False, "bridge to %s failed" % host
             if not slot[0].wait(SEND_BUDGET_S + IO_TIMEOUT_S):
-                return False, "no answer from %s" % host
+                return False, "no answer from %s, outcome unknown" % host
             return bool(slot[1].get("ok")), str(slot[1].get("text"))
-        except (OSError, ValueError) as e:
-            return False, "bridge to %s failed: %s" % (host, e.__class__.__name__)
         finally:
             self.waiting.pop(req["id"], None)
 
-    def _not_armed(self):
-        return False, "session was not launched with --channels %s" % CHANNEL_ARG
-
     def send(self, to, text):
         if not self.armed:
-            return self._not_armed()
+            return False, NOT_ARMED
         results = [self._call(h, {"op": "send", "to": to, "text": text}) for h in sorted(self.hosts)]
         return next((r for r in results if r[0]), results[-1] if results else (False, "no bridge"))
 
     def list_peers(self):
         if not self.armed:
-            return self._not_armed()
+            return False, NOT_ARMED
         results = [self._call(h, {"op": "peers"}) for h in sorted(self.hosts)]
         return (any(r[0] for r in results),
                 "\n".join("%s:\n%s" % (h, r[1]) for h, r in zip(sorted(self.hosts), results)))
 
     def close(self):
         self.closed = True
+        self.stop.set()
         with self.lock:
             children = list(self.children.values())
         for child in children:
@@ -920,11 +985,10 @@ def main(argv=None):
                     armed=a.mode == "bridge" or channel_armed())
     if a.mode == "bridge":
         try:
-            run_bridge(peer)
+            return run_bridge(peer)
         finally:
             peer.close()
             peer.log("stop", project=peer.project)
-        return 0
     server = McpServer(peer)
     peer.start_listener()
     try:
