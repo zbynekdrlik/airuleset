@@ -429,8 +429,6 @@ def apply_home_policy(run=subprocess.run, links_doc=None):
     links_doc = load_links() if links_doc is None else links_doc
     me = pwd.getpwuid(os.getuid()).pw_name
     if not is_bridge_home(me, links_doc):
-        if os.path.exists(POLICY_PATH) and not os.path.isdir(SOCK_DIR):
-            run(["sudo", "-n", "rm", "-f", POLICY_PATH], capture_output=True, text=True, timeout=60)
         return []
     script = ("set -euo pipefail\ncd /\numask 022\nCHANGED=''\n" + _INSTALL_FN
               + _heredoc(POLICY_PATH, render_policy(()))
