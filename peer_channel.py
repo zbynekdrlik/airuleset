@@ -727,16 +727,12 @@ class BridgeHome:
 
     def __init__(self, project, spec, home, armed, log=None, spawn=subprocess.Popen,
                  retry_s=BRIDGE_RETRY_S, beat_s=BRIDGE_BEAT_S):
-        self.project, self.home, self.armed = project, home, armed
-        self.hosts = spec.get("hosts") or {}
+        self.project, self.armed, self.hosts = project, armed, spec.get("hosts") or {}
         self.log = log or Log(os.path.join(home, ".claude", "logs", "peer-channel.log"))
         self.notify = lambda text, meta: None
         self.spawn, self.retry_s, self.beat_s = spawn, retry_s, beat_s
-        self.lock = threading.Lock()
-        self.write_lock = threading.Lock()
-        self.stop = threading.Event()
-        self.children, self.waiting = {}, {}
-        self.next_id, self.closed = 0, False
+        self.lock, self.write_lock, self.stop = threading.Lock(), threading.Lock(), threading.Event()
+        self.children, self.waiting, self.next_id, self.closed = {}, {}, 0, False
         self.log("start", project=project, armed=armed, bridge=sorted(self.hosts))
 
     def instructions(self):
