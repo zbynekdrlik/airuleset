@@ -330,6 +330,14 @@ def _heredoc(dest, content):
     return "_install %s <<'%s'\n%s%s\n" % (shlex.quote(dest), mark, content, mark)
 
 
+def snapshot_registry(registry, links_doc):
+    """The registry as the host snapshot holds it: with the bridged projects, because
+    a running session reads this file on every use but keeps the code of its start."""
+    rows = [dict(row, name=name) for host in links_doc.get("hosts", {})
+            for name, row in peer_channel.bridge_rows(links_doc, host).items()]
+    return list(registry) + rows
+
+
 def _far_end_script(accounts, links_doc):
     """#1266: the far end of a bridge is its OWN system account, so no project on a
     shared account can speak as the bridged project or squat its socket. Its key
@@ -374,7 +382,8 @@ def render_root_script(accounts, links_doc=None, registry=None):
         _heredoc(POLICY_PATH, render_policy()),
         "TMPFILES_CHANGED=\"$CHANGED\"\n",     # a snapshot change needs no ACL re-apply
         _heredoc(SNAPSHOT_LINKS, json.dumps(links_doc, ensure_ascii=False, indent=2) + "\n"),
-        _heredoc(SNAPSHOT_REGISTRY, json.dumps(registry, ensure_ascii=False, indent=2) + "\n"),
+        _heredoc(SNAPSHOT_REGISTRY, json.dumps(snapshot_registry(registry, links_doc),
+                                               ensure_ascii=False, indent=2) + "\n"),
         "case \"$CHANGED\" in *peers.mount*) systemctl daemon-reload ;; esac\n",
         "systemctl enable --now %s\n" % unit,
         # tmpfiles re-applies the ACL; skip it when nothing changed (no transient
@@ -519,7 +528,8 @@ def _snapshot_differs(links_doc, registry):
     leaves the old links live while the checkout shows the new ones."""
     try:
         return (load_links(os.path.join(SNAPSHOT_DIR, peer_channel.LINKS_FILE)) != links_doc
-                or load_registry(os.path.join(SNAPSHOT_DIR, peer_channel.REGISTRY_FILE)) != registry)
+                or load_registry(os.path.join(SNAPSHOT_DIR, peer_channel.REGISTRY_FILE))
+                != snapshot_registry(registry, links_doc))
     except (OSError, ValueError):
         return False
 

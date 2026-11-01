@@ -385,6 +385,10 @@ class TestManagedSide(unittest.TestCase):
         self.assertIn("/var/lib/far/.ssh/authorized_keys", script)
         self.assertEqual(cpc._far_end_script(["other"], doc), "")
 
+    def test_a_running_session_finds_the_bridge_in_the_snapshot(self):
+        rows = cpc.snapshot_registry(cpc.load_registry(), cpc.load_links())
+        self.assertEqual(pc.host_projects(rows, "dev1")["airuleset"]["account"], "airuleset-peer")
+
     def test_the_controller_allows_only_the_peer_plugin(self):
         self.assertEqual(json.loads(cpc.render_policy(()))["allowedChannelPlugins"],
                          [{"marketplace": "airuleset", "plugin": "peer"}])
