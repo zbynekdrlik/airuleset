@@ -90,6 +90,18 @@
         [
           "airuleset",
           "dsync"
+        ],
+        [
+          "camera-box",
+          "intercom"
+        ],
+        [
+          "dstack",
+          "intercom"
+        ],
+        [
+          "airuleset",
+          "intercom"
         ]
       ],
       "topics": {
@@ -114,7 +126,10 @@
         "airuleset|songplayer": "airuleset infra: accounts, permissions, peer links, tooling. Ask or report here; airuleset decides and a ticket alone wakes no session",
         "airuleset|wall-bridge": "airuleset infra: accounts, permissions, peer links, tooling. Ask or report here; airuleset decides and a ticket alone wakes no session",
         "dstack|dsync": "dsync is a critical part of dstack: every request to dsync comes through dstack, which decides it, and audio stability outranks video",
-        "airuleset|dsync": "airuleset infra: accounts, permissions, peer links, tooling. Ask or report here; airuleset decides and a ticket alone wakes no session"
+        "airuleset|dsync": "airuleset infra: accounts, permissions, peer links, tooling. Ask or report here; airuleset decides and a ticket alone wakes no session",
+        "camera-box|intercom": "the intercom: camera-box pins a released hub and intercom-vban and installs them on the boxes; intercom owns code, config and tests",
+        "dstack|intercom": "the hub's Dante device: a Dante need or bug goes to dstack, intercom only moves the stack version",
+        "airuleset|intercom": "airuleset infra: accounts, permissions, peer links, tooling. Ask or report here; airuleset decides and a ticket alone wakes no session"
       }
     }
   },

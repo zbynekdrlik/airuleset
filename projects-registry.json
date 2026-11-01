@@ -386,5 +386,16 @@
     "overrides": [],
     "onboarded": "2026-10-31",
     "account": "dcontroller"
+  },
+  {
+    "name": "intercom",
+    "host": "dev1",
+    "path": "/home/intercom/devel/intercom",
+    "branch_model": "2-branch",
+    "default_branch": "main",
+    "work_branch": "dev",
+    "overrides": [],
+    "onboarded": "2026-11-01",
+    "account": "intercom"
   }
 ]

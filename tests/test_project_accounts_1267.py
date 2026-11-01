@@ -192,20 +192,20 @@ class TestMinterSkipsPending(unittest.TestCase):
 
     def test_mint_all_skips_pending_accounts_loudly(self):
         self.assertEqual(pgt.github_app_accounts(),
-                         ["dasio", "dcontroller", "dstack", "dsync", "fohmixer", "iemmixer", "songplayer", "varos",
+                         ["dasio", "dcontroller", "dstack", "dsync", "fohmixer", "iemmixer", "intercom", "songplayer", "varos",
                           "wall-bridge"])
         with _pending(), \
                 mock.patch.object(ci_sync, "run_after_mint", return_value=0):
             rc, minted, out = self._mint_all()
         self.assertEqual(rc, 0)
-        self.assertEqual(minted, ["dasio", "dcontroller", "dstack", "dsync", "fohmixer", "iemmixer", "varos"])
+        self.assertEqual(minted, ["dasio", "dcontroller", "dstack", "dsync", "fohmixer", "iemmixer", "intercom", "varos"])
         for acct in NEW:
             self.assertIn("project-gh-token: %s: SKIPPED — pending" % acct, out)
 
     def test_a_live_account_is_minted_again(self):
         with mock.patch.object(ci_sync, "run_after_mint", return_value=0):
             rc, minted, out = self._mint_all()
-        self.assertEqual(minted, ["dasio", "dcontroller", "dstack", "dsync", "fohmixer", "iemmixer", "songplayer", "varos",
+        self.assertEqual(minted, ["dasio", "dcontroller", "dstack", "dsync", "fohmixer", "iemmixer", "intercom", "songplayer", "varos",
                           "wall-bridge"])
         self.assertNotIn("wall-bridge: SKIPPED", out)
 
@@ -223,7 +223,7 @@ class TestMinterSkipsPending(unittest.TestCase):
                                   side_effect=lambda a: a == "varos"):
             ci_sync.sync_all(run=lambda *a, **k: None)
         self.assertEqual([c.args[0] for c in s.call_args_list],
-                         ["dasio", "dcontroller", "dstack", "dsync", "fohmixer", "iemmixer", "songplayer",
+                         ["dasio", "dcontroller", "dstack", "dsync", "fohmixer", "iemmixer", "intercom", "songplayer",
                           "wall-bridge"])
 
 
@@ -240,12 +240,12 @@ class TestPeerLinks(unittest.TestCase):
         # wall-bridge never reaches the root script's `account missing` exit 3
         with _pending():
             accts = cpc.accounts_for_host("dev1")
-        self.assertEqual(accts, ["airuleset-peer", "dasio", "dcontroller", "dstack", "dsync", "fohmixer", "iemmixer", "newlevel"])
+        self.assertEqual(accts, ["airuleset-peer", "dasio", "dcontroller", "dstack", "dsync", "fohmixer", "iemmixer", "intercom", "newlevel"])
         self.assertNotIn("wall-bridge", cpc.render_tmpfiles(accts))
 
     def test_wall_bridge_joins_once_live(self):
         self.assertEqual(cpc.accounts_for_host("dev1"),
-                         ["airuleset-peer", "dasio", "dcontroller", "dstack", "dsync", "fohmixer", "iemmixer",
+                         ["airuleset-peer", "dasio", "dcontroller", "dstack", "dsync", "fohmixer", "iemmixer", "intercom",
                           "newlevel", "songplayer", "wall-bridge"])
 
 

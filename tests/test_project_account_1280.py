@@ -27,6 +27,14 @@ class TestDsyncAccount(unittest.TestCase):
         self.assertEqual(sorted(pairs), [["airuleset", "dsync"], ["dstack", "dsync"]])
         self.assertIn("through dstack", hosts["dev1"]["topics"]["dstack|dsync"])
 
+    def test_intercom_reaches_camera_box_dstack_and_airuleset(self):
+        hosts = json.loads((ROOT / "peer-links.json").read_text(encoding="utf-8"))["hosts"]
+        pairs = sorted(sorted(p) for p in hosts["dev1"]["links"] if "intercom" in p)
+        self.assertEqual(pairs, [["airuleset", "intercom"], ["camera-box", "intercom"],
+                                 ["dstack", "intercom"]])
+        self.assertEqual(drop._GENERATED_DROP_PORTS[("dev1", "intercom")], 8902)
+        self.assertEqual(bootstrap.validate_account("intercom", bootstrap.account_spec("intercom")), [])
+
     def test_the_old_name_left_the_registry(self):
         rows = json.loads((ROOT / "projects-registry.json").read_text(encoding="utf-8"))
         rows = rows if isinstance(rows, list) else rows["projects"]

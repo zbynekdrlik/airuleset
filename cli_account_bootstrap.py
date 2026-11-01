@@ -294,6 +294,21 @@ SERVICE_ACCOUNTS = {
             for human in ("zbynek", "marek")
         },
     },
+    # #1280 (owner 1.11.): the intercom hub, VBAN codec and PWA, split from camera-box.
+    "intercom": {
+        "host": "dev1",
+        "sudo": False,
+        "repo": "zbynekdrlik/intercom",   # public: camera-box pins it keyless
+        "github_app": True, "repo_secrets": [],
+        "tools": ["rust-toolchain:1.98.1", "playwright:1.49.1/chromium"],
+        "project_dir": "devel/intercom",
+        "tmux_session": "intercom",
+        "handover": "docs/HANDOVER.md",
+        "webterm_sessions": {
+            human: {"preferred": "intercom", "start_dir_chain": ["devel/intercom"]}
+            for human in ("zbynek", "marek")
+        },
+    },
     "iemmixer": {
         "host": "dev1",
         "sudo": False,
