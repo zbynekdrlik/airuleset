@@ -46,6 +46,42 @@
         [
           "iemmixer",
           "mikrotik"
+        ],
+        [
+          "airuleset",
+          "camera-box"
+        ],
+        [
+          "airuleset",
+          "dasio"
+        ],
+        [
+          "airuleset",
+          "dcontroller"
+        ],
+        [
+          "airuleset",
+          "dstack"
+        ],
+        [
+          "airuleset",
+          "fohmixer"
+        ],
+        [
+          "airuleset",
+          "iemmixer"
+        ],
+        [
+          "airuleset",
+          "mikrotik"
+        ],
+        [
+          "airuleset",
+          "songplayer"
+        ],
+        [
+          "airuleset",
+          "wall-bridge"
         ]
       ],
       "topics": {
@@ -59,7 +95,30 @@
         "dasio|fohmixer": "the shared FOH PC: who holds the audio devices, CPU pinning, restarts of Ableton",
         "dstack|songplayer": "dantesync and genlock on the SongPlayer PCs, the ASIO output through Dante Virtual Soundcard: a Dante bug goes to dstack",
         "iemmixer|mikrotik": "the SNV network under the IEM mixer: Dante VLAN 70, QoS, multicast, switch ports and link faults",
-        "fohmixer|iemmixer": "band lineups and channel names shared by the two mixers; a change in one mixer that affects the other"
+        "fohmixer|iemmixer": "band lineups and channel names shared by the two mixers; a change in one mixer that affects the other",
+        "airuleset|camera-box": "airuleset infra: accounts, permissions, peer links, tooling. Send requests and questions here; a ticket alone wakes no session",
+        "airuleset|dasio": "airuleset infra: accounts, permissions, peer links, tooling. Send requests and questions here; a ticket alone wakes no session",
+        "airuleset|dcontroller": "airuleset infra: accounts, permissions, peer links, tooling. Send requests and questions here; a ticket alone wakes no session",
+        "airuleset|dstack": "airuleset infra: accounts, permissions, peer links, tooling. Send requests and questions here; a ticket alone wakes no session",
+        "airuleset|fohmixer": "airuleset infra: accounts, permissions, peer links, tooling. Send requests and questions here; a ticket alone wakes no session",
+        "airuleset|iemmixer": "airuleset infra: accounts, permissions, peer links, tooling. Send requests and questions here; a ticket alone wakes no session",
+        "airuleset|mikrotik": "airuleset infra: accounts, permissions, peer links, tooling. Send requests and questions here; a ticket alone wakes no session",
+        "airuleset|songplayer": "airuleset infra: accounts, permissions, peer links, tooling. Send requests and questions here; a ticket alone wakes no session",
+        "airuleset|wall-bridge": "airuleset infra: accounts, permissions, peer links, tooling. Send requests and questions here; a ticket alone wakes no session"
+      }
+    }
+  },
+  "bridges": {
+    "airuleset": {
+      "account": "airuleset",
+      "path": "~/devel/airuleset",
+      "hosts": {
+        "dev1": {
+          "account": "newlevel",
+          "ssh": "newlevel@100.104.8.125",
+          "identity": "~/.secrets/airuleset_push_ed25519",
+          "path": "~/devel/airuleset"
+        }
       }
     }
   }

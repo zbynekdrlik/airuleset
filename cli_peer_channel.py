@@ -100,7 +100,7 @@ def validate_links(links_doc, registry, root_hosts=None):
         if not isinstance(raw, list):
             errors.append("%s: 'links' must be a list" % host)
             continue
-        projects = peer_channel.host_projects(registry, host)
+        projects = peer_channel.host_projects(registry, host, links_doc)
         topics = entry.get("topics") if isinstance(entry.get("topics"), dict) else {}
         for pair in raw:
             if not (isinstance(pair, list) and len(pair) == 2
@@ -126,13 +126,21 @@ def accounts_for_host(host, links_doc=None, registry=None):
     import cli_account_bootstrap as bootstrap
     links_doc = load_links() if links_doc is None else links_doc
     registry = load_registry() if registry is None else registry
-    projects = peer_channel.host_projects(registry, host)
+    projects = peer_channel.host_projects(registry, host, links_doc)
     accts = set()
     for pair in peer_channel.host_links(links_doc, host):
         for name in pair:
             if name in projects:
                 accts.add(projects[name]["account"])
     return sorted(a for a in accts if not bootstrap.is_pending(a))
+
+
+def is_bridge_home(user, links_doc=None):
+    """#1266: this account hosts a bridged project, so it needs the plugin and the
+    launcher flag on a box with no shared socket dir."""
+    links_doc = load_links() if links_doc is None else links_doc
+    return any(isinstance(s, dict) and s.get("account") == user
+               for s in (links_doc.get("bridges") or {}).values())
 
 
 def peer_repos(account, links_doc=None, registry=None):
@@ -213,7 +221,7 @@ def install_step(user=None, host=None, claude_dir=None, run=None, links_doc=None
     claude_dir = Path(claude_dir)
     marker = claude_dir / MARKER_NAME
     try:
-        linked = user in accounts_for_host(host, links_doc, registry)
+        linked = user in accounts_for_host(host, links_doc, registry) or is_bridge_home(user, links_doc)
     except (OSError, ValueError) as e:
         print("  ⚠ peer channel: config unreadable (%s)" % e, file=sys.stderr)
         return False
@@ -362,6 +370,26 @@ def render_teardown_script():
                shlex.quote(SNAPSHOT_REGISTRY)))
 
 
+def apply_home_policy(run=subprocess.run, links_doc=None):
+    """#1266: the bridge's home box needs only the managed channel allowlist. It
+    has no shared dir, because the sockets live on the far end. [] or one failure."""
+    links_doc = load_links() if links_doc is None else links_doc
+    me = pwd.getpwuid(os.getuid()).pw_name
+    if not is_bridge_home(me, links_doc):
+        return []
+    script = ("set -euo pipefail\ncd /\numask 022\nCHANGED=''\n" + _INSTALL_FN
+              + _heredoc(POLICY_PATH, render_policy())
+              + "python3 -I -c 'import json,sys; json.load(open(sys.argv[1]))' %s\n" % POLICY_PATH
+              + "echo \"peer-channel-home: ok changed=[${CHANGED# }]\"\n")
+    r = run(["sudo", "-n", "bash", "-c", script], capture_output=True, text=True, timeout=60)
+    out = ((r.stdout or "") + (r.stderr or "")).strip()
+    if r.returncode:
+        print("  ⚠ PEER-CHANNEL-HOME FAILED rc=%s: %s" % (r.returncode, out[:400]), file=sys.stderr)
+        return [("home", "rc=%s" % r.returncode)]
+    print("  " + out)
+    return []
+
+
 def provision_peer_channel_root(hosts=None, run=None, links_doc=None, registry=None,
                                 only=None):
     """Apply the root leg on every ``DISK_GUARD_ROOT_HOSTS`` host: the full leg where
@@ -385,7 +413,7 @@ def provision_peer_channel_root(hosts=None, run=None, links_doc=None, registry=N
         print("  ⚠ PEER-CHANNEL-ROOT FAILED: unknown host %s" % only, file=sys.stderr)
         return [(only, "unknown host")]
     named = set(links_doc.get("hosts", {}))
-    failed = []
+    failed = [] if only else apply_home_policy(run, links_doc)
     for h in hosts:
         name = h.get("name", "?")
         if only and name != only:

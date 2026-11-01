@@ -99,6 +99,24 @@ def validate_sudo(spec, account, declared=()):
     return errs
 
 
+# #1282: the device nodes an account may declare; never a disk, memory or kvm node.
+GRANTABLE_DEVICES = ("cpu_dma_latency",)
+_CONNECTION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+
+
+def validate_host_grants(spec):
+    """#1282: ``devices`` are allow-listed names, ``nic_noqueue`` one NetworkManager
+    connection name. Both reach a root script, so neither takes free text."""
+    errs = []
+    devices = spec.get("devices", [])
+    if not isinstance(devices, list) or any(d not in GRANTABLE_DEVICES for d in devices):
+        errs.append("devices must list names from %r, got %r" % (GRANTABLE_DEVICES, devices))
+    conn = spec.get("nic_noqueue")
+    if conn is not None and not (isinstance(conn, str) and _CONNECTION_RE.match(conn)):
+        errs.append("nic_noqueue must be a connection name, got %r" % (conn,))
+    return errs
+
+
 def validate_rtprio(spec):
     """#1281: an optional real-time priority ceiling, 1..49. Threaded IRQs and
     the fleet's timing daemons run SCHED_FIFO 50 on dev1, and FIFO does not

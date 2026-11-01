@@ -57,7 +57,7 @@ import sys
 
 CHECKS = ("tmux", "gh-token", "secret-sync", "ruff", "rust", "playwright",
           "home-duplicates", "git-identity", "webterm", "session", "drop",
-          "login", "handover", "rtprio", "old-checkout")
+          "login", "handover", "rtprio", "host-grants", "old-checkout")
 CLAUDY_CONFIG_DIR = "/home/claudy/.config/claudy"
 NOREPLY_SUFFIX = "@users.noreply.github.com"
 PROBE_TIMEOUT_S = 180
@@ -162,6 +162,10 @@ except Exception:
     pass' 2>/dev/null)"
 echo @@rtprio
 echo "hard=$(ulimit -Hr)"
+echo @@grants
+for d in __DEVICES__; do if [ -w "/dev/$d" ]; then echo "writable=$d"; fi; done
+nq=$(nmcli -g GENERAL.DEVICES connection show __NOQUEUE__ 2>/dev/null)
+if [ -n "$nq" ]; then echo "dev=$nq"; echo "qdisc=$(tc qdisc show dev "$nq" | awk 'NR==1{print $2}')"; fi
 echo @@handover
 if [ -r "$HOME"/__PROJECT__/__HANDOVER__ ]; then
   python3 -I -c 'import re, sys
@@ -191,6 +195,7 @@ def render_probe(account, spec):
     """The bash probe run AS the account (in a login shell)."""
     from cli_account_session import project_key
     from cli_bashrc_appliers import LAUNCHER_SINCE_NAME, ULTRACODE_BASHRC_BLOCK
+    from cli_account_policy import GRANTABLE_DEVICES
     from cli_playwright_mcp import PLAYWRIGHT_CHROMIUM_BUILD
     project = spec.get("project_dir") or "."
     pins = declared_pins(spec)[1]
@@ -200,6 +205,8 @@ def render_probe(account, spec):
         "__SESS__": shlex.quote(spec.get("tmux_session") or ""),
         "__PROJECT__": shlex.quote(project),
         "__HANDOVER__": shlex.quote(spec.get("handover") or "-"),
+        "__DEVICES__": " ".join(GRANTABLE_DEVICES),
+        "__NOQUEUE__": shlex.quote(spec.get("nic_noqueue") or "-"),
         "__BUILD__": shlex.quote(PLAYWRIGHT_CHROMIUM_BUILD),
         "__DUPS__": " ".join(shlex.quote(d) for d in HOME_DUPLICATES),
         "__REPO__": shlex.quote(spec.get("repo") or "-"),
@@ -624,6 +631,20 @@ def _check_rtprio(spec, s):
     return got == str(want), "declared %s, login has %s" % (want, got or "?")
 
 
+def _check_host_grants(spec, s):
+    """#1282: the running account can use exactly what it declares."""
+    want = spec.get("devices", [])
+    got = sorted(x.strip() for x in (s.get("grants") or {}).get("writable", []))
+    bad = [] if got == sorted(want) else [
+        "declared %s, writable %s" % (want or "none", got or "none")]
+    conn = spec.get("nic_noqueue")
+    if conn and _one(s, "grants", "qdisc") != "noqueue":
+        bad.append("%s on %s has qdisc %s" % (conn, _one(s, "grants", "dev") or "?",
+                                              _one(s, "grants", "qdisc") or "?"))
+    return (not bad), "; ".join(bad) or "devices %s, noqueue %s" % (
+        ",".join(want) or "none", conn or "none")
+
+
 def _check_handover(spec, s):
     """#1270: the file a new session starts from. Shape only: the supervisor
     reads the text before go-live."""
@@ -670,6 +691,7 @@ def evaluate(account, spec, sections, *, gh_rc, no_transfer=False,
         "login": _check_login(account, spec, s, claudy_read or read_claudy_file),
         "handover": _check_handover(spec, s),
         "rtprio": _check_rtprio(spec, s),
+        "host-grants": _check_host_grants(spec, s),
         "old-checkout": old_checkout,
     }
     return [(name,) + tuple(results[name]) for name in CHECKS]
@@ -748,7 +770,7 @@ def verify_account(account, *, run=None, gh_verify=None, no_transfer=False,
     results = evaluate(account, spec, sections, gh_rc=gh_rc, no_transfer=no_transfer,
                        claudy_read=claudy_read, old_checkout=old)
     remote = {"tmux", "ruff", "rust", "playwright", "home-duplicates",
-              "git-identity", "webterm", "session", "drop", "login", "handover", "rtprio"}
+              "git-identity", "webterm", "session", "drop", "login", "handover", "rtprio", "host-grants"}
     failed = 0
     for name, ok, detail in results:
         if err and name in remote:

@@ -39,6 +39,7 @@ Pure string renderers (stdlib only). ``cli_account_bootstrap`` validates every
 interpolated value before calling them.
 """
 import re
+import shlex
 import textwrap
 
 # The group every project account joins; PAM (su) and polkit deny its members.
@@ -71,6 +72,8 @@ SUDO_DENY_BASENAMES = frozenset({
 
 
 LIMITS_DIR = "/etc/security/limits.d"
+UDEV_RULES_DIR = "/etc/udev/rules.d"
+NM_DISPATCHER_DIR = "/etc/NetworkManager/dispatcher.d"
 
 
 def sudo_command_problem(cmd):
@@ -260,6 +263,55 @@ def render_rtprio_step(account, spec):
         echo "  rtprio: $(cat "{path}")"
     """).format(value="%d" % spec["rtprio"],
                 path="%s/90-%s-rtprio.conf" % (LIMITS_DIR, account))
+
+
+def render_host_grants_step(account, spec):
+    """Step 3d-hw (#1282): declared device and NIC grants. A per-uid ACL, because
+    a group would never reach a running tmux server. A dropped key removes its
+    file and its effect. Names come from the policy allow-lists."""
+    rules = "".join(
+        'KERNEL=="%s", RUN+="/usr/bin/setfacl -m u:%s:rw /dev/%%k"\n' % (d, account)
+        for d in spec.get("devices", []))
+    device_part = textwrap.dedent("""\
+
+        # 3d-hw. Declared device and NIC grants (#1282)
+        rules="{rules_path}"
+        if [ -f "$rules" ]; then
+          sed -n 's/^KERNEL=="\\([a-z_]*\\)".*/\\1/p' "$rules" | while read -r d; do
+            setfacl -x "u:$ACCOUNT" "/dev/$d" 2>/dev/null || true
+          done
+        fi
+    """).format(rules_path="%s/90-%s-devices.rules" % (UDEV_RULES_DIR, account))
+    if rules:
+        device_part += textwrap.dedent("""\
+            printf '%s' {rules} > "$rules"
+            chmod 0644 "$rules"
+            udevadm control --reload
+        """).format(rules=shlex.quote(rules))
+        device_part += "".join(
+            'udevadm trigger --action=add --settle --name-match=%s\n'
+            'echo "  device: $(getfacl -cp /dev/%s | grep "^user:$ACCOUNT")"\n' % (d, d)
+            for d in spec.get("devices", []))
+    else:
+        device_part += 'if [ -f "$rules" ]; then rm -f "$rules"; udevadm control --reload; fi\n'
+    return device_part + _render_noqueue(account, spec.get("nic_noqueue"))
+
+
+def _render_noqueue(account, conn):
+    path = "%s/90-%s-noqueue" % (NM_DISPATCHER_DIR, account)
+    if conn is None:
+        return 'rm -f "%s"\n' % path
+    script = ("#!/bin/sh\n# airuleset-managed (#1282). Do not edit.\n"
+              'if [ "$2" = up ] && [ "$CONNECTION_ID" = %s ]; then\n'
+              '  exec /usr/sbin/tc qdisc replace dev "$1" root noqueue\n'
+              "fi\n" % shlex.quote(conn))
+    return textwrap.dedent("""\
+        printf '%s' {script} > "{path}"
+        chmod 0755 "{path}"
+        dev=$(nmcli -g GENERAL.DEVICES connection show {conn})
+        if [ -n "$dev" ]; then tc qdisc replace dev "$dev" root noqueue; fi
+        echo "  noqueue: ${{dev:-connection down, the dispatcher applies it}}"
+    """).format(script=shlex.quote(script), path=path, conn=shlex.quote(conn))
 
 
 def nft_table_name(account):

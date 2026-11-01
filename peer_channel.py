@@ -29,6 +29,11 @@ Trust model (the account is the boundary):
   project, and the pair must be a link in ``peer-links.json``;
 * the SENDER only considers entries of the target account's own subdir that are
   sockets owned by that account, and re-checks ``SO_PEERCRED`` of the listener;
+* a project on another box (#1266, today the airuleset session on the controller)
+  is reached through a BRIDGE: that session's own server keeps ``ssh <box>
+  peer_channel.py bridge`` open, and the far end is an ordinary ``Peer`` on the
+  box, with all the checks above. The socket lives exactly as long as the session,
+  so "live" and "delivered" stay true;
 * bounded resources: at most ``MAX_CONNS`` connections in flight, one overall
   deadline per connection, a capped line, a per-sender rate limit (two sessions
   cannot ping-pong tokens forever).
@@ -46,6 +51,7 @@ import signal
 import socket
 import stat
 import struct
+import subprocess
 import sys
 import threading
 import time
@@ -62,6 +68,7 @@ MAX_TEXT = 100_000                  # #1269: one long reply stays one message (w
 MAX_WIRE = 6 * MAX_TEXT + 1024      # a JSON \uXXXX escape is 6 bytes per char
 IO_TIMEOUT_S = 5.0                  # one OVERALL deadline per connection
 SEND_BUDGET_S = 12.0                # all sockets of one peer_send / peers call
+BRIDGE_RETRY_S = 15.0               # #1266: ssh reconnect pause, never a tight loop
 MAX_CONNS = 8
 RATE_MAX = 20
 PENDING_MAX = 50                    # #1269: messages held before the MCP handshake ends
@@ -128,10 +135,32 @@ def load_json(path):
         return json.load(f)
 
 
-def host_projects(registry, host):
-    """{project: entry} for the registry entries on ``host`` with a valid name
-    and an explicit account."""
+def bridge_rows(links_doc, host):
+    """#1266: {project: entry} of the bridged projects with a far end on ``host``."""
+    bridges = links_doc.get("bridges") if isinstance(links_doc, dict) else None
     out = {}
+    for name, spec in (bridges if isinstance(bridges, dict) else {}).items():
+        far = (spec.get("hosts") or {}).get(host) if isinstance(spec, dict) else None
+        if isinstance(far, dict) and far.get("account"):
+            out[name] = {"name": name, "host": host, "account": far["account"],
+                         "path": spec.get("path"), "overrides": ["no-git"]}
+    return out
+
+
+def bridge_home(links_doc, user, cwd, home):
+    """#1266: (project, spec) when this session runs in a bridged project's home
+    account and directory, else None."""
+    bridges = links_doc.get("bridges") if isinstance(links_doc, dict) else None
+    for name, spec in (bridges if isinstance(bridges, dict) else {}).items():
+        if isinstance(spec, dict) and resolve_project({name: spec}, user, cwd, home):
+            return name, spec
+    return None
+
+
+def host_projects(registry, host, links_doc=None):
+    """{project: entry} for the registry entries on ``host`` with a valid name
+    and an explicit account, plus the bridged projects of ``links_doc``."""
+    out = bridge_rows(links_doc, host)
     for p in registry if isinstance(registry, list) else []:
         if not isinstance(p, dict) or p.get("host") != host:
             continue
@@ -307,7 +336,8 @@ class Peer:
     def _projects(self):
         try:
             return host_projects(load_json(os.path.join(self.config_dir, REGISTRY_FILE)),
-                                 self.host)
+                                 self.host,
+                                 load_json(os.path.join(self.config_dir, LINKS_FILE)))
         except (OSError, ValueError) as e:
             self.log("config-error", file=REGISTRY_FILE, error=str(e))
             return {}
@@ -639,6 +669,151 @@ class Peer:
 
 
 # --------------------------------------------------------------------------- #
+# Bridge (#1266): a session on one box <-> an ordinary Peer on another, over ssh
+# --------------------------------------------------------------------------- #
+def run_bridge(peer, inp=None, out=None):
+    """The far end. stdout carries ``msg`` lines and ``reply`` lines, stdin carries
+    ``send`` and ``peers`` calls. Stdin EOF (the session ended) closes the socket."""
+    out, lock = out or sys.stdout, threading.Lock()
+
+    def emit(obj):
+        with lock:
+            out.write(json.dumps(obj) + "\n")
+            out.flush()
+
+    peer.notify = lambda text, meta: emit({"t": "msg", "text": text, "meta": meta})
+    peer.start_listener()
+    for line in inp or sys.stdin:
+        try:
+            req = json.loads(line)
+        except (ValueError, RecursionError):
+            peer.log("bad-bridge-line", chars=len(line))
+            continue
+        if not isinstance(req, dict):
+            continue
+        ok, text = (peer.send(req.get("to"), req.get("text")) if req.get("op") == "send"
+                    else peer.list_peers())
+        emit({"t": "reply", "id": req.get("id"), "ok": ok, "text": text})
+
+
+class BridgeHome:
+    """The home end: the same surface as ``Peer`` for ``McpServer``, one ssh child
+    per box. An unarmed session opens no bridge, because Claude Code would drop
+    the events and a sender would read "delivered" for a lost message."""
+
+    def __init__(self, project, spec, home, armed, log=None, spawn=subprocess.Popen,
+                 retry_s=BRIDGE_RETRY_S):
+        self.project, self.home, self.armed = project, home, armed
+        self.hosts = spec.get("hosts") or {}
+        self.log = log or Log(os.path.join(home, ".claude", "logs", "peer-channel.log"))
+        self.notify = lambda text, meta: None
+        self.spawn, self.retry_s = spawn, retry_s
+        self.lock = threading.Lock()
+        self.children, self.waiting = {}, {}
+        self.next_id, self.closed = 0, False
+        self.log("start", project=project, armed=armed, bridge=sorted(self.hosts))
+
+    def instructions(self):
+        return INSTRUCTIONS
+
+    def start_listener(self):
+        if not self.armed:
+            self.log("listen-skipped", project=self.project, reason="not armed")
+            return False
+        for host in self.hosts:
+            threading.Thread(target=self._run, args=(host,), daemon=True).start()
+        return True
+
+    def _argv(self, far):
+        script = "%s/peer_channel.py" % far["path"].replace("~", "$HOME", 1)
+        return ["ssh", "-i", os.path.expanduser(far["identity"]), "-T",
+                "-o", "BatchMode=yes", "-o", "ConnectTimeout=15",
+                "-o", "ServerAliveInterval=30", "-o", "ServerAliveCountMax=3",
+                far["ssh"], 'exec python3 -I "%s" bridge --project %s' % (script, self.project)]
+
+    def _run(self, host):
+        while not self.closed:
+            try:
+                child = self.spawn(self._argv(self.hosts[host]), stdin=subprocess.PIPE,
+                                   stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                   text=True, bufsize=1)
+            except OSError as e:
+                self.log("bridge-failed", host=host, error=str(e))
+            else:
+                with self.lock:
+                    self.children[host] = child
+                self.log("bridge-up", host=host)
+                self._read(child)
+                with self.lock:
+                    self.children.pop(host, None)
+                child.wait()
+                self.log("bridge-down", host=host, rc=child.returncode)
+            if not self.closed:
+                time.sleep(self.retry_s)
+
+    def _read(self, child):
+        for line in child.stdout:
+            try:
+                msg = json.loads(line)
+            except (ValueError, RecursionError):
+                self.log("bad-bridge-line", chars=len(line))
+                continue
+            if not isinstance(msg, dict):
+                continue
+            if msg.get("t") == "msg":
+                self.notify(clean_text(str(msg.get("text"))), msg.get("meta") or {})
+                self.log("deliver", project=self.project, meta=msg.get("meta"))
+            elif msg.get("t") == "reply":
+                slot = self.waiting.get(msg.get("id"))
+                if slot:
+                    slot[1] = msg
+                    slot[0].set()
+
+    def _call(self, host, req):
+        with self.lock:
+            child = self.children.get(host)
+            self.next_id += 1
+            req = dict(req, id=self.next_id)
+        if child is None:
+            return False, "bridge to %s is down" % host
+        slot = [threading.Event(), None]
+        self.waiting[req["id"]] = slot
+        try:
+            child.stdin.write(json.dumps(req) + "\n")
+            child.stdin.flush()
+            if not slot[0].wait(SEND_BUDGET_S + IO_TIMEOUT_S):
+                return False, "no answer from %s" % host
+            return bool(slot[1].get("ok")), str(slot[1].get("text"))
+        except (OSError, ValueError) as e:
+            return False, "bridge to %s failed: %s" % (host, e.__class__.__name__)
+        finally:
+            self.waiting.pop(req["id"], None)
+
+    def _not_armed(self):
+        return False, "session was not launched with --channels %s" % CHANNEL_ARG
+
+    def send(self, to, text):
+        if not self.armed:
+            return self._not_armed()
+        results = [self._call(h, {"op": "send", "to": to, "text": text}) for h in sorted(self.hosts)]
+        return next((r for r in results if r[0]), results[-1] if results else (False, "no bridge"))
+
+    def list_peers(self):
+        if not self.armed:
+            return self._not_armed()
+        results = [self._call(h, {"op": "peers"}) for h in sorted(self.hosts)]
+        return (any(r[0] for r in results),
+                "\n".join("%s:\n%s" % (h, r[1]) for h, r in zip(sorted(self.hosts), results)))
+
+    def close(self):
+        self.closed = True
+        with self.lock:
+            children = list(self.children.values())
+        for child in children:
+            child.terminate()
+
+
+# --------------------------------------------------------------------------- #
 # MCP stdio server (JSON-RPC 2.0, one message per line)
 # --------------------------------------------------------------------------- #
 class McpServer:
@@ -724,14 +899,32 @@ def _exit_on_signal(signum, _frame):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description="peer channel MCP server (#1266)")
-    ap.add_argument("mode", nargs="?", default="serve", choices=["serve"])
+    ap.add_argument("mode", nargs="?", default="serve", choices=["serve", "bridge"])
     ap.add_argument("--project", help="claim a project of this account instead of the cwd's")
     a = ap.parse_args(argv)
     signal.signal(signal.SIGTERM, _exit_on_signal)   # so `finally` unlinks the socket
     signal.signal(signal.SIGHUP, _exit_on_signal)
     pw = pwd.getpwuid(os.getuid())
-    peer = Peer(socket.gethostname().split(".")[0], pw.pw_name, os.getuid(), os.getcwd(),
-                pw.pw_dir, project_arg=a.project, armed=channel_armed())
+    home_end = None
+    if a.mode == "serve":
+        try:
+            links = load_json(os.path.join(active_config_dir(), LINKS_FILE))
+            home_end = bridge_home(links, pw.pw_name, os.getcwd(), pw.pw_dir)
+        except (OSError, ValueError) as e:
+            sys.stderr.write("peer-channel: links unreadable: %s\n" % e)
+    if home_end:
+        peer = BridgeHome(home_end[0], home_end[1], pw.pw_dir, channel_armed())
+    else:
+        peer = Peer(socket.gethostname().split(".")[0], pw.pw_name, os.getuid(), os.getcwd(),
+                    pw.pw_dir, project_arg=a.project,
+                    armed=a.mode == "bridge" or channel_armed())
+    if a.mode == "bridge":
+        try:
+            run_bridge(peer)
+        finally:
+            peer.close()
+            peer.log("stop", project=peer.project)
+        return 0
     server = McpServer(peer)
     peer.start_listener()
     try:
