@@ -141,7 +141,7 @@ class _Child:
         self.returncode = None
 
         def run():
-            pc.run_bridge(peer, inp=far_in, out=out)
+            pc.run_bridge(peer, inp=far_in, out=out, abort=lambda: None)
             peer.close()
             out.close()
         self.thread = threading.Thread(target=run, daemon=True)

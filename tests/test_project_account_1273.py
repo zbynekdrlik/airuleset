@@ -37,7 +37,7 @@ class TestDcontroller(unittest.TestCase):
         doc = cpc.load_links()
         self.assertEqual(cpc.validate_links(doc, cpc.load_registry()), [])
         pairs = [p for p in doc["hosts"]["dev1"]["links"] if "dcontroller" in p]
-        self.assertEqual(pairs, [["dcontroller", "dstack"]])
+        self.assertEqual(pairs, [["dcontroller", "dstack"], ["airuleset", "dcontroller"]])
         self.assertIn("dstack",
                       doc["hosts"]["dev1"]["topics"]["dcontroller|dstack"])
 
