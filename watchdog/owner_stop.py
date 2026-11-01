@@ -52,8 +52,8 @@ import re
 from pathlib import Path
 
 STATE_KEY = "owner_stop_latch"
-TAIL_BYTES = 1024 * 1024
-TAIL_ENTRIES = 400
+TAIL_BYTES = 8 * 1024 * 1024   # api-request-* records add ~2 MiB a minute
+TAIL_ENTRIES = 400              # user and system entries, the only kinds classified
 RECORD_TTL_S = 7 * 24 * 3600
 MACHINE_CLEAR_WINDOW_S = 600
 MAX_MCLEARS = 20        # matched #522 disarm clears kept per session record
@@ -188,7 +188,9 @@ def scan(entries, rec=None, machine_clears=()):
 
 def _tail(path):
     from watchdog import transcripts
-    return transcripts._read_jsonl_byte_tail(str(path), TAIL_BYTES, TAIL_ENTRIES)
+    entries = transcripts._read_jsonl_byte_tail(str(path), TAIL_BYTES, 1 << 30)
+    return [e for e in entries if isinstance(e, dict)
+            and e.get("type") in ("user", "system")][-TAIL_ENTRIES:]
 
 
 def _whole(path, entries):
