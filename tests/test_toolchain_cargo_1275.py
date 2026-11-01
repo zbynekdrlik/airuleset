@@ -42,6 +42,11 @@ class TestCargoKind(unittest.TestCase):
         step = tc.render_system_step({"tools": ["cargo:trunk"]})
         self.assertEqual(subprocess.run(["bash", "-n"], input=step, text=True).returncode, 0)
 
+    def test_dstack_declares_its_tools(self):
+        spec = bootstrap.account_spec("dstack")
+        self.assertIn("tshark", spec["system_packages"])
+        self.assertTrue([t for t in spec["tools"] if t.startswith("cargo:cargo-mutants@25.")])
+
     def test_dcontroller_declares_trunk(self):
         self.assertIn("cargo:trunk", bootstrap.account_spec("dcontroller")["tools"])
 
