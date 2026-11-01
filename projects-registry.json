@@ -40,20 +40,22 @@
     "branch_model": "2-branch",
     "default_branch": "main",
     "work_branch": "dev",
-    "overrides": ["no-git"],
+    "overrides": [
+      "no-git"
+    ],
     "onboarded": "2026-03-20",
     "account": "newlevel"
   },
   {
-    "name": "dantesync",
+    "name": "dsync",
     "host": "dev1",
-    "path": "/home/dstack/devel/dantesync",
+    "path": "/home/dsync/devel/dsync",
     "branch_model": "2-branch",
     "default_branch": "master",
     "work_branch": "dev",
     "overrides": [],
     "onboarded": null,
-    "account": "dstack"
+    "account": "dsync"
   },
   {
     "name": "devbridge",

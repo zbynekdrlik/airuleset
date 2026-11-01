@@ -82,6 +82,14 @@
         [
           "airuleset",
           "wall-bridge"
+        ],
+        [
+          "dstack",
+          "dsync"
+        ],
+        [
+          "airuleset",
+          "dsync"
         ]
       ],
       "topics": {
@@ -89,11 +97,11 @@
         "camera-box|songplayer": "the NDI SP-program sender contract, genlock and the burn-id chain, the rig lease for deploys",
         "dcontroller|dstack": "the Dante protocol: a protocol need or bug in dcontroller goes to dstack, dcontroller only moves the stack version",
         "dasio|dstack": "the shared Dante crates: a Dante bug in dasio goes here, dasio only moves the stack version",
-        "dstack|iemmixer": "the shared Dante crates and dantesync: a Dante bug goes to dstack, iemmixer only moves the stack version",
-        "camera-box|dstack": "dantesync, and Dante RX on the editing PC (the intercom and OBS through dstack): a Dante need or bug goes to dstack, camera-box only moves the stack version",
+        "dstack|iemmixer": "the shared Dante crates and dsync: a Dante bug goes to dstack, iemmixer only moves the stack version",
+        "camera-box|dstack": "dsync, and Dante RX on the editing PC (the intercom and OBS through dstack): a Dante need or bug goes to dstack, camera-box only moves the stack version",
         "dstack|fohmixer": "the Dante side of the FOH PC: clock, devices, a Dante bug seen from fohmixer",
         "dasio|fohmixer": "the shared FOH PC: who holds the audio devices, CPU pinning, restarts of Ableton",
-        "dstack|songplayer": "dantesync and genlock on the SongPlayer PCs, the ASIO output through Dante Virtual Soundcard: a Dante bug goes to dstack",
+        "dstack|songplayer": "dsync and genlock on the SongPlayer PCs, the ASIO output through Dante Virtual Soundcard: a Dante bug goes to dstack",
         "iemmixer|mikrotik": "the SNV network under the IEM mixer: Dante VLAN 70, QoS, multicast, switch ports and link faults",
         "fohmixer|iemmixer": "band lineups and channel names shared by the two mixers; a change in one mixer that affects the other",
         "airuleset|camera-box": "airuleset infra: accounts, permissions, peer links, tooling. Ask or report here; airuleset decides and a ticket alone wakes no session",
@@ -104,7 +112,9 @@
         "airuleset|iemmixer": "airuleset infra: accounts, permissions, peer links, tooling. Ask or report here; airuleset decides and a ticket alone wakes no session",
         "airuleset|mikrotik": "airuleset infra: accounts, permissions, peer links, tooling. Ask or report here; airuleset decides and a ticket alone wakes no session",
         "airuleset|songplayer": "airuleset infra: accounts, permissions, peer links, tooling. Ask or report here; airuleset decides and a ticket alone wakes no session",
-        "airuleset|wall-bridge": "airuleset infra: accounts, permissions, peer links, tooling. Ask or report here; airuleset decides and a ticket alone wakes no session"
+        "airuleset|wall-bridge": "airuleset infra: accounts, permissions, peer links, tooling. Ask or report here; airuleset decides and a ticket alone wakes no session",
+        "dstack|dsync": "dsync is a critical part of dstack: every request to dsync comes through dstack, which decides it, and audio stability outranks video",
+        "airuleset|dsync": "airuleset infra: accounts, permissions, peer links, tooling. Ask or report here; airuleset decides and a ticket alone wakes no session"
       }
     }
   },

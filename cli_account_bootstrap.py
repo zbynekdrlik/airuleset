@@ -239,7 +239,6 @@ SERVICE_ACCOUNTS = {
         "host": "dev1",
         "sudo": False, "rtprio": 49, "devices": ["cpu_dma_latency"], "nic_noqueue": "dante-net",   # #1281 + #1282: HIL latency gate
         "repo": "zbynekdrlik/dstack",   # public: iemmixer's CI fetches it keyless
-        "extra_repos": ["zbynekdrlik/dantesync"],   # the one Dante expert keeps it too
         "github_app": True, "repo_secrets": [],
         "tools": ["rust-toolchain:1.98.1", "pipx:netaudio"],
         "project_dir": "devel/dstack",
@@ -277,6 +276,21 @@ SERVICE_ACCOUNTS = {
         "handover": "docs/HANDOVER.md",
         "webterm_sessions": {
             human: {"preferred": "dcontroller", "start_dir_chain": ["devel/dcontroller"]}
+            for human in ("zbynek", "marek")
+        },
+    },
+    # #1280 (owner 1.11.): the Dante clock, a part of dstack. Only dstack and airuleset reach it.
+    "dsync": {
+        "host": "dev1",
+        "sudo": False,
+        "repo": "zbynekdrlik/dsync",
+        "github_app": True, "repo_secrets": [],
+        "tools": ["rust-toolchain:1.98.1"],
+        "project_dir": "devel/dsync",
+        "tmux_session": "dsync",
+        "handover": "docs/HANDOVER.md",
+        "webterm_sessions": {
+            human: {"preferred": "dsync", "start_dir_chain": ["devel/dsync"]}
             for human in ("zbynek", "marek")
         },
     },

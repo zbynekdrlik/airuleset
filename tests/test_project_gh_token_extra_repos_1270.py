@@ -64,8 +64,7 @@ class TestExtraRepos(unittest.TestCase):
     def test_the_declarations(self):
         self.assertEqual(bootstrap.account_spec("iemmixer")["extra_repos"],
                          ["zbynekdrlik/iemmixer-ops"])
-        self.assertEqual(bootstrap.account_spec("dstack")["extra_repos"],
-                         ["zbynekdrlik/dantesync"])
+        self.assertNotIn("extra_repos", bootstrap.account_spec("dsync"))
 
     def test_a_bad_extra_repo_is_refused(self):
         spec = dict(bootstrap.account_spec("iemmixer"), extra_repos=["no-slash"])

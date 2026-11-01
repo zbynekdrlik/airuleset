@@ -466,7 +466,7 @@ class TestWiring(unittest.TestCase):
             rc = pgt.cmd_project_gh_token(self.ns())
         self.assertEqual(rc, 0)
         # + dstack, dasio (#1270 live 30.10.), dcontroller (#1273)
-        self.assertEqual(order, ["mint"] * 8 + ["sync"])
+        self.assertEqual(order, ["mint"] * 9 + ["sync"])
         self.assertEqual(s.call_args.kwargs.get("dry_run"), False)
 
     def test_a_sync_crash_is_loud_but_never_breaks_the_mint(self):
@@ -476,7 +476,7 @@ class TestWiring(unittest.TestCase):
                                   side_effect=RuntimeError("x")), \
                 redirect_stderr(err):
             rc = pgt.cmd_project_gh_token(self.ns())
-        self.assertEqual(m.call_count, 8)
+        self.assertEqual(m.call_count, 9)
         self.assertEqual(rc, 1)
         self.assertIn("secret-sync", err.getvalue())
 
@@ -512,7 +512,7 @@ class TestWiring(unittest.TestCase):
         with mock.patch.object(_sync(), "sync_account", return_value=0) as s:
             _sync().sync_all(run=lambda *a, **k: None)
         self.assertEqual([c.args[0] for c in s.call_args_list],
-                         ["dasio", "dcontroller", "dstack", "fohmixer", "iemmixer", "songplayer", "varos",
+                         ["dasio", "dcontroller", "dstack", "dsync", "fohmixer", "iemmixer", "songplayer", "varos",
                           "wall-bridge"])
 
 
