@@ -97,9 +97,7 @@ TOOLS = [
 _CTRL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
 
 
-# --------------------------------------------------------------------------- #
-# Logging (per account, JSON lines, size-capped one-step rotation)
-# --------------------------------------------------------------------------- #
+# -- Logging (per account, JSON lines, size-capped one-step rotation) --
 class Log:
     def __init__(self, path):
         self.path = path
@@ -121,9 +119,7 @@ class Log:
                 sys.stderr.write("peer-channel: log write failed: %s\n" % e)
 
 
-# --------------------------------------------------------------------------- #
-# Config: registry (project -> host/account/path) + links (allowlist)
-# --------------------------------------------------------------------------- #
+# -- Config: registry (project -> host/account/path) + links (allowlist) --
 def active_config_dir(snapshot=SNAPSHOT_DIR):
     """Where this host's links and registry live: the root leg's snapshot, so a
     link goes live without a checkout update, else the checkout."""
@@ -138,8 +134,7 @@ def load_json(path):
 
 
 def _bridges(links_doc):
-    found = links_doc.get("bridges") if isinstance(links_doc, dict) else None
-    return found if isinstance(found, dict) else {}
+    return (links_doc.get("bridges") or {}) if isinstance(links_doc, dict) else {}
 
 
 def bridge_rows(links_doc, host):
@@ -253,9 +248,7 @@ def channel_armed(pid=None):
     return False
 
 
-# --------------------------------------------------------------------------- #
-# Socket helpers
-# --------------------------------------------------------------------------- #
+# -- Socket helpers --
 def peer_uid(sock):
     """uid of the process on the other end (Linux SO_PEERCRED: pid, uid, gid)."""
     raw = sock.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"))
@@ -301,9 +294,7 @@ def _user_uid(user):
         return None
 
 
-# --------------------------------------------------------------------------- #
-# The peer node: config, listener, sender
-# --------------------------------------------------------------------------- #
+# -- The peer node: config, listener, sender --
 class Peer:
     def __init__(self, host, user, uid, cwd, home, project_arg=None,
                  sock_dir=SOCK_DIR, config_dir=None, log=None,
@@ -746,7 +737,8 @@ class BridgeHome:
             topics = host_link_topics(links, host)
             lines += ["%s (%s): %s" % (o, host, topics.get(frozenset((self.project, o)), "-"))
                       for o in linked_to(host_links(links, host), self.project)]
-        return INSTRUCTIONS + ("\nLinked projects:\n" + "\n".join(lines) if lines else "")
+        return INSTRUCTIONS + ("\nLinked projects:\n" + "\n".join(lines) + "\nDo not send "
+                               "one project's work to another." if lines else "")
 
     def start_listener(self):
         if not self.armed:
@@ -803,7 +795,7 @@ class BridgeHome:
             self.children[host] = child
         self.log("bridge-up", host=host)
         try:
-            self._read(child)
+            self._read(child, host)
         finally:
             with self.lock:
                 self.children.pop(host, None)
@@ -816,7 +808,19 @@ class BridgeHome:
             slot[1] = {"ok": False, "text": "bridge dropped, outcome unknown"}
             slot[0].set()
 
-    def _read(self, child):
+    def _deliver(self, host, msg):
+        """The far end is a root-owned copy, still only ``from`` of a linked project
+        and a capped text reach the session that holds fleet authority."""
+        sender = (msg.get("meta") or {}).get("from") if isinstance(msg.get("meta"), dict) else None
+        text, links = msg.get("text"), load_json(os.path.join(active_config_dir(), LINKS_FILE))
+        linked = linked_to(host_links(links, host), self.project)
+        if sender not in linked or not isinstance(text, str) or len(text) > MAX_TEXT:
+            self.log("refuse", project=self.project, host=host, reason="bad bridge message")
+            return
+        self.notify(clean_text(text), {"from": sender})
+        self.log("deliver", project=self.project, host=host, sender=sender, chars=len(text))
+
+    def _read(self, child, host):
         for line in child.stdout:
             try:
                 msg = json.loads(line)
@@ -826,8 +830,7 @@ class BridgeHome:
             if not isinstance(msg, dict):
                 continue
             if msg.get("t") == "msg":
-                self.notify(clean_text(str(msg.get("text"))), msg.get("meta") or {})
-                self.log("deliver", project=self.project, meta=msg.get("meta"))
+                self._deliver(host, msg)
             elif msg.get("t") == "reply":
                 slot = self.waiting.get(msg.get("id")) if isinstance(msg.get("id"), int) else None
                 if slot:
@@ -874,9 +877,7 @@ class BridgeHome:
             child.terminate()
 
 
-# --------------------------------------------------------------------------- #
-# MCP stdio server (JSON-RPC 2.0, one message per line)
-# --------------------------------------------------------------------------- #
+# -- MCP stdio server (JSON-RPC 2.0, one message per line) --
 class McpServer:
     def __init__(self, peer, out=None):
         self.peer = peer

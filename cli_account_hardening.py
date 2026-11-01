@@ -300,7 +300,11 @@ def render_host_grants_step(account, spec):
 def _render_noqueue(account, conn):
     path = "%s/90-%s-noqueue" % (NM_DISPATCHER_DIR, account)
     if conn is None:
-        return 'rm -f "%s"\n' % path
+        return ('if [ -f "{p}" ]; then\n'
+                '  c=$(sed -n \'s/.*CONNECTION_ID" = \\([A-Za-z0-9_-]*\\).*/\\1/p\' "{p}")\n'
+                '  dev=$(nmcli -g GENERAL.DEVICES connection show "$c" 2>/dev/null || true)\n'
+                '  if [ -n "$dev" ]; then tc qdisc del dev "$dev" root || true; fi\n'
+                '  rm -f "{p}"\nfi\n').format(p=path)
     script = ("#!/bin/sh\n# airuleset-managed (#1282). Do not edit.\n"
               'if [ "$2" = up ] && [ "$CONNECTION_ID" = %s ]; then\n'
               '  exec /usr/sbin/tc qdisc replace dev "$1" root noqueue\n'

@@ -32,6 +32,7 @@ session, self-contained). This leaf owns everything push/install does around it:
 import json
 import os
 import pwd
+import re
 import shlex
 import socket
 import subprocess
@@ -59,6 +60,8 @@ GITHUB_OWNER = "zbynekdrlik"
 SNAPSHOT_DIR = peer_channel.SNAPSHOT_DIR
 SNAPSHOT_LINKS = os.path.join(SNAPSHOT_DIR, peer_channel.LINKS_FILE)
 SNAPSHOT_REGISTRY = os.path.join(SNAPSHOT_DIR, peer_channel.REGISTRY_FILE)
+FAR_SSH_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}@[0-9.]+$")
+FAR_KEY_RE = re.compile(r"^ssh-ed25519 [A-Za-z0-9+/=]+ [A-Za-z0-9@._-]+$")
 # Anthropic's own channel plugins (claude-plugins-official external_plugins). A
 # managed allowedChannelPlugins REPLACES the default allowlist, so they are kept.
 OFFICIAL_CHANNEL_PLUGINS = ("discord", "fakechat", "imessage", "telegram")
@@ -130,9 +133,13 @@ def _bridge_errors(links_doc):
         for host, far in spec["hosts"].items():
             if host not in links_doc["hosts"]:
                 errors.append("bridge %s: %s is not a links host" % (name, host))
-            if not (isinstance(far, dict)
-                    and all(far.get(k) for k in ("account", "ssh", "identity", "path"))):
-                errors.append("bridge %s/%s: needs account, ssh, identity and path" % (name, host))
+            if not (isinstance(far, dict) and FAR_SSH_RE.match(str(far.get("ssh")))
+                    and far.get("path") == SNAPSHOT_DIR and far.get("identity")
+                    and FAR_KEY_RE.match(str(far.get("key")))
+                    and far.get("account") == str(far.get("ssh")).split("@")[0]
+                    and peer_channel.PROJECT_RE.match(str(far.get("account")))):
+                errors.append("bridge %s/%s: needs ssh, account, identity, key and path %s"
+                              % (name, host, SNAPSHOT_DIR))
     return errors
 
 
@@ -289,9 +296,8 @@ def render_tmpfiles(accounts):
     return "\n".join(lines) + "\n"
 
 
-def render_policy():
-    allowed = [{"marketplace": OFFICIAL_MARKETPLACE, "plugin": p}
-               for p in OFFICIAL_CHANNEL_PLUGINS]
+def render_policy(official=OFFICIAL_CHANNEL_PLUGINS):
+    allowed = [{"marketplace": OFFICIAL_MARKETPLACE, "plugin": p} for p in official]
     allowed.append({"marketplace": MARKETPLACE, "plugin": "peer"})
     return json.dumps({"channelsEnabled": True, "allowedChannelPlugins": allowed},
                       indent=2) + "\n"
@@ -324,6 +330,26 @@ def _heredoc(dest, content):
     return "_install %s <<'%s'\n%s%s\n" % (shlex.quote(dest), mark, content, mark)
 
 
+def _far_end_script(accounts, links_doc):
+    """#1266: the far end of a bridge is its OWN system account, so no project on a
+    shared account can speak as the bridged project or squat its socket. Its key
+    runs only the root-owned copy of the code, never a shell."""
+    script = ""
+    for name, spec in peer_channel._bridges(links_doc).items():
+        for far in (spec.get("hosts") or {}).values():
+            if far["account"] not in accounts:
+                continue
+            acct, home = far["account"], "/var/lib/" + far["account"]
+            code = os.path.join(SNAPSHOT_DIR, "peer_channel.py")
+            line = ('restrict,command="exec python3 -I %s bridge --project %s" %s\n'
+                    % (code, name, far["key"]))
+            script += ("id -u %s >/dev/null 2>&1 || useradd --system --create-home --home-dir %s "
+                       "--shell /bin/sh %s\n" % (acct, home, acct))
+            script += _heredoc(os.path.join(home, ".ssh", "authorized_keys"), line)
+            script += _heredoc(code, Path(peer_channel.__file__).read_text(encoding="utf-8"))
+    return script
+
+
 def render_root_script(accounts, links_doc=None, registry=None):
     """Idempotent root script: mount unit + tmpfiles + policy drop-in + the host
     snapshot of the links and registry (#1270), applied only when changed, then a
@@ -340,9 +366,9 @@ def render_root_script(accounts, links_doc=None, registry=None):
     unit, d = shlex.quote(MOUNT_UNIT), SOCK_DIR
     return "".join([
         "set -euo pipefail\nexport LC_ALL=C\ncd /\numask 022\nCHANGED=''\n",
+        _INSTALL_FN, _far_end_script(accounts, links_doc),
         "for a in %s; do id -u \"$a\" >/dev/null 2>&1 || "
         "{ echo \"peer-channel-root: account $a missing\" >&2; exit 3; }; done\n" % want,
-        _INSTALL_FN,
         _heredoc(MOUNT_UNIT_PATH, render_mount_unit()),
         _heredoc(TMPFILES_PATH, render_tmpfiles(accounts)),
         _heredoc(POLICY_PATH, render_policy()),
@@ -394,9 +420,11 @@ def apply_home_policy(run=subprocess.run, links_doc=None):
     links_doc = load_links() if links_doc is None else links_doc
     me = pwd.getpwuid(os.getuid()).pw_name
     if not is_bridge_home(me, links_doc):
+        if os.path.exists(POLICY_PATH) and not os.path.isdir(SOCK_DIR):
+            run(["sudo", "-n", "rm", "-f", POLICY_PATH], capture_output=True, text=True, timeout=60)
         return []
     script = ("set -euo pipefail\ncd /\numask 022\nCHANGED=''\n" + _INSTALL_FN
-              + _heredoc(POLICY_PATH, render_policy())
+              + _heredoc(POLICY_PATH, render_policy(()))
               + "python3 -I -c 'import json,sys; json.load(open(sys.argv[1]))' %s\n" % POLICY_PATH
               + "echo \"peer-channel-home: ok changed=[${CHANGED# }]\"\n")
     try:

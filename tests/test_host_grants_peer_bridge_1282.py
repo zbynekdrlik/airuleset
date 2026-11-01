@@ -90,6 +90,16 @@ class TestRender(unittest.TestCase):
             r = self._run(hardening.render_host_grants_step("x", {}), tmp, stubs=())
             self.assertEqual(r.returncode, 0, r.stderr)
 
+    def test_a_dropped_noqueue_restores_the_qdisc(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, "90-dstack-noqueue").write_text(
+                'if [ "$2" = up ] && [ "$CONNECTION_ID" = dante-net ]; then\n')
+            r = self._run(hardening.render_host_grants_step("dstack", {}), tmp)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            calls = Path(tmp, "calls").read_text()
+            self.assertIn("connection show dante-net", calls)
+            self.assertIn("tc qdisc del dev dev0 root", calls)
+
     def test_a_connection_that_is_down_does_not_abort_the_bootstrap(self):
         step = hardening.render_host_grants_step("dstack", {"nic_noqueue": "dante-net"})
         with tempfile.TemporaryDirectory() as tmp:
@@ -155,6 +165,9 @@ class TestBridge(_Env):
         doc = json.loads(Path(self.cfg, pc.LINKS_FILE).read_text())
         doc["bridges"] = {"home": self.SPEC}
         Path(self.cfg, pc.LINKS_FILE).write_text(json.dumps(doc))
+        p = mock.patch.object(pc, "active_config_dir", return_value=self.cfg)
+        p.start()
+        self.addCleanup(p.stop)
         self.far = pc.Peer(HOST, ME, os.getuid(), "/", self.home, project_arg="home",
                            sock_dir=self.sock, config_dir=self.cfg, log=_Recorder(), armed=True)
         self.addCleanup(self.far.close)
@@ -261,9 +274,20 @@ class TestBridge(_Env):
         home = pc.BridgeHome("home", self.SPEC, self.home, True, log=_Recorder())
         seen = []
         home.notify = lambda text, meta: seen.append(text)
+        good = {"t": "msg", "text": "after", "meta": {"from": "alpha", "x": "owner"}}
+        home.notify = lambda text, meta: seen.append((text, meta))
         home._read(mock.Mock(stdout=["not json\n", "[1]\n", '{"t":"reply","id":[1]}\n',
-                                     json.dumps({"t": "msg", "text": "after"}) + "\n"]))
-        self.assertEqual(seen, ["after"])
+                                     json.dumps(good) + "\n"]), HOST)
+        self.assertEqual(seen, [("after", {"from": "alpha"})])
+
+    def test_an_unlinked_sender_from_the_far_end_is_dropped(self):
+        home = pc.BridgeHome("home", self.SPEC, self.home, True, log=_Recorder())
+        seen = []
+        home.notify = lambda text, meta: seen.append(text)
+        for meta in ({"from": "owner"}, {"from": "beta"}, None):
+            home._deliver(HOST, {"text": "x", "meta": meta})
+        home._deliver(HOST, {"text": "x" * (pc.MAX_TEXT + 1), "meta": {"from": "alpha"}})
+        self.assertEqual(seen, [])
 
     def test_a_dropped_bridge_wakes_a_waiting_call(self):
         home = pc.BridgeHome("home", self.SPEC, self.home, True, log=_Recorder())
@@ -300,6 +324,7 @@ class TestBridge(_Env):
         with mock.patch.object(pc, "active_config_dir", return_value=self.cfg):
             text = pc.BridgeHome("home", self.SPEC, self.home, True, log=_Recorder()).instructions()
         self.assertIn("alpha (%s)" % HOST, text)
+        self.assertIn("Do not send one project's work to another.", text)
 
     def test_only_the_home_directory_is_the_home_end(self):
         doc = {"bridges": {"home": {"account": ME, "path": "/srv/home"}}}
@@ -330,11 +355,39 @@ class TestManagedSide(unittest.TestCase):
         self.assertEqual(cpc.apply_home_policy(run, doc), [("home", "rc=1")])
         self.assertIn(cpc.POLICY_PATH, run.call_args[0][0][-1])
 
-    def test_a_bridge_with_a_missing_field_is_refused(self):
+    FAR = {"account": "far", "ssh": "far@10.0.0.1", "identity": "~/k",
+           "path": "/etc/airuleset/peer", "key": "ssh-ed25519 AAAA c@h"}
+
+    def _errors(self, **far):
         links = {"hosts": {"h": {"links": []}},
-                 "bridges": {"x": {"account": "a", "path": "~/x", "hosts": {"h": {"ssh": "u@h"}}}}}
-        errors = cpc.validate_links(links, [], {"h"})
-        self.assertTrue([e for e in errors if "needs account, ssh" in e], errors)
+                 "bridges": {"x": {"account": "a", "path": "~/x",
+                                   "hosts": {"h": dict(self.FAR, **far)}}}}
+        return cpc.validate_links(links, [], {"h"})
+
+    def test_a_valid_bridge_passes(self):
+        self.assertEqual(self._errors(), [])
+
+    def test_a_bad_bridge_is_refused(self):
+        for bad in ({"ssh": "-oProxyCommand=id"}, {"ssh": "other@10.0.0.1"},
+                    {"path": "$(id)"}, {"key": 'x" command="id'}, {"identity": ""}):
+            self.assertTrue(self._errors(**bad), repr(bad))
+
+    def test_the_far_end_is_no_shared_account(self):
+        far = cpc.load_links()["bridges"]["airuleset"]["hosts"]["dev1"]
+        self.assertEqual(far["account"], "airuleset-peer")
+        self.assertNotIn(far["account"], {r.get("account") for r in cpc.load_registry()})
+
+    def test_the_far_key_runs_only_the_root_owned_copy(self):
+        doc = {"bridges": {"x": {"hosts": {"h": self.FAR}}}}
+        script = cpc._far_end_script(["far"], doc)
+        self.assertIn('restrict,command="exec python3 -I /etc/airuleset/peer/peer_channel.py '
+                      'bridge --project x" ssh-ed25519 AAAA c@h', script)
+        self.assertIn("/var/lib/far/.ssh/authorized_keys", script)
+        self.assertEqual(cpc._far_end_script(["other"], doc), "")
+
+    def test_the_controller_allows_only_the_peer_plugin(self):
+        self.assertEqual(json.loads(cpc.render_policy(()))["allowedChannelPlugins"],
+                         [{"marketplace": "airuleset", "plugin": "peer"}])
 
     def test_home_policy_timeout_does_not_stop_the_root_leg(self):
         doc = {"bridges": {"x": {"account": ME}}}
