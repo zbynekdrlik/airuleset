@@ -38,7 +38,8 @@ class TestDsyncAccount(unittest.TestCase):
     def test_obs_reaches_only_camera_box_dstack_and_airuleset(self):
         hosts = json.loads((ROOT / "peer-links.json").read_text(encoding="utf-8"))["hosts"]
         pairs = sorted(sorted(p) for p in hosts["dev1"]["links"] if "obs" in p)
-        self.assertEqual(pairs, [["airuleset", "obs"], ["camera-box", "obs"], ["dstack", "obs"]])
+        self.assertEqual(pairs, [["airuleset", "obs"], ["camera-box", "obs"], ["dstack", "obs"],
+                                 ["obs", "vstack"]])
         self.assertEqual(drop._GENERATED_DROP_PORTS[("dev1", "obs")], 8903)
         self.assertEqual(bootstrap.validate_account("obs", bootstrap.account_spec("obs")), [])
 
@@ -48,6 +49,13 @@ class TestDsyncAccount(unittest.TestCase):
         self.assertEqual(pairs, [["airuleset", "shading"], ["camera-box", "shading"]])
         self.assertEqual(drop._GENERATED_DROP_PORTS[("dev1", "shading")], 8904)
         self.assertEqual(bootstrap.validate_account("shading", bootstrap.account_spec("shading")), [])
+
+    def test_vstack_reaches_camera_box_obs_and_airuleset(self):
+        hosts = json.loads((ROOT / "peer-links.json").read_text(encoding="utf-8"))["hosts"]
+        pairs = sorted(sorted(p) for p in hosts["dev1"]["links"] if "vstack" in p)
+        self.assertEqual(pairs, [["airuleset", "vstack"], ["camera-box", "vstack"], ["obs", "vstack"]])
+        self.assertEqual(drop._GENERATED_DROP_PORTS[("dev1", "vstack")], 8905)
+        self.assertEqual(bootstrap.validate_account("vstack", bootstrap.account_spec("vstack")), [])
 
     def test_the_old_name_left_the_registry(self):
         rows = json.loads((ROOT / "projects-registry.json").read_text(encoding="utf-8"))

@@ -341,6 +341,21 @@ SERVICE_ACCOUNTS = {
             for human in ("zbynek", "marek")
         },
     },
+    # #1280 (owner 2.11.): shared Rust video libraries, the model of dstack.
+    "vstack": {
+        "host": "dev1",
+        "sudo": False,
+        "repo": "zbynekdrlik/vstack",   # public: obs and camera-box pin its tags keyless
+        "github_app": True, "repo_secrets": [],
+        "tools": ["rust-toolchain:1.98.1"],
+        "project_dir": "devel/vstack",
+        "tmux_session": "vstack",
+        "handover": "docs/HANDOVER.md",
+        "webterm_sessions": {
+            human: {"preferred": "vstack", "start_dir_chain": ["devel/vstack"]}
+            for human in ("zbynek", "marek")
+        },
+    },
     "iemmixer": {
         "host": "dev1",
         "sudo": False,

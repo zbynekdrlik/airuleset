@@ -419,5 +419,16 @@
     "overrides": [],
     "onboarded": "2026-11-02",
     "account": "shading"
+  },
+  {
+    "name": "vstack",
+    "host": "dev1",
+    "path": "/home/vstack/devel/vstack",
+    "branch_model": "2-branch",
+    "default_branch": "main",
+    "work_branch": "dev",
+    "overrides": [],
+    "onboarded": "2026-11-02",
+    "account": "vstack"
   }
 ]

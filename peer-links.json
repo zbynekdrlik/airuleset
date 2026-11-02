@@ -130,6 +130,18 @@
         [
           "airuleset",
           "shading"
+        ],
+        [
+          "camera-box",
+          "vstack"
+        ],
+        [
+          "obs",
+          "vstack"
+        ],
+        [
+          "airuleset",
+          "vstack"
         ]
       ],
       "topics": {
@@ -164,7 +176,10 @@
         "airuleset|obs": "airuleset infra: accounts, permissions, peer links, tooling. Ask or report here; airuleset decides and a ticket alone wakes no session",
         "airuleset|remoteos-mcp": "airuleset infra: accounts, permissions, peer links, tooling. Ask or report here; airuleset decides and a ticket alone wakes no session",
         "camera-box|shading": "shading: camera-box pins a released relay and service, deploys them and runs the whole-system gates; shading owns code, config and releases. The relay keys used by E2E are a pinned contract",
-        "airuleset|shading": "airuleset infra: accounts, permissions, peer links, tooling. Ask or report here; airuleset decides and a ticket alone wakes no session"
+        "airuleset|shading": "airuleset infra: accounts, permissions, peer links, tooling. Ask or report here; airuleset decides and a ticket alone wakes no session",
+        "camera-box|vstack": "the shared video libraries: a need or bug goes to vstack, camera-box only moves the pinned tag. The clock stays with dsync",
+        "obs|vstack": "the shared video libraries: a need or bug goes to vstack, obs only moves the pinned tag",
+        "airuleset|vstack": "airuleset infra: accounts, permissions, peer links, tooling. Ask or report here; airuleset decides and a ticket alone wakes no session"
       }
     }
   },
