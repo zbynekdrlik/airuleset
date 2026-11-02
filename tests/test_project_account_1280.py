@@ -61,7 +61,8 @@ class TestDsyncAccount(unittest.TestCase):
         # /tmp/gh-cli-cache belonged to the first account that used `gh run view --log-failed`.
         import cli_project_gh_shim as shim
         src = next(v for k, v in vars(shim).items() if isinstance(v, str) and "gh-upstream" in v)
-        self.assertLess(src.index('TMPDIR="$HOME/.cache/gh-tmp"'), src.index('exec "$_real" "$@"'))
+        self.assertIn('_t="$HOME/.cache/gh-tmp"', src)
+        self.assertLess(src.index('export TMPDIR="$_t"'), src.index('exec "$_real" "$@"'))
 
     def test_the_old_name_left_the_registry(self):
         rows = json.loads((ROOT / "projects-registry.json").read_text(encoding="utf-8"))
