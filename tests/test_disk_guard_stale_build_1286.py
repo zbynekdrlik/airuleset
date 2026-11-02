@@ -107,7 +107,7 @@ class TestDiscovery(unittest.TestCase):
 class TestLadder(unittest.TestCase):
     def test_the_rung_is_in_the_pressure_ladder_only(self):
         with tempfile.TemporaryDirectory() as td:
-            pressure = [n for n, _ in dg._drain_planners(td, time.time())]
+            pressure = [n for n, _ in dg._default_planners(td, time.time())]
             prevention = [n for n, _ in dg._prevention_planners(td, time.time())]
         self.assertIn("stale-build", pressure)
         self.assertLess(pressure.index("stale-build"), pressure.index("journal"))

@@ -2479,6 +2479,16 @@ def _plan_android_build(home, now, box_class_fn=None):
                  "reason": "android-build discovery error: %r" % e}]
 
 
+def _plan_stale_build(home, now):
+    """#1286 — build output outside an agent worktree, age and live-use gated."""
+    from watchdog.disk_guard_stale_build import CLS, discover_stale_build
+    try:
+        return [_norm_action(CLS, r, "delete") for r in discover_stale_build(home=home, now=now)]
+    except Exception as e:
+        return [{"cls": CLS, "path": "-", "bytes": 0, "kind": "skip",
+                 "reason": "stale-build discovery error: %r" % e}]
+
+
 def _plan_scratch_worktrees(home, now):
     """#965 — scratch worktrees under /tmp scratchpads."""
     try:
@@ -2573,6 +2583,7 @@ def _default_planners(home, now, scratch_rows=None, wt_cache=False, level=None):
         ("stale-agent-worktree",
          lambda: _plan_stale_agent_worktrees(home, now, wt_cache, level=level)),
         ("scratch-worktree", lambda: _plan_scratch_worktrees(home, now)),
+        ("stale-build", lambda: _plan_stale_build(home, now)),
         ("journal", lambda: _plan_journal(home, now)),
         ("docker-image", lambda: _plan_docker(home, now)),
         ("runner-checkout", lambda: _plan_runner_checkouts(home, now)),
