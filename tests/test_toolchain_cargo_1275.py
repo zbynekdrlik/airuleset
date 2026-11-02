@@ -45,6 +45,8 @@ class TestCargoKind(unittest.TestCase):
     def test_dstack_declares_its_tools(self):
         spec = bootstrap.account_spec("dstack")
         self.assertIn("tshark", spec["system_packages"])
+        self.assertIn("gcc-mingw-w64-x86-64", spec["system_packages"])
+        self.assertIn("rust-target:x86_64-pc-windows-gnu", spec["tools"])
         self.assertTrue([t for t in spec["tools"] if t.startswith("cargo:cargo-mutants@25.")])
         self.assertTrue([t for t in spec["tools"] if t.startswith("cargo:cargo-nextest@0.9.")])
 
