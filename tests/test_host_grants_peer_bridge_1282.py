@@ -325,6 +325,8 @@ class TestBridge(_Env):
             text = pc.BridgeHome("home", self.SPEC, self.home, True, log=_Recorder()).instructions()
         self.assertIn("alpha (%s)" % HOST, text)
         self.assertIn("Do not send one project's work to another.", text)
+        # mikrotik 2.11.2026: a link added later was absent here, so it never tried to answer.
+        self.assertIn("at session start; call peers for the current list", text)
 
     def test_only_the_home_directory_is_the_home_end(self):
         doc = {"bridges": {"home": {"account": ME, "path": "/srv/home"}}}
