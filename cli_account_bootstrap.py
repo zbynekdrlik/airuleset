@@ -310,6 +310,22 @@ SERVICE_ACCOUNTS = {
             for human in ("zbynek", "marek")
         },
     },
+    # #1280 (owner 2.11.): the forked OBS and the Dante OBS source, split from camera-box.
+    # songplayer, restreamer and others reach it only through camera-box.
+    "obs": {
+        "host": "dev1",
+        "sudo": False,
+        "repo": "zbynekdrlik/obs",   # public: OBS is GPL and was public in camera-box
+        "github_app": True, "repo_secrets": [],
+        "tools": ["rust-toolchain:1.98.1"],
+        "project_dir": "devel/obs",
+        "tmux_session": "obs",
+        "handover": "docs/HANDOVER.md",
+        "webterm_sessions": {
+            human: {"preferred": "obs", "start_dir_chain": ["devel/obs"]}
+            for human in ("zbynek", "marek")
+        },
+    },
     "iemmixer": {
         "host": "dev1",
         "sudo": False,

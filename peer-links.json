@@ -106,6 +106,18 @@
         [
           "dasio",
           "mikrotik"
+        ],
+        [
+          "camera-box",
+          "obs"
+        ],
+        [
+          "dstack",
+          "obs"
+        ],
+        [
+          "airuleset",
+          "obs"
         ]
       ],
       "topics": {
@@ -134,7 +146,10 @@
         "camera-box|intercom": "the intercom: camera-box pins a released hub and intercom-vban and installs them on the boxes; intercom owns code, config and tests",
         "dstack|intercom": "the hub's Dante device: a Dante need or bug goes to dstack, intercom only moves the stack version",
         "airuleset|intercom": "airuleset infra: accounts, permissions, peer links, tooling. Ask or report here; airuleset decides and a ticket alone wakes no session",
-        "dasio|mikrotik": "the network: a switch, router or VLAN need of dasio's test machines goes to mikrotik, which owns that configuration"
+        "dasio|mikrotik": "the network: a switch, router or VLAN need of dasio's test machines goes to mikrotik, which owns that configuration",
+        "camera-box|obs": "the forked OBS: camera-box owns the picture, the boxes and the deploy and pins released OBS builds; obs owns the fork. Other projects ask for OBS changes through camera-box",
+        "dstack|obs": "the Dante OBS source: a Dante need or bug goes to dstack, obs only moves the stack version",
+        "airuleset|obs": "airuleset infra: accounts, permissions, peer links, tooling. Ask or report here; airuleset decides and a ticket alone wakes no session"
       }
     }
   },
