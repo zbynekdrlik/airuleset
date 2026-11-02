@@ -326,6 +326,21 @@ SERVICE_ACCOUNTS = {
             for human in ("zbynek", "marek")
         },
     },
+    # #1280 (owner 2.11.): shading (bkshading), split from camera-box.
+    "shading": {
+        "host": "dev1",
+        "sudo": False,
+        "repo": "zbynekdrlik/shading",   # public: camera-box pins it keyless
+        "github_app": True, "repo_secrets": [],
+        "tools": ["rust-toolchain:1.98.1"],
+        "project_dir": "devel/shading",
+        "tmux_session": "shading",
+        "handover": "docs/HANDOVER.md",
+        "webterm_sessions": {
+            human: {"preferred": "shading", "start_dir_chain": ["devel/shading"]}
+            for human in ("zbynek", "marek")
+        },
+    },
     "iemmixer": {
         "host": "dev1",
         "sudo": False,

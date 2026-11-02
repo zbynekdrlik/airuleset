@@ -122,6 +122,14 @@
         [
           "airuleset",
           "remoteos-mcp"
+        ],
+        [
+          "camera-box",
+          "shading"
+        ],
+        [
+          "airuleset",
+          "shading"
         ]
       ],
       "topics": {
@@ -154,7 +162,9 @@
         "camera-box|obs": "the forked OBS: camera-box owns the picture, the boxes and the deploy and pins released OBS builds; obs owns the fork. Other projects ask for OBS changes through camera-box",
         "dstack|obs": "the Dante OBS source: a Dante need or bug goes to dstack, obs only moves the stack version",
         "airuleset|obs": "airuleset infra: accounts, permissions, peer links, tooling. Ask or report here; airuleset decides and a ticket alone wakes no session",
-        "airuleset|remoteos-mcp": "airuleset infra: accounts, permissions, peer links, tooling. Ask or report here; airuleset decides and a ticket alone wakes no session"
+        "airuleset|remoteos-mcp": "airuleset infra: accounts, permissions, peer links, tooling. Ask or report here; airuleset decides and a ticket alone wakes no session",
+        "camera-box|shading": "shading: camera-box pins a released relay and service, deploys them and runs the whole-system gates; shading owns code, config and releases. The relay keys used by E2E are a pinned contract",
+        "airuleset|shading": "airuleset infra: accounts, permissions, peer links, tooling. Ask or report here; airuleset decides and a ticket alone wakes no session"
       }
     }
   },

@@ -89,7 +89,7 @@ _GENERATED_DROP_PORTS = {
     ("dev2", "varos"): 8892, ("dev1", "fohmixer"): 8893,   # #1220, #1237 project accounts
     ("dev1", "songplayer"): 8894, ("dev1", "wall-bridge"): 8895,   # #1267 project accounts
     ("dev1", "dstack"): 8896, ("dev1", "dasio"): 8897, ("dev1", "iemmixer"): 8899,  # #1270
-    ("dev1", "dcontroller"): 8900, ("dev1", "dsync"): 8901, ("dev1", "intercom"): 8902, ("dev1", "obs"): 8903,   # #1273, #1280
+    ("dev1", "dcontroller"): 8900, ("dev1", "dsync"): 8901, ("dev1", "intercom"): 8902, ("dev1", "obs"): 8903, ("dev1", "shading"): 8904,   # #1280
 }
 
 
