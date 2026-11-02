@@ -11,6 +11,7 @@ from watchdog import disk_guard_stale_build as sb
 
 DAY = 86400
 NOW = 1_800_000_000.0
+SIGNATURE = "Signature: 8a477f597d28d172789f06886806bc55\n"
 
 
 def _age(path, days):
@@ -25,7 +26,8 @@ def _target(parent, days=30, tag=True):
     (d / "debug").mkdir(parents=True)
     (d / "debug" / "app").write_bytes(b"x" * 100)
     if tag:
-        (d / "CACHEDIR.TAG").write_text("Signature: 8a477f597d28d172789f06886806bc55\n")
+        (d / "CACHEDIR.TAG").write_text(SIGNATURE)
+        (d / ".rustc_info.json").write_text("{}")
     _age(d, days)
     return d
 
@@ -46,8 +48,7 @@ class TestDiscovery(unittest.TestCase):
     def test_a_stale_cargo_target_outside_devel_is_a_candidate(self):
         d = _target(Path(self.home) / "restreamer-buildcheck")
         self.assertEqual(self.candidates(), [str(d)])
-        self.assertEqual(_rows(self.home)[0]["bytes"], 100 + len(
-            "Signature: 8a477f597d28d172789f06886806bc55\n"))
+        self.assertEqual(_rows(self.home)[0]["bytes"], 102 + len(SIGNATURE))
 
     def test_a_tauri_target_two_levels_down_is_found(self):
         d = _target(Path(self.home) / "copy" / "src-tauri")
@@ -64,6 +65,29 @@ class TestDiscovery(unittest.TestCase):
     def test_a_directory_named_target_without_the_cargo_tag_stays(self):
         _target(Path(self.home) / "photos", tag=False)
         self.assertEqual(self.candidates(), [])
+
+    def test_a_foreign_tag_without_the_cargo_marker_stays(self):
+        d = _target(Path(self.home) / "other")
+        (d / ".rustc_info.json").unlink()
+        self.assertEqual(self.candidates(), [])
+
+    def test_a_tag_with_another_signature_stays(self):
+        d = _target(Path(self.home) / "other")
+        tag = d / "CACHEDIR.TAG"
+        tag.write_text("not a cache tag\n")
+        _age(d, 30)
+        self.assertEqual(self.candidates(), [])
+
+    def test_an_unreadable_subtree_keeps_the_target(self):
+        d = _target(Path(self.home) / "work")
+        with mock.patch.object(sb.os, "walk") as walk:
+            walk.side_effect = lambda *a, **k: (k["onerror"](OSError("denied")), iter(()))[1]
+            self.assertIsNone(sb._old_size(str(d), NOW))
+
+    def test_a_file_that_cannot_be_read_keeps_the_target(self):
+        d = _target(Path(self.home) / "work")
+        with mock.patch.object(sb.os, "lstat", side_effect=PermissionError("denied")):
+            self.assertIsNone(sb._old_size(str(d), NOW))
 
     def test_a_recent_target_gives_no_row(self):
         _target(Path(self.home) / "work", days=3)
@@ -127,6 +151,13 @@ class TestExecution(unittest.TestCase):
         with mock.patch("cli_target_purge._target_in_live_use", return_value=False):
             self.assertEqual(dg._perform_action(self.action, now=NOW), 100)
         self.assertFalse(self.dir.exists())
+
+    def test_a_file_written_after_the_plan_refuses_the_delete(self):
+        (self.dir / "debug" / "new").write_bytes(b"y")
+        os.utime(self.dir / "debug" / "new", (NOW, NOW))
+        with mock.patch("cli_target_purge._target_in_live_use", return_value=False):
+            self.assertEqual(dg._perform_action(self.action, now=NOW), -1)
+        self.assertTrue(self.dir.exists())
 
     def test_a_build_started_after_the_plan_refuses_the_delete(self):
         with mock.patch("cli_target_purge._target_in_live_use", return_value=True):

@@ -54,7 +54,8 @@ class TestLinks(unittest.TestCase):
 
     def test_consumers_are_not_linked_to_each_other_for_dante(self):
         self.assertNotIn(frozenset(("iemmixer", "camera-box")), self.links)
-        self.assertNotIn(frozenset(("iemmixer", "dasio")), self.links)
+        # 2.11.2026: the iemmixer-dasio link exists for FOH PC restarts only.
+        self.assertNotIn("dante", self.links[frozenset(("iemmixer", "dasio"))].lower())
 
     def test_the_two_mixers_talk_about_their_shared_band_data(self):
         # owner 30.10.: "prepoj cez peers fohmixer a iemmixer"
