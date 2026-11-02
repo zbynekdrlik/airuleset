@@ -2764,8 +2764,8 @@ def _perform_action(a, sudo_ok=False, run_fn=None, scratch_live_fn=None, now=Non
                     else live_fn(path, now, floor_days=floor)):
                 return -1
         if a.get("cls") == "stale-build":       # #1286: a build may have started since the plan
-            from cli_target_purge import _target_in_live_use
-            if _target_in_live_use(path):
+            from watchdog.disk_guard_stale_build import still_stale
+            if not still_stale(path, now or time.time()):
                 return -1
         _rm_path(path, sudo=use_sudo, run_fn=run_fn)
         return nbytes

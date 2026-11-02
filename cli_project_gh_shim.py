@@ -88,5 +88,9 @@ else
   done
 fi
 [ -n "$_real" ] || { echo "gh: no real gh binary found (project-account App shim, #1190)" >&2; exit 127; }
+# gh caches run logs in $TMPDIR/gh-cli-cache, and in a shared /tmp that dir belongs
+# to the first account that used it (#1280).
+_t="$HOME/.cache/gh-tmp"
+if mkdir -p "$_t" 2>/dev/null; then export TMPDIR="$_t"; fi
 exec "$_real" "$@"
 """
