@@ -1,6 +1,8 @@
 ### Delivering Files to the User — ALWAYS a Clickable URL, NEVER a /tmp Path → on-demand skill `deliver-files-as-urls`
 
-The full protocol moved VERBATIM to the `deliver-files-as-urls` skill — load it whenever producing a file the user needs to open or download. Non-negotiable that survives here: the user has NO filesystem access to the dev machines — a `/tmp/...` path is USELESS to them. Every deliverable file goes through `python3 ~/devel/airuleset/airuleset.py share <path-to-file>` (never a bare path, never "can't be linked") — it prints ONE public HTTPS URL, or NO URL + exit 1 when the public lane is dead/missing. NEVER hand the owner a tailscale/LAN URL (owner 30.9., #1192: tailscale opens boxes that must not be reachable); `--private` exists only when he explicitly asks for one. See the input counterpart `receive-files-via-upload-url.md` for the opposite direction.
+Protocol: the `deliver-files-as-urls` skill — load it when producing a file the user needs to open or download. Non-negotiable that survives here: the user has NO filesystem access to the dev machines — a `/tmp/...` path is USELESS to them. Every deliverable file goes through `python3 ~/devel/airuleset/airuleset.py share <path-to-file>` — it prints ONE public HTTPS URL, or NO URL + exit 1 when the public lane is dead/missing. NEVER hand the owner a tailscale/LAN URL (owner 30.9., #1192: tailscale opens boxes that must not be reachable); `--private` exists only when he explicitly asks for one.
+
+**A design for owner approval (#1226):** `docs/mockups/<topic>-vN.html`, sent as a `raw.githack.com` URL pinned to the SHA. Never a claude.ai URL.
 
 **A credential is NOT a file** — deliver via `secret show` (one-shot URL, `❓`/`needs-owner-action` #879), never `share`/chat/`cat`. See `receive-files-via-upload-url.md`.
 

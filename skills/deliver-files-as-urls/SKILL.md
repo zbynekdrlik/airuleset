@@ -18,6 +18,13 @@ user-invocable: false
 
 A recording / audio / video, an image or screenshot, a PDF, a CSV / dataset / export, a log bundle, a `.zip` / archive, a generated report, a downloaded attachment — anything the user asked for or that you saved for them to look at.
 
+#### A design or proposal for the owner's approval (#1226, owner 13.10.2026)
+
+1. A standalone HTML page (doctype, charset, viewport, inline CSS) with visual mockups of the screens, committed as `docs/mockups/<topic>-vN.html` on the work branch, docs only.
+2. The owner gets `https://raw.githack.com/<owner>/<repo>/<commit-sha>/docs/mockups/<file>.html`, pinned to the SHA so it never changes under him. Check `200 text/html` first. A revision is a new `-v2` file and a new SHA.
+3. Never a claude.ai artifact URL (private to the account of the CLI, his browser cannot open it). Never a plain-text gist.
+4. raw.githack serves public repos only. For a private repo use `airuleset.py share`. A public page carries no secrets and no exploitable security detail.
+
 #### The mechanism — one command, always available
 
 ```bash
