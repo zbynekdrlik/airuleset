@@ -97,15 +97,14 @@ class FakeOdoo:
                 rows = rows[:limit]
             return rows
         if model == "mail.message" and method == "message_reactions_guarded":
+            import cli_odoo_ro as ro
             if self.guarded_unavailable:
-                import cli_odoo_ro as ro
                 raise ro.OdooError("Odoo mail.message/message_reactions_guarded "
                                    "HTTP 404: method does not exist")
-            ids = body.get("ids", [])
-            out = []
-            for mid in ids:
-                out.extend(self.reactions.get(mid, []))
-            return out
+            if "message_id" not in body:   # the live server's answer to `ids=`
+                raise ro.OdooError("Odoo mail.message/message_reactions_guarded "
+                                   "HTTP 422: cannot call it with ids")
+            return list(self.reactions.get(body["message_id"], []))
         raise AssertionError("unexpected call %s/%s %r" % (model, method, body))
 
 

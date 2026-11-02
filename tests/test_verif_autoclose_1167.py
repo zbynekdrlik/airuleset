@@ -300,10 +300,10 @@ class ClassABotAuthor(unittest.TestCase):
         self.assertEqual([7], [it["task_id"] for it in res["A"]])
         self.assertEqual("Patrik Javorský", res["A"][0]["author"])
 
-    def test_miva_bot_message_behaviour_is_unchanged(self):
+    def test_miva_bot_message_is_no_client_comment_either(self):
         res = _compute(MIVA, [_verif_task(7, 1)],
                        {7: [_bot(71, 0.5), _stream(70, 1)]})
-        self.assertEqual([7], [it["task_id"] for it in res["A"]])
+        self.assertEqual([], res["A"])
 
 
 # --------------------------------------------------------------------------- #

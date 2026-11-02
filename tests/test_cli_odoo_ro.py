@@ -87,7 +87,7 @@ class TestClientRequestShape(unittest.TestCase):
         # message_reactions_guarded is a READ-ONLY guarded server method (#784):
         # it must dispatch (the raw mail.message.reaction model 403s by design).
         c = self._client([[{"content": "👷", "partner_id": [17244, "Z"]}]])
-        out = c.call("mail.message", "message_reactions_guarded", ids=[5])
+        out = c.call("mail.message", "message_reactions_guarded", message_id=5)
         self.assertEqual(out, [{"content": "👷", "partner_id": [17244, "Z"]}])
         self.assertTrue(self.transport.calls[0]["url"]
                         .endswith("/mail.message/message_reactions_guarded"))
