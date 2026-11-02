@@ -737,7 +737,7 @@ class BridgeHome:
             topics = host_link_topics(links, host)
             lines += ["%s (%s): %s" % (o, host, topics.get(frozenset((self.project, o)), "-"))
                       for o in linked_to(host_links(links, host), self.project)]
-        return INSTRUCTIONS + ("\nLinked projects:\n" + "\n".join(lines) + "\nDo not send "
+        return INSTRUCTIONS + ("\nLinked projects at session start; call peers for the current list:\n" + "\n".join(lines) + "\nDo not send "
                                "one project's work to another." if lines else "")
 
     def start_listener(self):
