@@ -118,6 +118,8 @@ RECLAIMABLE_CLASSES = frozenset({
     "stale-agent-worktree",
     # #980 — dead-session /tmp/claude-<uid>/ scratchpad dirs:
     "session-scratch",
+    # #1286 — Cargo output outside an agent worktree:
+    "stale-build",
 })
 
 # #854 — the ROOT-owned cache classes: their deletes go through `sudo -n` when
@@ -2760,6 +2762,10 @@ def _perform_action(a, sudo_ok=False, run_fn=None, scratch_live_fn=None, now=Non
             floor = a.get("floor_days")
             if (live_fn(path, now) if floor is None
                     else live_fn(path, now, floor_days=floor)):
+                return -1
+        if a.get("cls") == "stale-build":       # #1286: a build may have started since the plan
+            from cli_target_purge import _target_in_live_use
+            if _target_in_live_use(path):
                 return -1
         _rm_path(path, sudo=use_sudo, run_fn=run_fn)
         return nbytes

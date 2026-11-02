@@ -1,18 +1,20 @@
-"""#1286: drain rung for build output that no other rung owns.
+"""#1286: drain rung for Cargo output no other rung owns.
 
 The Tier-0 `target/` purge (#315) was retired by #1137, so a Cargo `target/`
-outside an agent worktree never aged out: dev2 held 233 GB of it with the guard
-reporting `drain_exhausted`. A directory is a candidate only when it proves what
-it is (Cargo's CACHEDIR.TAG, or a direct child of a build scratch root), has no
-file newer than MIN_AGE_DAYS, and no process uses it. Everything else stays.
+outside an agent worktree never aged out: dev2 held 200 GB of it with the guard
+reporting `drain_exhausted`. A directory is a candidate only when Cargo's
+CACHEDIR.TAG proves what it is, it has no file newer than MIN_AGE_DAYS, and no
+process uses it. Cargo output is regenerable, so nothing else qualifies: a
+worktree in a build scratch dir can hold uncommitted work and stays.
+A young target ends its scan at the first fresh file and gives no row, so a
+poll under pressure neither re-walks it whole nor logs it.
 Stdlib only at module level; shared helpers are deferred imports.
 """
 import os
 
 CLS = "stale-build"
 MIN_AGE_DAYS = 14
-MAX_DEPTH = 4                      # ~/copy/src-tauri/target, ~/devel/app/repo/target
-SCRATCH_ROOTS = ("gk-scratch",)    # direct children are throwaway build lanes
+MAX_DEPTH = 3                      # ~/copy/src-tauri/target, ~/devel/app/repo/target
 _PRUNE = {"node_modules"}
 
 
@@ -41,47 +43,33 @@ def _cargo_targets(home):
     return found
 
 
-def _scratch_children(home):
-    out = []
-    for root in SCRATCH_ROOTS:
-        base = os.path.join(home, root)
-        if os.path.islink(base) or not os.path.isdir(base):
-            continue
-        for name in sorted(os.listdir(base)):
-            full = os.path.join(base, name)
-            if not os.path.islink(full):
-                out.append(full)
-    return out
+def _old_size(path, limit):
+    """Total bytes of ``path``, or None at the first file newer than ``limit``."""
+    total = 0
+    for dirpath, _dirnames, filenames in os.walk(path, onerror=lambda e: None):
+        for name in filenames:
+            try:
+                st = os.lstat(os.path.join(dirpath, name))
+            except OSError:
+                continue
+            if st.st_mtime > limit:
+                return None
+            total += st.st_size
+    return total
 
 
-def _stats(path, dir_stats_fn):
-    if os.path.isdir(path):
-        return dir_stats_fn(path)
-    st = os.lstat(path)
-    return st.st_size, st.st_mtime
-
-
-def discover_stale_build(home=None, now=None, dir_stats_fn=None, live_fn=None):
+def discover_stale_build(home=None, now=None, live_fn=None):
     """Rows ``{cls, path, bytes, reason}``; ``reason`` None means a delete candidate."""
-    if dir_stats_fn is None:
-        from cli_target_purge import _dir_stats as dir_stats_fn
     if live_fn is None:
         from cli_live_snapshot import batch_checker
         live_fn = batch_checker()          # #1216: one /proc pass for the batch
     home = home or os.path.expanduser("~")
     limit = now - MIN_AGE_DAYS * 86400
     rows = []
-    for path in _cargo_targets(home) + _scratch_children(home):
-        try:
-            size, newest = _stats(path, dir_stats_fn)
-        except OSError as e:
-            rows.append({"cls": CLS, "path": path, "bytes": 0, "reason": "unreadable: %s" % e})
+    for path in _cargo_targets(home):
+        size = _old_size(path, limit)
+        if size is None:
             continue
-        if newest is not None and newest > limit:
-            reason = "newest file younger than %d days" % MIN_AGE_DAYS
-        elif live_fn(path):
-            reason = "in live use"
-        else:
-            reason = None
-        rows.append({"cls": CLS, "path": path, "bytes": size, "reason": reason})
+        rows.append({"cls": CLS, "path": path, "bytes": size,
+                     "reason": "in live use" if live_fn(path) else None})
     return rows
