@@ -5,9 +5,9 @@ fleet replacement for the per-box audit scripts each stream ran locally. It
 computes three violation classes and NEVER trusts a time window (the concrete
 defect the local scripts had):
 
-  A — an OPEN task whose LAST `comment` is authored by someone OUTSIDE the
-      stream/owner identity set (a client) with NO stream reaction/message
-      after it. The client is waiting for a reply.
+  A — an OPEN task whose newest comment a client could wait on (`ClientView`:
+      no bot, no comment addressed to a colleague) is by a CLIENT, with NO
+      delivery-side reaction/message after it. The client is waiting for a reply.
   B — a task in Verifikácia / Realizácia / Potrebuje ujasniť with ZERO stream
       message (the Verifikácia invariant: "awaiting client verification MUST
       carry a stream handover message").
@@ -64,18 +64,17 @@ def _is_stream_author(author_value, own_names, stream_partner_ids):
 def _has_stream_reaction(call, msg, own_names, stream_partner_ids):
     """True iff the stream/owner reacted to `msg`.
 
-    PRIMARY: the guarded server method `message_reactions_guarded` (#784) —
-    read-only, returns `[{content, partner_id/guest_id}, ...]`. A reactor whose
-    partner id is in `stream_partner_ids` or whose name is in `own_names` = a
-    stream ACK. FALLBACK (guarded method not released on this instance → the
+    PRIMARY: the read-only guarded server method `message_reactions_guarded`
+    (#784). A reactor in `stream_partner_ids` or `own_names` = a stream ACK.
+    FALLBACK (guarded method not released on this instance → the
     call raises `OdooError`): the ticket's else-branch — the PRESENCE of any
     `reaction_ids` on the message is treated as ACKed (never a raw
     `mail.message.reaction` read, which 403s by design)."""
     mid = msg.get("id")
     if mid is None:
         return bool(msg.get("reaction_ids"))
-    try:
-        reacts = call("mail.message", "message_reactions_guarded", ids=[mid])
+    try:   # `message_id`, never `ids`: the live server answers `ids` with a 422
+        reacts = call("mail.message", "message_reactions_guarded", message_id=mid)
     except ro.OdooError:
         return bool(msg.get("reaction_ids"))
     if not isinstance(reacts, list):
@@ -84,7 +83,8 @@ def _has_stream_reaction(call, msg, own_names, stream_partner_ids):
         if not isinstance(rx, dict):
             continue
         pid, pname = _m2o(rx.get("partner_id"))
-        if (pid is not None and pid in stream_partner_ids) or pname in own_names:
+        if (pid is not None and pid in stream_partner_ids) or (
+                pname or rx.get("partner_name")) in own_names:
             return True
     return False
 
@@ -127,6 +127,7 @@ def compute_hygiene(call, cfg, now=None):
     confirm_days = ro.client_confirm_days(cfg)
     tracker = board.AutoCloseTracker(cfg)      # #1167 auto-close wait
     prof = tracker.prof                        # None → no auto-close wait
+    view = board.ClientView(cfg, prof, own_names, stream_pids)   # class A only
     project_ids = list(cfg.get("project_ids", []))
 
     domain = [["project_id", "in", project_ids]]
@@ -150,7 +151,7 @@ def compute_hygiene(call, cfg, now=None):
                     ["res_id", "in", [t.get("id") for t in tasks]],
                     (["message_type", "in", list(board.MESSAGE_TYPES)] if prof
                      else ["message_type", "=", "comment"])],
-            fields=["id", "author_id", "date", "reaction_ids", "res_id"],
+            fields=["id", "author_id", "date", "reaction_ids", "res_id", "body"],
             order="res_id, date desc, id desc", limit=_MSG_LIMIT)
         # #1036 review 🟡 CORRECTNESS-2: if the batched read hit the cap it is
         # INCOMPLETE (ordered res_id ASC, so the highest-res_id tasks lose their
@@ -176,14 +177,14 @@ def compute_hygiene(call, cfg, now=None):
 
         base = {"task_id": tid, "task_name": tname, "stage": stage_name}
 
-        # A — last comment by a client, no stream reaction after it.
-        if last is not None and not _is_stream_author(
-                last.get("author_id"), own_names, stream_pids):
-            if not _has_stream_reaction(call, last, own_names, stream_pids):
-                _, aname = _m2o(last.get("author_id"))
-                dt = _parse_dt(last.get("date"))
+        # A — the comment a client waits on, no delivery-side reaction after it.
+        wait = view.awaited(msgs)
+        if wait is not None and view.is_client(wait.get("author_id")):
+            if not _has_stream_reaction(call, wait, view.names, view.pids):
+                _, aname = _m2o(wait.get("author_id"))
+                dt = _parse_dt(wait.get("date"))
                 a_items.append(dict(base, author=aname,
-                                    date=last.get("date"),
+                                    date=wait.get("date"),
                                     ts=(dt.timestamp() if dt else None)))
 
         # B — tracked-stage task with NO stream message at all. On a TRUNCATED

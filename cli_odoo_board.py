@@ -52,12 +52,21 @@ BOARD_PROFILES = {
     "erp.montalu.cloud": {
         "verif_auto_close": {"reminder_days": 14, "close_days": 21,
                              "after_reminder_days": 7,
-                             "bot_author_names": ["OdooBot"],
+                             "bot_author_names": ["OdooBot", "AI pomocník"],
+                             "bot_partner_ids": [2],
                              "stream_author_names": ["ZbynekAI", "MarekAI"],
                              "github_repo": "zbynekdrlik/odoo-erp"},
+        # The delivery side, never the client (issue 1262): the two owners and
+        # the sibling MarekAI stream. Class A and the reaction ack only; the
+        # auto-close classifier keeps its own rule 5 identities.
+        "owner_partner_ids": [17128, 17129, 20848],
     },
 }
 _WAIT_KEYS = ("reminder_days", "close_days", "after_reminder_days")
+# base.partner_root is partner 2 in every Odoo database, whatever its display
+# name (montalu renamed it): a bot on every board, not only on an auto-close one.
+ROOT_PARTNER_ID = 2
+ROOT_PARTNER_NAME = "OdooBot"
 
 # #1258 (owner 24.10.2026): the slovnormal client does not use Odoo projects or
 # tasks, so its streams have NO client board. install writes BOARD_MARKER = "off"
@@ -198,6 +207,87 @@ def counted(msgs, prof):
     if not prof:
         return msgs
     return [m for m in msgs if not is_bot(m.get("author_id"), prof)]
+
+
+def _int_set(value):
+    return {v for v in value if isinstance(v, int) and not isinstance(v, bool)} \
+        if isinstance(value, list) else set()
+
+
+# Leading markup before a comment's first words, and one partner mention
+# (`<a class="o_mail_redirect" data-oe-id="21" data-oe-model="res.partner">@X</a>`).
+# Every gap is bounded, so the scan stays linear on any body.
+_OPENING_RX = re.compile(r"(?:\s|&nbsp;|&#160;|<(?!a\b)[^<>]{0,200}>)")
+_ANCHOR_RX = re.compile(r"<a\b([^<>]{0,500})>@?([^<>]{0,80})</a>")
+_ANCHOR_ID_RX = re.compile(r'\bdata-oe-id="(\d+)"')
+_OPENING_MAX_STEPS = 64
+
+
+def _opening_mentions(body):
+    """The `(partner id, name)` mentions a comment OPENS with, in order. Anchors
+    further in (a mid-sentence name, a quoted reply) are not its addressees."""
+    if not isinstance(body, str):
+        return []
+    pos, out = 0, []
+    for _ in range(_OPENING_MAX_STEPS):
+        gap = _OPENING_RX.match(body, pos)
+        if gap:
+            pos = gap.end()
+            continue
+        anchor = _ANCHOR_RX.match(body, pos)
+        if not anchor or "o_mail_redirect" not in anchor.group(1) \
+                or 'data-oe-model="res.partner"' not in anchor.group(1):
+            break
+        pid = _ANCHOR_ID_RX.search(anchor.group(1))
+        if not pid:
+            break
+        out.append((int(pid.group(1)), anchor.group(2).strip()))
+        pos = anchor.end()
+    return out
+
+
+class ClientView:
+    """Who class A treats as the client (issues 1221, 1239, 1262): anyone who is
+    not a bot, the box's stream, a board stream or the board's owner side. The
+    owner side stays OUT of `_is_stream_author` and the auto-close classifier:
+    an owner comment is no stream message (B) and still cancels the countdown."""
+
+    def __init__(self, cfg, prof, own_names, stream_pids):
+        cfg = cfg if isinstance(cfg, dict) else {}
+        self.prof = prof
+        self.stream_pids = set(stream_pids)
+        self.pids = self.stream_pids | _int_set(cfg.get("owner_partner_ids")) \
+            | _int_set(BOARD_PROFILES.get(_host(cfg), {}).get("owner_partner_ids"))
+        self.names = set(own_names) | (prof["stream_author_names"] if prof else set())
+
+    def is_own(self, pid, name):
+        """True iff this partner is the delivery side."""
+        return (pid is not None and pid in self.pids) or name in self.names
+
+    def is_bot(self, author_value):
+        """A bot author. A stream configured AS the root partner stays a stream."""
+        aid, name = m2o(author_value)
+        if aid in self.stream_pids:
+            return False
+        return aid == ROOT_PARTNER_ID or name == ROOT_PARTNER_NAME \
+            or is_bot(author_value, self.prof)
+
+    def colleague_addressed(self, msg):
+        """True iff the comment opens by @mentioning only non-delivery people."""
+        mentions = _opening_mentions(msg.get("body"))
+        return bool(mentions) and not any(
+            self.is_own(pid, name) for pid, name in mentions)
+
+    def awaited(self, msgs):
+        """The newest message a client could be waiting on (bots and
+        colleague-addressed comments skipped), or None. `msgs` newest-first."""
+        for m in msgs:
+            if not self.is_bot(m.get("author_id")) and not self.colleague_addressed(m):
+                return m
+        return None
+
+    def is_client(self, author_value):
+        return not self.is_own(*m2o(author_value))
 
 
 def ticket_numbers(description):

@@ -90,7 +90,7 @@ def guarded_reactions_ok(call, msgs):
     if mid is None:
         return False
     try:
-        call("mail.message", "message_reactions_guarded", ids=[mid])
+        call("mail.message", "message_reactions_guarded", message_id=mid)
     except ro.OdooError:
         return False
     return True
