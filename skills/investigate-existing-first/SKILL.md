@@ -12,6 +12,7 @@ user-invocable: false
 
 When the user asks "do we need to develop X?" or you are about to propose a custom layer / module / utility / wrapper:
 
+0. **Search the owner's own projects first (#1227).** `gh search code <term> --owner zbynekdrlik`, `gh repo list zbynekdrlik`, and read the matching repo's `.claude/rules/`. Reuse its code and its verified findings, and research only the gaps. Incident: a presenter session paid for web research on VBAN and live translation that songplayer had already solved.
 1. **Identify the candidate existing solutions.** Library docs, OCA repos, npm/pypi packages, Odoo Enterprise/Community modules, framework built-ins, the project's own existing code.
 2. **Read their actual source.** Manifest files, model definitions, view XML, README. `curl -s raw.githubusercontent.com/...` or `Read` the file. Do not rely on memory or general knowledge of "what library X usually does".
 3. **Map each piece of the proposed custom layer to either: (a) provided by existing solution, (b) configuration/data only, or (c) genuinely custom code.**
