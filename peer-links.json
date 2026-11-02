@@ -118,6 +118,10 @@
         [
           "airuleset",
           "obs"
+        ],
+        [
+          "airuleset",
+          "remoteos-mcp"
         ]
       ],
       "topics": {
@@ -149,7 +153,8 @@
         "dasio|mikrotik": "the network: a switch, router or VLAN need of dasio's test machines goes to mikrotik, which owns that configuration",
         "camera-box|obs": "the forked OBS: camera-box owns the picture, the boxes and the deploy and pins released OBS builds; obs owns the fork. Other projects ask for OBS changes through camera-box",
         "dstack|obs": "the Dante OBS source: a Dante need or bug goes to dstack, obs only moves the stack version",
-        "airuleset|obs": "airuleset infra: accounts, permissions, peer links, tooling. Ask or report here; airuleset decides and a ticket alone wakes no session"
+        "airuleset|obs": "airuleset infra: accounts, permissions, peer links, tooling. Ask or report here; airuleset decides and a ticket alone wakes no session",
+        "airuleset|remoteos-mcp": "airuleset infra: accounts, permissions, peer links, tooling. Ask or report here; airuleset decides and a ticket alone wakes no session"
       }
     }
   },
