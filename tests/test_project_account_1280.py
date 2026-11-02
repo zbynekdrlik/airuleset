@@ -53,7 +53,8 @@ class TestDsyncAccount(unittest.TestCase):
     def test_vstack_reaches_camera_box_obs_and_airuleset(self):
         hosts = json.loads((ROOT / "peer-links.json").read_text(encoding="utf-8"))["hosts"]
         pairs = sorted(sorted(p) for p in hosts["dev1"]["links"] if "vstack" in p)
-        self.assertEqual(pairs, [["airuleset", "vstack"], ["camera-box", "vstack"], ["obs", "vstack"]])
+        self.assertEqual(pairs, [["airuleset", "vstack"], ["camera-box", "vstack"],
+                                 ["dstack", "vstack"], ["obs", "vstack"]])
         self.assertEqual(drop._GENERATED_DROP_PORTS[("dev1", "vstack")], 8905)
         self.assertEqual(bootstrap.validate_account("vstack", bootstrap.account_spec("vstack")), [])
 

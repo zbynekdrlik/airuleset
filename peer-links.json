@@ -144,6 +144,10 @@
           "vstack"
         ],
         [
+          "dstack",
+          "vstack"
+        ],
+        [
           "dasio",
           "iemmixer"
         ]
@@ -183,6 +187,7 @@
         "airuleset|shading": "airuleset infra: accounts, permissions, peer links, tooling. Ask or report here; airuleset decides and a ticket alone wakes no session",
         "camera-box|vstack": "the shared video libraries: a need or bug goes to vstack, camera-box only moves the pinned tag. The clock stays with dsync",
         "obs|vstack": "the shared video libraries: a need or bug goes to vstack, obs only moves the pinned tag",
+        "dstack|vstack": "which of the two takes shared audio code out of camera-box, such as the asrc family",
         "airuleset|vstack": "airuleset infra: accounts, permissions, peer links, tooling. Ask or report here; airuleset decides and a ticket alone wakes no session",
         "dasio|iemmixer": "restarts of the FOH PC: dasio restarts it; iemmixer asks dasio before a restart it needs"
       }
