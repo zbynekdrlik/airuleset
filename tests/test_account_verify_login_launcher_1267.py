@@ -177,7 +177,10 @@ class TestLauncherPane(_Base):
         self.fails("~/.bash_profile")
 
     def test_a_bash_profile_that_sources_the_bashrc_passes(self):
-        (self.w.home / ".bash_profile").write_text('[ -f ~/.bashrc ] && . ~/.bashrc\n')
+        # it also sources ~/.profile (the fake world's PATH restore: Debian's
+        # /etc/profile, the CI image, resets PATH in a login shell)
+        (self.w.home / ".bash_profile").write_text(
+            '. ~/.profile\n[ -f ~/.bashrc ] && . ~/.bashrc\n')
         self.assertEqual(self.verify(), 0, self.out)
 
     def test_a_stale_pane_with_a_non_claude_child_fails(self):
