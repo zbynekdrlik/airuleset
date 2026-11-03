@@ -115,7 +115,7 @@ CLAUSES = [
     Clause("obligation", ("full",),
         "Every open issue THIS box is OBLIGED to action — the CORE slice (not labeled autopilot-skip, not owned by a sub-dev stream) PLUS every ticket only I can action whatever stream owns it (needs-gatekeeper, a hand-off awaiting my review/merge/close) — is resolved,"),
     Clause("proof", ("full",),
-        "and (B) holds ONLY when my final message carries the pasted OUTPUT of both proof commands: `python3 ~/devel/airuleset/airuleset.py core-quals --count` printing exactly `0` under it (it counts EXACTLY that obligation set), AND `gh run list -b main -L 1 --json conclusion --jq '.[0].conclusion'` printing exactly `success` under it, AND then the line `🏁 BACKLOG EMPTY: 0 open, main green` directly above the terminal `✅ DONE:` marker."),
+        "and (B) holds ONLY when my final message carries the pasted OUTPUT of both proof commands: `python3 ~/devel/airuleset/airuleset.py core-quals --count` printing exactly `0` under it (it counts EXACTLY that obligation set), AND `gh run list -b \"$(gh repo view --json defaultBranchRef --jq .defaultBranchRef.name)\" -L 1 --json conclusion --jq '.[0].conclusion'` printing exactly `success` under it, AND then the line `🏁 BACKLOG EMPTY: 0 open, main green` directly above the terminal `✅ DONE:` marker."),
     Clause("how-to-tell", ("full",),
         "HOW TO TELL A REAL COMPLETION FROM A CLAIMED ONE: real = output shown; claimed = asserted."),
     Clause("done-never", ("full",),
@@ -407,6 +407,12 @@ _LEGACY_POINTER = tuple(
     ("(the %s variant, `skills/completion-report-deep/DEEP.md`)" % v,
      "(the %s variant, `completion-report.md`)" % v)
     for v in ("branch-merge", "fork-no-merge"))
+# 2026-11-03 (dsync): the (B) proof read CI on a hard-coded `main`; it now
+# resolves the repo default branch. Lines typed before stay recognised.
+_LEGACY_PROOF = (
+    ('gh run list -b "$(gh repo view --json defaultBranchRef --jq '
+     '.defaultBranchRef.name)" -L 1', "gh run list -b main -L 1"),
+)
 _LEGACY_REVIEW = (
     (("h, stav release", "h, lanes N/cap, stav release"),
      (_REVIEW_D, "(d) lanes plním DISPATCHOVATEĽNÝMI jednotkami vždy keď existuje "
@@ -461,6 +467,10 @@ def all_goal_line_variants():
         lines += legacy_goal_line_variants()
     except Exception:  # noqa: BLE001 — never lose the current variants
         pass
+    for line in list(lines):
+        for new, legacy in _LEGACY_PROOF:
+            line = line.replace(new, legacy, 1)
+        lines.append(line)
     for line in lines:
         if line not in seen:
             seen.add(line)
