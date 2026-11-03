@@ -160,7 +160,7 @@ class LaneSpec:
 
 
 # #1205: the ONE shape of a lane BORN on the controller for a single external
-# human (timo #1183, palo #1205). The shared controller tunnel fronts it
+# human (timo #1183). The shared controller tunnel fronts it
 # (dummy per-lane tunnel fields), no key gates it, its tab list is the
 # human's own policy entry, and every path/unit name derives from the lane
 # name. The roots are fixed at import, like the thin modules' constants were.

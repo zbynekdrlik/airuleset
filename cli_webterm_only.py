@@ -95,12 +95,6 @@ WEBTERM_CONTROLLER_LANE_PUBKEYS = {
         "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGkDFpFljP1a7eMt9mZa/iWXxKNq"
         "3b8ZBAeR8DlYjoEz webterm-timo-controller"
     ),
-    # #1205 go-live 2026-10-01 (owner: a TRIAL lane, 1.10.): minted on the
-    # controller (~/.secrets/webterm_palo_ed25519); his only tab is montalu6.
-    "palo": (
-        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGfppfY7KfJenBuOXwsTqLasCdVA"
-        "ju57nEigwi08uHj0 webterm-palo-controller"
-    ),
 }
 
 # #870 incident 2 fix: which webterm-only user accounts each human's

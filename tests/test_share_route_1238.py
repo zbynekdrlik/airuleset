@@ -240,18 +240,18 @@ class TestControllerRenderShape(_TempCache):
     first, then the drop lanes, the service routes, claudy, the catch-all."""
 
     def test_the_render_keeps_every_rule_family_in_order(self):
-        import cli_webterm_palo as palo
+        import cli_webterm_timo as timo
         configs = []
 
         def capture(*a, **k):
             configs.append(a[3])
             return True
 
-        with mock.patch.object(w.profiles, "LANE_HOST", {"palo": "controller"}), \
+        with mock.patch.object(w.profiles, "LANE_HOST", {"timo": "controller"}), \
                 mock.patch.object(tun, "_provision_managed_tunnel", side_effect=capture):
             _ct().apply_tunnel(_ct().hosted_lanes())
         cfg = configs[0]
-        order = [palo._spec().tunnel_hostname, "drop-gk.newlevel.media",
+        order = [timo._spec().tunnel_hostname, "drop-gk.newlevel.media",
                  "backup.newlevel.media", "claudy.newlevel.media",
                  "service: http_status:404"]
         idx = [cfg.index(x) for x in order]

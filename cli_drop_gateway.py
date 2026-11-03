@@ -342,8 +342,7 @@ def _webterm_readers():
             for name, inv in (("david", _wp.david_inventory),
                               ("marek", _wp.marek_inventory),
                               ("dominika", _wp.dominika_inventory),
-                              ("timo", _wp.timo_inventory),
-                              ("palo", _wp.palo_inventory))
+                              ("timo", _wp.timo_inventory))
             if name in _wo.WEBTERM_CONTROLLER_LANE_PUBKEYS]
 
 

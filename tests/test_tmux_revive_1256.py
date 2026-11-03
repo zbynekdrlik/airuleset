@@ -267,7 +267,7 @@ class HumanSessionRegistry(unittest.TestCase):
 
     def test_every_preferred_is_an_account_or_a_registered_human(self):
         profiles = [prof.OWNER, prof.DAVID, prof.MAREK, prof.DOMINIKA,
-                    prof.TIMO, prof.PALO]
+                    prof.TIMO]
         for profile in profiles:
             for e in prof.profile_inventory(profile, []):
                 pref = e.get("preferred")
