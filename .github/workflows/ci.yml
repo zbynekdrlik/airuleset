@@ -66,8 +66,10 @@ jobs:
       - name: Install jq (hooks under test parse their payload with jq)
         run: |
           apt-get update -qq
-          apt-get install -y -qq jq
+          apt-get install -y -qq jq acl
           jq --version
+          # #1266 peer-channel root-script tests run setfacl/getfacl.
+          setfacl --version
 
       - name: Install Python test tooling
         run: pip install --no-input pytest==8.3.2 pytest-xdist==3.8.0 ruff==0.16.2

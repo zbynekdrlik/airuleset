@@ -115,7 +115,11 @@ class _World:
         key = session.project_key("/home/fohmixer/devel/fohmixer")
         (claude / "projects" / key).mkdir(parents=True)
         (claude / "projects" / key / "1b11a9f0.jsonl").write_text("{}\n")
-        (self.home / ".profile").write_text("# the #1201 block landed before the pane\n")
+        # the #1201 block landed before the pane. Debian's /etc/profile (the
+        # CI image) resets PATH in a login shell; restore the pane PATH the
+        # test intends, so the result never depends on the host's /etc/profile.
+        (self.home / ".profile").write_text(
+            '[ -z "${FAKE_PANE_PATH:-}" ] || export PATH="$FAKE_PANE_PATH"\n')
         old = time.time() - 3600
         os.utime(self.home / ".profile", (old, old))
         # 1267: the claude() launcher landed before the pane; a Claude login
@@ -153,6 +157,7 @@ class _World:
                             self.email], check=True)
         pane_env = {k: v for k, v in os.environ.items() if k != "RUSTUP_HOME"}
         pane_env["HOME"] = str(self.home)        # never the runner's real ~/.profile
+        pane_env["FAKE_PANE_PATH"] = self.pane_env.get("PATH", "")
         pane = subprocess.Popen(self.pane_cmd, env=dict(pane_env, **self.pane_env),
                                 start_new_session=True)
         deadline = time.monotonic() + 10         # the probe reads the pane's child
