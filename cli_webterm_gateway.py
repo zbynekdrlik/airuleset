@@ -779,7 +779,7 @@ class Gateway:
         if path == "/tab-layout":
             await self._route_tab_layout(reader, writer, method, headers)
             return
-        if path == "/phone-read":
+        if path in ("/phone-read", "/phone-history"):
             await self._route_phone_read(writer, target, method, headers)
             return
         if self._is_proxy_path(target):
@@ -956,7 +956,8 @@ class Gateway:
             await self._send(writer, http_response("404 Not Found", "not found"))
             return
         await self._send(writer, http_response(
-            "200 OK", await self.phone.body(target),
+            "200 OK", await (self.phone.history_body(target)
+                             if target.startswith("/phone-history") else self.phone.body(target)),
             extra_headers=["Cache-Control: no-store"],
             content_type="application/json; charset=utf-8"))
 

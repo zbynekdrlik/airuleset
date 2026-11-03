@@ -59,7 +59,7 @@ from cli_tmux_revive import TMUX_REVIVE_SH  # #1256: revive before create
 # the `@@…@@` single-pass substitution contract stays in render_dashboard_html.
 from cli_webterm_dash_template import DASHBOARD_TEMPLATE as _DASHBOARD_TEMPLATE
 from cli_webterm_keybar import KEYBAR_CSS, KEYBAR_HTML
-from cli_webterm_capture import WEBTERM_CAPTURE_LINES, WEBTERM_CAPTURE_VERB, capture_main
+from cli_webterm_capture import WEBTERM_READ_SH, capture_main
 from cli_webterm_phone import PHONE_CSS, PHONE_HTML
 from cli_webterm_tabmenu import TABMENU_CSS, TABMENU_JS
 
@@ -408,14 +408,11 @@ _ATTACH_BODY = (
     'N=$(tmux list-sessions -F "#{session_name}" 2>/dev/null); '
     'if [ "$(printf %s "$N" | grep -c .)" = "1" ]; then '
     'case " $H " in *" $N "*) ;; *) T="$N";; esac; fi; '
-    'fi; fi; '
+    'fi; fi; ' +
     # #1287: the phone view's history read. Only the exact value, only a read: it
     # leaves before the mouse option, the attach and the create fallback. No
     # session means no output, never a new session.
-    'if [ "${SSH_ORIGINAL_COMMAND:-}" = ' + WEBTERM_CAPTURE_VERB + ' ]; then '
-    '[ -n "$T" ] || exit 1; '
-    'exec tmux capture-pane -p -J -S -' + str(WEBTERM_CAPTURE_LINES) + ' -t "=$T:"; '
-    'fi; '
+    WEBTERM_READ_SH +
     'if [ -n "$T" ]; then '
     # #615 (SCOPED to this connection -- see the block comment above for the
     # full record + the #646/#648 interaction): mouse mode so the browser's

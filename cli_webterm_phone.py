@@ -27,6 +27,9 @@ PHONE_CSS = """/* #1287: the phone text view, over the terminal area. Off until 
   font: 13.5px/1.42 "Cascadia Mono", Consolas, "DejaVu Sans Mono", Menlo, monospace;
   color: #CCCCCC; white-space: pre-wrap; overflow-wrap: anywhere;
   -webkit-overflow-scrolling: touch; user-select: text; -webkit-user-select: text; }
+#phonelog .m { margin: 0 0 10px; font-family: system-ui, sans-serif; font-size: 15px; line-height: 1.4; }
+#phonelog .m.u { padding: 6px 8px; border-radius: 6px; background: #262626; color: #F2F2F2; }
+#phonescreen { margin: 0; padding-top: 8px; border-top: 1px solid #3f3f3f; font: inherit; }
 #phonestate { display: none; flex: 0 0 auto; padding: 4px 10px; color: #E74856; font-size: 13px; }
 #phonestate.on { display: block; }
 #phonedown { display: none; position: absolute; right: 12px; bottom: 64px; height: 40px;
@@ -45,7 +48,7 @@ body.wt-phone { touch-action: pan-x pan-y; }
 
 # Raw string: the `\s`/`\n` escapes below must reach the browser as JS escapes.
 PHONE_HTML = r"""<div id="phone">
-<pre id="phonelog" tabindex="0"></pre>
+<div id="phonelog" tabindex="0"><div id="phonehist"></div><pre id="phonescreen"></pre></div>
 <div id="phonestate">Text tohto tabu sa nedá načítať. Tlačidlo Terminál otvorí plný terminál.</div>
 <button id="phonedown" type="button">&#8595; nadol</button>
 <div id="phonebar">
@@ -57,6 +60,7 @@ PHONE_HTML = r"""<div id="phone">
 <script>
 // #1287: see cli_webterm_phone.py.
 const PHONE_POLL_MS = 1500;
+const PHONE_HISTORY_MS = 5000;      // the gateway reads a transcript at most this often
 const PHONE_GRID_NEAR_FULL = CFG.term_cols - 6;    // a line this long continues below
 // The pane is drawn for 176 columns. Rejoin what Claude broke at that width, and
 // cut full-width rules, which would wrap into several rows.
@@ -87,20 +91,46 @@ function phoneSelecting() {           // a redraw would drop the owner's selecti
   const state = document.getElementById('phonestate');
   const down = document.getElementById('phonedown');
   const box = document.getElementById('phonebox');
-  let shownIdx = -1, shownText = null, seq = 0, following = true;
+  const hist = document.getElementById('phonehist');
+  const screen = document.getElementById('phonescreen');
+  let shownIdx = -1, shownText = null, seq = 0, following = true, histNext = 0, histAt = 0, gen = 0;
 
   function newTab(idx) {                       // never another tab's text under this box
     seq++;
     shownIdx = idx; shownText = null; following = true;
-    log.textContent = '';
+    gen++; hist.textContent = ''; screen.textContent = ''; histNext = 0; histAt = 0;
     state.classList.remove('on');
     if (window.getSelection) window.getSelection().removeAllRanges();
+  }
+  // Claude runs fullscreen, so its pane holds one screen: older messages come
+  // from the session transcript, appended in order, never re-rendered.
+  async function refreshHistory(s) {
+    const mine = gen;
+    if (Date.now() - histAt < PHONE_HISTORY_MS) return;
+    histAt = Date.now();
+    let d = { ok: false };
+    try {
+      const r = await fetch('/phone-history?id=' + encodeURIComponent(s.id) + '&since=' + histNext,
+                            { cache: 'no-store', signal: AbortSignal.timeout(20000) });
+      if (r.ok) d = await r.json();
+    } catch (e) { /* the next history tick retries */ }
+    if (mine !== gen || !d.ok) return;
+    if (d.first > histNext) { hist.textContent = ''; histNext = d.first; }
+    d.msgs.forEach((m) => {
+      const div = document.createElement('div');
+      div.className = 'm ' + (m.r === 'u' ? 'u' : 'a');
+      div.textContent = m.t;
+      hist.appendChild(div);
+    });
+    histNext += d.msgs.length;
+    if (d.msgs.length && following) phoneToEnd(log);
   }
   async function refresh() {
     const idx = current, s = CFG.sessions[idx];
     if (!s || !window.wtPhoneOn || document.hidden) return;
     if (idx !== shownIdx) newTab(idx);
     const mine = ++seq;
+    refreshHistory(s);
     let d = { ok: false };
     try {
       const r = await fetch('/phone-read?id=' + encodeURIComponent(s.id),
@@ -112,7 +142,7 @@ function phoneSelecting() {           // a redraw would drop the owner's selecti
     if (!d.ok || phoneSelecting()) return;
     const text = phoneTidy(d.text);
     if (text === shownText) return;
-    log.textContent = text;
+    screen.textContent = text;
     shownText = text;
     if (following) phoneToEnd(log);
     down.classList.toggle('on', !phoneAtEnd(log));
@@ -138,6 +168,7 @@ function phoneSelecting() {           // a redraw would drop the owner's selecti
     keybarSend(term, '\r');
     box.value = '';
     following = true;
+    histAt = 0;
     setTimeout(refresh, 300);
   }
   // Terminal text is not page text: a pinch would only bring the old problem back.

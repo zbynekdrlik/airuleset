@@ -82,6 +82,104 @@ class TestForcedCommandRead(unittest.TestCase):
             self.assertNotIn("capture-pane", log, verb)
 
 
+class TestHistoryRead(unittest.TestCase):
+    """The history verb, through the real attach body, on a fake transcript."""
+
+    def _hist(self, verb, data=b"", cwd="/home/x/devel/proj"):
+        d = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, str(d), True)
+        proj = d / ".claude/projects" / "".join(ch if ch.isalnum() else "-" for ch in cwd)
+        proj.mkdir(parents=True)
+        (proj / "old.jsonl").write_bytes(b"old\n")
+        os.utime(proj / "old.jsonl", (1, 1))
+        (proj / "new.jsonl").write_bytes(data)
+        stub = d / "tmux"
+        stub.write_text('#!/bin/sh\necho "$*" >> %s/tmux.log\n'
+                        'case "$1" in display) echo %s;; esac\nexit 0\n' % (d, cwd))
+        stub.chmod(0o755)
+        env = dict(os.environ, PATH="%s:%s" % (d, os.environ["PATH"]), HOME=str(d),
+                   SSH_ORIGINAL_COMMAND=verb)
+        r = subprocess.run(["sh", "-c", w._remote_command("zbynek")], env=env,
+                           capture_output=True, stdin=subprocess.DEVNULL, timeout=20)
+        log = (d / "tmux.log").read_text() if (d / "tmux.log").exists() else ""
+        return r, log
+
+    def test_first_read_is_the_newest_transcript(self):
+        r, log = self._hist("wt-history 0", b"abc\ndef\n")
+        self.assertEqual(r.stdout, b"new.jsonl 8 0\nabc\ndef\n")
+        self.assertNotIn("attach-session", log)
+
+    def test_an_offset_reads_only_new_bytes(self):
+        r, _ = self._hist("wt-history 4", b"abc\ndef\n")
+        self.assertEqual(r.stdout, b"new.jsonl 8 4\ndef\n")
+
+    def test_a_long_tail_is_capped(self):
+        size = cap.WEBTERM_HISTORY_FIRST_BYTES + 10
+        r, _ = self._hist("wt-history 0", b"x" * size)
+        self.assertTrue(r.stdout.startswith(b"new.jsonl %d 10\n" % size))
+        self.assertEqual(len(r.stdout.partition(b"\n")[2]), cap.WEBTERM_HISTORY_FIRST_BYTES)
+
+    def test_a_bad_offset_is_refused_and_attaches_nothing(self):
+        for verb in ("wt-history ", "wt-history 1;id", "wt-history -1", "wt-history 1 2"):
+            r, log = self._hist(verb, b"abc\n")
+            self.assertEqual(r.returncode, 2, verb)
+            self.assertEqual(r.stdout, b"", verb)
+            self.assertNotIn("attach-session", log, verb)
+
+
+class TestHistoryParse(unittest.TestCase):
+    def _line(self, **kw):
+        return (json.dumps(kw) + "\n").encode()
+
+    def test_keeps_what_was_typed_and_written(self):
+        h = cap.History()
+        data = (self._line(type="user", origin={"kind": "human"}, message={"content": "ahoj"})
+                + self._line(type="assistant", message={"content": [
+                    {"type": "thinking", "thinking": "x"}, {"type": "text", "text": "čau"}]})
+                + self._line(type="assistant", message={"content": [{"type": "tool_use"}]})
+                + self._line(type="user", message={"content": [{"type": "tool_result"}]})
+                + self._line(type="user", origin={"kind": "channel"}, message={"content": "peer"})
+                + self._line(type="user", isMeta=True, message={"content": "meta"})
+                + self._line(type="user", message={"content": "<command-name>x"})
+                + self._line(type="assistant", isSidechain=True,
+                             message={"content": [{"type": "text", "text": "sub"}]}))
+        self.assertTrue(h.feed(b"a.jsonl %d 0\n" % len(data) + data))
+        self.assertEqual(h.msgs, [{"r": "u", "t": "ahoj"}, {"r": "a", "t": "čau"}])
+
+    def test_reads_continue_across_a_split_line(self):
+        h = cap.History()
+        line = self._line(type="user", message={"content": "jeden"})
+        h.feed(b"a.jsonl 5 0\n" + line[:5])
+        self.assertEqual(h.msgs, [])
+        h.feed(b"a.jsonl %d 5\n" % len(line) + line[5:])
+        self.assertEqual(h.msgs, [{"r": "u", "t": "jeden"}])
+        self.assertEqual(h.offset, len(line))
+
+    def test_a_new_session_starts_over_and_moves_first(self):
+        h = cap.History()
+        h.feed(b"a.jsonl 10 0\n" + self._line(type="user", message={"content": "a"}))
+        h.feed(b"b.jsonl 10 0\n" + self._line(type="user", message={"content": "b"}))
+        self.assertEqual((h.first, h.msgs), (1, [{"r": "u", "t": "b"}]))
+
+    def test_a_tail_drops_its_partial_first_line(self):
+        h = cap.History()
+        h.feed(b"a.jsonl 99 50\n" + b'ent": "x"}}\n' + self._line(type="user", message={"content": "ok"}))
+        self.assertEqual(h.msgs, [{"r": "u", "t": "ok"}])
+
+    def test_a_bad_header_is_a_failure(self):
+        self.assertFalse(cap.History().feed(b"garbage\n"))
+
+    def test_the_route_serves_from_since(self):
+        async def read(sid, offset):
+            line = (json.dumps({"type": "user", "message": {"content": "m"}}) + "\n").encode()
+            return b"a.jsonl %d 0\n" % (2 * len(line)) + 2 * line
+        r = cap.PhoneReader("inv", g._TAB_ID_RE, history=read)
+        body = json.loads(asyncio.run(r.history_body("/phone-history?id=alfa&since=1")))
+        self.assertEqual(body, {"ok": True, "first": 0, "msgs": [{"r": "u", "t": "m"}]})
+        bad = asyncio.run(r.history_body("/phone-history?id=../x&since=0"))
+        self.assertEqual(json.loads(bad), {"ok": False})
+
+
 class TestCaptureArgv(unittest.TestCase):
     def test_remote_uses_the_tab_key_without_a_pty(self):
         argv, env = cap.build_capture_argv(INVENTORY[1])
@@ -233,7 +331,8 @@ class TestGatewayRoute(unittest.TestCase):
 class TestLeaf(unittest.TestCase):
     def test_pane_text_is_never_markup(self):
         self.assertNotIn("innerHTML", phone.PHONE_HTML)
-        self.assertIn("log.textContent = text", phone.PHONE_HTML)
+        self.assertIn("screen.textContent = text", phone.PHONE_HTML)
+        self.assertIn("div.textContent = m.t", phone.PHONE_HTML)
 
     def test_off_unless_the_gateway_has_the_route(self):
         html = w.render_dashboard_html(INVENTORY, ttyd_base="/t")
@@ -255,6 +354,7 @@ const { chromium: cr } = require(pwPath);
   await p.waitForFunction(() => { const f = made[0]; return f && f.contentWindow && f.contentWindow.term; });
   const log = () => p.evaluate(() => document.getElementById('phonelog').textContent);
   out.text = await log();
+  out.hist = await p.evaluate(() => [...document.querySelectorAll('#phonehist .m')].map(e => [e.className, e.textContent]));
   out.layout = await p.evaluate(() => { const r = (s) => document.querySelector(s).getBoundingClientRect();
     const l = document.getElementById('phonelog');
     return { on: getComputedStyle(document.getElementById('phone')).display, docW: document.documentElement.scrollWidth,
@@ -312,6 +412,11 @@ window.term = { options: {}, modes: {}, cols: 176, rows: 51, element: document.b
 
 class _Handler(kb._QuietHandler):
     def do_GET(self):
+        if self.path.startswith("/phone-history"):
+            sid = self.path.split("id=", 1)[1].split("&", 1)[0]
+            since = int(self.path.split("since=", 1)[1])
+            msgs = [{"r": "u", "t": "otázka <i>%s</i>" % sid}, {"r": "a", "t": "odpoveď " + sid}]
+            return self._json({"ok": True, "first": 0, "msgs": msgs[since:]})
         if not self.path.startswith("/phone-read"):
             return super().do_GET()
         sid = self.path.split("id=", 1)[1]
@@ -322,6 +427,9 @@ class _Handler(kb._QuietHandler):
             wide = "x" * 174
             body = {"ok": True, "text": "tab%d\n<b>raw</b>\n%s\npokračovanie\n%s\n%s\n\n\n" % (
                 idx, wide, "─" * 176, "\n".join("riadok %d" % i for i in range(120)))}
+        self._json(body)
+
+    def _json(self, body):
         data = json.dumps(body).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
@@ -384,6 +492,10 @@ class TestBrowser(unittest.TestCase):
     def test_pane_text_stays_text(self):
         self.assertIn("<b>raw</b>", self.out["text"])
 
+    def test_history_sits_above_the_screen_as_text(self):
+        self.assertEqual(self.out["hist"], [["m u", "otázka <i>alfa</i>"], ["m a", "odpoveď alfa"]])
+        self.assertLess(self.out["text"].index("odpoveď alfa"), self.out["text"].index("tab0"))
+
     def test_tidy_rejoins_and_cuts_rules(self):
         self.assertIn("x" * 174 + " pokračovanie", self.out["text"])
         self.assertIn("\n" + "─" * 24 + "\n", self.out["text"])
@@ -403,7 +515,8 @@ class TestBrowser(unittest.TestCase):
         self.assertEqual(self.out["desktopReads"], 0)
 
     def test_a_failed_tab_never_shows_the_previous_tab(self):
-        self.assertEqual(self.out["failedTabText"], "")
+        self.assertNotIn("tab1", self.out["failedTabText"])
+        self.assertNotIn("beta", self.out["failedTabText"])
 
     def test_a_dead_socket_keeps_the_typed_text(self):
         self.assertEqual(self.out["offline"], {"box": "zostan", "pastes": 0})
