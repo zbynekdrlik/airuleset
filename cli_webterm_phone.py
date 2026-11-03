@@ -29,7 +29,8 @@ PHONE_CSS = """/* #1287: the phone text view, over the terminal area. Off until 
   -webkit-overflow-scrolling: touch; user-select: text; -webkit-user-select: text; }
 #phonelog .m { margin: 0 0 10px; font-family: system-ui, sans-serif; font-size: 15px; line-height: 1.4; }
 #phonelog .m.u { padding: 6px 8px; border-radius: 6px; background: #262626; color: #F2F2F2; }
-#phonescreen { margin: 0; padding-top: 8px; border-top: 1px solid #3f3f3f; font: inherit; }
+#phonescreen { margin: 0; padding-top: 8px; border-top: 1px solid #3f3f3f; font: inherit;
+  white-space: pre-wrap; overflow-wrap: anywhere; }
 #phonestate { display: none; flex: 0 0 auto; padding: 4px 10px; color: #E74856; font-size: 13px; }
 #phonestate.on { display: block; }
 #phonedown { display: none; position: absolute; right: 12px; bottom: 64px; height: 40px;
@@ -69,8 +70,9 @@ function phoneTidy(raw) {
   let open = false;
   raw.split('\n').forEach((line0) => {
     let line = line0.replace(/\s+$/, '');
-    if (/^[\s─━═╌-]{24,}$/.test(line)) line = line.trim().slice(0, 24);
-    if (open && line.trim()) out[out.length - 1] += ' ' + line.trim();
+    const rule = /^[\s─━═╌-]{24,}$/.test(line);
+    if (rule) line = line.trim().slice(0, 24);
+    if (open && !rule && line.trim()) out[out.length - 1] += ' ' + line.trim();
     else out.push(line);
     open = line.length >= PHONE_GRID_NEAR_FULL;
   });

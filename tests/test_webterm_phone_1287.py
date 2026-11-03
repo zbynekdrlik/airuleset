@@ -359,7 +359,7 @@ const { chromium: cr } = require(pwPath);
     const l = document.getElementById('phonelog');
     return { on: getComputedStyle(document.getElementById('phone')).display, docW: document.documentElement.scrollWidth,
       vw: innerWidth, tabsTop: r('#tabbar').top, barBottom: r('#keybar').bottom, vh: innerHeight, atEnd: l.scrollHeight - l.scrollTop - l.clientHeight,
-      font: parseFloat(getComputedStyle(l).fontSize), scrolls: l.scrollHeight > l.clientHeight, meta: document.querySelector('meta[name=viewport]').content }; });
+      font: parseFloat(getComputedStyle(l).fontSize), screenOver: document.getElementById('phonescreen').scrollWidth - document.getElementById('phonescreen').clientWidth, scrolls: l.scrollHeight > l.clientHeight, meta: document.querySelector('meta[name=viewport]').content }; });
   await p.evaluate(() => { const l = document.getElementById('phonelog'); l.scrollTop = 0; });
   await p.waitForSelector('#phonedown.on');
   await p.waitForTimeout(1800);
@@ -425,8 +425,8 @@ class _Handler(kb._QuietHandler):
         else:
             idx = [e["id"] for e in INV3].index(sid)
             wide = "x" * 174
-            body = {"ok": True, "text": "tab%d\n<b>raw</b>\n%s\npokračovanie\n%s\n%s\n\n\n" % (
-                idx, wide, "─" * 176, "\n".join("riadok %d" % i for i in range(120)))}
+            body = {"ok": True, "text": "tab%d\n<b>raw</b>\n%s\npokračovanie\n%s\n%s\n%s\n\n\n" % (
+                idx, wide, "slovo " * 60, "─" * 176, "\n".join("riadok %d" % i for i in range(120)))}
         self._json(body)
 
     def _json(self, body):
@@ -476,6 +476,7 @@ class TestBrowser(unittest.TestCase):
         self.assertLessEqual(lay["docW"], lay["vw"])
         self.assertGreaterEqual(lay["font"], 13)
         self.assertIn("user-scalable=no", lay["meta"])
+        self.assertLessEqual(lay["screenOver"], 0)       # a long line wraps, never clips
 
     def test_tabs_and_keys_stay_on_screen(self):
         lay = self.out["layout"]
