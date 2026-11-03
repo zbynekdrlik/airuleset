@@ -240,7 +240,7 @@ SERVICE_ACCOUNTS = {
         "sudo": False, "rtprio": 49, "devices": ["cpu_dma_latency"], "nic_noqueue": "dante-net",   # #1281 + #1282: HIL latency gate
         "repo": "zbynekdrlik/dstack",   # public: iemmixer's CI fetches it keyless
         "github_app": True, "repo_secrets": [],
-        "tools": ["rust-toolchain:1.98.1", "pipx:netaudio", "cargo:cargo-mutants@25.3.1", "cargo:cargo-nextest@0.9.150", "rust-target:x86_64-pc-windows-gnu"],
+        "tools": ["rust-toolchain:1.98.1", "pipx:netaudio", "cargo:cargo-mutants@27.1.0", "cargo:cargo-nextest@0.9.150", "rust-target:x86_64-pc-windows-gnu"],
         "system_packages": ["tshark", "gcc-mingw-w64-x86-64"],
         "project_dir": "devel/dstack",
         "tmux_session": "dstack",

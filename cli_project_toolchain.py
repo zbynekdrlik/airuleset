@@ -328,10 +328,12 @@ def _playwright_lines(browsers, pw_dir):
 
 
 def _cargo_lines(tools, cargo_bin):
-    """``cargo install`` per declared tool; a built binary stays (#1275)."""
+    """``cargo install`` per declared tool. An unpinned built binary stays (#1275).
+    A pinned one always runs: cargo is a no-op on the same version and replaces any
+    other, so a pin bump reaches the box (dstack cargo-mutants 25 to 27)."""
     return "".join(
-        "[ -x %s/%s ] || %s/cargo +%s install --locked %s%s\n"
-        % (cargo_bin, crate, cargo_bin, DEFAULT_TOOLCHAIN,
+        "%s%s/cargo +%s install --locked %s%s\n"
+        % ("" if ver else "[ -x %s/%s ] || " % (cargo_bin, crate), cargo_bin, DEFAULT_TOOLCHAIN,
            "--version %s " % shlex.quote(ver) if ver else "", shlex.quote(crate))
         for crate, ver in tools)
 
