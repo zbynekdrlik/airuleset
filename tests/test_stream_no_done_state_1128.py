@@ -35,8 +35,10 @@ FULL_GOLDEN = {
     # longer forced a worker per unit. #1137 (owner 25.10.2026): the mode axis
     # is gone and the bundling sentence replaced the mode clauses, so every
     # full variant changed again (now keyed by (authority, role)).
-    ("full", None): "50d0bc6877013e6cd04e4b23",
-    ("full", "infra"): "80d411270fb48c2d3634ac89",
+    # 2026-11-03: the (B) proof reads CI on the repo's default branch, not a
+    # hard-coded `main` (dsync's default branch is `master`).
+    ("full", None): "b64c7333d9315915a3a0356f",
+    ("full", "infra"): "9c9e1016e1ebecb7a9ec9f8f",
     ("full", "quality"): "db7d4af0bc0ade2cec966636",
     ("full", "review"): "644e95bf176d7476dc25b526",
 }

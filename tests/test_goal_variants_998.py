@@ -179,8 +179,8 @@ class TestReviewRoleVariant1000(TestCase):
     # clauses with the bundling sentence — every variant changed. The #1137
     # review round pointed the two stream report clauses at the DEEP companion.
     _GOLDEN = {
-        "full/None": "50d0bc6877013e6cd04e4b23",
-        "full/infra": "80d411270fb48c2d3634ac89",
+        "full/None": "b64c7333d9315915a3a0356f",
+        "full/infra": "9c9e1016e1ebecb7a9ec9f8f",
         "branch-merge/None": "a00596f8e7f82dff5e746f35",
         "branch-merge/infra": "757aab945455df84488c5509",
         "fork-no-merge/None": "232880b1afc95a7ec739ca48",
