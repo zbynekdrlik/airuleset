@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="sk">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Webterm na telefóne — návrh v1</title>
+<style>
+:root { color-scheme: dark; --bg:#0C0C0C; --panel:#1b1b1b; --line:#3f3f3f; --text:#CCCCCC; --hi:#F2F2F2; --blue:#3B78FF; --green:#13A10E; --red:#E74856; --dim:#8a8a8a; }
+* { box-sizing: border-box; }
+html, body { margin: 0; background: #181818; color: var(--text); font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+main { max-width: 430px; margin: 0 auto; padding: 12px 12px 32px; }
+h1 { font-size: 18px; color: var(--hi); margin: 4px 0 10px; }
+h2 { font-size: 15px; color: var(--hi); margin: 18px 0 4px; }
+p { margin: 0 0 8px; }
+#phone { height: 76vh; min-height: 480px; display: flex; flex-direction: column; overflow: hidden; background: var(--bg); border: 1px solid var(--line); border-radius: 14px; position: relative; }
+#tabs { display: flex; gap: 2px; padding: 6px 6px 0; overflow-x: auto; flex: 0 0 auto; border-bottom: 1px solid #2b2b2b; }
+.tab { flex: 0 0 auto; min-height: 40px; padding: 0 14px; border: 0; border-radius: 7px 7px 0 0; background: var(--panel); color: var(--text); font: 14px ui-monospace, Menlo, Consolas, monospace; }
+.tab b { color: var(--green); font-size: 11px; margin-right: 5px; }
+.tab.u b { color: var(--red); }
+.tab.on { background: #333333; color: var(--hi); font-weight: 700; box-shadow: inset 0 -2px 0 var(--blue); }
+#log { flex: 1 1 auto; overflow-y: auto; padding: 10px; font: 13.5px/1.42 ui-monospace, Menlo, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; -webkit-overflow-scrolling: touch; }
+#log .me { color: var(--hi); background: #262626; display: block; padding: 4px 6px; border-radius: 5px; margin: 10px 0; }
+#log .ok { color: var(--green); }
+#log .q { color: var(--hi); border-left: 3px solid var(--red); padding-left: 8px; display: block; margin: 10px 0; }
+#down { position: absolute; right: 12px; bottom: 124px; display: none; height: 40px; padding: 0 14px; border: 1px solid var(--line); border-radius: 20px; background: #333333; color: var(--hi); font-size: 14px; }
+#keys { display: flex; gap: 4px; padding: 5px 6px; overflow-x: auto; flex: 0 0 auto; border-top: 1px solid #2b2b2b; }
+#keys button { flex: 0 0 auto; min-width: 44px; height: 38px; padding: 0 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--hi); font-size: 14px; }
+#input { display: flex; gap: 6px; padding: 0 6px 6px; flex: 0 0 auto; }
+#input textarea { flex: 1 1 auto; min-width: 0; height: 44px; padding: 10px; resize: none; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--hi); font: 16px system-ui, sans-serif; }
+#input button { flex: 0 0 auto; width: 56px; height: 44px; border: 0; border-radius: 8px; background: var(--blue); color: #fff; font-size: 15px; }
+#paste { background: var(--panel) !important; border: 1px solid var(--line) !important; color: var(--hi) !important; width: 64px !important; }
+ul { margin: 4px 0 8px; padding-left: 20px; }
+li { margin-bottom: 4px; }
+</style>
+</head>
+<body>
+<main>
+<h1>Webterm na telefóne — návrh</h1>
+<p>Toto je ukážka s vymysleným textom. Taby, posun, tlačidlá aj políčko dole si môžeš vyskúšať.</p>
+
+<div id="phone">
+  <div id="tabs"></div>
+  <div id="log"></div>
+  <button id="down" type="button">↓ nadol</button>
+  <div id="keys">
+    <button type="button">Esc</button><button type="button">Tab</button><button type="button">↑</button><button type="button">↓</button><button type="button">^C</button><button type="button" id="full">Terminál</button>
+  </div>
+  <div id="input">
+    <textarea id="box" placeholder="Napíš alebo vlož text…" aria-label="Text pre Claude"></textarea>
+    <button id="paste" type="button">Vložiť</button>
+    <button id="send" type="button">Poslať</button>
+  </div>
+</div>
+
+<h2>Čo sa zmení na telefóne</h2>
+<ul>
+  <li><b>História:</b> posúvaš prstom ako v chate. Tlačidlo „↓ nadol“ ťa vráti k poslednému textu.</li>
+  <li><b>Kopírovanie:</b> podržíš prst na texte a označíš ho ako na každej stránke.</li>
+  <li><b>Vkladanie:</b> tlačidlo „Vložiť“ alebo podržanie prsta v políčku. Funguje aj diktovanie.</li>
+  <li><b>Taby:</b> sú stále hore, stačí ťuknúť. Červená šípka znamená otázku na teba.</li>
+  <li><b>Približovanie:</b> nebude treba, text sa zalamuje na šírku telefónu.</li>
+  <li><b>Tlačidlo „Terminál“:</b> otvorí dnešný plný terminál, keď treba menu.</li>
+</ul>
+
+<h2>Čo sa nezmení</h2>
+<ul>
+  <li>Terminál na PC, jeho rozmer ani zobrazenie.</li>
+  <li>Ten istý tab môže byť otvorený na oboch naraz.</li>
+</ul>
+</main>
+
+<script>
+const TABS = [['dev1',0],['ar',0],['camera',1],['dsync',0],['dstack',0],['vstack',0],['obs',0]];
+const TEXT = {
+  dev1: '<span class="me">oprav prosím prepínanie jazyka na stránke</span>Čítam kód prepínača.\n\nPríčina je v tom, že stránka si jazyk nepamätá po obnovení. Pridal som uloženie výberu a test, ktorý to overuje.\n\n<span class="ok">● testy prešli: 214 z 214</span>\n\nZmena je nasadená a na živej stránke som overil, že jazyk po obnovení ostane.\n\n✅ DONE: prepínač jazyka opravený',
+  ar: '<span class="me">aký je stav?</span>Nič nebeží. Posledný push prešiel bez chyby.\n\n✅ DONE: bez otvorenej práce',
+  camera: 'Hotovo s prvou časťou. Na ďalší krok potrebujem tvoje rozhodnutie.\n\n<span class="q">Otázka — projekt camera-box: ktorú kameru mám použiť ako hlavnú?\n\n• Kamera 1 (odporúčam)\n• Kamera 2\n\n❓ NEEDS YOU: Ktorú kameru?</span>',
+  dsync: 'Beh testov stále pokračuje.\n\n⏳ WORKING: testy bežia',
+  dstack: '✅ DONE: bez otvorenej práce',
+  vstack: '✅ DONE: bez otvorenej práce',
+  obs: '✅ DONE: bez otvorenej práce',
+};
+const LONG = 'Staršia história. Tu by bol text z predchádzajúcej práce, ktorým sa dá plynulo posúvať prstom.\n\n'.repeat(14);
+const tabs = document.getElementById('tabs'), log = document.getElementById('log'), down = document.getElementById('down');
+const box = document.getElementById('box');
+function atEnd() { return log.scrollHeight - log.scrollTop - log.clientHeight < 40; }
+function toEnd() { log.scrollTop = log.scrollHeight; }
+function show(name) {
+  [...tabs.children].forEach((b) => b.classList.toggle('on', b.dataset.n === name));
+  log.innerHTML = LONG + TEXT[name];
+  toEnd();
+}
+TABS.forEach(([n, u]) => {
+  const b = document.createElement('button');
+  b.type = 'button'; b.className = 'tab' + (u ? ' u' : ''); b.dataset.n = n;
+  b.innerHTML = '<b>▸</b>' + n;
+  b.onclick = () => show(n);
+  tabs.appendChild(b);
+});
+log.addEventListener('scroll', () => { down.style.display = atEnd() ? 'none' : 'block'; });
+down.onclick = toEnd;
+document.getElementById('send').onclick = () => {
+  if (!box.value.trim()) return;
+  const s = document.createElement('span');
+  s.className = 'me'; s.textContent = box.value;
+  log.appendChild(s); box.value = ''; toEnd();
+};
+document.getElementById('paste').onclick = async () => {
+  try { box.value += await navigator.clipboard.readText(); } catch (e) { box.focus(); }
+};
+document.getElementById('full').onclick = () => {
+  const s = document.createElement('span');
+  s.className = 'me'; s.textContent = '(tu sa otvorí plný terminál)';
+  log.appendChild(s); toEnd();
+};
+show('dev1');
+</script>
+</body>
+</html>
