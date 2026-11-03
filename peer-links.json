@@ -150,6 +150,14 @@
         [
           "dasio",
           "iemmixer"
+        ],
+        [
+          "camera-box",
+          "dasio"
+        ],
+        [
+          "camera-box",
+          "iemmixer"
         ]
       ],
       "topics": {
@@ -189,7 +197,9 @@
         "obs|vstack": "the shared video libraries: a need or bug goes to vstack, obs only moves the pinned tag",
         "dstack|vstack": "which of the two takes shared audio code out of camera-box, such as the asrc family",
         "airuleset|vstack": "airuleset infra: accounts, permissions, peer links, tooling. Ask or report here; airuleset decides and a ticket alone wakes no session",
-        "dasio|iemmixer": "restarts of the FOH PC: dasio restarts it; iemmixer asks dasio before a restart it needs"
+        "dasio|iemmixer": "restarts of the FOH PC: dasio restarts it; iemmixer asks dasio before a restart it needs",
+        "camera-box|dasio": "FOH PC availability and dasio windows: dasio says when the FOH PC (Ableton-FOH) is free or held; camera-box asks before a test that needs it, such as a test signal through master Ableton",
+        "camera-box|iemmixer": "tests and windows on the SNV show rig: a camera-box test signal that reaches the IEM mixer, an IEM mixer change that affects the camera-box rig; a Dante question still goes to dstack"
       }
     }
   },
