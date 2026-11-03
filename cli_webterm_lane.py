@@ -242,11 +242,13 @@ def render_gateway_unit(spec):
     if getattr(spec, "collector_mode", None) is not None:
         execstart = execstart.replace(
             "--base-path {{TTYD_BASE}}",
-            "--base-path {{TTYD_BASE}} " + spec.collector_mode)
+            "--base-path {{TTYD_BASE}} " + spec.collector_mode
+            + " --inventory " + str(spec.inventory_path))
     else:
         execstart = execstart.replace(
             "--base-path {{TTYD_BASE}}",
-            "--base-path {{TTYD_BASE}} --u-lane " + spec.profile)
+            "--base-path {{TTYD_BASE}} --u-lane " + spec.profile
+            + " --inventory " + str(spec.inventory_path))
     # #974 reopened: embed the gateway code hash so a code change triggers restart.
     import cli_webterm_reconcile as _rec
     code_hash = _rec.compute_gateway_code_hash(w.WEBTERM_GATEWAY_MODULE)
@@ -316,6 +318,7 @@ def write_artifacts(spec):
     # dot off (fail-safe direction, never a stale nonzero). Verify the live dot
     # on the real marek/david deploy where an ssh target's key shape matters.
     render_kwargs["lane_u_status"] = True
+    render_kwargs["phone_read"] = True      # #1287
     spec.dash_index.write_text(
         w.render_dashboard_html(inv, **render_kwargs), encoding="utf-8")
     # The lane's own installable-PWA assets (#644 per-domain identity) next to index.

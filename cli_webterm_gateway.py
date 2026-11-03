@@ -80,6 +80,8 @@ import time
 import urllib.parse
 from pathlib import Path
 
+from cli_webterm_capture import PhoneReader
+
 # The cookie the browser round-trips. Its value is a random session token, never
 # the credential (see module docstring).
 COOKIE_NAME = "webterm_session"
@@ -583,8 +585,11 @@ class Gateway:
     def __init__(self, dash_index, cred_path, ttyd_host, ttyd_port, base_path,
                  origins, sessions=None, limiter=None, trust_access_header=None,
                  u_status_path=None, u_collect_spawn=None, ttyd_socket=None,
-                 allowed_emails=None):
+                 allowed_emails=None, inventory=None, phone_capture=None):
         self.dash_index = dash_index
+        # #1287: the lane's inventory switches the phone read on.
+        self.phone = (PhoneReader(inventory, _TAB_ID_RE, phone_capture)
+                      if inventory else None)
         self.dash_dir = Path(dash_index).parent   # #644: PWA assets live here
         # #677: the aggregate U map served at /u-status + a detached spawner that
         # refreshes it when stale. The feature is OFF unless a `u_status_path` is
@@ -774,6 +779,9 @@ class Gateway:
         if path == "/tab-layout":
             await self._route_tab_layout(reader, writer, method, headers)
             return
+        if path == "/phone-read":
+            await self._route_phone_read(writer, target, method, headers)
+            return
         if self._is_proxy_path(target):
             await self._route_proxy(reader, writer, head, headers)
             return
@@ -935,6 +943,22 @@ class Gateway:
             return
         await self._send(writer, http_response("204 No Content", b"",
                                                content_type="text/plain"))
+
+    async def _route_phone_read(self, writer, target, method, headers):
+        # #1287: a read of one tab of THIS lane, auth-gated exactly like `/`.
+        if not self._authed(headers):
+            if self.trust_access_header:
+                await self._send(writer, self._access_denied())
+            else:
+                await self._send(writer, self._redirect("/login"))
+            return
+        if self.phone is None or method != "GET":
+            await self._send(writer, http_response("404 Not Found", "not found"))
+            return
+        await self._send(writer, http_response(
+            "200 OK", await self.phone.body(target),
+            extra_headers=["Cache-Control: no-store"],
+            content_type="application/json; charset=utf-8"))
 
     def _u_status_body(self):
         """The current aggregate U JSON (bytes). When the feature is OFF (no
@@ -1102,7 +1126,7 @@ async def start_gateway(host, port, dash_index, cred_path, ttyd_host="127.0.0.1"
                         sessions=None, limiter=None, trust_access_header=None,
                         u_status_path=None, u_collect_spawn=None,
                         socket_path=None, ttyd_socket=None,
-                        allowed_emails=None):
+                        allowed_emails=None, inventory=None):
     """Bind + start the gateway. Default: a TCP `host:port` listener (the caller
     reads `server.sockets[0].getsockname()` for an ephemeral port). #663: when
     `socket_path` is set, bind a UNIX-domain socket instead (a stale socket file is
@@ -1114,7 +1138,8 @@ async def start_gateway(host, port, dash_index, cred_path, ttyd_host="127.0.0.1"
                  origins or [], sessions=sessions, limiter=limiter,
                  trust_access_header=trust_access_header,
                  u_status_path=u_status_path, u_collect_spawn=u_collect_spawn,
-                 ttyd_socket=ttyd_socket, allowed_emails=allowed_emails)
+                 ttyd_socket=ttyd_socket, allowed_emails=allowed_emails,
+                 inventory=inventory)
     if socket_path:
         _unlink_quiet(socket_path)      # clear a stale single-instance leftover
         # #663 review: bind UNDER umask 077 so the socket is owner-only from the
@@ -1158,7 +1183,7 @@ async def _main_async(args):
         trust_access_header=args.trust_access_header,
         u_status_path=u_status_path, u_collect_spawn=u_collect_spawn,
         socket_path=args.socket, ttyd_socket=args.ttyd_socket,
-        allowed_emails=ae)
+        allowed_emails=ae, inventory=args.inventory)
     if args.socket:
         upstream = ("unix:%s" % args.ttyd_socket if args.ttyd_socket
                     else "%s:%d" % (args.ttyd_host, args.ttyd_port))
@@ -1262,6 +1287,8 @@ def main(argv):
                         "so a peer unix account cannot reach the auth-less ttyd "
                         "directly. Mutually exclusive with --ttyd-host/--ttyd-port.")
     p.add_argument("--base-path", default="/t")
+    p.add_argument("--inventory", default=None,
+                   help="this lane's webterm inventory; switches on /phone-read (#1287)")
     args = p.parse_args(argv)
     # Fail-CLOSED: exactly one auth mode. Neither would serve the terminal with
     # NO gate at all; both is contradictory. This refuses to start rather than

@@ -30,8 +30,9 @@ class TestComputeGatewayCodeHash(unittest.TestCase):
         # Must be a valid hex SHA256
         self.assertEqual(len(h), 64)
         int(h, 16)  # must not raise
-        # Must match the actual file's SHA256
-        expected = hashlib.sha256(gateway.read_bytes()).hexdigest()
+        # Must match the SHA256 of the gateway and its local imports
+        expected = hashlib.sha256(b"".join(
+            f.read_bytes() for f in rec._gateway_code_set(gateway))).hexdigest()
         self.assertEqual(h, expected)
 
     def test_hash_includes_local_imports(self):
@@ -391,6 +392,7 @@ class TestRenderedUnitCarriesHash(unittest.TestCase):
             dash_index = "/tmp/dash.html"
             ttyd_port = 7683
             profile = "david"
+            inventory_path = "/tmp/inv.json"
             ttyd_service_name = "webterm-david-ttyd.service"
             gateway_sock_basename = "webterm-david-gateway.sock"
             ttyd_sock_basename = "webterm-david-ttyd.sock"

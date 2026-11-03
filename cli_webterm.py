@@ -59,6 +59,8 @@ from cli_tmux_revive import TMUX_REVIVE_SH  # #1256: revive before create
 # the `@@…@@` single-pass substitution contract stays in render_dashboard_html.
 from cli_webterm_dash_template import DASHBOARD_TEMPLATE as _DASHBOARD_TEMPLATE
 from cli_webterm_keybar import KEYBAR_CSS, KEYBAR_HTML
+from cli_webterm_capture import WEBTERM_CAPTURE_LINES, WEBTERM_CAPTURE_VERB, capture_main
+from cli_webterm_phone import PHONE_CSS, PHONE_HTML
 from cli_webterm_tabmenu import TABMENU_CSS, TABMENU_JS
 
 REPO_DIR = Path(__file__).resolve().parent
@@ -407,6 +409,13 @@ _ATTACH_BODY = (
     'if [ "$(printf %s "$N" | grep -c .)" = "1" ]; then '
     'case " $H " in *" $N "*) ;; *) T="$N";; esac; fi; '
     'fi; fi; '
+    # #1287: the phone view's history read. Only the exact value, only a read: it
+    # leaves before the mouse option, the attach and the create fallback. No
+    # session means no output, never a new session.
+    'if [ "${SSH_ORIGINAL_COMMAND:-}" = ' + WEBTERM_CAPTURE_VERB + ' ]; then '
+    '[ -n "$T" ] || exit 1; '
+    'exec tmux capture-pane -p -J -S -' + str(WEBTERM_CAPTURE_LINES) + ' -t "=$T:"; '
+    'fi; '
     'if [ -n "$T" ]; then '
     # #615 (SCOPED to this connection -- see the block comment above for the
     # full record + the #646/#648 interaction): mouse mode so the browser's
@@ -1070,7 +1079,7 @@ CAMPBELL_THEME = {
 
 
 def render_dashboard_html(inventory, ttyd_base=None, term_grid=None, human=None,
-                          lane_u_status=False):
+                          lane_u_status=False, phone_read=False):
     """The single-page tabbed terminal UI. `ttyd_base` is the SAME-ORIGIN ttyd
     base path under the #584 gateway (`/t`); the page's JS builds each tab's
     iframe src as `<ttyd_base>/?arg=<id>` on first activation — same-origin, so
@@ -1141,17 +1150,19 @@ def render_dashboard_html(inventory, ttyd_base=None, term_grid=None, human=None,
     # --u-collect; defence in depth).
     cfg = {"ttyd_base": ttyd_base, "sessions": tabs,
            "term_cols": term_cols, "term_rows": term_rows,
+           "phone_read": bool(phone_read),      # #1287
            "u_status": human == WEBTERM_LOGIN_USER or bool(lane_u_status)}
     subst = {"@@BUTTONS@@": buttons, "@@CFG_JSON@@": _json_for_script(cfg),
              # #643: the Campbell palette as an xterm.js theme object literal.
              "@@THEME_JSON@@": _json_for_script(CAMPBELL_THEME),
              "@@KEYBAR_CSS@@": KEYBAR_CSS, "@@KEYBAR_HTML@@": KEYBAR_HTML,  # #1159
-             "@@TABMENU_CSS@@": TABMENU_CSS, "@@TABMENU_JS@@": TABMENU_JS}  # #1269
+             "@@TABMENU_CSS@@": TABMENU_CSS, "@@TABMENU_JS@@": TABMENU_JS,  # #1269
+             "@@PHONE_CSS@@": PHONE_CSS, "@@PHONE_HTML@@": PHONE_HTML}      # #1287
     # SINGLE PASS over the TEMPLATE — inserted content (an inventory label in a
     # button, the config JSON, the theme object) is never re-scanned, so a label
     # that happens to equal a `@@…@@` sentinel can't splice a later substitution
     # into itself.
-    return re.sub(r"@@(?:BUTTONS|CFG_JSON|THEME_JSON|KEYBAR_CSS|KEYBAR_HTML|TABMENU_CSS|TABMENU_JS)@@",
+    return re.sub(r"@@(?:BUTTONS|CFG_JSON|THEME_JSON|KEYBAR_CSS|KEYBAR_HTML|TABMENU_CSS|TABMENU_JS|PHONE_CSS|PHONE_HTML)@@",
                   lambda mo: subst[mo.group(0)], _DASHBOARD_TEMPLATE)
 
 
@@ -1429,7 +1440,8 @@ def _render_webterm_gateway_unit(bind_ip, access_mode=False):
     # /u-status serves only that lane's own scoped map and a lane gateway never
     # spawns an owner-fleet collector as the sub-dev account.
     tmpl = tmpl.replace("--base-path {{TTYD_BASE}}",
-                        "--base-path {{TTYD_BASE}} --u-collect")
+                        "--base-path {{TTYD_BASE}} --u-collect --inventory "
+                        + str(WEBTERM_INVENTORY_PATH))
     if access_mode:
         # #663: retire the TCP loopback origin entirely — bind + reach ttyd over
         # mode-0700 UNIX sockets in the account runtime dir, so no peer unix account
@@ -1630,7 +1642,8 @@ def setup_webterm_service(run=None):
     # tab list (zbynek.newlevel.media), in his order — NOT a tab per fleet target.
     WEBTERM_DASH_INDEX.write_text(
         render_dashboard_html(inv, ttyd_base=WEBTERM_TTYD_BASE,
-                              human=WEBTERM_LOGIN_USER), encoding="utf-8")
+                              human=WEBTERM_LOGIN_USER, phone_read=True),
+        encoding="utf-8")
     # #644: the installable-PWA assets (manifest + network-only SW + icons) next
     # to index.html; the gateway serves them from the dash dir. Lazy import to
     # avoid a module-level cycle (cli_webterm_pwa imports this module).
@@ -1835,6 +1848,8 @@ def maybe_setup_webterm():
 def main(argv):
     if argv and argv[0] == "webterm-connect":
         return connect_main(argv[1:])
+    if argv and argv[0] == "webterm-capture":       # #1287: spawned by the gateway
+        return capture_main(argv[1:])
     if argv and argv[0] == "webterm-u-collect":     # #677: spawned by the gateway
         return cmd_webterm_u_collect(argv[1:])
     sys.stderr.write("usage: cli_webterm.py webterm-connect <session-id>\n")

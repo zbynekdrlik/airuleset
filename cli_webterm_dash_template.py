@@ -97,7 +97,8 @@ body { display: flex; flex-direction: column; background: #0C0C0C; color: #CCCCC
    pracovnu plochu nie tvoje blbe vysvetlivky"): the copy/paste footer hint strip
    is removed entirely so the terminal reclaims the height. The select/copy/paste
    FUNCTIONALITY (attachClipboard) stays; only the visible strip is gone. */
-@@KEYBAR_CSS@@</style>
+@@KEYBAR_CSS@@
+@@PHONE_CSS@@</style>
 </head>
 <body>
 <div id="tabbar">
@@ -262,7 +263,7 @@ function attachForwarder(f) {
 // the now-HIDDEN A. Each retry bails the moment `current` has moved on, so
 // last-activate always wins and a superseded chain becomes a no-op.
 function focusTerminal(f, idx) {
-  if (!f) return;
+  if (!f || window.wtPhoneOn) return;       // #1287: the phone text view owns the keyboard
   let tries = 0;
   const tryFocus = () => {
     if (idx !== current) return;            // superseded by a newer switch -> stop
@@ -1043,6 +1044,7 @@ CFG.sessions.forEach(function (s, i) {
 });
 </script>
 @@KEYBAR_HTML@@
+@@PHONE_HTML@@
 </body>
 </html>
 """
