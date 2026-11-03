@@ -204,34 +204,7 @@ Non-obvious decisions #867 settled, reusable for the next lane:
   change (6→9) broke it. Decouple such a lock to the asymmetry it actually owns (parse the
   4-value shorthand, assert left=16 > right=12), never the values a later ticket owns.
 
-### #685 tmux — a CONF-ONLY geometry pin never reaches a running server; live convergence is now sanctioned, version-gated
-
-The #672 uniform-grid fix pinned `window-size manual` + `default-size 176x50` in the
-managed tmux conf — but a tmux server reads the conf ONLY at start, and agentic fleet
-boxes never restart tmux (that kills live Claude sessions), so every server started
-before the pin ran `window-size latest` forever. Live dev2: David's direct 305x57
-client sized the codex-bridge window to 305x56; the owner's 176x51 `-f ignore-size`
-webterm client showed the top-left 176x51 region → the CC footer (bottom ~5 rows)
-invisible after a window switch. **`-f ignore-size` only stops the webterm from
-SHRINKING a window — it cannot fix one already LARGER than the owner's viewport.**
-FIX = `converge_tmux_window_geometry` (cli_tmux_provisioning.py), invoked from
-`apply_tmux_history_limit` at every install/push: version-gated on the SAME >= 3.5
-probe as the conf line (fails CLOSED — tmux 3.4's conf-parse crash #241 and the dev1
-format-expansion segfault stay impossible; spinbike is 3.4 and is correctly refused),
-idempotent (state-read-first: `show-options -g`, window listing dedup'd by window id
-— grouped sessions list a shared window once per session), never kills/restarts,
-never types. The old "window-size NEVER live-set / per-window resize never anywhere"
-doctrine (#236/#241) was NARROWED, not deleted: `TestTmuxWindowSizeNoResize` now
-locks airuleset.py literal-free + the mutating resize subcommand to the ONE helper;
-the #236 "snap-resize hazard" is the owner-DESIRED convergence under #672. Live
-convergence recipe (manual, same as the helper): `tmux set-option -g window-size
-manual; tmux set-option -g default-size 176x50;` then per window ≠176x50
-`tmux resize-window -t <window_id> -x 176 -y 50` — proven on dev2, gk, david1/2,
-miva1, montalu1–8, marek@subdev, dev1: sessions untouched, attached larger clients
-just gain the cosmetic dark margin the owner decreed. Acceptance read-back:
-`tmux capture-pane -p -t <sess:win> | tail -6` shows the CC statusline inside the
-50-row window.
-
+- **[Moved to `.claude/rules-reference/internals-archive.md` at the #1287 cap, 2026-11-03 — grep "#685 tmux — a CONF-ONLY geometry pin" there]** live tmux window-size convergence (`converge_tmux_window_geometry`).
 - **#661 go-live (supervisor, 2026-08-25):** authorized_keys forced-command tvar je `restrict,pty,command="…"` — samotné `restrict` vypína aj PTY a interaktívny tmux attach by zlyhal; `pty` ho musí explicitne vrátiť. Overenie živosti restrict línie bez interakcie: BatchMode probe (`ssh -T … true`) — forced command IGNORUJE `true` a padne na `open terminal failed: not a terminal` = auth OK + forced command beží. Presný remote command renderuj z `cli_webterm._remote_command(preferred)` (escape `\` a `"` pre authorized_keys), nikdy ručne prepísaný.
 ### #700 webterm — exact viewport fill: the integer-cell residual is killed at the IFRAME boundary, never inside the xterm document
 

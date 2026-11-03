@@ -2720,3 +2720,31 @@ The peer-channel wiring (#1266) needed lines in three files at their size-ratche
 
 - **#1016 — plain Alt+drag = a COLUMN (block) selection, translated in the DASH, never a ttyd/xterm flag.** Fleet tmux `mouse on` (#646) means xterm force-selects only on `shiftKey` + column-blocks only on `altKey` (`shouldForceSelection`/`_shouldColumnSelect`), so a plain Alt+drag goes to tmux. `attachBlockSelect(win)` (in `applyFixedGrid`'s poll, beside `attachClipboard`) attaches ONE CAPTURE-phase `mousedown` on `term.element` re-dispatching a plain Alt+left as Shift+Alt (xterm column-selects; `shiftKey:true` self-guards the re-dispatch) + sets `altClickMovesCursor=false` and `macOptionClickForcesSelection=true` (Mac force-selects on altKey not shiftKey; shared template serves Mac lanes). Test: `test_webterm_alt_block_select_1016.py` (structural + node stub harness; outcome verified live at deploy).
   - **#1016 FIX-FORWARD ("krizik ale nic sa neda vyznacit") — MINIMAL, `detail` only.** TRUE root cause (design's "moves leak to tmux" was incomplete): `new MouseEvent` defaults `detail` to 0, and xterm starts a selection only in its `1===e.detail` single-click branch — so v0.1.416's synthetic reached `handleMouseDown` yet NEVER started a selection. Fix = carry `detail:ev.detail||1` on the ONE synthetic mousedown; a FORCED selection skips xterm's tracking branch, so the plain moves are handled by xterm's own drag and NOT forwarded to tmux — no per-move translation (real-browser proof: `detail`-alone yields the block; supervisor area review DROPPED whole-drag as MVP-unneeded). Test: real-browser tier (chromium **headless-shell**; full chrome needs libcups) + node stub harness.
+
+### #685 tmux — a CONF-ONLY geometry pin never reaches a running server; live convergence is now sanctioned, version-gated
+
+The #672 uniform-grid fix pinned `window-size manual` + `default-size 176x50` in the
+managed tmux conf — but a tmux server reads the conf ONLY at start, and agentic fleet
+boxes never restart tmux (that kills live Claude sessions), so every server started
+before the pin ran `window-size latest` forever. Live dev2: David's direct 305x57
+client sized the codex-bridge window to 305x56; the owner's 176x51 `-f ignore-size`
+webterm client showed the top-left 176x51 region → the CC footer (bottom ~5 rows)
+invisible after a window switch. **`-f ignore-size` only stops the webterm from
+SHRINKING a window — it cannot fix one already LARGER than the owner's viewport.**
+FIX = `converge_tmux_window_geometry` (cli_tmux_provisioning.py), invoked from
+`apply_tmux_history_limit` at every install/push: version-gated on the SAME >= 3.5
+probe as the conf line (fails CLOSED — tmux 3.4's conf-parse crash #241 and the dev1
+format-expansion segfault stay impossible; spinbike is 3.4 and is correctly refused),
+idempotent (state-read-first: `show-options -g`, window listing dedup'd by window id
+— grouped sessions list a shared window once per session), never kills/restarts,
+never types. The old "window-size NEVER live-set / per-window resize never anywhere"
+doctrine (#236/#241) was NARROWED, not deleted: `TestTmuxWindowSizeNoResize` now
+locks airuleset.py literal-free + the mutating resize subcommand to the ONE helper;
+the #236 "snap-resize hazard" is the owner-DESIRED convergence under #672. Live
+convergence recipe (manual, same as the helper): `tmux set-option -g window-size
+manual; tmux set-option -g default-size 176x50;` then per window ≠176x50
+`tmux resize-window -t <window_id> -x 176 -y 50` — proven on dev2, gk, david1/2,
+miva1, montalu1–8, marek@subdev, dev1: sessions untouched, attached larger clients
+just gain the cosmetic dark margin the owner decreed. Acceptance read-back:
+`tmux capture-pane -p -t <sess:win> | tail -6` shows the CC statusline inside the
+50-row window.
