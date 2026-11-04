@@ -10,8 +10,8 @@ A young target ends its scan at the first fresh file and gives no row, so a
 poll under pressure neither re-walks it whole nor logs it.
 A project that builds daily never ages out (dev1, 4.11.: 590 GB), so at critical disk
 a second rung takes only the ``incremental/`` dirs of an idle target: they are
-regenerable and cost one slower rebuild, while ``deps/`` stays. One pass takes one
-target, because the ladder rechecks the disk only between rungs.
+regenerable and cost one slower rebuild, while ``deps/`` stays. One pass takes the
+largest deletable target, because the ladder rechecks the disk only between rungs.
 Stdlib only at module level; shared helpers are deferred imports.
 """
 import contextlib
@@ -64,15 +64,8 @@ def _cargo_targets(home):
 def _old_size(path, limit):
     """Total bytes of ``path``, or None at the first file newer than ``limit``
     or the first entry that cannot be read: an unseen file may be a fresh one."""
-    stats = _old_stats(path, limit)
-    return None if stats is None else stats[0]
-
-
-def _old_stats(path, limit):
-    """``(bytes, newest mtime)`` under the same refusals as ``_old_size``."""
     unreadable = []
     total = 0
-    newest = 0
     for dirpath, _dirnames, filenames in os.walk(path, onerror=unreadable.append):
         for name in filenames:
             try:
@@ -82,8 +75,7 @@ def _old_stats(path, limit):
             if st.st_mtime > limit:
                 return None
             total += st.st_size
-            newest = max(newest, st.st_mtime)
-    return None if unreadable else (total, newest)
+    return None if unreadable else total
 
 
 def still_stale(path, now):
@@ -186,29 +178,55 @@ def reclaim_guard(cls, path, now):
                 os.close(fd)
 
 
+def _can_delete(path):
+    """Every dir under ``path`` is writable here and no other holder has its build locks.
+    Else the same target would fail or be refused on every later pass."""
+    for dirpath, _dirnames, _filenames in os.walk(path):
+        if not os.access(dirpath, os.W_OK | os.X_OK):
+            return False
+    fds = _hold_build_locks(os.path.dirname(path))
+    for fd in fds or ():
+        os.close(fd)
+    return fds is not None
+
+
+def _idle_rows(target, limit):
+    """The target's idle, deletable incremental dirs: ``[(dir, bytes)]``."""
+    sized = [(d, _old_size(d, limit)) for d in _incremental_dirs(target)]
+    sized = [(d, size) for d, size in sized if size]
+    return sized
+
+
 def discover_idle_incremental(home=None, now=None, live_fn=None):
     """Rows ``{cls, path, bytes, reason}``; ``reason`` None means a delete candidate.
-    Candidates come from the longest-idle target only."""
+    Candidates come from the largest target that can really be deleted."""
     if live_fn is None:
         from cli_live_snapshot import batch_checker
         live_fn = batch_checker()
     home = home or os.path.expanduser("~")
     limit = now - INCREMENTAL_MIN_IDLE_S
     rows, candidates = [], []
+
+    def _keep(target, reason):
+        rows.append({"cls": INCREMENTAL_CLS, "path": target, "bytes": 0, "reason": reason})
+
     for target in _cargo_targets(home):
-        dirs = _incremental_dirs(target)
-        if dirs and live_fn(target):
-            rows.append({"cls": INCREMENTAL_CLS, "path": target, "bytes": 0,
-                         "reason": "in live use"})
-            continue
-        sized = [(d, _old_stats(d, limit)) for d in dirs]
-        sized = [(d, stats) for d, stats in sized if stats and stats[0]]
-        if sized:
-            candidates.append((max(stats[1] for _d, stats in sized), sized))
+        try:
+            if live_fn(target):
+                if _incremental_dirs(target):
+                    _keep(target, "in live use")
+                continue
+            sized = _idle_rows(target, limit)
+            if sized and all(_can_delete(d) for d, _size in sized):
+                candidates.append(sized)
+            elif sized:
+                _keep(target, "cannot delete or lock")
+        except OSError as e:
+            _keep(target, "unreadable: %s" % e)
     if candidates:
-        _newest, sized = min(candidates, key=lambda c: c[0])
-        rows += [{"cls": INCREMENTAL_CLS, "path": d, "bytes": stats[0], "reason": None}
-                 for d, stats in sized]
+        largest = max(candidates, key=lambda sized: sum(size for _d, size in sized))
+        rows += [{"cls": INCREMENTAL_CLS, "path": d, "bytes": size, "reason": None}
+                 for d, size in largest]
     return rows
 
 
