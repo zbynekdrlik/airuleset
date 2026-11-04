@@ -119,7 +119,7 @@ RECLAIMABLE_CLASSES = frozenset({
     # #980 — dead-session /tmp/claude-<uid>/ scratchpad dirs:
     "session-scratch",
     # #1286 — Cargo output outside an agent worktree:
-    "stale-build",
+    "stale-build", "build-incremental",
 })
 
 # #854 — the ROOT-owned cache classes: their deletes go through `sudo -n` when
@@ -211,7 +211,7 @@ HOME_WORKTREE_GLOB = "/home/*"
 # #925 — extended with npmcache-* and tmp* (observed litter shapes on subdev)
 TMP_TEST_MIN_AGE_DAYS = 1
 TMP_TEST_MIN_AGE_HOURS_SHARED_STREAM = 3   # #925 owner ruling: 3h on shared-stream
-TMP_TEST_PREFIXES = ("jest_", "pytest-of-", "npmcache-")
+TMP_TEST_PREFIXES = ("jest_", "pytest-of-", "npmcache-", "cargo-mutants-")
 # #920 — runner _diag logs (diagnostic, safe to age out)
 RUNNER_DIAG_MIN_AGE_DAYS = 2
 # #968 — runner top-level _diag (Runner_*.log, Worker_*.log) — 1 day per ticket
@@ -2491,6 +2491,11 @@ def _plan_stale_build(home, now):
                  "reason": "stale-build discovery error: %r" % e}]
 
 
+def _plan_idle_incremental(home, now, level=None):
+    from watchdog.disk_guard_stale_build import plan_idle_incremental
+    return plan_idle_incremental(home, now, level, _norm_action)
+
+
 def _plan_scratch_worktrees(home, now):
     """#965 — scratch worktrees under /tmp scratchpads."""
     try:
@@ -2586,6 +2591,7 @@ def _default_planners(home, now, scratch_rows=None, wt_cache=False, level=None):
          lambda: _plan_stale_agent_worktrees(home, now, wt_cache, level=level)),
         ("scratch-worktree", lambda: _plan_scratch_worktrees(home, now)),
         ("stale-build", lambda: _plan_stale_build(home, now)),
+        ("build-incremental", lambda: _plan_idle_incremental(home, now, level=level)),
         ("journal", lambda: _plan_journal(home, now)),
         ("docker-image", lambda: _plan_docker(home, now)),
         ("runner-checkout", lambda: _plan_runner_checkouts(home, now)),
@@ -2763,9 +2769,9 @@ def _perform_action(a, sudo_ok=False, run_fn=None, scratch_live_fn=None, now=Non
             if (live_fn(path, now) if floor is None
                     else live_fn(path, now, floor_days=floor)):
                 return -1
-        if a.get("cls") == "stale-build":       # #1286: a build may have started since the plan
-            from watchdog.disk_guard_stale_build import still_stale
-            if not still_stale(path, now or time.time()):
+        if a.get("cls") in ("stale-build", "build-incremental"):   # #1286: a build may have started
+            from watchdog.disk_guard_stale_build import still_reclaimable
+            if not still_reclaimable(a["cls"], path, now or time.time()):
                 return -1
         _rm_path(path, sudo=use_sudo, run_fn=run_fn)
         return nbytes

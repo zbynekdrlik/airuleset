@@ -8,12 +8,18 @@ readable, and no process uses it. Cargo output is regenerable, so nothing else q
 worktree in a build scratch dir can hold uncommitted work and stays.
 A young target ends its scan at the first fresh file and gives no row, so a
 poll under pressure neither re-walks it whole nor logs it.
+A project that builds daily never ages out (dev1, 4.11.: 590 GB), so at critical disk
+a second rung takes only the ``incremental/`` dirs of an idle target: they are
+regenerable and cost one slower rebuild, while ``deps/`` stays.
 Stdlib only at module level; shared helpers are deferred imports.
 """
+import glob
 import os
 
 CLS = "stale-build"
+INCREMENTAL_CLS = "build-incremental"
 MIN_AGE_DAYS = 14
+INCREMENTAL_MIN_IDLE_S = 600       # a build between two test runs keeps its cache
 MAX_DEPTH = 3                      # ~/copy/src-tauri/target, ~/devel/app/repo/target
 _PRUNE = {"node_modules"}
 _TAG_SIGNATURE = "Signature: 8a477f597d28d172789f06886806bc55"
@@ -91,3 +97,66 @@ def discover_stale_build(home=None, now=None, live_fn=None):
         rows.append({"cls": CLS, "path": path, "bytes": size,
                      "reason": "in live use" if live_fn(path) else None})
     return rows
+
+
+def _incremental_dirs(target):
+    """``<profile>/incremental`` and ``<triple-or-custom>/<profile>/incremental``."""
+    found = []
+    for pattern in ("*/incremental", "*/*/incremental"):
+        found += glob.glob(os.path.join(glob.escape(target), pattern))
+    return sorted(d for d in found if os.path.isdir(d) and not os.path.islink(d))
+
+
+def _owning_target(path):
+    """The Cargo target above an incremental dir. Cargo holds ``.cargo-lock`` open there
+    during a build, so liveness is asked of the target, never of ``incremental/``."""
+    parent = os.path.dirname(path)
+    while parent != os.path.dirname(parent):
+        if _is_cargo_target(parent):
+            return parent
+        parent = os.path.dirname(parent)
+    return None
+
+
+def still_idle_incremental(path, now):
+    """The act-time re-check: a build may have run since the plan."""
+    from cli_target_purge import _target_in_live_use
+    target = _owning_target(path)
+    if target is None or _old_size(path, now - INCREMENTAL_MIN_IDLE_S) is None:
+        return False
+    return not _target_in_live_use(target)
+
+
+def discover_idle_incremental(home=None, now=None, live_fn=None):
+    """Rows ``{cls, path, bytes, reason}``; ``reason`` None means a delete candidate."""
+    if live_fn is None:
+        from cli_live_snapshot import batch_checker
+        live_fn = batch_checker()
+    home = home or os.path.expanduser("~")
+    limit = now - INCREMENTAL_MIN_IDLE_S
+    rows = []
+    for target in _cargo_targets(home):
+        sized = [(d, _old_size(d, limit)) for d in _incremental_dirs(target)]
+        sized = [(d, size) for d, size in sized if size]
+        if not sized:
+            continue
+        reason = "in live use" if live_fn(target) else None
+        rows += [{"cls": INCREMENTAL_CLS, "path": d, "bytes": size, "reason": reason}
+                 for d, size in sized]
+    return rows
+
+
+def still_reclaimable(cls, path, now):
+    return (still_stale if cls == CLS else still_idle_incremental)(path, now)
+
+
+def plan_idle_incremental(home, now, level, norm_action):
+    """#1286 — incremental output of an idle Cargo target, at critical disk only."""
+    if level != "critical":
+        return []
+    try:
+        return [norm_action(INCREMENTAL_CLS, r, "delete")
+                for r in discover_idle_incremental(home=home, now=now)]
+    except Exception as e:
+        return [{"cls": INCREMENTAL_CLS, "path": "-", "bytes": 0, "kind": "skip",
+                 "reason": "build-incremental discovery error: %r" % e}]
