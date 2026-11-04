@@ -106,12 +106,52 @@ class TestDiscovery(unittest.TestCase):
         (d / "linked").symlink_to(outside)
         self.assertEqual(self.rows(), [])
 
-    def test_one_pass_takes_only_the_longest_idle_target(self):
-        """The ladder rechecks the disk between rungs, never between a rung's rows."""
-        young = _target(Path(self.home) / "devel" / "young", idle_s=2 * 3600)
-        old = _target(Path(self.home) / "devel" / "old", idle_s=9 * 3600)
-        self.assertEqual([r["path"] for r in self.rows()], [str(old / "debug" / "incremental")])
-        self.assertNotEqual(old, young)
+    def _grow(self, target, size):
+        (target / "debug" / "incremental" / "app-1" / "big.bin").write_bytes(b"z" * size)
+        _set_age(target / "debug" / "incremental", 2 * 3600)
+
+    def test_one_pass_takes_only_the_largest_idle_target(self):
+        """The ladder rechecks the disk between rungs, never between a rung's rows,
+        and three tiny deletes in a row would trip the low-yield skip."""
+        _target(Path(self.home) / "devel" / "tiny", idle_s=9 * 3600)
+        big = _target(Path(self.home) / "devel" / "big")
+        self._grow(big, 5000)
+        self.assertEqual([r["path"] for r in self.rows()], [str(big / "debug" / "incremental")])
+
+    def test_a_dir_this_account_cannot_delete_gives_way_to_the_next_target(self):
+        stuck = _target(Path(self.home) / "devel" / "stuck")
+        self._grow(stuck, 5000)
+        session = stuck / "debug" / "incremental" / "app-1"
+        session.chmod(0o555)
+        self.addCleanup(session.chmod, 0o755)
+        other = _target(Path(self.home) / "devel" / "other")
+        rows = self.rows()
+        self.assertEqual([r["path"] for r in rows if r["reason"] is None],
+                         [str(other / "debug" / "incremental")])
+        self.assertEqual([r["reason"] for r in rows if r["path"] == str(stuck)],
+                         ["cannot delete or lock"])
+
+    def test_a_lock_someone_holds_gives_way_to_the_next_target(self):
+        stuck = _target(Path(self.home) / "devel" / "stuck")
+        self._grow(stuck, 5000)
+        fd = os.open(stuck / "debug" / ".cargo-lock", os.O_RDONLY)
+        self.addCleanup(os.close, fd)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        other = _target(Path(self.home) / "devel" / "other")
+        self.assertEqual([r["path"] for r in self.rows() if r["reason"] is None],
+                         [str(other / "debug" / "incremental")])
+
+    def test_an_unreadable_dir_costs_only_its_own_target(self):
+        stuck = _target(Path(self.home) / "devel" / "stuck", incremental=())
+        weird = stuck / "weird"
+        weird.mkdir()
+        weird.chmod(0)
+        self.addCleanup(weird.chmod, 0o755)
+        other = _target(Path(self.home) / "devel" / "other")
+        rows = self.rows()
+        self.assertEqual([r["path"] for r in rows if r["reason"] is None],
+                         [str(other / "debug" / "incremental")])
+        self.assertEqual([r["path"] for r in rows if r["reason"]], [str(stuck)])
 
     def test_a_target_in_use_gives_one_row_and_no_walk(self):
         d = _target(Path(self.home) / "devel" / "app", incremental=(
