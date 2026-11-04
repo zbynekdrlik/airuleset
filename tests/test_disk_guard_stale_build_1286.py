@@ -59,7 +59,7 @@ class TestDiscovery(unittest.TestCase):
         self.assertEqual(self.candidates(), [str(d)])
 
     def test_the_walk_stops_at_its_depth(self):
-        _target(Path(self.home) / "a" / "b" / "c" / "d")
+        _target(Path(self.home) / "a" / "b" / "c" / "d" / "e" / "f")
         self.assertEqual(self.candidates(), [])
 
     def test_a_directory_named_target_without_the_cargo_tag_stays(self):

@@ -160,6 +160,10 @@ class TestDiscovery(unittest.TestCase):
             rows = self.rows(lambda p: True)
         self.assertEqual([(r["path"], r["reason"]) for r in rows], [(str(d), "in live use")])
 
+    def test_a_target_five_levels_down_is_found(self):
+        d = _target(Path(self.home) / "devel" / "obs" / "plugins" / "input" / "ffi")
+        self.assertEqual([r["path"] for r in self.rows()], [str(d / "debug" / "incremental")])
+
     def test_a_symlinked_incremental_dir_is_never_followed(self):
         d = _target(Path(self.home) / "devel" / "app", incremental=())
         outside = Path(self.home) / "outside"
