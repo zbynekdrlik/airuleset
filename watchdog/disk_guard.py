@@ -57,6 +57,7 @@ of ``watchdog.reaper`` is a DEFERRED import inside the function that needs it,
 so this module has no import cycle with the ``watchdog`` package that hosts it.
 """
 
+import contextlib
 import fcntl
 import json
 import math
@@ -2450,8 +2451,9 @@ def _plan_home_worktrees(home, now):
 
 def _plan_tmp_test(home, now):
     """#920/#925 — test-runner /tmp leftovers (jest, pytest, npmcache, tmp*)."""
+    from watchdog.disk_guard_stale_build import keep_live_tmp_test
     return [_norm_action("tmp-test", r, "delete")
-            for r in discover_stale_tmp_test_dirs(now=now)]
+            for r in keep_live_tmp_test(discover_stale_tmp_test_dirs(now=now))]
 
 
 def _plan_runner_diag(home, now):
@@ -2769,11 +2771,14 @@ def _perform_action(a, sudo_ok=False, run_fn=None, scratch_live_fn=None, now=Non
             if (live_fn(path, now) if floor is None
                     else live_fn(path, now, floor_days=floor)):
                 return -1
-        if a.get("cls") in ("stale-build", "build-incremental"):   # #1286: a build may have started
-            from watchdog.disk_guard_stale_build import still_reclaimable
-            if not still_reclaimable(a["cls"], path, now or time.time()):
+        from watchdog.disk_guard_stale_build import reclaim_guard
+        # #1286: a build or a test run may have started since the plan.
+        with (reclaim_guard(a["cls"], path, now or time.time())
+              if a.get("cls") in ("stale-build", "build-incremental", "tmp-test")
+              else contextlib.nullcontext(True)) as allowed:
+            if not allowed:
                 return -1
-        _rm_path(path, sudo=use_sudo, run_fn=run_fn)
+            _rm_path(path, sudo=use_sudo, run_fn=run_fn)
         return nbytes
     return 0
 
@@ -2931,7 +2936,9 @@ def execute_drain(status, home, planners, recheck_fn, do_action_fn,
                 # live since plan) is logged as REFUSE, not as a success or FAIL.
                 # #1195 item 5: a scratchpad child is refused when used/held since.
                 if freed is not None and freed < 0:
-                    why = ("scratchpad child used/held/unstatable since plan (#1195)"
+                    why = ("build started or target in use since plan (#1286)"
+                           if a.get("cls") in ("stale-build", "build-incremental", "tmp-test")
+                           else "scratchpad child used/held/unstatable since plan (#1195)"
                            if Path(path).parent.name == "scratchpad"
                            else "session live/undeterminable since plan (#863)")
                     rung_lines.append(_log_line(now, "REFUSE", path, planned,
