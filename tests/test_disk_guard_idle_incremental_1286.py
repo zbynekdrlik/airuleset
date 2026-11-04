@@ -1,13 +1,16 @@
 """#1286 (dev1, 4.11.2026): a project that builds daily never ages out, so at critical
 disk the guard must reclaim the regenerable incremental output of an idle Cargo target."""
+import fcntl
 import os
 import tempfile
 import time
+import types
 import unittest
 from pathlib import Path
 from unittest import mock
 
 from watchdog import disk_guard as dg
+from watchdog import disk_guard_quota as dq
 from watchdog import disk_guard_stale_build as sb
 
 NOW = 1_800_000_000.0
@@ -21,7 +24,7 @@ def _set_age(path, seconds):
             os.utime(os.path.join(root, name), (t, t))
 
 
-def _target(parent, idle_s=3600, incremental=("debug/incremental",)):
+def _target(parent, idle_s=2 * 3600, incremental=("debug/incremental",)):
     """A live project's target: deps written just now, incremental idle for ``idle_s``."""
     d = Path(parent) / "target"
     (d / "debug" / "deps").mkdir(parents=True)
@@ -31,6 +34,8 @@ def _target(parent, idle_s=3600, incremental=("debug/incremental",)):
     for rel in incremental:
         (d / rel / "app-1").mkdir(parents=True)
         (d / rel / "app-1" / "query-cache.bin").write_bytes(b"y" * 100)
+        (d / rel).parent.joinpath(".cargo-lock").write_text("")
+        (d / rel).parent.joinpath(".cargo-build-lock").write_text("")
         _set_age(d / rel, idle_s)
     return d
 
@@ -80,8 +85,44 @@ class TestDiscovery(unittest.TestCase):
         d = Path(self.home) / "devel" / "app" / "target" / "debug" / "incremental"
         d.mkdir(parents=True)
         (d / "mine.txt").write_text("x")
-        _set_age(d, 3600)
+        _set_age(d, 2 * 3600)
         self.assertEqual(self.rows(), [])
+
+    def test_a_dir_named_incremental_without_a_cargo_lock_beside_it_stays(self):
+        d = _target(Path(self.home) / "devel" / "app", incremental=())
+        other = d / "test-output" / "incremental"
+        other.mkdir(parents=True)
+        (other / "keep.txt").write_text("x")
+        _set_age(other, 2 * 3600)
+        self.assertEqual(self.rows(), [])
+
+    def test_a_symlink_inside_target_never_reaches_outside_it(self):
+        d = _target(Path(self.home) / "devel" / "app", incremental=())
+        outside = Path(self.home) / "data"
+        (outside / "incremental").mkdir(parents=True)
+        (outside / ".cargo-lock").write_text("")
+        (outside / "incremental" / "user.txt").write_text("x")
+        _set_age(outside, 2 * 3600)
+        (d / "linked").symlink_to(outside)
+        self.assertEqual(self.rows(), [])
+
+    def test_one_pass_takes_only_the_longest_idle_target(self):
+        """The ladder rechecks the disk between rungs, never between a rung's rows."""
+        young = _target(Path(self.home) / "devel" / "young", idle_s=2 * 3600)
+        old = _target(Path(self.home) / "devel" / "old", idle_s=9 * 3600)
+        self.assertEqual([r["path"] for r in self.rows()], [str(old / "debug" / "incremental")])
+        self.assertNotEqual(old, young)
+
+    def test_a_target_in_use_gives_one_row_and_no_walk(self):
+        d = _target(Path(self.home) / "devel" / "app", incremental=(
+            "debug/incremental", "release/incremental"))
+        with mock.patch.object(sb, "_old_size", side_effect=AssertionError("walked")):
+            rows = self.rows(lambda p: True)
+        self.assertEqual([(r["path"], r["reason"]) for r in rows], [(str(d), "in live use")])
+
+    def test_a_target_four_levels_down_is_found(self):
+        d = _target(Path(self.home) / "devel" / "obs" / "plugins" / "input" / "ffi")
+        self.assertEqual([r["path"] for r in self.rows()], [str(d / "debug" / "incremental")])
 
     def test_a_symlinked_incremental_dir_is_never_followed(self):
         d = _target(Path(self.home) / "devel" / "app", incremental=())
@@ -100,8 +141,36 @@ class TestActTimeRecheck(unittest.TestCase):
 
     def _still(self, live=False):
         with mock.patch("cli_target_purge._target_in_live_use", return_value=live) as use:
-            result = sb.still_idle_incremental(str(self.incremental), NOW)
-        return result, use
+            with sb.reclaim_guard("build-incremental", str(self.incremental), NOW) as ok:
+                pass
+        return ok, use
+
+    def test_a_target_that_lost_its_cargo_marker_refuses(self):
+        (self.target / ".rustc_info.json").unlink()
+        self.assertFalse(self._still()[0])
+
+    def test_a_path_that_became_a_symlink_route_refuses(self):
+        real = self.target.parent / "real"
+        (self.target / "debug").rename(real)
+        (self.target / "debug").symlink_to(real)
+        self.assertFalse(self._still()[0])
+
+    def test_a_build_holding_a_cargo_lock_refuses(self):
+        fd = os.open(self.target / "debug" / ".cargo-build-lock", os.O_RDONLY)
+        self.addCleanup(os.close, fd)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        self.assertFalse(self._still()[0])
+
+    def test_a_build_cannot_start_while_the_delete_runs(self):
+        lock = self.target / "debug" / ".cargo-lock"
+        with mock.patch("cli_target_purge._target_in_live_use", return_value=False):
+            with sb.reclaim_guard("build-incremental", str(self.incremental), NOW) as ok:
+                self.assertTrue(ok)
+                fd = os.open(lock, os.O_RDONLY)
+                self.addCleanup(os.close, fd)
+                with self.assertRaises(BlockingIOError):
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)      # released afterwards
 
     def test_an_idle_dir_passes_and_the_check_covers_the_whole_target(self):
         result, use = self._still()
@@ -132,6 +201,29 @@ class TestActTimeRecheck(unittest.TestCase):
 
 
 class TestLadder(unittest.TestCase):
+    def test_the_quota_pass_keeps_the_rung(self):
+        self.assertNotIn("build-incremental", dq.QUOTA_PASS_EXCLUDED_RUNGS)
+
+    def test_a_small_root_at_its_lower_critical_reaches_the_rung(self):
+        seen = {}
+
+        def _planners(home, now, **kw):
+            seen.update(kw)
+            return [("noop", lambda: [])]
+
+        with tempfile.TemporaryDirectory() as td, \
+                mock.patch.object(dg, "_default_planners", side_effect=_planners):
+            dg.run_disk_guard(
+                now=1000.0, home=td, dry_run=True,
+                statvfs_fn=lambda _m: types.SimpleNamespace(
+                    f_blocks=1000, f_bfree=130, f_bavail=130, f_frsize=4096,
+                    f_files=100000, f_ffree=50000),
+                dev_fn=lambda _p: 1, geteuid_fn=lambda: 1000,
+                box_class_fn=lambda: "workstation",
+                scratch_discover_fn=lambda *_a: [],
+                top_consumers_fn=lambda *a, **kw: [])
+        self.assertEqual(seen.get("level"), "critical")
+
     def _plan(self, level):
         with tempfile.TemporaryDirectory() as td:
             d = _target(Path(td) / "app")
@@ -165,6 +257,46 @@ class TestLadder(unittest.TestCase):
             with mock.patch("cli_live_snapshot.batch_checker", return_value=lambda p: False):
                 rows = planners["build-incremental"]()
         self.assertEqual([r["path"] for r in rows], [str(d / "debug" / "incremental")])
+
+
+class TestRefusalLog(unittest.TestCase):
+    def test_a_refused_build_row_names_the_build_not_a_session(self):
+        act = {"cls": "build-incremental", "path": "/x/target/debug/incremental",
+               "bytes": 2 << 20, "kind": "delete"}
+        status = {"worst_pct": 91, "level": "critical"}
+        with tempfile.TemporaryDirectory() as td:
+            log = Path(td) / "log"
+            dg.execute_drain(status, td, [("build-incremental", lambda: [act])],
+                             lambda: 91, lambda a: -1, geteuid_fn=lambda: 1000,
+                             log_path=str(log), now=NOW, target_pct=75)
+            text = log.read_text()
+        self.assertIn("build started or target in use since plan (#1286)", text)
+        self.assertNotIn("session live", text)
+
+
+class TestTmpTestLiveness(unittest.TestCase):
+    def test_a_live_dir_is_kept_at_plan_time(self):
+        row = {"cls": "tmp-test", "path": "/tmp/cargo-mutants-a.tmp", "bytes": 5, "reason": None}
+        with mock.patch.object(dg, "discover_stale_tmp_test_dirs", return_value=[row]), \
+                mock.patch("cli_live_snapshot.batch_checker", return_value=lambda p: True):
+            rows = dg._plan_tmp_test("/h", NOW)
+        self.assertEqual([r["kind"] for r in rows], ["skip"])
+
+    def test_an_idle_dir_is_planned(self):
+        row = {"cls": "tmp-test", "path": "/tmp/cargo-mutants-a.tmp", "bytes": 5, "reason": None}
+        with mock.patch.object(dg, "discover_stale_tmp_test_dirs", return_value=[row]), \
+                mock.patch("cli_live_snapshot.batch_checker", return_value=lambda p: False):
+            rows = dg._plan_tmp_test("/h", NOW)
+        self.assertEqual([r["kind"] for r in rows], ["delete"])
+
+    def test_the_executor_refuses_a_dir_that_became_live(self):
+        with tempfile.TemporaryDirectory() as td:
+            d = Path(td) / "cargo-mutants-a.tmp"
+            d.mkdir()
+            action = {"cls": "tmp-test", "path": str(d), "bytes": 5, "kind": "delete"}
+            with mock.patch("cli_target_purge._target_in_live_use", return_value=True):
+                self.assertEqual(dg._perform_action(action, now=NOW), -1)
+            self.assertTrue(d.is_dir())
 
 
 class TestCargoMutantsLeftover(unittest.TestCase):
