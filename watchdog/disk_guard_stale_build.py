@@ -23,7 +23,7 @@ CLS = "stale-build"
 INCREMENTAL_CLS = "build-incremental"
 MIN_AGE_DAYS = 14
 INCREMENTAL_MIN_IDLE_S = 3600      # a session between two builds keeps its cache
-MAX_DEPTH = 3                      # ~/copy/src-tauri/target, ~/devel/app/repo/target
+MAX_DEPTH = 5                      # ~/copy/src-tauri/target, ~/devel/app/plugins/x/ffi/target
 _PRUNE = {"node_modules"}
 _TAG_SIGNATURE = "Signature: 8a477f597d28d172789f06886806bc55"
 
