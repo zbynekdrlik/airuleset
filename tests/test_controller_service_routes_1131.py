@@ -142,6 +142,17 @@ class TestServiceRouteTable(unittest.TestCase):
         self.assertFalse(set(hosts) & taken, "route host collides: %s"
                          % sorted(set(hosts) & taken))
 
+    def test_vaultwarden_copy_stays_owner_only_on_loopback(self):
+        """#1290: a restored password vault must never open wider than the
+        owner while it is a test copy, and its origin stays on loopback."""
+        rows = [r for r in dl.CONTROLLER_SERVICE_ROUTES
+                if r["hostname"] == "bwnew.newlevel.media"]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(list(rows[0]["allowed_emails"]), [OWNER])
+        self.assertEqual(rows[0]["origin"], "http://127.0.0.1:8095")
+        self.assertIn(("bwnew.newlevel.media", "http://127.0.0.1:8095"),
+                      dl.controller_service_ingress_rules())
+
     def test_incomplete_specs_are_not_complete(self):
         for bad in (_route(allowed_emails=[]), _route(allowed_emails=None),
                     _route(allowed_emails=[""]), _route(origin=""),
