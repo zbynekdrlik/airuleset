@@ -6,6 +6,10 @@ VERBATIM so the always-on module stays lean. Load this file whenever you need
 to send or receive a credential via the vault (`secret request`/`secret
 exec`/`secret show`).
 
+#### First: does this target need the credential at all? (#1241)
+
+airuleset is the infra gatekeeper for every target (owner 14.10.2026). Never ask the owner to mint or type a high-privilege key for a target. A target holds only credentials its product or CI uses regularly, scoped to its own resources. Anything account-wide, org-level, admin or rare goes to airuleset as an `infra-request` issue, plus a peer message when linked (a ticket alone wakes no session). airuleset applies it with the controller's tokens and posts the call and read-back. Box root, sudo or MCP access: airuleset passes the need to remoteos, and remoteos confirms with the owner. Existing keys are removed only with the owner's OK per key, and `newlevel` access stays as it is.
+
 #### Receiving CREDENTIALS FROM the User — `secret request`/`secret exec`, NEVER `upload` or chat
 
 **A password, API key, token, PAT, or connection string is a CREDENTIAL, not a file — `upload` above is the wrong channel for it, and pasting it into chat is worse.** When the user needs to give you a credential:

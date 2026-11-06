@@ -107,6 +107,12 @@ re-review and no pickup).
    stream's pane (rule 6 mechanics) so it resumes without polling. Session-local pollers for this
    lane are FORBIDDEN — the watchdog owns the cadence (the odoo-erp master-loop interim poller is
    superseded).
+   **Which side takes the request (#1241, owner 14.10.2026), never by guess:**
+   Odoo, prod data and client-facing work (deploys, prod reads and writes, Odoo config, the client
+   board) go to **gk** with plain `gk-request`. Infra outside Odoo (Cloudflare, DNS, GitHub repo
+   administration, tailscale, box root or sudo, the stream's own tooling) goes to **airuleset** with
+   `gk-request --repo zbynekdrlik/airuleset`, because an App-token stream gets 403 filing there
+   directly.
 9. **SELF-SERVICE TRIAGE — bounce a prod-STATE READ the stream could do itself (airuleset #516).**
    The recurring overload: a sub-dev files gk an action request for a prod-STATE READ (a group
    membership, a row count, a config value, sent-mail content) it could read itself from its own

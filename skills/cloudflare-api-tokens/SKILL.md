@@ -10,6 +10,14 @@ Hard-won from the spinbike DNS incident that filed this skill: adding ONE DNS
 record cost the owner four round trips, every wrong turn avoidable. This is the
 procedure that prevents all four.
 
+**A project never gets a new token for a rare change (#1241, owner 14.10. + 31.10.2026).**
+Before you mint or request one, ask two things: can the controller apply this
+change, and can the project avoid the credential? Account-wide, org-level, admin
+or once-a-month work goes to airuleset: `gh issue create -R zbynekdrlik/airuleset
+--label infra-request` naming the service, operation, values and why, plus a peer
+message when linked. Keep only a token your product uses regularly, scoped to
+your own resources. §3-§6 apply to that token.
+
 ## 0. Which credential is this? — identify the artifact BEFORE you verify
 
 Cloudflare issues FOUR different credential artifacts, and the #1 way a VALID
