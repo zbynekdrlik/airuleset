@@ -18,6 +18,6 @@ Such an app ships a system-tray icon next to its service. The tray has:
 
 The tray autostarts at the desktop user's logon, next to the service.
 
-Reference implementation: iemmixer `crates/iem-tray`.
+Reference implementation: wall-bridge `crates/wb-tray`.
 
 `onboard-project` files a foundation ticket for a Rust web app with no tray dependency (`tray-icon`, `tray-item`, `ksni`, `trayicon`, `systray`), no `tauri` dependency with the `tray-icon` or `system-tray` feature, and no `*-tray` crate. `--audit` reports it as `missing-tray` (#1198, owner 2026-09-30, after fohmixer went live without one). A server-only app (a VPS, no desktop) opts out with `<!-- airuleset:tray=n/a <reason> -->` in its `CLAUDE.md`.

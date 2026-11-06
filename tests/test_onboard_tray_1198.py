@@ -115,7 +115,7 @@ class TestRustWebTrayRule(unittest.TestCase):
     def test_rule_states_the_convention(self):
         text = RULE.read_text()
         for needle in ("tooltip", "Open", "Copy URL", "Exit", "logon",
-                       "crates/iem-tray"):
+                       "wall-bridge `crates/wb-tray`"):
             self.assertIn(needle, text, needle)
         # Exit ends the tray only, never the service.
         self.assertIn("tray only", text)
