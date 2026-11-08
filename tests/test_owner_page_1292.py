@@ -91,6 +91,40 @@ class PagePolicy(_Home):
         self.assertEqual(self.send_at(T0 + 5, "page:streamaudio"), "dedup")
         self.assertIn("page:streamaudio:%d" % int(T0 // 600), self.log())
 
+    def _seed(self, status):
+        key = notify.page_dedup_key("page:stream-audio", now=T0)
+        notify._dedup_claim(key)
+        notify._dedup_mark_status(key, status)
+        return key
+
+    def test_dry_run_keeps_a_failed_marker(self):
+        key = self._seed("error")
+        with m.patch.object(notify.time, "time", return_value=T0 + 5):
+            notify.send("x", owner="zbynek", dedup_key="page:stream-audio",
+                        dry_run=True)
+        self.assertTrue(Path(notify._dedup_path(key)).exists())
+
+    def test_suppressed_or_sent_marker_is_never_released(self):
+        for status in ("suppressed", "sent"):
+            with self.subTest(status=status):
+                key = self._seed(status)
+                self.assertEqual(self.send_at(T0 + 5, "page:stream-audio"), "dedup")
+                notify._dedup_release(key)
+        self.assertEqual(self.posts, [])
+
+    def test_release_spares_a_claim_taken_after_the_check(self):
+        key = self._seed("error")
+        real = notify.marker_delivered
+
+        def racing(k):
+            seen = real(k)                 # reads "error" ...
+            notify._dedup_release(k)       # ... then another sender re-claims
+            notify._dedup_claim(k)
+            return seen
+        with m.patch.object(notify, "marker_delivered", racing):
+            notify._release_failed_page(key)
+        self.assertTrue(Path(notify._dedup_path(key)).exists())
+
 
 if __name__ == "__main__":
     unittest.main()
