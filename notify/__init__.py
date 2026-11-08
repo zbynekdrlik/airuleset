@@ -364,8 +364,28 @@ def stream_redirect(raw_owner):
 # delivered, so no gate loops. david (david1-4) is not listed: unchanged.
 OWNER_PING_ALLOW = {
     "zbynek": re.compile(r"^(acctblock|credential-dead|conformance-hb):"
-                         r"|^healthz:.*:(down|recovery):"),
+                         r"|^healthz:.*:(down|recovery):"
+                         r"|^page:[a-z0-9][a-z0-9.-]{0,63}:[0-9]+$"),
 }
+
+# #1292 (owner 8.11.2026, camera-box#1495): a production-stopping outage pages
+# the owner at most once per 10 minutes per check while it lasts. A
+# `page:<check>[:<anything>]` key is rewritten to `page:<check>:<epoch // 600>`
+# before every gate, so the dedup marker enforces the cap whatever bucket the
+# caller sends. A key whose check part breaks the name rule is left as it is,
+# so it never matches the policy and stays suppressed.
+PAGE_WINDOW_S = 600
+_PAGE_KEY = re.compile(r"^page:([a-z0-9][a-z0-9.-]{0,63})(?::[^\s]*)?$")
+
+
+def page_dedup_key(dedup_key, now=None):
+    """The canonical `page:<check>:<bucket>` key for a page key, else
+    `dedup_key` unchanged."""
+    mt = _PAGE_KEY.match(str(dedup_key or ""))
+    if not mt:
+        return dedup_key
+    now = time.time() if now is None else now
+    return "page:%s:%d" % (mt.group(1), int(now // PAGE_WINDOW_S))
 
 
 def _policy_owner(owner):
@@ -3256,6 +3276,7 @@ def send(body, env=None, owner=None, dedup_key=None, dry_run=False,
     the keyed path, a keyless send whose POST fails keeps its claim, so a
     byte-identical retry is deduped until the window rolls — a caller needing
     guaranteed retry delivery passes an explicit `dedup_key`."""
+    dedup_key = page_dedup_key(dedup_key)         # #1292: one page per check per 10 min
     suppressed = _suppressed_alert_class(dedup_key)
     if suppressed is not None:
         if not dry_run:

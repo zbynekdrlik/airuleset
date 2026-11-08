@@ -109,7 +109,7 @@
     "gates/shellcmd.py": 88,
     "gates/testskips.py": 238,
     "goal_registry.py": 628,
-    "notify/__init__.py": 3376,
+    "notify/__init__.py": 3396,
     "ratchet_counts.py": 264,
     "statusbar.py": 1127,
     "subagent_statusline.py": 300,
