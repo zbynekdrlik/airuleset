@@ -372,10 +372,12 @@ OWNER_PING_ALLOW = {
 # the owner at most once per 10 minutes per check while it lasts. A
 # `page:<check>[:<anything>]` key is rewritten to `page:<check>:<epoch // 600>`
 # before every gate, so the dedup marker enforces the cap whatever bucket the
-# caller sends. A key whose check part breaks the name rule is left as it is,
-# so it never matches the policy and stays suppressed.
+# caller sends (fixed buckets, not a rolling window). The check name is matched
+# case-insensitively and lowercased. A key whose check part breaks the name rule
+# is left as it is, so it never matches the policy and stays suppressed. A page
+# whose POST failed releases its claim, so a retry in the same window can send.
 PAGE_WINDOW_S = 600
-_PAGE_KEY = re.compile(r"^page:([a-z0-9][a-z0-9.-]{0,63})(?::[^\s]*)?$")
+_PAGE_KEY = re.compile(r"^page:([a-z0-9][a-z0-9.-]{0,63})(?::[^\s]*)?$", re.I)
 
 
 def page_dedup_key(dedup_key, now=None):
@@ -385,7 +387,15 @@ def page_dedup_key(dedup_key, now=None):
     if not mt:
         return dedup_key
     now = time.time() if now is None else now
-    return "page:%s:%d" % (mt.group(1), int(now // PAGE_WINDOW_S))
+    return "page:%s:%d" % (mt.group(1).lower(), int(now // PAGE_WINDOW_S))
+
+
+def _release_failed_page(dedup_key):
+    """Drop a canonical page key's marker when it records a failed send."""
+    if (str(dedup_key or "").startswith("page:")
+            and os.path.exists(_dedup_path(dedup_key))
+            and not marker_delivered(dedup_key)):
+        _dedup_release(dedup_key)
 
 
 def _policy_owner(owner):
@@ -3277,6 +3287,8 @@ def send(body, env=None, owner=None, dedup_key=None, dry_run=False,
     byte-identical retry is deduped until the window rolls — a caller needing
     guaranteed retry delivery passes an explicit `dedup_key`."""
     dedup_key = page_dedup_key(dedup_key)         # #1292: one page per check per 10 min
+    if not dry_run:
+        _release_failed_page(dedup_key)
     suppressed = _suppressed_alert_class(dedup_key)
     if suppressed is not None:
         if not dry_run:
