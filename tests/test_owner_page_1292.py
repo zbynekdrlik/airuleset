@@ -79,6 +79,18 @@ class PagePolicy(_Home):
         self.assertNotEqual(self.send_at(T0 + 1, "page:x:9", owner="david"), "sent")
         self.assertEqual(len(self.posts), 1)
 
+    def test_failed_page_is_retried_inside_the_window(self):
+        with m.patch.object(notify, "_post_discord", lambda *a, **k: None):
+            self.assertNotEqual(self.send_at(T0, "page:stream-audio"), "sent")
+        self.assertEqual(self.send_at(T0 + 60, "page:stream-audio"), "sent")
+        self.assertEqual(self.send_at(T0 + 120, "page:stream-audio"), "dedup")
+        self.assertEqual(len(self.posts), 1)
+
+    def test_check_name_is_case_insensitive(self):
+        self.assertEqual(self.send_at(T0, "page:StreamAudio"), "sent")
+        self.assertEqual(self.send_at(T0 + 5, "page:streamaudio"), "dedup")
+        self.assertIn("page:streamaudio:%d" % int(T0 // 600), self.log())
+
 
 if __name__ == "__main__":
     unittest.main()
