@@ -391,11 +391,42 @@ def page_dedup_key(dedup_key, now=None):
 
 
 def _release_failed_page(dedup_key):
-    """Drop a canonical page key's marker when it records a failed send."""
-    if (str(dedup_key or "").startswith("page:")
-            and os.path.exists(_dedup_path(dedup_key))
-            and not marker_delivered(dedup_key)):
-        _dedup_release(dedup_key)
+    """Drop a canonical page key's marker when it records a failed send.
+
+    Race-safe: the marker is renamed aside and dropped only if it still holds
+    the failed record read first; a claim another sender took meanwhile is put
+    back (`os.link` never overwrites). Best-effort and logged, never raises."""
+    if not str(dedup_key or "").startswith("page:"):
+        return
+    path = _dedup_path(dedup_key)
+    try:
+        with open(path, encoding="utf-8") as fh:
+            before = fh.read(200)
+    except FileNotFoundError:
+        return                      # no marker: nothing to release
+    except OSError as exc:
+        log_delivery("page-release-error", kind="python", key=dedup_key,
+                     reason="read:%s" % type(exc).__name__)
+        return
+    if marker_delivered(dedup_key):
+        return
+    try:
+        aside = "%s.release.%d.%s" % (path, os.getpid(), os.urandom(4).hex())
+        os.rename(path, aside)
+        with open(aside, encoding="utf-8") as fh:
+            changed = fh.read(200) != before
+        reason = "failed-marker"
+        if changed:
+            reason = "kept-newer-claim"
+            try:
+                os.link(aside, path)    # a newer claim: put it back
+            except FileExistsError:
+                reason = "newer-claim-already-back"
+        os.unlink(aside)
+        log_delivery("page-release", kind="python", key=dedup_key, reason=reason)
+    except OSError as exc:
+        log_delivery("page-release-error", kind="python", key=dedup_key,
+                     reason="%s" % type(exc).__name__)
 
 
 def _policy_owner(owner):
@@ -3363,6 +3394,8 @@ def send(body, env=None, owner=None, dedup_key=None, dry_run=False,
     # Claim FIRST so a racing duplicate can't double-post; RELEASE only when the
     # primary provably never sent (no token / no channel), so a transient failure
     # can NOT re-send (a timeout can fire AFTER Discord accepted the message).
+    # Exception (#1292): a `page:` key's failed marker is released at the top of
+    # send(), so a production page may double-send rather than be lost.
     if dedup_key and not _dedup_claim(dedup_key):
         # #184: logged too, not just non-deliveries — an ABSENT log file must
         # mean "the logger is broken", never "nothing has ever been sent or
