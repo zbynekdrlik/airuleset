@@ -33,13 +33,16 @@ class TestDcontroller(unittest.TestCase):
         ports = list(drop._GENERATED_DROP_PORTS.values())
         self.assertEqual(ports.count(port), 1)
 
-    def test_only_peer_is_dstack_with_a_topic(self):
+    def test_peers_are_dstack_and_dasio_with_topics(self):
+        # owner 8.11.2026 added dasio ("sprav peer medzi dasio a dcontroller")
         doc = cpc.load_links()
         self.assertEqual(cpc.validate_links(doc, cpc.load_registry()), [])
         pairs = [p for p in doc["hosts"]["dev1"]["links"] if "dcontroller" in p]
-        self.assertEqual(pairs, [["dcontroller", "dstack"], ["airuleset", "dcontroller"]])
-        self.assertIn("dstack",
-                      doc["hosts"]["dev1"]["topics"]["dcontroller|dstack"])
+        self.assertEqual(pairs, [["dcontroller", "dstack"], ["airuleset", "dcontroller"],
+                                 ["dasio", "dcontroller"]])
+        topics = doc["hosts"]["dev1"]["topics"]
+        self.assertIn("dstack", topics["dcontroller|dstack"])
+        self.assertIn("dasio asks", topics["dasio|dcontroller"])
 
 
 if __name__ == "__main__":
