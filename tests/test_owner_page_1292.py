@@ -9,8 +9,8 @@ A `page:<check>[:<anything>]` dedup key passes the zbynek owner policy, and
 whatever bucket the caller sends. A malformed `page:` key stays suppressed.
 """
 
-import os
 import sys
+import time
 import unittest
 import unittest.mock as m
 from pathlib import Path
@@ -22,7 +22,9 @@ sys.path.insert(0, str(ROOT / "tests"))
 import notify                                             # noqa: E402
 from test_owner_policy_1137 import _Home                  # noqa: E402
 
-T0 = 1_800_000_000.0          # a 600 s bucket boundary (1_800_000_000 % 600 == 0)
+# A 600 s bucket boundary near the real clock: `_prune_dedup` ages markers by
+# their real mtime against `time.time()`, so a far-off fake clock prunes them.
+T0 = float(int(time.time()) // 600 * 600)
 
 
 class PagePolicy(_Home):
