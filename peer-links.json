@@ -166,6 +166,10 @@
         [
           "dasio",
           "dcontroller"
+        ],
+        [
+          "camera-box",
+          "restreamer"
         ]
       ],
       "topics": {
@@ -209,7 +213,8 @@
         "camera-box|dasio": "FOH PC availability and dasio windows: dasio says when the FOH PC (Ableton-FOH) is free or held; camera-box asks before a test that needs it, such as a test signal through master Ableton",
         "camera-box|iemmixer": "tests and windows on the SNV show rig: a camera-box test signal that reaches the IEM mixer, an IEM mixer change that affects the camera-box rig; a Dante question still goes to dstack",
         "iemmixer|songplayer": "songplayer outages and restarts seen in iemmixer's measurements, and when songplayer deploys; a Dante question still goes to dstack",
-        "dasio|dcontroller": "dcontroller: Dante control UI/API; dasio asks for Dante views and actions it needs (subscriptions, multicast flows), dcontroller decides and builds"
+        "dasio|dcontroller": "dcontroller: Dante control UI/API; dasio asks for Dante views and actions it needs (subscriptions, multicast flows), dcontroller decides and builds",
+        "camera-box|restreamer": "the E2E YouTube leg: camera-box measures the stream end to end; restreamer owns its av-gate session and the egress to YouTube"
       }
     }
   },
