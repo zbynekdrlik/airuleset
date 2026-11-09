@@ -20,7 +20,7 @@ FAR = {"account": "p-peer", "ssh": "p-peer@1.2.3.4", "identity": "~/.ssh/k",
 REG = [{"name": "a", "host": "h1", "account": "ua", "path": "/a"}]
 
 
-def _doc(home="h2"):
+def _doc(home="dev2"):
     spec = {"account": "nl", "path": "~/p", "hosts": {"h1": dict(FAR)}}
     if home is not None:
         spec["home"] = home
@@ -34,7 +34,7 @@ class R:
 
 class TestRootLeg(unittest.TestCase):
     HOSTS = [{"name": "h1", "host": "1.1.1.1", "identity": "~/k"},
-             {"name": "h2", "host": "2.2.2.2", "identity": "~/k"},
+             {"name": "dev2", "host": "2.2.2.2", "identity": "~/k"},
              {"name": "h3", "host": "3.3.3.3", "identity": "~/k"}]
 
     def provision(self, doc):
@@ -81,15 +81,25 @@ class TestLinksHostAlsoHome(TestRootLeg):
 
 class TestValidation(unittest.TestCase):
     def test_a_non_string_home_is_a_validation_error_not_a_crash(self):
-        for bad in (["h2"], {"h": 1}, 7, "", None):
-            errs = cpc.validate_links(_doc(home=bad), REG, root_hosts={"h1", "h2"})
+        for bad in (["dev2"], {"h": 1}, 7, "", None):
+            errs = cpc.validate_links(_doc(home=bad), REG, root_hosts={"h1", "dev2"})
             self.assertTrue(any("home" in e for e in errs), (bad, errs))
-        self.assertEqual(cpc.bridge_home_hosts(_doc(home=["h2"])), set())
+        self.assertEqual(cpc.bridge_home_hosts(_doc(home=["dev2"])), set())
+
+    def test_a_root_host_whose_hostname_differs_cannot_be_a_home(self):
+        # review 3: install matches the socket hostname; gk's node is gatekeeper-cx23
+        doc = _doc(home="gatekeeper")
+        errs = cpc.validate_links(doc, REG, root_hosts={"h1", "gatekeeper"})
+        self.assertTrue(any("home 'gatekeeper'" in e for e in errs), errs)
+        self.assertEqual(cpc.HOME_HOSTS, {"dev1", "dev2", cpc.CONTROLLER_HOME})
 
     def test_home_must_be_a_root_host(self):
-        errs = cpc.validate_links(_doc(home="nope"), REG, root_hosts={"h1", "h2"})
+        errs = cpc.validate_links(_doc(home="nope"), REG, root_hosts={"h1", "dev2"})
         self.assertTrue(any("home 'nope'" in e for e in errs), errs)
-        self.assertEqual([e for e in cpc.validate_links(_doc(), REG, root_hosts={"h1", "h2"})
+        errs = cpc.validate_links(_doc(home="dev2"), REG, root_hosts={"h1"})   # not a root host
+        self.assertTrue(any("home 'dev2'" in e for e in errs), errs)
+        self.assertEqual([e for e in cpc.validate_links(_doc(home="dev2"), REG,
+                                                        root_hosts={"h1", "dev2"})
                           if "home" in e], [])
 
     def test_committed_presenter_bridge_is_valid_and_homed_on_dev2(self):
@@ -101,15 +111,15 @@ class TestValidation(unittest.TestCase):
 
 class TestBridgeHomeMatch(unittest.TestCase):
     def test_declared_home_matches_only_there(self):
-        self.assertTrue(cpc.is_bridge_home("nl", _doc(), "h2"))
+        self.assertTrue(cpc.is_bridge_home("nl", _doc(), "dev2"))
         self.assertFalse(cpc.is_bridge_home("nl", _doc(), "h1"))
-        self.assertFalse(cpc.is_bridge_home("other", _doc(), "h2"))
+        self.assertFalse(cpc.is_bridge_home("other", _doc(), "dev2"))
 
     def test_an_undeclared_home_matches_nowhere(self):
         # review 2: install and runtime must agree; home is required, so a bridge
         # without one is invalid and enables no host
         doc = _doc(home=None)
-        for host in ("h1", "h2", cpc.CONTROLLER_HOME, None):
+        for host in ("h1", "dev2", cpc.CONTROLLER_HOME, None):
             self.assertFalse(cpc.is_bridge_home("nl", doc, host), host)
 
     def test_the_controller_bridge_is_homed_on_the_controller(self):
@@ -129,7 +139,7 @@ class TestBridgeHomeMatch(unittest.TestCase):
         def run(argv, **kw):
             calls.append(argv)
             return Ok()
-        self.assertTrue(cpc.install_step(user="nl", host="h2", claude_dir=d, run=run,
+        self.assertTrue(cpc.install_step(user="nl", host="dev2", claude_dir=d, run=run,
                                          links_doc=_doc(), registry=REG))
         self.assertTrue((Path(d) / cpc.MARKER_NAME).exists())
         self.assertTrue(cpc.install_step(user="nl", host="h3", claude_dir=d, run=run,
@@ -139,7 +149,7 @@ class TestBridgeHomeMatch(unittest.TestCase):
     def test_runtime_bridge_home_follows_the_declared_home(self):
         import peer_channel as pc
         doc = _doc()
-        self.assertEqual(pc.bridge_home(doc, "nl", "/h/p", "/h", host="h2")[0], "p")
+        self.assertEqual(pc.bridge_home(doc, "nl", "/h/p", "/h", host="dev2")[0], "p")
         self.assertIsNone(pc.bridge_home(doc, "nl", "/h/p", "/h", host="h1"))
         self.assertIsNone(pc.bridge_home(_doc(home=None), "nl", "/h/p", "/h", host="h1"))
 

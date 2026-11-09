@@ -157,7 +157,7 @@ class _Child:
 
 class TestBridge(_Env):
     LINKS = [["alpha", "beta"], ["alpha", "home"]]
-    SPEC = {"account": ME, "path": "~/devel/home",
+    SPEC = {"account": ME, "home": "dev2", "path": "~/devel/home",
             "hosts": {HOST: {"account": ME, "ssh": "u@h", "identity": "~/k", "path": "~/x"}}}
 
     def setUp(self):
