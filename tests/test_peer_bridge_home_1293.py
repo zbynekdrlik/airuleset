@@ -85,7 +85,7 @@ class TestLinksHostAlsoHome(TestRootLeg):
         self.assertEqual(cpc.provision_peer_channel_root(
             hosts=self.HOSTS, run=run, links_doc=doc,
             registry=[dict(REG[0], host="dev2")]), [])
-        by_host = {c[-2].split("@")[1]: c[-1] for c in calls}
+        by_host = {c[-2].split("@")[1]: c[-1] for c in calls if c[0] == "ssh"}
         self.assertIn("peer-channel-root: ok", by_host["2.2.2.2"])     # full leg, not policy-only
         self.assertIn("nothing to tear down", by_host["1.1.1.1"])
 
