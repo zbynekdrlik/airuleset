@@ -66,7 +66,20 @@ class TestRootLeg(unittest.TestCase):
         self.assertIn("nothing to tear down", by_host["2.2.2.2"])
 
 
+class TestLinksHostAlsoHome(TestRootLeg):
+    def test_a_links_host_keeps_the_full_leg(self):
+        by_host = self.provision(_doc(home="h1"))
+        self.assertIn("peer-channel-root: ok", by_host["1.1.1.1"])
+        self.assertIn("nothing to tear down", by_host["2.2.2.2"])
+
+
 class TestValidation(unittest.TestCase):
+    def test_a_non_string_home_is_a_validation_error_not_a_crash(self):
+        for bad in (["h2"], {"h": 1}, 7, ""):
+            errs = cpc.validate_links(_doc(home=bad), REG, root_hosts={"h1", "h2"})
+            self.assertTrue(any("home" in e for e in errs), (bad, errs))
+        self.assertEqual(cpc.bridge_home_hosts(_doc(home=["h2"])), set())
+
     def test_home_must_be_a_root_host(self):
         errs = cpc.validate_links(_doc(home="nope"), REG, root_hosts={"h1", "h2"})
         self.assertTrue(any("home 'nope'" in e for e in errs), errs)
@@ -86,9 +99,38 @@ class TestBridgeHomeMatch(unittest.TestCase):
         self.assertFalse(cpc.is_bridge_home("nl", _doc(), "h1"))
         self.assertFalse(cpc.is_bridge_home("other", _doc(), "h2"))
 
-    def test_undeclared_home_matches_any_host(self):
-        self.assertTrue(cpc.is_bridge_home("nl", _doc(home=None), "h1"))
-        self.assertTrue(cpc.is_bridge_home("nl", _doc(home=None)))
+    def test_undeclared_home_matches_only_off_the_root_hosts(self):
+        # review 1: a home removed later must not leave dev2 enabled while the root
+        # leg tears its policy down; an undeclared home is the controller's case
+        doc = _doc(home=None)
+        self.assertFalse(cpc.is_bridge_home("nl", doc, "h1", root_hosts={"h1", "h2"}))
+        self.assertTrue(cpc.is_bridge_home("nl", doc, "controller", root_hosts={"h1", "h2"}))
+        self.assertTrue(cpc.is_bridge_home("nl", doc))
+
+    def test_install_step_enables_the_home_account_only_on_its_host(self):
+        import tempfile
+        d = tempfile.mkdtemp()
+        calls = []
+
+        class Ok:
+            returncode, stdout, stderr = 0, "", ""
+
+        def run(argv, **kw):
+            calls.append(argv)
+            return Ok()
+        self.assertTrue(cpc.install_step(user="nl", host="h2", claude_dir=d, run=run,
+                                         links_doc=_doc(), registry=REG))
+        self.assertTrue((Path(d) / cpc.MARKER_NAME).exists())
+        self.assertTrue(cpc.install_step(user="nl", host="h3", claude_dir=d, run=run,
+                                         links_doc=_doc(), registry=REG))
+        self.assertFalse((Path(d) / cpc.MARKER_NAME).exists())
+
+    def test_runtime_bridge_home_follows_the_declared_home(self):
+        import peer_channel as pc
+        doc = _doc()
+        self.assertEqual(pc.bridge_home(doc, "nl", "/h/p", "/h", host="h2")[0], "p")
+        self.assertIsNone(pc.bridge_home(doc, "nl", "/h/p", "/h", host="h1"))
+        self.assertEqual(pc.bridge_home(_doc(home=None), "nl", "/h/p", "/h", host="h1")[0], "p")
 
     def test_apply_home_policy_skips_a_root_homed_bridge(self):
         import pwd
