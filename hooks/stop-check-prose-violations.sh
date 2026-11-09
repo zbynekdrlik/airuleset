@@ -511,7 +511,9 @@ fi
 # When agent draws UI layout in terminal text, visual companion MUST be used instead.
 # The brainstorming skill's "use terminal for conceptual questions" escape DOES NOT apply
 # to layout/position/component-placement questions — those are always visual.
-HAS_BOXDRAW=$(msg_has "$MSG" -qE "[┌┐└┘─│├┤┬┴┼╔╗╚╝═║█▓▒░▀▄■□]{3,}" && echo 1 || echo 0)
+# LC_ALL=C.UTF-8 (#319 convention): in the C locale grep reads this class byte by
+# byte, and every byte of an em dash is inside it (dasio, 9.11.2026).
+HAS_BOXDRAW=$(LC_ALL=C.UTF-8 msg_has "$MSG" -qE "[┌┐└┘─│├┤┬┴┼╔╗╚╝═║█▓▒░▀▄■□]{3,}" && echo 1 || echo 0)
 HAS_LAYOUT_KW=$(msg_has "$MSG" -qiE "\b(header|footer|navbar|sidebar|toolbar|titlebar|status.?bar|menu.?bar|top border|bottom border|top.right|top.left|bottom.right|bottom.left|version label|version display|logo placement|page header|page footer|presenter (panel|view|placement)|top of (the )?(page|screen|window|view|border)|bottom of (the )?(page|screen|window|view|border)|above (the )?(header|footer|button|panel)|below (the )?(header|footer|button|panel)|position (of|the)|place (the )?[a-z]+ (on|in|at)|move (the )?[a-z]+ to|layout option|wizard step|dashboard layout|side.by.side layout|column layout|grid layout|component placement|fixed (top|bottom|header|footer)|sticky (top|header|footer))\b" && echo 1 || echo 0)
 # A live companion URL EXONERATES (the mockup is already in a browser), so ask
 # whether it is MISSING — an unanswerable check must not grant the exemption.
@@ -1559,9 +1561,9 @@ if _DONE_LINES=$(msg_lines "$MSG" -E "^✅ DONE:"); then
 fi
 if [ "$IS_COMPLETION_SIGNAL" = "0" ] && [ -n "$DONE_LINE" ]; then
     if msg_has "$DONE_LINE" -qE "#[0-9]+" \
-       && msg_has "$DONE_LINE" -qiE "hotov|opraven|zavret|uzavret|vyrie[sš]en|dokon[cč]en|implementovan|nasaden|zmerg|zl[uú][cč]en|odovzdan|merged|deployed|fixed|closed|resolved|implemented|shipped|handed.?off"; then
+       && LC_ALL=C.UTF-8 msg_has "$DONE_LINE" -qiE "hotov|opraven|zavret|uzavret|vyrie[sš]en|dokon[cč]en|implementovan|nasaden|zmerg|zl[uú][cč]en|odovzdan|merged|deployed|fixed|closed|resolved|implemented|shipped|handed.?off"; then
         IS_COMPLETION_SIGNAL=1
-    elif msg_has "$MSG" -qiE "READY-FOR-REVIEW|odovzdan[eéáý]?[^.]{0,40}review|ready for (the )?(gatekeeper|maintainer) review"; then
+    elif LC_ALL=C.UTF-8 msg_has "$MSG" -qiE "READY-FOR-REVIEW|odovzdan[eéáý]?[^.]{0,40}review|ready for (the )?(gatekeeper|maintainer) review"; then
         IS_COMPLETION_SIGNAL=1
     fi
 fi
