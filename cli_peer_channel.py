@@ -131,7 +131,8 @@ def _bridge_errors(links_doc, root_hosts=None):
             errors.append("bridge %s: needs account, path and hosts" % name)
             continue
         home = spec.get("home")
-        if home is not None and home not in (root_hosts if root_hosts is not None else root_host_names()):
+        if home is not None and not (isinstance(home, str) and home in (
+                root_hosts if root_hosts is not None else root_host_names())):
             errors.append("bridge %s: home %r is not a root-leg host" % (name, home))
         for host, far in spec["hosts"].items():
             if host not in links_doc["hosts"]:
@@ -163,20 +164,32 @@ def accounts_for_host(host, links_doc=None, registry=None):
     return sorted(a for a in accts if not bootstrap.is_pending(a))
 
 
-def is_bridge_home(user, links_doc=None, host=None):
+def is_bridge_home(user, links_doc=None, host=None, root_hosts=None):
     """#1266: this account hosts a bridged project, so it needs the plugin and the
     launcher flag on a box with no shared socket dir. #1293: a spec that declares
-    its ``home`` host matches only there; without it, on any host (the controller)."""
+    its ``home`` host matches only there; without it, only off the root-leg hosts
+    (the controller), where no root leg would tear the policy down."""
     links_doc = load_links() if links_doc is None else links_doc
-    return any(isinstance(s, dict) and s.get("account") == user
-               and (s.get("home") is None or s.get("home") == host)
-               for s in (links_doc.get("bridges") or {}).values())
+    roots = None
+    for s in (links_doc.get("bridges") or {}).values():
+        if not (isinstance(s, dict) and s.get("account") == user):
+            continue
+        if s.get("home") is not None:
+            if s.get("home") == host:
+                return True
+            continue
+        if host is None:
+            return True
+        roots = (root_host_names() if root_hosts is None else root_hosts) if roots is None else roots
+        if host not in roots:
+            return True
+    return False
 
 
 def bridge_home_hosts(links_doc):
     """#1293: the root hosts a bridge declares as its home."""
     return {s["home"] for s in (links_doc.get("bridges") or {}).values()
-            if isinstance(s, dict) and s.get("home")}
+            if isinstance(s, dict) and isinstance(s.get("home"), str) and s["home"]}
 
 
 def peer_repos(account, links_doc=None, registry=None):

@@ -148,11 +148,12 @@ def bridge_rows(links_doc, host):
     return out
 
 
-def bridge_home(links_doc, user, cwd, home):
+def bridge_home(links_doc, user, cwd, home, host=None):
     """#1266: (project, spec) when this session runs in a bridged project's home
-    account and directory, else None."""
+    account and directory, else None. #1293: a declared ``home`` host must match."""
     for name, spec in _bridges(links_doc).items():
-        if isinstance(spec, dict) and resolve_project({name: spec}, user, cwd, home):
+        if isinstance(spec, dict) and spec.get("home", host) in (host, None) \
+                and resolve_project({name: spec}, user, cwd, home):
             return name, spec
     return None
 
@@ -966,19 +967,18 @@ def main(argv=None):
     a = ap.parse_args(argv)
     signal.signal(signal.SIGTERM, _exit_on_signal)   # so `finally` unlinks the socket
     signal.signal(signal.SIGHUP, _exit_on_signal)
-    pw = pwd.getpwuid(os.getuid())
+    pw, host = pwd.getpwuid(os.getuid()), socket.gethostname().split(".")[0]
     home_end = None
     if a.mode == "serve":
         try:
             links = load_json(os.path.join(active_config_dir(), LINKS_FILE))
-            home_end = bridge_home(links, pw.pw_name, os.getcwd(), pw.pw_dir)
+            home_end = bridge_home(links, pw.pw_name, os.getcwd(), pw.pw_dir, host)
         except (OSError, ValueError) as e:
             sys.stderr.write("peer-channel: links unreadable: %s\n" % e)
     if home_end:
         peer = BridgeHome(home_end[0], home_end[1], pw.pw_dir, channel_armed())
     else:
-        peer = Peer(socket.gethostname().split(".")[0], pw.pw_name, os.getuid(), os.getcwd(),
-                    pw.pw_dir, project_arg=a.project,
+        peer = Peer(host, pw.pw_name, os.getuid(), os.getcwd(), pw.pw_dir, project_arg=a.project,
                     armed=a.mode == "bridge" or channel_armed())
     if a.mode == "bridge":
         try:
