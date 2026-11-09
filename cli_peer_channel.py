@@ -96,7 +96,7 @@ def validate_links(links_doc, registry, root_hosts=None):
     hosts = links_doc.get("hosts") if isinstance(links_doc, dict) else None
     if not isinstance(hosts, dict):
         return ["peer-links.json: missing 'hosts' object"]
-    errors += _bridge_errors(links_doc)
+    errors += _bridge_errors(links_doc, root_hosts)
     for host, entry in sorted(hosts.items()):
         if host not in root_hosts:
             errors.append("%s: not a root-leg host (DISK_GUARD_ROOT_HOSTS)" % host)
@@ -122,7 +122,7 @@ def validate_links(links_doc, registry, root_hosts=None):
     return errors
 
 
-def _bridge_errors(links_doc):
+def _bridge_errors(links_doc, root_hosts=None):
     """#1266: a bridge with a missing field would kill its thread at session start."""
     errors = []
     for name, spec in (links_doc.get("bridges") or {}).items():
@@ -130,6 +130,9 @@ def _bridge_errors(links_doc):
                 and spec.get("account") and spec.get("path") and spec.get("hosts")):
             errors.append("bridge %s: needs account, path and hosts" % name)
             continue
+        home = spec.get("home")
+        if home is not None and home not in (root_hosts if root_hosts is not None else root_host_names()):
+            errors.append("bridge %s: home %r is not a root-leg host" % (name, home))
         for host, far in spec["hosts"].items():
             if host not in links_doc["hosts"]:
                 errors.append("bridge %s: %s is not a links host" % (name, host))
@@ -160,12 +163,20 @@ def accounts_for_host(host, links_doc=None, registry=None):
     return sorted(a for a in accts if not bootstrap.is_pending(a))
 
 
-def is_bridge_home(user, links_doc=None):
+def is_bridge_home(user, links_doc=None, host=None):
     """#1266: this account hosts a bridged project, so it needs the plugin and the
-    launcher flag on a box with no shared socket dir."""
+    launcher flag on a box with no shared socket dir. #1293: a spec that declares
+    its ``home`` host matches only there; without it, on any host (the controller)."""
     links_doc = load_links() if links_doc is None else links_doc
     return any(isinstance(s, dict) and s.get("account") == user
+               and (s.get("home") is None or s.get("home") == host)
                for s in (links_doc.get("bridges") or {}).values())
+
+
+def bridge_home_hosts(links_doc):
+    """#1293: the root hosts a bridge declares as its home."""
+    return {s["home"] for s in (links_doc.get("bridges") or {}).values()
+            if isinstance(s, dict) and s.get("home")}
 
 
 def peer_repos(account, links_doc=None, registry=None):
@@ -246,7 +257,8 @@ def install_step(user=None, host=None, claude_dir=None, run=None, links_doc=None
     claude_dir = Path(claude_dir)
     marker = claude_dir / MARKER_NAME
     try:
-        linked = user in accounts_for_host(host, links_doc, registry) or is_bridge_home(user, links_doc)
+        linked = (user in accounts_for_host(host, links_doc, registry)
+                  or is_bridge_home(user, links_doc, host))
     except (OSError, ValueError) as e:
         print("  ⚠ peer channel: config unreadable (%s)" % e, file=sys.stderr)
         return False
@@ -408,6 +420,16 @@ def render_root_script(accounts, links_doc=None, registry=None):
     ])
 
 
+def render_home_script(official=()):
+    """#1266/#1293: a bridge home box needs only the managed channel allowlist; its
+    sockets live on the far end. Idempotent, with a read-back. A shared root host
+    keeps Anthropic's official channels too, as the full leg does."""
+    return ("set -euo pipefail\ncd /\numask 022\nCHANGED=''\n" + _INSTALL_FN
+            + _heredoc(POLICY_PATH, render_policy(official))
+            + "python3 -I -c 'import json,sys; json.load(open(sys.argv[1]))' %s\n" % POLICY_PATH
+            + "echo \"peer-channel-home: ok changed=[${CHANGED# }]\"\n")
+
+
 def render_teardown_script():
     """A root host no longer named in peer-links.json: remove our files (only if
     present) and stop the mount. Idempotent no-op on a host that never had it."""
@@ -428,12 +450,10 @@ def apply_home_policy(run=subprocess.run, links_doc=None):
     has no shared dir, because the sockets live on the far end. [] or one failure."""
     links_doc = load_links() if links_doc is None else links_doc
     me = pwd.getpwuid(os.getuid()).pw_name
-    if not is_bridge_home(me, links_doc):
-        return []
-    script = ("set -euo pipefail\ncd /\numask 022\nCHANGED=''\n" + _INSTALL_FN
-              + _heredoc(POLICY_PATH, render_policy(()))
-              + "python3 -I -c 'import json,sys; json.load(open(sys.argv[1]))' %s\n" % POLICY_PATH
-              + "echo \"peer-channel-home: ok changed=[${CHANGED# }]\"\n")
+    if not any(isinstance(s, dict) and s.get("account") == me and s.get("home") is None
+               for s in (links_doc.get("bridges") or {}).values()):
+        return []      # a declared home gets its policy from the root leg (#1293)
+    script = render_home_script()
     try:
         r = run(["sudo", "-n", "bash", "-c", script], capture_output=True, text=True, timeout=60)
     except (OSError, subprocess.SubprocessError) as e:
@@ -481,8 +501,12 @@ def provision_peer_channel_root(hosts=None, run=None, links_doc=None, registry=N
             failed.append((name, "no-identity"))
             continue
         accounts = accounts_for_host(name, links_doc, registry) if name in named else []
-        script = (render_root_script(accounts, links_doc, registry) if accounts
-                  else render_teardown_script())
+        if accounts:
+            script = render_root_script(accounts, links_doc, registry)
+        elif name in bridge_home_hosts(links_doc):
+            script = render_home_script(OFFICIAL_CHANNEL_PLUGINS)  # #1293: keep the policy, never tear it down
+        else:
+            script = render_teardown_script()
         remote = ("sudo -n " if h.get("sudo") else "") + "bash -c " + shlex.quote(script)
         argv = ["ssh", "-i", os.path.expanduser(h["identity"]), "-o", "BatchMode=yes",
                 "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=15",

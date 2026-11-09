@@ -170,6 +170,10 @@
         [
           "camera-box",
           "restreamer"
+        ],
+        [
+          "presenter",
+          "songplayer"
         ]
       ],
       "topics": {
@@ -214,7 +218,8 @@
         "camera-box|iemmixer": "tests and windows on the SNV show rig: a camera-box test signal that reaches the IEM mixer, an IEM mixer change that affects the camera-box rig; a Dante question still goes to dstack",
         "iemmixer|songplayer": "songplayer outages and restarts seen in iemmixer's measurements, and when songplayer deploys; a Dante question still goes to dstack",
         "dasio|dcontroller": "dcontroller: Dante control UI/API; dasio asks for Dante views and actions it needs (subscriptions, multicast flows), dcontroller decides and builds",
-        "camera-box|restreamer": "the E2E YouTube leg: camera-box measures the stream end to end; restreamer owns its av-gate session and the egress to YouTube"
+        "camera-box|restreamer": "the E2E YouTube leg: camera-box measures the stream end to end; restreamer owns its av-gate session and the egress to YouTube",
+        "presenter|songplayer": "SongPlayer playback and the Presenter screens at SNV: what plays and what is shown, and the cues between them"
       }
     }
   },
@@ -229,6 +234,20 @@
           "identity": "~/.secrets/airuleset_push_ed25519",
           "path": "/etc/airuleset/peer",
           "key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGOHYeG/kHVSzo+k0d9fDHRbGKIN9lMhs2nX5loR3/AP airuleset-push@airuleset"
+        }
+      }
+    },
+    "presenter": {
+      "account": "newlevel",
+      "home": "dev2",
+      "path": "~/devel/presenter/presenter-dev2",
+      "hosts": {
+        "dev1": {
+          "account": "presenter-peer",
+          "ssh": "presenter-peer@100.104.8.125",
+          "identity": "~/.ssh/presenter_peer_ed25519",
+          "path": "/etc/airuleset/peer",
+          "key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGkRnAroNZk+tD6jrYVbJUalRDoBk/pxTiLwB/rUZvfW presenter-peer@dev2"
         }
       }
     }
