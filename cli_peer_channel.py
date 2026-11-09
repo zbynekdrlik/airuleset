@@ -82,6 +82,9 @@ def load_registry(path=None):
 
 
 CONTROLLER_HOME = "airuleset"    # the controller's hostname: home of its own bridge (#1293)
+# #1293: boxes whose socket hostname equals their fleet name, so install (hostname)
+# and the root leg (fleet name) agree; subdev's and gk's nodes are named otherwise
+HOME_HOSTS = {"dev1", "dev2", CONTROLLER_HOME}
 
 
 def root_host_names():
@@ -135,9 +138,10 @@ def _bridge_errors(links_doc, root_hosts=None):
             continue
         home = spec.get("home")
         roots = root_hosts if root_hosts is not None else root_host_names()
-        if not (isinstance(home, str) and (home in roots or home == CONTROLLER_HOME)):
-            errors.append("bridge %s: home %r is not a root-leg host or %s"
-                          % (name, home, CONTROLLER_HOME))
+        if not (isinstance(home, str) and home in HOME_HOSTS
+                and (home in roots or home == CONTROLLER_HOME)):
+            errors.append("bridge %s: home %r is not one of %s on the root leg"
+                          % (name, home, sorted(HOME_HOSTS)))
         for host, far in spec["hosts"].items():
             if host not in links_doc["hosts"]:
                 errors.append("bridge %s: %s is not a links host" % (name, host))

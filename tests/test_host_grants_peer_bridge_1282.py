@@ -364,9 +364,9 @@ class TestManagedSide(unittest.TestCase):
 
     def _errors(self, **far):
         links = {"hosts": {"h": {"links": []}},
-                 "bridges": {"x": {"account": "a", "home": "h", "path": "~/x",
+                 "bridges": {"x": {"account": "a", "home": "dev2", "path": "~/x",
                                    "hosts": {"h": dict(self.FAR, **far)}}}}
-        return cpc.validate_links(links, [], {"h"})
+        return cpc.validate_links(links, [], {"h", "dev2"})
 
     def test_a_valid_bridge_passes(self):
         self.assertEqual(self._errors(), [])

@@ -74,9 +74,20 @@ class TestRootLeg(unittest.TestCase):
 
 class TestLinksHostAlsoHome(TestRootLeg):
     def test_a_links_host_keeps_the_full_leg(self):
-        by_host = self.provision(_doc(home="h1"))
-        self.assertIn("peer-channel-root: ok", by_host["1.1.1.1"])
-        self.assertIn("nothing to tear down", by_host["2.2.2.2"])
+        doc = _doc(home="dev2")
+        doc["hosts"] = {"dev2": doc["hosts"].pop("h1")}
+        doc["bridges"]["p"]["hosts"] = {"dev2": dict(FAR)}
+        calls = []
+
+        def run(argv, **kw):
+            calls.append(argv)
+            return R()
+        self.assertEqual(cpc.provision_peer_channel_root(
+            hosts=self.HOSTS, run=run, links_doc=doc,
+            registry=[dict(REG[0], host="dev2")]), [])
+        by_host = {c[-2].split("@")[1]: c[-1] for c in calls}
+        self.assertIn("peer-channel-root: ok", by_host["2.2.2.2"])     # full leg, not policy-only
+        self.assertIn("nothing to tear down", by_host["1.1.1.1"])
 
 
 class TestValidation(unittest.TestCase):
