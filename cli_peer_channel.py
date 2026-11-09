@@ -81,6 +81,9 @@ def load_registry(path=None):
         return json.load(f)
 
 
+CONTROLLER_HOME = "airuleset"    # the controller's hostname: home of its own bridge (#1293)
+
+
 def root_host_names():
     import airuleset  # L-E: DISK_GUARD_ROOT_HOSTS lives in cli_fleet, via the facade
     return {h.get("name") for h in airuleset.DISK_GUARD_ROOT_HOSTS}
@@ -131,9 +134,10 @@ def _bridge_errors(links_doc, root_hosts=None):
             errors.append("bridge %s: needs account, path and hosts" % name)
             continue
         home = spec.get("home")
-        if home is not None and not (isinstance(home, str) and home in (
-                root_hosts if root_hosts is not None else root_host_names())):
-            errors.append("bridge %s: home %r is not a root-leg host" % (name, home))
+        roots = root_hosts if root_hosts is not None else root_host_names()
+        if not (isinstance(home, str) and (home in roots or home == CONTROLLER_HOME)):
+            errors.append("bridge %s: home %r is not a root-leg host or %s"
+                          % (name, home, CONTROLLER_HOME))
         for host, far in spec["hosts"].items():
             if host not in links_doc["hosts"]:
                 errors.append("bridge %s: %s is not a links host" % (name, host))
@@ -164,26 +168,14 @@ def accounts_for_host(host, links_doc=None, registry=None):
     return sorted(a for a in accts if not bootstrap.is_pending(a))
 
 
-def is_bridge_home(user, links_doc=None, host=None, root_hosts=None):
+def is_bridge_home(user, links_doc=None, host=None):
     """#1266: this account hosts a bridged project, so it needs the plugin and the
-    launcher flag on a box with no shared socket dir. #1293: a spec that declares
-    its ``home`` host matches only there; without it, only off the root-leg hosts
-    (the controller), where no root leg would tear the policy down."""
+    launcher flag on a box with no shared socket dir. #1293: only on the bridge's
+    declared ``home`` host; a bridge without one enables nothing."""
     links_doc = load_links() if links_doc is None else links_doc
-    roots = None
-    for s in (links_doc.get("bridges") or {}).values():
-        if not (isinstance(s, dict) and s.get("account") == user):
-            continue
-        if s.get("home") is not None:
-            if s.get("home") == host:
-                return True
-            continue
-        if host is None:
-            return True
-        roots = (root_host_names() if root_hosts is None else root_hosts) if roots is None else roots
-        if host not in roots:
-            return True
-    return False
+    return any(isinstance(s, dict) and s.get("account") == user
+               and isinstance(s.get("home"), str) and s.get("home") == host
+               for s in (links_doc.get("bridges") or {}).values())
 
 
 def bridge_home_hosts(links_doc):
@@ -433,7 +425,7 @@ def render_root_script(accounts, links_doc=None, registry=None):
     ])
 
 
-def render_home_script(official=()):
+def render_home_script(official):
     """#1266/#1293: a bridge home box needs only the managed channel allowlist; its
     sockets live on the far end. Idempotent, with a read-back. A shared root host
     keeps Anthropic's official channels too, as the full leg does."""
@@ -463,10 +455,9 @@ def apply_home_policy(run=subprocess.run, links_doc=None):
     has no shared dir, because the sockets live on the far end. [] or one failure."""
     links_doc = load_links() if links_doc is None else links_doc
     me = pwd.getpwuid(os.getuid()).pw_name
-    if not any(isinstance(s, dict) and s.get("account") == me and s.get("home") is None
-               for s in (links_doc.get("bridges") or {}).values()):
-        return []      # a declared home gets its policy from the root leg (#1293)
-    script = render_home_script()
+    if this_host() in root_host_names() or not is_bridge_home(me, links_doc, this_host()):
+        return []      # a root-host home gets its policy from the root leg (#1293)
+    script = render_home_script(official=())    # the controller: peer only (#1266)
     try:
         r = run(["sudo", "-n", "bash", "-c", script], capture_output=True, text=True, timeout=60)
     except (OSError, subprocess.SubprocessError) as e:

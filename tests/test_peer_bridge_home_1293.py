@@ -157,7 +157,7 @@ class TestBridgeHomeMatch(unittest.TestCase):
         return calls
 
     def test_apply_home_policy_runs_only_for_the_controller_home_on_it(self):
-        self.assertEqual(self._apply("h2", "h2"), [])        # the root leg owns a root home
+        self.assertEqual(self._apply("dev2", "dev2"), [])    # the root leg owns a root home
         self.assertEqual(self._apply(cpc.CONTROLLER_HOME, "dev1"), [])
         calls = self._apply(cpc.CONTROLLER_HOME, cpc.CONTROLLER_HOME)
         self.assertEqual(len(calls), 1)

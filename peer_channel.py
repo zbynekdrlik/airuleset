@@ -152,7 +152,7 @@ def bridge_home(links_doc, user, cwd, home, host=None):
     """#1266: (project, spec) when this session runs in a bridged project's home
     account and directory, else None. #1293: a declared ``home`` host must match."""
     for name, spec in _bridges(links_doc).items():
-        if isinstance(spec, dict) and spec.get("home", host) in (host, None) \
+        if isinstance(spec, dict) and spec.get("home") == host is not None \
                 and resolve_project({name: spec}, user, cwd, home):
             return name, spec
     return None

@@ -226,6 +226,7 @@
   "bridges": {
     "airuleset": {
       "account": "airuleset",
+      "home": "airuleset",
       "path": "~/devel/airuleset",
       "hosts": {
         "dev1": {
