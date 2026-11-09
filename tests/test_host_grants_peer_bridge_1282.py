@@ -329,11 +329,12 @@ class TestBridge(_Env):
         self.assertIn("at session start; call peers for the current list", text)
 
     def test_only_the_home_directory_is_the_home_end(self):
-        doc = {"bridges": {"home": {"account": ME, "path": "/srv/home"}}}
+        doc = {"bridges": {"home": {"account": ME, "home": "b", "path": "/srv/home"}}}
         with mock.patch("os.path.realpath", side_effect=lambda p: p):
-            self.assertEqual(pc.bridge_home(doc, ME, "/srv/home/sub", "/h")[0], "home")
-            self.assertIsNone(pc.bridge_home(doc, ME, "/srv/other", "/h"))
-            self.assertIsNone(pc.bridge_home(doc, "someone", "/srv/home", "/h"))
+            self.assertEqual(pc.bridge_home(doc, ME, "/srv/home/sub", "/h", "b")[0], "home")
+            self.assertIsNone(pc.bridge_home(doc, ME, "/srv/other", "/h", "b"))
+            self.assertIsNone(pc.bridge_home(doc, "someone", "/srv/home", "/h", "b"))
+            self.assertIsNone(pc.bridge_home(doc, ME, "/srv/home", "/h", "other"))   # #1293
 
 
 class TestManagedSide(unittest.TestCase):
@@ -347,14 +348,15 @@ class TestManagedSide(unittest.TestCase):
         self.assertNotIn("zbynekdrlik/airuleset", cpc.peer_repos("dstack"))
 
     def test_home_account_gets_the_plugin(self):
-        doc = {"bridges": {"airuleset": {"account": "airuleset"}}}
-        self.assertTrue(cpc.is_bridge_home("airuleset", doc))
-        self.assertFalse(cpc.is_bridge_home("dstack", doc))
+        doc = {"bridges": {"airuleset": {"account": "airuleset", "home": cpc.CONTROLLER_HOME}}}
+        self.assertTrue(cpc.is_bridge_home("airuleset", doc, cpc.CONTROLLER_HOME))
+        self.assertFalse(cpc.is_bridge_home("dstack", doc, cpc.CONTROLLER_HOME))
 
     def test_home_policy_failure_is_loud(self):
-        doc = {"bridges": {"x": {"account": ME}}}
+        doc = {"bridges": {"x": {"account": ME, "home": cpc.CONTROLLER_HOME}}}
         run = mock.Mock(return_value=mock.Mock(returncode=1, stdout="", stderr="no sudo"))
-        self.assertEqual(cpc.apply_home_policy(run, doc), [("home", "rc=1")])
+        with mock.patch.object(cpc, "this_host", return_value=cpc.CONTROLLER_HOME):
+            self.assertEqual(cpc.apply_home_policy(run, doc), [("home", "rc=1")])
         self.assertIn(cpc.POLICY_PATH, run.call_args[0][0][-1])
 
     FAR = {"account": "far", "ssh": "far@10.0.0.1", "identity": "~/k",
@@ -362,7 +364,7 @@ class TestManagedSide(unittest.TestCase):
 
     def _errors(self, **far):
         links = {"hosts": {"h": {"links": []}},
-                 "bridges": {"x": {"account": "a", "path": "~/x",
+                 "bridges": {"x": {"account": "a", "home": "h", "path": "~/x",
                                    "hosts": {"h": dict(self.FAR, **far)}}}}
         return cpc.validate_links(links, [], {"h"})
 
@@ -396,9 +398,10 @@ class TestManagedSide(unittest.TestCase):
                          [{"marketplace": "airuleset", "plugin": "peer"}])
 
     def test_home_policy_timeout_does_not_stop_the_root_leg(self):
-        doc = {"bridges": {"x": {"account": ME}}}
+        doc = {"bridges": {"x": {"account": ME, "home": cpc.CONTROLLER_HOME}}}
         run = mock.Mock(side_effect=subprocess.TimeoutExpired("sudo", 60))
-        self.assertEqual(cpc.apply_home_policy(run, doc)[0][0], "home")
+        with mock.patch.object(cpc, "this_host", return_value=cpc.CONTROLLER_HOME):
+            self.assertEqual(cpc.apply_home_policy(run, doc)[0][0], "home")
 
     def test_a_foreign_account_gets_no_home_policy(self):
         run = mock.Mock()

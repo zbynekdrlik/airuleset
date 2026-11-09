@@ -61,9 +61,15 @@ class TestRootLeg(unittest.TestCase):
         self.assertIn("nothing to tear down", by_host["3.3.3.3"])
         self.assertIn("peer-channel-root: ok", by_host["1.1.1.1"])
 
-    def test_without_a_home_the_host_is_torn_down(self):
-        by_host = self.provision(_doc(home=None))
+    def test_a_controller_homed_bridge_tears_no_root_host_down_to_a_policy(self):
+        by_host = self.provision(_doc(home=cpc.CONTROLLER_HOME))
         self.assertIn("nothing to tear down", by_host["2.2.2.2"])
+
+    def test_the_far_end_of_the_presenter_bridge_renders_on_dev1(self):
+        doc, reg = cpc.load_links(), cpc.load_registry()
+        script = cpc.render_root_script(cpc.accounts_for_host("dev1", doc, reg), doc, reg)
+        self.assertIn("useradd --system --create-home --home-dir /var/lib/presenter-peer", script)
+        self.assertIn("bridge --project presenter", script)
 
 
 class TestLinksHostAlsoHome(TestRootLeg):
@@ -75,7 +81,7 @@ class TestLinksHostAlsoHome(TestRootLeg):
 
 class TestValidation(unittest.TestCase):
     def test_a_non_string_home_is_a_validation_error_not_a_crash(self):
-        for bad in (["h2"], {"h": 1}, 7, ""):
+        for bad in (["h2"], {"h": 1}, 7, "", None):
             errs = cpc.validate_links(_doc(home=bad), REG, root_hosts={"h1", "h2"})
             self.assertTrue(any("home" in e for e in errs), (bad, errs))
         self.assertEqual(cpc.bridge_home_hosts(_doc(home=["h2"])), set())
@@ -99,13 +105,18 @@ class TestBridgeHomeMatch(unittest.TestCase):
         self.assertFalse(cpc.is_bridge_home("nl", _doc(), "h1"))
         self.assertFalse(cpc.is_bridge_home("other", _doc(), "h2"))
 
-    def test_undeclared_home_matches_only_off_the_root_hosts(self):
-        # review 1: a home removed later must not leave dev2 enabled while the root
-        # leg tears its policy down; an undeclared home is the controller's case
+    def test_an_undeclared_home_matches_nowhere(self):
+        # review 2: install and runtime must agree; home is required, so a bridge
+        # without one is invalid and enables no host
         doc = _doc(home=None)
-        self.assertFalse(cpc.is_bridge_home("nl", doc, "h1", root_hosts={"h1", "h2"}))
-        self.assertTrue(cpc.is_bridge_home("nl", doc, "controller", root_hosts={"h1", "h2"}))
-        self.assertTrue(cpc.is_bridge_home("nl", doc))
+        for host in ("h1", "h2", cpc.CONTROLLER_HOME, None):
+            self.assertFalse(cpc.is_bridge_home("nl", doc, host), host)
+
+    def test_the_controller_bridge_is_homed_on_the_controller(self):
+        doc = cpc.load_links()
+        self.assertEqual(doc["bridges"]["airuleset"]["home"], cpc.CONTROLLER_HOME)
+        self.assertTrue(cpc.is_bridge_home("airuleset", doc, cpc.CONTROLLER_HOME))
+        self.assertFalse(cpc.is_bridge_home("airuleset", doc, "dev1"))
 
     def test_install_step_enables_the_home_account_only_on_its_host(self):
         import tempfile
@@ -130,14 +141,27 @@ class TestBridgeHomeMatch(unittest.TestCase):
         doc = _doc()
         self.assertEqual(pc.bridge_home(doc, "nl", "/h/p", "/h", host="h2")[0], "p")
         self.assertIsNone(pc.bridge_home(doc, "nl", "/h/p", "/h", host="h1"))
-        self.assertEqual(pc.bridge_home(_doc(home=None), "nl", "/h/p", "/h", host="h1")[0], "p")
+        self.assertIsNone(pc.bridge_home(_doc(home=None), "nl", "/h/p", "/h", host="h1"))
 
-    def test_apply_home_policy_skips_a_root_homed_bridge(self):
-        import pwd
-        import os
-        me = pwd.getpwuid(os.getuid()).pw_name
-        doc = {"bridges": {"p": {"account": me, "home": "h2", "path": "~/p", "hosts": {}}}}
-        self.assertEqual(cpc.apply_home_policy(lambda *a, **k: self.fail("ran"), doc), [])
+    def _apply(self, home, host):
+        from unittest import mock
+        doc = {"bridges": {"p": {"account": "nl", "home": home, "path": "~/p", "hosts": {}}}}
+        calls = []
+
+        def run(argv, **kw):
+            calls.append(argv)
+            return mock.Mock(returncode=0, stdout="ok", stderr="")
+        with mock.patch.object(cpc.pwd, "getpwuid", return_value=mock.Mock(pw_name="nl")), \
+                mock.patch.object(cpc, "this_host", return_value=host):
+            self.assertEqual(cpc.apply_home_policy(run, doc), [])
+        return calls
+
+    def test_apply_home_policy_runs_only_for_the_controller_home_on_it(self):
+        self.assertEqual(self._apply("h2", "h2"), [])        # the root leg owns a root home
+        self.assertEqual(self._apply(cpc.CONTROLLER_HOME, "dev1"), [])
+        calls = self._apply(cpc.CONTROLLER_HOME, cpc.CONTROLLER_HOME)
+        self.assertEqual(len(calls), 1)
+        self.assertNotIn('"plugin": "telegram"', calls[0][-1])   # controller: peer only (#1266)
 
 
 if __name__ == "__main__":
