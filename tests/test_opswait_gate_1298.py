@@ -185,6 +185,12 @@ class Classify(unittest.TestCase):
         r = _run(cmd, rows=_no_read)
         self.assertEqual((r[0]["verdict"], r[0]["reason"]), ("BLOCK", "owner"))
 
+    def test_a_valid_wait_next_to_an_owner_line_passes(self):
+        body = GOOD + "\nWaiting-on: owner — power-cycle — ask him"
+        r = _run("gh issue edit 5 --add-label ops-wait",
+                 rows=[{"body": body, "ts": NOW - 60}])
+        self.assertEqual(r[0]["verdict"], "PASS")
+
     def test_label_forms(self):
         for cmd in ("gh issue edit 5 --add-label 'bug,ops-wait'",
                     "gh issue edit 5 --add-label=ops-wait",
