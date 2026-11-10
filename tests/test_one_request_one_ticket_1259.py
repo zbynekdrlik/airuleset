@@ -30,7 +30,6 @@ class TestPlannedWorkIsRetired(unittest.TestCase):
 
     def test_planned_work_is_not_an_accepted_reason(self):
         self.assertNotIn("planned-work", parse.ALLOWED)
-        self.assertNotIn("planned-work", parse.EXEMPT_FROM_CAP)
 
     def test_a_planned_work_filing_is_blocked_with_the_checklist_way(self):
         r = run(body_cmd("step 2 of the plan", "the second step",
@@ -46,20 +45,18 @@ class TestPlannedWorkIsRetired(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
 
 
-class TestDailyCap(unittest.TestCase):
+class TestCapsRemoved1297(unittest.TestCase):
+    """#1297 (owner 10.11.2026) reversed the #1259 caps: no daily cap, no
+    chain-width cap; planned-work stays retired."""
 
-    def test_daily_cap_is_two(self):
-        self.assertEqual(caps.DAILY_CAP, 2)
+    def test_no_daily_or_width_cap(self):
+        self.assertFalse(hasattr(caps, "DAILY_CAP"))
+        self.assertFalse(hasattr(caps, "CHAIN_WIDTH_CAP"))
 
-    def test_chain_width_cap_is_one(self):
-        # a 2nd finding off one ticket goes ON that ticket
-        self.assertEqual(caps.CHAIN_WIDTH_CAP, 1)
-
-    def test_block_message_names_the_new_cap_and_no_planned_work(self):
+    def test_block_message_has_no_cap_and_planned_work_only_as_retired(self):
         from gates.filing import render
-        # the criterion token, not the `complete-planned-work.md` file name
-        self.assertNotRegex(render.BLOCK_MSG, r"(?<!complete-)planned-work")
-        self.assertIn("soft filing cap of 2", render.BLOCK_MSG)
+        self.assertNotIn("soft filing cap", render.BLOCK_MSG)
+        self.assertIn("`planned-work` is retired", render.BLOCK_MSG)
 
 
 class TestFrontmatterYaml(unittest.TestCase):
@@ -90,9 +87,10 @@ class TestDoctrineOneTicket(unittest.TestCase):
         self.assertNotIn("decompose it into filed issues", text)
         self.assertIn("checklist", text)
 
-    def test_no_dropped_work_records_on_the_current_ticket(self):
+    def test_no_dropped_work_keeps_plan_steps_off_tickets(self):
+        # #1297 keeps this half of #1259: a plan step is never its own ticket
         text = (ROOT / "modules/quality/no-dropped-work.md").read_text(encoding="utf-8")
-        self.assertIn("ONE owner request = ONE ticket", text)
+        self.assertIn("plan steps never become tickets", text)
 
 
 if __name__ == "__main__":

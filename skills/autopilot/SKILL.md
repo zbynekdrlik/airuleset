@@ -50,7 +50,7 @@ no "nothing is hands-off so I'm stopping". You answer the important questions; e
 - `ci-monitoring.md` — 2-branch single-CI repo: the worker monitors its OWN CI **foreground** (NEVER `run_in_background` — that ends the subagent), the main loop verifies the result; long / multi-stage pipeline (3-branch): the SUPERVISOR owns the CI waits and the worker returns per stage (Step 3 multi-stage note)
 - `post-deploy-verification.md` / `version-on-dashboard.md` — deploys verified via the live DOM version
 - `milestone-notifications.md` — short `❓`/`✅` idle pings only on a worker's ❓ question or the FINAL ✅ (mobile model); BUT each finished+deployed ticket ALSO sends ONE structured Discord completion card (the worker fires it directly at merge — the user's explicit per-ticket ask); every device message @mentions the tmux owner (zbynek/marek)
-- `no-dropped-work.md` — everything identified but unfinished is recorded on the CURRENT ticket (`- [ ]` item / comment, #1259); workers return `followup_candidates:`
+- `no-dropped-work.md` — a step of the same deliverable is a `- [ ]` line in the ticket's description, a separate deliverable its own ticket linked both ways (#1297); workers return `followup_candidates:`
 - `verify-issue-still-valid.md` — the worker FIRST proves the issue still reproduces against current code + live system; obsolete/already-solved tickets get closed with evidence, never blindly implemented
 - `ask-before-assuming.md` — a genuine per-issue question is a CONVERSATION with you, asked the MOMENT the ticket needs it and it ALWAYS pings; then either BLOCK (`❓ NEEDS YOU`) or ask-and-continue (`❓ ASKED` + track on the issue, work other tickets meanwhile) — never buried, never a reason to abandon the issue, never a reason to reproach you (NO night/day difference (#791): ask the moment it arises 24/7 — no night-hour cutoff, no time-of-day deferral)
 - `user-questions-slovak.md` — HOW to phrase it: SELF-CONTAINED (a person with ZERO terminal context understands it — which project, what happened, every cross-project/ticket link explained), plain Slovak, no jargon; delivered as the `❓` text marker (waits UNLIMITED), NEVER a 60-second `AskUserQuestion` dialog for an away user; structured template + ONE decision per ping is hook-enforced
@@ -739,7 +739,7 @@ merge→gates→push at a time per repo across all sessions).
    - **Worker filing authority — NONE (#842).** A worker has NO `gh issue create` / `gh api
      …/issues` POST authority — the scope-gate hook hard-BLOCKS a subagent's filing (payload
      `agent_id`). It FIXES every discovery in-lane and returns a `followup_candidates:` line
-     (title + which of the six criteria it clears + est. LoC) for YOU to record as `- [ ]` items on the current ticket (a NEW issue only for a separate defect outside the request, #1259). At
+     (title + which of the six criteria it clears + est. LoC) for YOU to file — each separate one as its own ticket (`Part of #N` + a `- [ ] #<new>` line on the current ticket), a step of the same deliverable as a `- [ ]` line (#1297). At
      integration (Step 4) a worker return carrying a `filed:` line is REJECTED — send that lane
      back (`SendMessage` if it is alive, else re-dispatch fresh) to fix it in-lane; never accept
      a worker-filed ticket. This is the same net-drain discipline that gates YOUR OWN
@@ -946,7 +946,7 @@ merge→gates→push at a time per repo across all sessions).
    >    `arch <oblasť> OK|REWORK fixed|REWORK #N` token on its `✅ Overené:` line** (`completion-report.md`,
    >    hook-enforced). A `REWORK` is FIXED in the same change (bounce the lane, or fix it at
    >    integration) → `REWORK fixed`. Only a separate, larger defect that cannot be fixed there
-   >    becomes ONE ticket labelled `architecture-rework` under the normal #1259 filing gate (a real
+   >    becomes ONE ticket labelled `architecture-rework` under the normal filing gate (a real
    >    criterion such as `>300-loc` / `cross-cutting`; body: area + files + concrete patchwork
    >    signs + target concept) → `REWORK #N`. ONE open rework ticket per area: a further finding
    >    there is a COMMENT on it, never a second. It is INFRA class (below) and sorts first. A

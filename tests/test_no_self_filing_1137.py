@@ -516,7 +516,8 @@ class ReworkFixedOrOneTicket(unittest.TestCase):
 
     def test_no_cap_exemption_left(self):
         from gates.filing import caps, parse, render
-        self.assertEqual(parse.EXEMPT_FROM_CAP, {"user-request"})
+        self.assertEqual(parse.PRESENCE_GATED, {"user-request"})  # #1297: no caps left
+        self.assertFalse(hasattr(caps, "DAILY_CAP"))
         self.assertFalse(hasattr(caps, "UNCAPPED_ALWAYS"))
         self.assertNotIn("architecture-rework", parse.ALLOWED)
         self.assertNotIn("architecture-rework", render.BLOCK_MSG)
@@ -616,15 +617,16 @@ class DoctrineRecordsOnTicket(unittest.TestCase):
         return json.loads(p.stdout)["reason"]
 
     def test_hook_dismissal_says_record_on_current_ticket(self):
+        # #1297: a defect outside the change is its OWN ticket, linked back.
         reason = self._hook("The failing lint test is pre-existing, so I left it.")
-        self.assertNotIn("gh issue create", reason)
-        self.assertIn("current ticket", reason)
+        self.assertIn("its OWN ticket", reason)
+        self.assertIn("Part of #<current>", reason)
 
     def test_hook_ask_to_file_drops_the_permission_wording(self):
         reason = self._hook("I drafted 3 issues. Should I create the issues or hold off?")
         self.assertNotIn("NEVER needs approval", reason)
         self.assertNotIn("NON-DESTRUCTIVE", reason)
-        self.assertIn("current ticket", reason)
+        self.assertIn("own linked ticket", reason)  # #1297
 
 
 if __name__ == "__main__":

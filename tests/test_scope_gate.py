@@ -49,7 +49,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 sys.path.insert(0, str(REPO_ROOT))
 import airuleset  # noqa: E402
-from gates.filing.caps import CHAIN_WIDTH_CAP, DAILY_CAP  # noqa: E402  (#1259: 2/day, 1/parent)
+# #1297: no daily cap, no chain-width cap -- more filings than either old cap.
+_MANY = 3
 
 
 _DEFAULT_EMPTY_GH_DIR = None
@@ -782,180 +783,48 @@ class TestDedupGate(TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
 
 
-class TestDailyCap(TestCase):
-    """#329 -- soft per-day, per-repo cap on agent-authored filings
-    (#1259: DAILY_CAP/day/repo, now 2). Real SEQUENTIAL filings into a shared HOME (never a
-    hand-seeded log line), so the test exercises the hook's OWN log
-    format end-to-end instead of a fixture's own assumption about it."""
+class TestNoFilingCaps1297(TestCase):
+    """#1297 (owner 10.11.2026) -- the #329/#1259 daily cap and chain-width cap
+    are gone: every separate deliverable gets its own ticket. Real SEQUENTIAL
+    filings into a shared HOME, so the hook's own log is in the loop."""
 
-    def test_filing_past_the_daily_cap_blocks(self):
-        home = tempfile.mkdtemp(prefix="airuleset-dailycap-test-")
+    def test_many_filings_in_one_day_pass(self):
+        home = tempfile.mkdtemp(prefix="airuleset-nocap-test-")
         self.addCleanup(shutil.rmtree, home, ignore_errors=True)
         with tempfile.TemporaryDirectory() as d:
-            for i in range(DAILY_CAP):
+            for i in range(_MANY):
                 r = run(body_cmd(
                     "finding %d" % i,
                     "A genuinely distinct topic %d: %s." % (i, os.urandom(4).hex()),
                     scope_gate="cross-cutting"), home=home, cwd=d)
-                self.assertEqual(r.returncode, 0, "seed %d: %s" % (i, r.stderr))
-            r = run(body_cmd(
-                "finding past the cap",
-                "One more genuinely distinct topic: %s." % os.urandom(4).hex(),
-                scope_gate="cross-cutting"), home=home, cwd=d)
-            self.assertEqual(r.returncode, 2, r.stderr)
-            # #329 adversarial review: assert the exact classified reason.
-            self.assertIn('"finding past the cap" -> daily-cap', r.stderr)
+                self.assertEqual(r.returncode, 0, "filing %d: %s" % (i, r.stderr))
 
-    def test_last_filing_under_the_daily_cap_still_passes(self):
-        home = tempfile.mkdtemp(prefix="airuleset-dailycap-test2-")
-        self.addCleanup(shutil.rmtree, home, ignore_errors=True)
-        with tempfile.TemporaryDirectory() as d:
-            for i in range(DAILY_CAP - 1):
-                r = run(body_cmd(
-                    "finding %d" % i,
-                    "A genuinely distinct topic %d: %s." % (i, os.urandom(4).hex()),
-                    scope_gate="cross-cutting"), home=home, cwd=d)
-                self.assertEqual(r.returncode, 0, "seed %d: %s" % (i, r.stderr))
-            r = run(body_cmd(
-                "finding at the cap",
-                "The last genuinely distinct topic: %s." % os.urandom(4).hex(),
-                scope_gate="cross-cutting"), home=home, cwd=d)
-            self.assertEqual(r.returncode, 0, r.stderr)
-
-    def test_exempt_criteria_bypass_the_cap(self):
-        home = tempfile.mkdtemp(prefix="airuleset-dailycap-test3-")
-        self.addCleanup(shutil.rmtree, home, ignore_errors=True)
-        with tempfile.TemporaryDirectory() as d:
-            for i in range(DAILY_CAP):
-                r = run(body_cmd(
-                    "finding %d" % i,
-                    "A genuinely distinct topic %d: %s." % (i, os.urandom(4).hex()),
-                    scope_gate="cross-cutting"), home=home, cwd=d)
-                self.assertEqual(r.returncode, 0, "seed %d: %s" % (i, r.stderr))
-            r = run(body_cmd(
-                "user requested this",
-                "The user explicitly asked for this: %s." % os.urandom(4).hex(),
-                scope_gate="user-request"), home=home, cwd=d)
-            self.assertEqual(r.returncode, 0, r.stderr)
-
-    def test_cap_is_scoped_per_repo(self):
-        home = tempfile.mkdtemp(prefix="airuleset-dailycap-test4-")
-        self.addCleanup(shutil.rmtree, home, ignore_errors=True)
-        with tempfile.TemporaryDirectory() as d1:
-            for i in range(DAILY_CAP):
-                r = run(body_cmd(
-                    "finding %d" % i,
-                    "A genuinely distinct topic %d: %s." % (i, os.urandom(4).hex()),
-                    scope_gate="cross-cutting"), home=home, cwd=d1)
-                self.assertEqual(r.returncode, 0, "seed %d: %s" % (i, r.stderr))
-            with tempfile.TemporaryDirectory() as d2:
-                r = run(body_cmd(
-                    "finding in a different repo",
-                    "A genuinely distinct topic: %s." % os.urandom(4).hex(),
-                    scope_gate="cross-cutting"), home=home, cwd=d2)
-                self.assertEqual(r.returncode, 0, r.stderr)
-
-    def test_batch_within_one_call_hits_the_cap_too(self):
-        home = tempfile.mkdtemp(prefix="airuleset-dailycap-test5-")
+    def test_batch_within_one_call_passes(self):
+        home = tempfile.mkdtemp(prefix="airuleset-nocap-test2-")
         self.addCleanup(shutil.rmtree, home, ignore_errors=True)
         with tempfile.TemporaryDirectory() as d:
             items = [
                 ("finding %d" % i,
                  "A genuinely distinct topic %d: %s." % (i, os.urandom(4).hex()),
                  "cross-cutting")
-                for i in range(DAILY_CAP + 1)
+                for i in range(_MANY)
             ]
             r = run(_multi_body_cmd(items), home=home, cwd=d)
-            self.assertEqual(r.returncode, 2, r.stderr)
-
-
-class TestChainWidthCap(TestCase):
-    """#329 -- chain-WIDTH cap: siblings off ONE parent, same day, same
-    repo (#1259: CHAIN_WIDTH_CAP, now 1 -- the 2nd blocks). Extends #311's chain-DEPTH cap with the
-    WIDTH half of the same measured failure (odoo-erp's real
-    #3250/#3251/#3252/#3258 -- four siblings off one parent, each
-    individually depth-1). Reuses the SAME "(#N follow-up)" wording the
-    depth cap already detects."""
-
-    def test_sibling_past_the_width_cap_blocks(self):
-        tmp = tempfile.mkdtemp(prefix="airuleset-widthcap-test-")
-        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
-        gh_bin = _fake_gh(tmp, {
-            "100": {"title": "original bug", "body": "Just a normal ticket."},
-        })
-        with tempfile.TemporaryDirectory() as d:
-            for i in range(CHAIN_WIDTH_CAP):
-                r = run(body_cmd(
-                    "sibling %d (#100 follow-up)" % i,
-                    "Found while fixing #100 (#100 follow-up).",
-                    scope_gate="cross-cutting"), home=tmp, cwd=d, gh_bin=gh_bin)
-                self.assertEqual(r.returncode, 0, "sibling %d: %s" % (i, r.stderr))
-            r = run(body_cmd(
-                "sibling past (#100 follow-up)",
-                "Found while fixing #100 (#100 follow-up).",
-                scope_gate="cross-cutting"), home=tmp, cwd=d, gh_bin=gh_bin)
-            self.assertEqual(r.returncode, 2, r.stderr)
-            # #329 adversarial review: assert the exact classified reason.
-            self.assertIn(
-                '"sibling past (#100 follow-up)" -> chain-width-cap', r.stderr)
-
-    def test_siblings_up_to_the_width_cap_pass(self):
-        tmp = tempfile.mkdtemp(prefix="airuleset-widthcap-test2-")
-        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
-        gh_bin = _fake_gh(tmp, {
-            "100": {"title": "original bug", "body": "Just a normal ticket."},
-        })
-        with tempfile.TemporaryDirectory() as d:
-            for i in range(CHAIN_WIDTH_CAP):
-                r = run(body_cmd(
-                    "sibling %d (#100 follow-up)" % i,
-                    "Found while fixing #100 (#100 follow-up).",
-                    scope_gate="cross-cutting"), home=tmp, cwd=d, gh_bin=gh_bin)
-                self.assertEqual(r.returncode, 0, r.stderr)
-
-    def test_width_cap_scoped_per_parent(self):
-        tmp = tempfile.mkdtemp(prefix="airuleset-widthcap-test3-")
-        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
-        gh_bin = _fake_gh(tmp, {
-            "100": {"title": "original bug A", "body": "Just a normal ticket."},
-            "200": {"title": "original bug B", "body": "Just a normal ticket."},
-        })
-        # the per-parent scope is observable only while one more filing fits the day
-        self.assertLess(CHAIN_WIDTH_CAP, DAILY_CAP)
-        with tempfile.TemporaryDirectory() as d:
-            for i in range(CHAIN_WIDTH_CAP):
-                r = run(body_cmd(
-                    "sibling-A %d (#100 follow-up)" % i,
-                    "Found while fixing #100 (#100 follow-up).",
-                    scope_gate="cross-cutting"), home=tmp, cwd=d, gh_bin=gh_bin)
-                self.assertEqual(r.returncode, 0, r.stderr)
-            r = run(body_cmd(
-                "sibling-B 0 (#200 follow-up)",
-                "Found while fixing #200 (#200 follow-up).",
-                scope_gate="cross-cutting"), home=tmp, cwd=d, gh_bin=gh_bin)
             self.assertEqual(r.returncode, 0, r.stderr)
 
-    def test_width_cap_applies_to_user_request_children(self):
-        # #1259 review: a user-request naming a parent was the new split door;
-        # only an area-review verdict escapes the width cap now.
-        tmp = tempfile.mkdtemp(prefix="airuleset-widthcap-test4-")
+    def test_siblings_off_one_parent_pass(self):
+        tmp = tempfile.mkdtemp(prefix="airuleset-nocap-siblings-")
         self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
         gh_bin = _fake_gh(tmp, {
             "100": {"title": "original bug", "body": "Just a normal ticket."},
         })
         with tempfile.TemporaryDirectory() as d:
-            for i in range(CHAIN_WIDTH_CAP):
+            for i, topic in enumerate(("parser", "renderer", "logger")):
                 r = run(body_cmd(
-                    "sibling %d (#100 follow-up)" % i,
-                    "Found while fixing #100 (#100 follow-up).",
+                    "%s defect (#100 follow-up)" % topic,
+                    "Found while fixing #100 (#100 follow-up) %d." % i,
                     scope_gate="cross-cutting"), home=tmp, cwd=d, gh_bin=gh_bin)
-                self.assertEqual(r.returncode, 0, r.stderr)
-            r = run(body_cmd(
-                "sibling 2 (#100 follow-up)",
-                "A user directive, distinct from the cross-cutting siblings.",
-                scope_gate="user-request"), home=tmp, cwd=d, gh_bin=gh_bin)
-            self.assertEqual(r.returncode, 2, r.stderr)
-            self.assertIn("-> chain-width-cap", r.stderr)
+                self.assertEqual(r.returncode, 0, "sibling %d: %s" % (i, r.stderr))
 
     def test_parents_field_is_written_to_the_log(self):
         tmp = tempfile.mkdtemp(prefix="airuleset-widthcap-test5-")
@@ -972,34 +841,6 @@ class TestChainWidthCap(TestCase):
         log = Path(tmp) / ".claude" / "scope-gate.log"
         text = log.read_text()
         self.assertIn("parents=100", text)
-
-    def test_width_cap_checks_every_referenced_parent_not_just_the_first(self):
-        # #329 adversarial review MAJOR: the first cut only ever checked
-        # parents[0] while crediting ALL referenced parents on the PASS
-        # side -- a filing naming an early DECOY parent (with zero
-        # siblings) before its real, already-saturated parent would
-        # wrongly pass. `parents[0]` here is the decoy #999 (title comes
-        # before body in the concatenated text _chain_parents scans); the
-        # real, already-capped parent is #100, referenced second.
-        tmp = tempfile.mkdtemp(prefix="airuleset-widthcap-allparents-")
-        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
-        gh_bin = _fake_gh(tmp, {
-            "999": {"title": "decoy parent", "body": "An unrelated ticket."},
-            "100": {"title": "original bug", "body": "Just a normal ticket."},
-        })
-        with tempfile.TemporaryDirectory() as d:
-            for i in range(CHAIN_WIDTH_CAP):
-                r = run(body_cmd(
-                    "sibling %d (#100 follow-up)" % i,
-                    "Found while fixing #100 (#100 follow-up).",
-                    scope_gate="cross-cutting"), home=tmp, cwd=d, gh_bin=gh_bin)
-                self.assertEqual(r.returncode, 0, "sibling %d: %s" % (i, r.stderr))
-            r = run(body_cmd(
-                "decoy first (#999 follow-up)",
-                "Also found while fixing #100 (#100 follow-up).",
-                scope_gate="cross-cutting"), home=tmp, cwd=d, gh_bin=gh_bin)
-            self.assertEqual(r.returncode, 2, r.stderr)
-            self.assertIn("chain-width-cap", r.stderr)
 
 
 class TestScopeGate329ReviewFixes(TestCase):
@@ -1037,65 +878,21 @@ class TestScopeGate329ReviewFixes(TestCase):
             self.assertIn("verdict=NOTFILED", text)
             self.assertNotIn("verdict=PASS", text)
 
-            # If the phantom entry had wrongly counted, only DAILY_CAP - 1 of these
-            # DAILY_CAP genuinely distinct real filings would pass.
-            for i in range(DAILY_CAP):
-                r = run(body_cmd(
-                    "real finding %d" % i,
-                    "A genuinely distinct real topic %d: %s." %
-                    (i, os.urandom(4).hex()),
-                    scope_gate="cross-cutting"), home=home, cwd=d)
-                self.assertEqual(r.returncode, 0, "real %d: %s" % (i, r.stderr))
-
-    def test_exempt_filings_never_consume_daily_cap_budget(self):
-        # MAJOR: `_log_pass_count` used to count EVERY PASS line
-        # regardless of criterion, so an exempt planned-work/user-request
-        # batch silently consumed the SAME budget the block message
-        # promises is reserved for non-exempt filings.
-        home = tempfile.mkdtemp(prefix="airuleset-dailycap-exempt-")
-        self.addCleanup(shutil.rmtree, home, ignore_errors=True)
-        with tempfile.TemporaryDirectory() as d:
-            for i in range(10):
-                r = run(body_cmd(
-                    "user request %d" % i,
-                    "The user explicitly asked for this %d: %s." %
-                    (i, os.urandom(4).hex()),
-                    scope_gate="user-request"), home=home, cwd=d)
-                self.assertEqual(r.returncode, 0, "exempt %d: %s" % (i, r.stderr))
-            # The FIRST non-exempt filing of the day must still pass --
-            # if any exempt filing had wrongly counted, the daily count
-            # would already be >= 8 by now.
-            r = run(body_cmd(
-                "first real finding",
-                "A genuinely distinct real topic: %s." % os.urandom(4).hex(),
-                scope_gate="cross-cutting"), home=home, cwd=d)
-            self.assertEqual(r.returncode, 0, r.stderr)
-
     def test_gh_api_issues_path_resolves_the_same_target_repo_as_dash_R(self):
-        # MAJOR: the caps used to be keyed on the cwd-derived repo while
-        # the near-dup check used the filing's own -R target -- a
-        # `gh api repos/<o>/<r>/issues` filing (no -R flag at all) had NO
-        # target-repo resolution whatsoever and was capped/checked
-        # against the wrong (cwd) repo. Seed the cap via an explicit -R,
-        # then confirm the SAME target repo is reached via the API path.
+        # MAJOR: a `gh api repos/<o>/<r>/issues` filing (no -R flag) must
+        # resolve the SAME target repo as an explicit -R (the near-dup check
+        # and the log key on it). #1297: proven via the logged repo= field.
         home = tempfile.mkdtemp(prefix="airuleset-targetrepo-api-")
         self.addCleanup(shutil.rmtree, home, ignore_errors=True)
         with tempfile.TemporaryDirectory() as d:
-            for i in range(DAILY_CAP):
-                r = run(body_cmd(
-                    "finding %d" % i,
-                    "A genuinely distinct topic %d: %s." %
-                    (i, os.urandom(4).hex()),
-                    scope_gate="cross-cutting") + " -R owner/repo",
-                    home=home, cwd=d)
-                self.assertEqual(r.returncode, 0, "seed %d: %s" % (i, r.stderr))
             r = run(
                 "gh api repos/owner/repo/issues -X POST -f title=x "
                 "-f body='Dedup-checked: searched, found none\n"
                 "One more distinct topic.\nScope-gate: cross-cutting'",
                 home=home, cwd=d)
-            self.assertEqual(r.returncode, 2, r.stderr)
-            self.assertIn("daily-cap", r.stderr)
+            self.assertEqual(r.returncode, 0, r.stderr)
+        log = (Path(home) / ".claude" / "scope-gate.log").read_text()
+        self.assertIn("verdict=PASS  repo=owner/repo", log)
 
     def test_title_with_embedded_tab_does_not_corrupt_downstream_fields(self):
         # MAJOR: an embedded tab/newline in a TITLE used to be able to
@@ -1933,71 +1730,27 @@ class TestNetDrainHarness842(TestCase):
                 session_id="t-nd-present-" + uuid.uuid4().hex[:6], home=self.home)
         self.assertEqual(r.returncode, 0, r.stderr)
 
-    # ---- req 2: net-drain ratchet ----
-    def test_unattended_discovery_blocked_when_not_draining(self):
-        # created(9) >= closed(5) -> repo is NOT draining -> BLOCK.
+    # ---- req 2: the net-drain ratchet is gone (#1297) ----
+    def test_unattended_discovery_passes_on_a_non_draining_repo(self):
         r = run(body_cmd("net drain", "a broad security-boundary change across the auth layer",
                           scope_gate="security-boundary"),
                 gh_bin=_fake_gh_netdrain(self.tmp, created=9, closed=5),
                 session_id=self._away_sid(), home=self.home)
-        self.assertEqual(r.returncode, 2, r.stderr)
-        self.assertIn("drain", r.stderr.lower())
-
-    def test_unattended_discovery_blocked_at_parity(self):
-        # created == closed -> parity blocks (0/0 too, the day's first).
-        r = run(body_cmd("parity", "a broad security-boundary change across the auth layer",
-                          scope_gate="security-boundary"),
-                gh_bin=_fake_gh_netdrain(self.tmp, created=5, closed=5),
-                session_id=self._away_sid(), home=self.home)
-        self.assertEqual(r.returncode, 2, r.stderr)
-
-    def test_unattended_discovery_passes_when_draining(self):
-        # created(3) < closed(9) -> repo IS draining -> the ratchet allows.
-        r = run(body_cmd("draining ok", "a broad security-boundary change across the auth layer",
-                          scope_gate="security-boundary"),
-                gh_bin=_fake_gh_netdrain(self.tmp, created=3, closed=9),
-                session_id=self._away_sid(), home=self.home)
         self.assertEqual(r.returncode, 0, r.stderr)
 
-    def test_ratchet_gh_error_blocks_fail_safe(self):
-        # A gh error computing the counts -> BLOCK, never a wrong ALLOW.
-        r = run(body_cmd("gh error", "a broad security-boundary change across the auth layer",
-                          scope_gate="security-boundary"),
-                gh_bin=_fake_gh_netdrain(self.tmp, created=None, closed=None),
-                session_id=self._away_sid(), home=self.home)
-        self.assertEqual(r.returncode, 2, r.stderr)
-
-    def test_attended_discovery_now_ratchet_blocked_when_not_draining(self):
-        # #1070 item 7 (owner ruling 2026-09-18): the net-drain brake applies to
-        # EVERY filing session, ATTENDED included -- a present gk session filing
-        # under the owner identity on a non-draining repo is now refused too
-        # (REVERSES the pre-#1070 attended-exempt behaviour).
+    def test_attended_discovery_passes_on_a_non_draining_repo(self):
         r = run(body_cmd("attended not draining",
                           "a broad security-boundary change across the auth layer",
                           scope_gate="security-boundary"),
                 gh_bin=_fake_gh_netdrain(self.tmp, created=99, closed=0),
                 session_id="t-nd-present-" + uuid.uuid4().hex[:6], home=self.home)
-        self.assertEqual(r.returncode, 2, r.stderr)
-        self.assertIn("drain", r.stderr.lower())
-
-    def test_attended_discovery_passes_when_draining(self):
-        # #1070 item 7: an ATTENDED non-exempt filing still PASSES while the repo
-        # is strictly draining (created < closed) -- the brake only bites a
-        # non-draining repo.
-        r = run(body_cmd("attended draining",
-                          "a broad security-boundary change across the auth layer",
-                          scope_gate="security-boundary"),
-                gh_bin=_fake_gh_netdrain(self.tmp, created=2, closed=9),
-                session_id="t-nd-present-" + uuid.uuid4().hex[:6], home=self.home)
         self.assertEqual(r.returncode, 0, r.stderr)
 
-    def test_attended_exempt_still_passes_on_a_non_draining_repo(self):
-        # #1070 item 7: the exemption never meets the ratchet, even attended on a
-        # non-draining repo (#1259: planned-work is retired; user-request remains).
-        r = run(body_cmd("owner asked attended", "the owner asked for this",
-                          scope_gate="user-request"),
-                gh_bin=_fake_gh_netdrain(self.tmp, created=99, closed=0),
-                session_id="t-nd-present-" + uuid.uuid4().hex[:6], home=self.home)
+    def test_a_count_query_error_never_blocks(self):
+        r = run(body_cmd("gh error", "a broad security-boundary change across the auth layer",
+                          scope_gate="security-boundary"),
+                gh_bin=_fake_gh_netdrain(self.tmp, created=None, closed=None),
+                session_id=self._away_sid(), home=self.home)
         self.assertEqual(r.returncode, 0, r.stderr)
 
 

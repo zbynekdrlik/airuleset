@@ -39,11 +39,12 @@ class TestDurableDecisionsRule(TestCase):
         self.assertIn("Compaction fires MID-SESSION", t)
 
     def test_converged_plan_is_one_ticket_checklist(self):
-        # #1259 (owner 24.10.2026): a converged plan is ONE ticket with a
-        # checklist, never decomposed into child tickets.
+        # #1297 (owner 10.11.2026): steps of ONE deliverable are a checklist in
+        # its description; a separate deliverable is its own linked ticket.
         t = read(self.MOD)
-        self.assertIn("ONE ticket with a checklist, implementation SECOND", t)
-        self.assertIn("never split it into child tickets", t)
+        self.assertIn("a checklist in the description, implementation SECOND", t)
+        self.assertIn("never a ticket per step", t)
+        self.assertIn("`Part of #P` / `- [ ] #C`", t)
         self.assertIn("FRESH session could work it with zero conversation context", t)
 
     def test_continuous_self_test_present(self):

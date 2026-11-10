@@ -1,7 +1,7 @@
-### No Dropped Work — Everything You Identify Is Done Now or Recorded on Its Ticket
+### No Dropped Work — Every Separate Deliverable Gets Its Own Ticket
 
-**ONE owner request = ONE ticket (#1259, owner 24.10.2026: „aj keď ja zadám jednu úlohu, claude vygeneruje desiatky nových").** Work you IDENTIFY but do NOT complete is captured BEFORE you stop. The only three fates: (1) do it now, (2) record it on the CURRENT ticket — a `- [ ]` checklist item in its body or a comment — and cite it, (3) it was already tracked. A NEW issue only when the owner asks for one, or for a separate defect outside the request that cannot be fixed in the current change.
+**A NEW ticket for every separate deliverable (#1297, owner 10.11.2026: „nasilu sa pcha do existujucich ticketov aj veci ktore mali ist o novych … sa straca praca").** Separate = a different request, a task another project hands over (`gh issue create -R <receiving repo>` saying `Requested by owner/repo#N` + a peer tell, never a comment on its ticket), or a defect outside the change in hand. Link both ways: the child says `Part of #P`, the parent's description gets `- [ ] #C`.
 
-**Default fate = FIX NOW; filing is RATE-GATED (#842; #1259: 2/day, a plan step never).** A worktree WORKER cannot `gh issue create` — it fixes in-lane and returns `followup_candidates:`, which the supervisor adds to the current ticket.
+**The three fates of identified work:** fix it now (default); a `- [ ]` line in the description for a step of the SAME deliverable (plan steps never become tickets); its own linked ticket when separate. The description is the task list: a comment that adds work also adds its `- [ ]` line, and a ticket closes only when every line is `- [x]` with evidence (hook: `block-close-with-open-checklist.sh`). A worktree WORKER returns `followup_candidates:` instead.
 
-**Context gate:** `durable-decisions-to-tickets.md` — DECISIONS and FINDINGS land on the ticket too. Failure modes, mechanism, dedup and banned phrases: `skills/no-dropped-work-deep/DEEP.md` (auto-loads on `gh issue create`). Hook-enforced: `stop-check-untracked-work.sh` blocks dropped-work phrases; `block-ungated-issue-filing.sh` requires `Scope-gate:`.
+**Context gate:** `durable-decisions-to-tickets.md`. Failure modes, dedup and banned phrases: `skills/no-dropped-work-deep/DEEP.md` (auto-loads on `gh issue create`).

@@ -28,7 +28,7 @@ If ANY of these are not true, you are NOT done. Keep working.
 
 **Intent, not wording.** The examples above are representative. ANY phrase that shifts incomplete work to a later time, a different session, or a new issue — under any wording — is banned. If you're about to say something that means "I'll do this later," STOP and do it now.
 
-**If you discover something genuinely out of scope** (not in the plan, not in the original prompt, but important), record it on the CURRENT ticket (a `- [ ]` item or comment) BEFORE sending the completion report — the ONLY acceptable way to "postpone" work (#1259: a new issue only when the owner asks, or for a separate defect outside the request).
+**If you discover something genuinely out of scope** (not in the plan, not in the original prompt, but important), file it as its OWN ticket linked to the current one (`Part of #N` + a `- [ ] #<new>` line on `#N`) BEFORE sending the completion report; a step of the SAME deliverable is a `- [ ]` line in the current ticket's description instead (#1297) — the ONLY acceptable ways to "postpone" work.
 
 **CRITICAL — deferral phrases MUST cite the ticket number:**
 
@@ -48,7 +48,7 @@ If the completion report contains ANY of these deferral patterns (or rewordings)
 
 > "The actual root-cause fix for X is deferred — you'll see the real value once Y happens."
 
-NO `#N` → the work has been declared incomplete with NO tracking. This is the failure mode the rule exists to prevent. NEVER write a deferral phrase in a completion report without first recording the work on the current ticket and citing it.
+NO `#N` → the work has been declared incomplete with NO tracking. This is the failure mode the rule exists to prevent. NEVER write a deferral phrase in a completion report without first recording the work (a `- [ ]` line on the current ticket, or its own linked ticket when separate) and citing it.
 
 **Correct pattern:**
 
@@ -69,7 +69,7 @@ Before filing a follow-up issue, apply the bundling gate (per `autonomous-batch-
 
 If NONE of these apply → the cleanup is small and MUST land in the CURRENT PR, not a follow-up issue. Fix it, ship it in the same PR.
 
-**This gate is mechanically enforced, not prose-only, on every `gh issue create` / `gh api .../issues` POST** (`hooks/block-ungated-issue-filing.sh`, #137): the issue body must carry a `Scope-gate: <criterion>` line naming which of the six exemptions above applies (`>300-loc`/`schema-migration`/`api-break`/`security-boundary`/`cross-cutting`/`needs-user-decision`), or the owner-asked mode (`user-request`). `planned-work` is retired (#1259): a plan step is a `- [ ]` checklist item in the current ticket, never a new issue. No line, or a fabricated one that doesn't apply → fix it now in the current PR instead of filing.
+**This gate is mechanically enforced, not prose-only, on every `gh issue create` / `gh api .../issues` POST** (`hooks/block-ungated-issue-filing.sh`, #137): the issue body must carry a `Scope-gate: <criterion>` line naming which of the six exemptions above applies (`>300-loc`/`schema-migration`/`api-break`/`security-boundary`/`cross-cutting`/`needs-user-decision`), a separate deliverable (`separate-work`: another request, a task for another project, a defect outside the change in hand, #1297), or the owner-asked mode (`user-request`). `planned-work` is retired: a plan step is a `- [ ]` checklist item in the current ticket, never a new issue. No line, or a fabricated one that doesn't apply → fix it now in the current PR instead of filing.
 
 **Things that DO NOT qualify as "genuinely out of scope" (must be done in current PR):**
 

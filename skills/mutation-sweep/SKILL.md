@@ -41,7 +41,7 @@ one yet, that's tracked in its mutation-alignment issue.)
 6. **Survivors → issues:** the workflow files surviving mutants as `test-quality` issues. Verify:
    `gh issue list --label test-quality --state open`. If the workflow didn't auto-file, collect
    survivors from the run logs and `gh issue create` ONE `test-quality` issue for the sweep with
-   one `- [ ]` item per area (#1259: one request = one ticket).
+   one `- [ ]` item per area (steps of one deliverable, #1297).
 7. **Report:** mutants run, survivors found, the `#N` issues filed/confirmed. With `all`, one summary
    line per repo.
 

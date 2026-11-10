@@ -115,8 +115,8 @@ them, never drop silently.
 - **Milestone:** `arch-review: <model> <YYYY-MM-DD>` — model name from THIS session's
   environment (e.g. `opus-4.8`), date from the system clock at run time.
 - **ONE issue for the whole run** — one section per dimension that has surviving findings,
-  each concrete fix a `- [ ]` item under it (#1259, owner 24.10.2026: one request = one
-  ticket, never an issue per dimension or per fix).
+  each concrete fix a `- [ ]` item under it (one audit run = one deliverable, never an
+  issue per dimension or per fix; #1297).
 
 ## Phase 5 — Auto-create the issue (no confirm gate)
 

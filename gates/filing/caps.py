@@ -1,10 +1,11 @@
-"""gates.filing.caps -- the gh-backed lookups, soft caps, near-duplicate check,
-stream-routing decision, authority resolution and the net-drain ratchet for the
-ungated-issue-filing gate (#1020 Part 2).
+"""gates.filing.caps -- the gh-backed lookups, near-duplicate check,
+stream-routing decision and authority resolution for the ungated-issue-filing
+gate (#1020 Part 2). #1297 removed the daily cap, the chain-width cap and the
+net-drain brake: a separate deliverable always gets its own ticket.
 
 Extracted VERBATIM from the classifier that lived embedded in
 hooks/block-ungated-issue-filing.sh; the pure parse helpers it needs
-(EXEMPT_FROM_CAP, the stream regexes, _title_jaccard/_tokenize, the label
+(the stream regexes, _title_jaccard/_tokenize, the label
 readers, _target_repo_for_segment) are imported from ``gates.filing.parse``. The
 per-invocation caches (`_issue_list_cache`/`_label_list_cache`/`_authority_cache`)
 are module-level exactly as in the single-script heredoc: the module loads once
@@ -17,10 +18,8 @@ import os
 import re
 import subprocess
 import sys
-from datetime import datetime
 
 from gates.filing.parse import (
-    EXEMPT_FROM_CAP,
     STREAM_LABEL_RE,
     STREAM_ROUTING_RE,
     _all_labels,
@@ -29,13 +28,6 @@ from gates.filing.parse import (
     _tokenize,
     TOKEN_JACCARD_THRESHOLD,
 )
-
-# #1259 (owner 24.10.2026): 8 -> 2 non-exempt discovery filings per repo per box per day.
-DAILY_CAP = 2
-
-# #1259: 2 -> 1 -- a 2nd finding off one ticket goes ON that ticket.
-CHAIN_WIDTH_CAP = 1
-
 
 def _gh_view_text(parent, cwd, repo=None):
     """title + "\\n" + body of issue `parent`, or None on ANY failure
@@ -140,85 +132,6 @@ def _near_duplicate(title, body, cwd, repo, batch_titles):
             best = (num, ratio)
     return str(best[0]) if best else None
 
-
-def _today_str():
-    return datetime.now().strftime("%Y-%m-%d")
-
-
-def _log_pass_count(path, repo, today, parent=None, exempt=None):
-    """Count of PASS-verdict filings already WRITTEN to the scope-gate log
-    for `repo` on `today`, EXCLUDING any entry whose own `criterion=` is
-    exempt from the cap (#329 adversarial-review finding: `_log_pass_count`
-    used to count EVERY PASS line regardless of criterion, so an exempt
-    `planned-work`/`user-request` batch silently consumed the SAME budget
-    the block message promised was reserved for non-exempt filings) --
-    optionally further scoped to filings whose OWN logged `parents=` field
-    named `parent` (the chain-width count). A missing/unreadable log -> 0
-    (never invents a cap violation from unmeasurable state).
-
-    Every counting-relevant field (`verdict=`, `repo=`, `criterion=`,
-    `parents=`) is extracted with a plain `\\bfield=(\\S+)` search rather
-    than an end-of-line anchor -- safe because the LOG LINE FORMAT itself
-    places every one of these fields BEFORE the two free-text fields
-    (title, dedup), so the first match in the line is always the real one,
-    never a decoy value a crafted title could spell out later in the same
-    line (#329 adversarial-review finding: the original `parents=(\\S+)`
-    search had no such guarantee and a title containing literal text
-    "parents=999" could shift the extracted value).
-
-    `exempt` (#1259): the criteria NOT counted; default EXEMPT_FROM_CAP. The
-    width count and an unattended session's daily count pass an empty set, so
-    `user-request` children / away filings count too."""
-    count = 0
-    try:
-        with open(path, "r", encoding="utf-8", errors="replace") as fh:
-            for line in fh:
-                if not line.startswith(today):
-                    continue
-                mv = re.search(r'\bverdict=(\S+)', line)
-                if not mv or mv.group(1) != "PASS":
-                    continue
-                mr = re.search(r'\brepo=(\S+)', line)
-                if not mr or mr.group(1) != repo:
-                    continue
-                mc = re.search(r'\bcriterion=(\S+)', line)
-                if mc and mc.group(1).lower() in (EXEMPT_FROM_CAP if exempt is None else exempt):
-                    continue
-                if parent is not None:
-                    mp = re.search(r'\bparents=(\S+)', line)
-                    if not mp or parent not in mp.group(1).split(","):
-                        continue
-                count += 1
-    except OSError:
-        pass
-    return count
-
-
-
-def cap_verdict(log_path, repo, today, crit_l, parents, unattended,
-                local_day, local_parent):
-    """#329/#1259: `(reason, width_capped, daily_capped)`; reason is
-    "chain-width-cap", "daily-cap" or None. A child naming a parent is
-    width-capped whatever its criterion (#1137: nothing escapes), and an
-    unattended `user-request` is daily-capped -- else it is the new split door.
-    The two flags tell the caller which in-batch counters a PASS bumps."""
-    width_capped = True
-    daily_capped = (crit_l not in EXEMPT_FROM_CAP
-                    or (unattended and crit_l == "user-request"))
-    for p in parents:
-        n = (_log_pass_count(log_path, repo, today, parent=p, exempt=frozenset())
-             + local_parent.get((repo, p), 0))
-        if n >= CHAIN_WIDTH_CAP:
-            return "chain-width-cap", width_capped, daily_capped
-    if daily_capped:
-        # only an away user-request counts the day's user-request filings too
-        away_ask = unattended and crit_l == "user-request"
-        n = (_log_pass_count(log_path, repo, today,
-                             exempt=frozenset() if away_ask else None)
-             + local_day.get(repo, 0))
-        if n >= DAILY_CAP:
-            return "daily-cap", width_capped, daily_capped
-    return None, width_capped, daily_capped
 
 # Cached per (cwd, repo) / (cwd, repo_dir) WITHIN THIS ONE hook invocation,
 # same shape as `_issue_list_cache` above -- a batch filing several issues
@@ -375,23 +288,6 @@ def _stream_routing_block_reason(tk, is_api, body, cwd, target_repo, repo_dir):
                 "`-l needs-gatekeeper` to auto-route the core ticket "
                 "to the gatekeeper for triage)")
     return "stream-routing-unjustified"
-
-
-def _ratchet_should_block(target_repo, cwd):
-    """#842 req 2 -- True when the per-repo net-drain ratchet must BLOCK an
-    UNATTENDED non-exempt discovery filing on `target_repo`: the repo is NOT
-    strictly draining today (`created_today >= closed_today`). #1020 fold-in --
-    the decision recomputes the counts LIVE (`net_drain_blocks_live`), never the
-    TTL cache, so it can never disagree with the real `gh` day counts (a drifted
-    cache false-blocked at created 2 < closed 3). Fail-SAFE: a gh error or a
-    ratchet_counts import failure (`repo_dir` is on sys.path from the top of the
-    heredoc) returns True (BLOCK), never a wrong ALLOW (#842 (d))."""
-    try:
-        import ratchet_counts as _rc
-    except Exception:
-        return True
-    blocks = _rc.net_drain_blocks_live(target_repo, cwd)
-    return True if blocks is None else blocks
 
 
 def _first_nonempty_line(text):
