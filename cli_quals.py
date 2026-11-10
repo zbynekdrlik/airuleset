@@ -26,6 +26,7 @@ from pathlib import Path
 
 import cli_app_token
 import working_time
+from gates import opswait
 
 
 class SliceUnresolved(Exception):
@@ -1362,13 +1363,15 @@ def _norm_ages(res):
         res.setdefault("own_final_reminder", None)
         res.setdefault("own_target", None)           # #881
         res.setdefault("own_target_event", None)     # #944
+        res.setdefault("waiting_on", None)           # #1298
         return res
     if isinstance(res, (tuple, list)) and len(res) >= 2:
         return {"own": res[0], "any": res[1],
                 "own_cited": res[0], "own_oldest": None,
                 "own_final_reminder": None,
                 "own_target": None,
-                "own_target_event": None}
+                "own_target_event": None,
+                "waiting_on": None}
     return None
 
 
@@ -1456,6 +1459,7 @@ def _ages_from_comments(comments, self_login):
     own_target = None                                # #881: newest valid target date
     own_target_event = None                          # #944: event text of the winning target
     own_target_ts = 0                                # comment ts of the winning target
+    waiting_on = None                                # #1298: newest valid Waiting-on:
     for c in comments:
         if not isinstance(c, dict):
             continue
@@ -1466,6 +1470,11 @@ def _ages_from_comments(comments, self_login):
             any_ts = ts
         author = c.get("author")
         login = author.get("login") if isinstance(author, dict) else None
+        # #1298: the newest comment of ANY author with a valid third-party
+        # `Waiting-on:` line (the W-membership evidence, gates.opswait).
+        if (waiting_on is None or ts > waiting_on) and \
+                opswait.has_valid_waiting_on(c.get("body")):
+            waiting_on = ts
         if self_login and _is_own_login(login, self_login):
             body = c.get("body")
             if own_ts is None or ts > own_ts:
@@ -1494,7 +1503,8 @@ def _ages_from_comments(comments, self_login):
             "own_cited": own_cited, "own_oldest": own_oldest,
             "own_final_reminder": own_final_reminder,
             "own_target": own_target,
-            "own_target_event": own_target_event}
+            "own_target_event": own_target_event,
+            "waiting_on": waiting_on}
 
 
 def _issue_comment_ages(number, self_login, now, cwd=None):

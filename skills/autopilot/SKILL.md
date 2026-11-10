@@ -147,7 +147,8 @@ grep -n "airuleset:authority=" CLAUDE.md || true                                
   blocking 🏁, cleared by the SUPERVISOR (not you, and no auto-labelling) when the event/evidence (or
   the client's acceptance) lands (#510/#526). **`W` = SENT, waiting on a THIRD PARTY** ("odoslané,
   čaká tretia strana"). The canonical `W` workflow: ask a THIRD PARTY (e.g. "zisti X od človeka Y cez
-  Odoo discussion") → post the question in that thread, label the ticket `ops-wait` (it leaves `I N`
+  Odoo discussion") → post the question in that thread, comment a `Waiting-on: <party> — <event> — <check>`
+  line (#1298) and label the ticket `ops-wait` (it leaves `I N`
   into `W N`), check the thread as you work others, and CLEAR the label when they reply so the ticket
   re-enters `I N`. **Before ANY `ops-wait` park (incl. a drained backlog's leftovers):** completion
   needs the owner → U (`needs-owner-action`), not W (#1197). **#539 acceptance SIDE-BRANCHES — name

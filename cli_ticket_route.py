@@ -34,9 +34,12 @@ def footer(rows, root, slug, merged, own_stream=None, *, handed=None,
     window of this repo), then `role_filter(rows) -> rows` narrows the rows.
     A facts failure is logged and read as "unknown" (the old buckets), and
     the cached facts are dropped so the quals commands read "unknown" too."""
+    wait = [n for n, row in (rows or {}).items()   # #1298: W evidence rows
+            if ts.plain_ops_wait(row, ts.Box(own_stream=own_stream))]
     try:
         facts = cli_ticket_facts.refresh(root, slug, rows, merged=merged,
-                                         handed=handed, gh_fn=gh_fn)
+                                         handed=handed, gh_fn=gh_fn,
+                                         wait=wait, own_stream=own_stream)
     except Exception as e:  # noqa: BLE001 — never break the footer refresh
         sys.stderr.write("tickets-status: ticket facts skipped (%s)\n" % e)
         cli_ticket_facts.forget(root)
