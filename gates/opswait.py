@@ -1,34 +1,38 @@
 """gates.opswait -- the W-entry rule: `ops-wait` needs a concrete third-party wait (#1298).
 
 Owner, 10.11.2026: sessions park work in W (`ops-wait`) that waits on nobody or
-on the OWNER, and it rots there for weeks (camera-box #1496/#1483/#1441 needed
-owner actions = U; dstack had five workable tickets in W; airuleset #1141 sat
-in W on an "observation window"). The label was hand-set and nothing checked it.
+on the OWNER, and it rots there for weeks (camera-box tickets that needed owner
+actions = U; dstack had five workable tickets in W; airuleset #1141 sat in W on
+an "observation window"). The label was hand-set and nothing checked it.
 
-ONE line shape is the evidence, both at label time and at read time:
+ONE piece of evidence, read the same way at label time and at read time: a
+TICKET COMMENT carrying the line
 
     Waiting-on: <third party> — <the concrete event> — <how it is checked>
 
-The party is never the owner (an owner wait is U: `needs-owner-action` /
-`needs-answer`), never us / a session of ours, never "nobody". The word lists
-are explicit (`OWNER_PARTY_*`, `SELF_PARTY_*`, `*_WHOLE_WORDS`) and
-content-locked by tests.
+(markdown `- ` / `**…**` wrappers and `--` / ` - ` separators accepted, a `>`
+quote or a fenced code block never). The party is never the owner (an owner
+wait is U: `needs-owner-action` / `needs-answer`), never us / a session of
+ours, never the gatekeeper (a hand-off, #636), never "nobody" / "time". The
+word lists are explicit and content-locked by tests. An issue BODY never
+counts: the read side reads comments only, so the gate does too.
 
 Two halves share the parse:
-- LABEL TIME (this module's `main`, thin adapter
-  `hooks/block-ops-wait-without-waiting-on.sh`): `gh issue edit <N>
-  --add-label ops-wait` (comma lists too) and `gh issue create -l/--label
-  ops-wait` are refused unless a valid line is in the SAME command (a `gh
-  issue comment` / edit / create body in the chain) or in a comment on that
-  ticket from the last `FRESH_S` (30 min). Shell parsing is REUSED from
-  `gates.selfservice` / `gates.labeledit` (#1020: one implementation). A `gh
-  api` label POST is not parsed (the sibling labeledit gate does not either).
-  FAIL-OPEN on a gh read error or an unresolvable ticket/slug (logged), the
-  #539 never-false-accuse direction. Every box is gated (the owner's complaint
-  spans full and reduced authority). Log ~/.claude/opswait-gate.log; bypass
-  `# airuleset:opswait-ok <reason>` (logged).
-- READ TIME (`unbacked_reason`): an ops-wait row whose newest valid line is
-  missing, or older than `STALE_S` (7 days) with no newer cited own push,
+- LABEL TIME (`main`, thin adapter `hooks/block-ops-wait-without-waiting-on.sh`):
+  `gh issue edit <N…> --add-label ops-wait` (comma lists, `=`, URL tickets,
+  any case) is refused unless a valid line is in a `gh issue comment` on that
+  ticket in the SAME command (inline, `-F file`, heredoc, `$(cat <<EOF)`) or
+  in a comment CREATED on that ticket in the last `FRESH_S` (30 min). `gh
+  issue create --label ops-wait` is always refused (no comment can exist yet:
+  create, comment, then label). Shell parsing is REUSED from
+  `gates.selfservice` / `gates.labeledit` (#1020). A `gh api` label POST is
+  not parsed (the sibling labeledit gate does not either); any label-time miss
+  is caught at read time. FAIL-OPEN on a gh read error or an unresolvable
+  ticket/slug (logged), the #539 never-false-accuse direction. Every box is
+  gated. Log ~/.claude/opswait-gate.log; bypass `# airuleset:opswait-ok
+  <reason>` (the reason is logged).
+- READ TIME (`unbacked_reason`): a plain ops-wait row whose newest valid line
+  is missing, or older than `STALE_S` (7 days) with no newer cited own push,
   counts in I, not W (`cli_ticket_state.classify`, fact `wait_unbacked`, read
   by `cli_ticket_facts` from the W comment prefetch).
 
@@ -54,36 +58,53 @@ BYPASS_MARKER = "airuleset:opswait-ok"
 FRESH_S = 30 * 60               # a ticket comment counts this long at label time
 STALE_S = 7 * 24 * 3600         # read time: an older line needs a newer cited push
 
-# The line: start of a line (indent allowed, never a `>` quote), the key, a colon.
-_LINE_RE = re.compile(r"(?im)^[ \t]*Waiting-on[ \t]*:[ \t]*(?P<rest>[^\n]*)$")
-# Separators between party / event / check: an em or en dash, or a spaced `--`.
-_SEP_RE = re.compile(r"[ \t]*[—–][ \t]*|[ \t]+--[ \t]+")
+# The line: start of a line (indent, a `- ` bullet and `**` bold allowed, never
+# a `>` quote), the key (`Waiting-on` / `Waiting on`), a colon.
+_LINE_RE = re.compile(r"(?im)^[ \t]*(?:[-*+][ \t]+)?(?:\*\*|__)?Waiting[- ]on"
+                      r"(?:\*\*|__)?[ \t]*:(?:\*\*|__)?[ \t]*(?P<rest>[^\n]*)$")
+# A fenced code block (an example, never a statement) is dropped first.
+_FENCE_RE = re.compile(r"(?ms)^[ \t]*(`{3,}|~{3,})[^\n]*\n.*?^[ \t]*\1[ \t]*$")
+# Separators between party / event / check: an em or en dash, or a spaced
+# `--` / `-`.
+_SEP_RE = re.compile(r"[ \t]*[—–][ \t]*|[ \t]+--?[ \t]+")
 # A copied template field (`<third party>`) is no party.
 _PLACEHOLDER_RE = re.compile(r"^<[^<>]*>$")
+_BYPASS_RE = re.compile(r"airuleset:opswait-ok[ \t]*(?P<reason>[^\n]*)",
+                        re.IGNORECASE)
+_CAT_HEREDOC_RE = re.compile(r"^\$\(\s*cat\s+<<-?\s*(['\"]?)(\w+)\1")
 
 # Tokens are compared lower-cased with diacritics stripped. Two kinds of list:
-# - ANYWHERE: one such token anywhere in the party disqualifies it. `*_STEMS`
-#   are prefixes, so a Slovak case ending ("vlastníka", "ownera", "Zbyňkovi",
-#   "session-y") is caught too.
-# - WHOLE: pronouns that disqualify only when the WHOLE party is made of them
-#   (plus fillers), so a possessive like "our client" / "tvoj klient" stays a
-#   third party while a bare "us" / "ty" / "Claude" does not.
-# The owner (Marek counts as the owner's side, owner wording 10.11.2026):
-OWNER_PARTY_STEMS = ("zbyn", "drlik", "owner", "vlastnik", "majitel")
-OWNER_PARTY_WORDS = ("marek", "marka", "markovi", "marekovi")
-OWNER_WHOLE_WORDS = ("ty", "teba", "tebe", "you", "your", "user", "users",
-                     "pouzivatel", "pouzivatela", "pouzivatelovi")
-# Us: this session, another session / lane / worker of ours, the tooling.
-SELF_PARTY_STEMS = ("session", "autopilot", "worker", "supervisor", "subagent",
-                    "airuleset")
+# - ANYWHERE: one such token anywhere in the party disqualifies it (`*_STEMS`
+#   are prefixes, so a Slovak case ending — "Zbyňkovi", "session-y" — counts).
+#   Kept to words that can only mean the owner / our own machinery.
+# - WHOLE: words that disqualify only when the WHOLE party (minus fillers) is
+#   made of them, so "repo owner", "vlastník domény", "Marek Novák (klient)",
+#   "Cloudflare Workers", "our client", "tvoj klient" stay third parties while
+#   a bare "owner" / "Marek" / "ty" / "worker" / "us" does not.
+OWNER_NAME_STEMS = ("zbyn", "drlik")
+OWNER_WHOLE_WORDS = ("owner", "ownera", "ownerovi", "vlastnik", "vlastnika",
+                     "vlastnikovi", "majitel", "majitela", "majitelovi",
+                     "marek", "marka", "markovi", "marekovi", "ty", "teba",
+                     "tebe", "you", "your", "user", "users", "pouzivatel",
+                     "pouzivatela", "pouzivatelovi")
+SELF_PARTY_STEMS = ("session", "autopilot", "subagent")
 SELF_PARTY_WORDS = ("lane", "lanes")
-SELF_WHOLE_WORDS = ("us", "we", "me", "my", "i", "ja", "nas", "nami", "self",
-                    "myself", "ourselves", "claude", "agent", "agents")
-# Nobody / unknown (WHOLE party only).
+SELF_WHOLE_WORDS = ("us", "we", "me", "my", "i", "ja", "mna", "mne", "sebe",
+                    "nas", "nami", "self", "myself", "ourselves", "claude",
+                    "agent", "agents", "worker", "workers", "supervisor",
+                    "stream", "streams")
+# The gatekeeper is a fleet actor with its own hand-off lane, never W (#636).
+GATEKEEPER_STEMS = ("gatekeeper",)
+GATEKEEPER_WORDS = ("gk",)
 NOBODY_WHOLE_WORDS = ("nobody", "nikto", "nikoho", "nikomu", "none", "nothing",
-                      "nic", "unknown", "tbd", "na", "n")
+                      "nic", "unknown", "tbd", "na", "n", "someone", "somebody",
+                      "anyone", "anybody", "niekto", "niekoho", "time", "cas",
+                      "window", "okno", "observation", "pozorovanie",
+                      "external", "third", "party", "3rd", "tretia", "tretej",
+                      "strana", "strany", "wait", "waiting")
 _FILLER_WORDS = ("this", "the", "a", "an", "other", "another", "tento", "tato",
-                 "toto", "iny", "ina", "ine", "nejaky", "nejaka")
+                 "toto", "iny", "ina", "ine", "nejaky", "nejaka", "of", "for",
+                 "and", "or", "na", "do")
 
 
 def _norm_tokens(text):
@@ -94,25 +115,26 @@ def _norm_tokens(text):
 
 
 def party_problem(party):
-    """Why `party` is not a third party ("owner" / "self" / "nobody"), or ""."""
+    """Why `party` is not a third party ("owner" / "self" / "gatekeeper" /
+    "nobody"), or ""."""
     tokens = _norm_tokens(party)
-    for tok in tokens:
-        if tok in OWNER_PARTY_WORDS or tok.startswith(OWNER_PARTY_STEMS):
-            return "owner"
-    for tok in tokens:
-        if tok in SELF_PARTY_WORDS or tok.startswith(SELF_PARTY_STEMS):
-            return "self"
-    core = [tok for tok in tokens if tok not in _FILLER_WORDS]
-    if not core:
-        return "nobody"
+    if any(tok.startswith(OWNER_NAME_STEMS) for tok in tokens):
+        return "owner"
+    if any(tok in GATEKEEPER_WORDS or tok.startswith(GATEKEEPER_STEMS)
+           for tok in tokens):
+        return "gatekeeper"
+    if any(tok in SELF_PARTY_WORDS or tok.startswith(SELF_PARTY_STEMS)
+           for tok in tokens):
+        return "self"
+    core = [tok for tok in tokens if tok not in _FILLER_WORDS] or tokens
     whole = OWNER_WHOLE_WORDS + SELF_WHOLE_WORDS + NOBODY_WHOLE_WORDS
-    if all(tok in whole for tok in core):
-        if any(tok in OWNER_WHOLE_WORDS for tok in core):
-            return "owner"
-        if any(tok in SELF_WHOLE_WORDS for tok in core):
-            return "self"
-        return "nobody"
-    return ""
+    if not core or not all(tok in whole for tok in core):
+        return "" if core else "nobody"
+    if any(tok in OWNER_WHOLE_WORDS for tok in core):
+        return "owner"
+    if any(tok in SELF_WHOLE_WORDS for tok in core):
+        return "self"
+    return "nobody"
 
 
 def line_problem(rest):
@@ -126,15 +148,18 @@ def line_problem(rest):
 
 
 def waiting_on_lines(text):
-    """`[(rest, problem)]` for every `Waiting-on:` line in `text`."""
+    """`[(rest, problem)]` for every `Waiting-on:` line in `text` (fenced code
+    blocks skipped)."""
     if not isinstance(text, str):
         return []
+    text = _FENCE_RE.sub("", text)
     return [(m.group("rest").strip(), line_problem(m.group("rest")))
             for m in _LINE_RE.finditer(text)]
 
 
 def has_valid_waiting_on(text):
-    """True when `text` carries at least one valid `Waiting-on:` line."""
+    """True when `text` carries at least one valid `Waiting-on:` line (several
+    waits may be listed; one valid third-party wait is enough)."""
     return any(not problem for _rest, problem in waiting_on_lines(text))
 
 
@@ -172,7 +197,8 @@ _EDIT_VALUE_FLAGS = ("--add-label", "--remove-label", "--add-assignee",
 
 def _ticket_keys(tk):
     """The ticket positionals of `gh issue edit|comment …` (numbers, `…/issues/N`
-    URLs as N, or a raw token such as `$N` kept verbatim as the chain key)."""
+    URLs as N, or a raw token such as `$N` kept verbatim as the chain key),
+    flags and their values skipped wherever they sit."""
     keys, skip = [], False
     for tok in tk[3:]:
         if skip:
@@ -182,7 +208,7 @@ def _ticket_keys(tk):
             skip = "=" not in tok and tok in _EDIT_VALUE_FLAGS
             continue
         m = _ISSUE_URL_RE.search(tok)
-        keys.append(m.group(1) if m else tok)
+        keys.append(m.group(1) if m else tok.lstrip("#"))
     return keys
 
 
@@ -191,20 +217,31 @@ def _repo_of(tk):
     if not val:
         return None
     parts = [p for p in val.rstrip("/").split("/") if p]
-    return "/".join(parts[-2:]) if len(parts) >= 2 else None
+    return "/".join(parts[-2:]).lower() if len(parts) >= 2 else None
 
 
-def _body_of(tk, seg, cwd, file_bodies, direct_bodies):
+def _comment_body(tk, seg, cwd, file_bodies, direct_bodies):
+    """The body of a `gh issue comment`: `--body`/`-b` inline (a `$(cat <<EOF
+    …)` value resolved from its heredoc), `--body-file`/`-F` file or heredoc."""
     body = _resolve_body(tk, seg, cwd, file_bodies, direct_bodies)
     if body is None:
         body = _flag_value(tk, ("-b",))
+    if body is not None:
+        m = _CAT_HEREDOC_RE.match(body.strip())
+        if m and m.group(2) in direct_bodies:
+            return direct_bodies[m.group(2)]
     return body
 
 
+def _adds_ops_wait(tk, flags):
+    return any(v.strip().lower() == OPS_WAIT_LABEL
+               for v in _all_flag_values(tk, flags))
+
+
 def parse_command(cmd, cwd=None):
-    """`(adds, bodies)`: `adds` = `[{"key", "kind", "body", "repo", "cwd"}]`
-    for every ops-wait ADD (kind `edit` keyed by ticket, kind `create` with its
-    own body), `bodies` = `{ticket key: [comment/edit bodies in the chain]}`."""
+    """`(adds, bodies)`: `adds` = `[{"key", "kind", "repo", "cwd"}]` for every
+    ops-wait ADD (kind `edit` per ticket, kind `create`), `bodies` =
+    `{(repo, ticket): [same-command comment bodies]}`."""
     file_bodies, direct_bodies, skeleton = _capture_heredocs(cmd)
     eff = cwd or os.getcwd()
     adds, bodies = [], {}
@@ -219,27 +256,27 @@ def parse_command(cmd, cwd=None):
             continue
         if not _is_gh_issue_cmd(tk):
             continue
-        verb = tk[2]
-        body = _body_of(tk, seg, eff, file_bodies, direct_bodies)
+        verb, repo = tk[2], _repo_of(tk)
         if verb == "create":
-            if OPS_WAIT_LABEL in _all_flag_values(tk, ("-l", "--label")):
-                adds.append({"key": None, "kind": "create", "body": body,
-                             "repo": _repo_of(tk), "cwd": eff})
+            if _adds_ops_wait(tk, ("-l", "--label")):
+                adds.append({"key": None, "kind": "create", "repo": repo,
+                             "cwd": eff})
             continue
         keys = _ticket_keys(tk)
-        if body is not None:
+        if verb == "comment":
+            body = _comment_body(tk, seg, eff, file_bodies, direct_bodies)
             for key in keys:
-                bodies.setdefault(key, []).append(body)
-        if verb == "edit" and OPS_WAIT_LABEL in _all_flag_values(
-                tk, ("--add-label",)):
+                bodies.setdefault((repo, key), []).append(body or "")
+        elif _adds_ops_wait(tk, ("--add-label",)):
             for key in keys:
-                adds.append({"key": key, "kind": "edit", "body": None,
-                             "repo": _repo_of(tk), "cwd": eff})
+                adds.append({"key": key, "kind": "edit", "repo": repo,
+                             "cwd": eff})
     return adds, bodies
 
 
 def _verdict_from_texts(texts):
-    """("PASS", "same-command") / ("BLOCK", <problem>) / (None, None)."""
+    """("PASS", "valid-line") / ("BLOCK", <problem>) / (None, None) when no
+    `Waiting-on:` line exists at all."""
     problems = [p for text in texts for _r, p in waiting_on_lines(text)]
     if not problems:
         return None, None
@@ -259,13 +296,15 @@ def _parse_ts(s):
         return None
 
 
-def _default_comments(ticket, repo, cwd, now):
-    """The ticket's comments created or edited in the last FRESH_S, as
-    `[{"body", "ts"}]`, or None on any read problem (→ the gate fails OPEN).
-    Test seam: `AIRULESET_OPSWAIT_COMMENTS_FIXTURE` names a JSON file mapping
-    str(ticket) → that list (or null = unreadable)."""
+def _default_comments(ticket, repo, cwd, now, runner=None):
+    """The ticket's comments CREATED in the last FRESH_S, as `[{"body",
+    "ts"}]` (ts = created_at, the timestamp the read side ages), or None on
+    any read problem (→ the gate fails OPEN). `?since=` filters by
+    updated_at, a superset. Seams: `runner(argv) -> (rc, out, err)`, and the
+    env `AIRULESET_OPSWAIT_COMMENTS_FIXTURE` naming a JSON file that maps
+    str(ticket) → that list (or null = unreadable) for the hook test."""
     fixture = os.environ.get("AIRULESET_OPSWAIT_COMMENTS_FIXTURE")
-    if fixture:
+    if fixture and runner is None:
         try:
             with open(fixture, encoding="utf-8") as fh:
                 return json.load(fh).get(str(ticket))
@@ -275,10 +314,10 @@ def _default_comments(ticket, repo, cwd, now):
     slug = repo or ghread.canonical_slug(cwd)
     if not slug:
         return None
-    since = _iso(now - FRESH_S)
     rc, out, _err = ghread._run(
         ["gh", "api", "repos/%s/issues/%s/comments?since=%s&per_page=100"
-         % (slug, ticket, since)], cwd, 10, ghread._gh_env(), None)
+         % (slug, ticket, _iso(now - FRESH_S))], cwd, 10,
+        None if runner else ghread._gh_env(), runner)
     if rc != 0:
         return None
     try:
@@ -287,13 +326,16 @@ def _default_comments(ticket, repo, cwd, now):
         return None
     if not isinstance(rows, list):
         return None
-    out_rows = []
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        ts = _parse_ts(row.get("updated_at") or row.get("created_at"))
-        out_rows.append({"body": row.get("body") or "", "ts": ts})
-    return out_rows
+    return [{"body": row.get("body") or "", "ts": _parse_ts(row.get("created_at"))}
+            for row in rows if isinstance(row, dict)]
+
+
+def _chain_bodies(bodies, add):
+    """The same-command comment bodies for `add`'s ticket: same key, and the
+    same `-R` repo (a missing `-R` on either side means the cwd repo)."""
+    return [body for (repo, key), texts in bodies.items() for body in texts
+            if key == add["key"]
+            and (repo == add["repo"] or repo is None or add["repo"] is None)]
 
 
 def classify_command(cmd, cwd=None, comments_fn=None, now=None):
@@ -307,14 +349,13 @@ def classify_command(cmd, cwd=None, comments_fn=None, now=None):
     for add in adds:
         key = add["key"]
         if add["kind"] == "create":
-            verdict, reason = _verdict_from_texts([add["body"] or ""])
-            results.append({"verdict": verdict or "BLOCK",
-                            "reason": reason or "missing", "ticket": "new"})
+            results.append({"verdict": "BLOCK", "reason": "create",
+                            "ticket": "new"})
             continue
-        verdict, reason = _verdict_from_texts(bodies.get(key, []))
+        verdict, reason = _verdict_from_texts(_chain_bodies(bodies, add))
         if verdict:
-            results.append({"verdict": verdict, "reason": "same-command:" + reason
-                            if verdict == "PASS" else reason, "ticket": key})
+            results.append({"verdict": verdict, "ticket": key, "reason":
+                            "same-command" if verdict == "PASS" else reason})
             continue
         if not (key and key.isdigit()):
             results.append({"verdict": "PASS", "reason": "unresolvable-ticket",
@@ -332,9 +373,9 @@ def classify_command(cmd, cwd=None, comments_fn=None, now=None):
                   and isinstance(r.get("ts"), (int, float))
                   and now - r["ts"] <= FRESH_S]
         verdict, reason = _verdict_from_texts(recent)
-        results.append({"verdict": verdict or "BLOCK",
-                        "reason": ("recent-comment" if verdict == "PASS"
-                                   else reason or "missing"), "ticket": key})
+        results.append({"verdict": verdict or "BLOCK", "ticket": key, "reason":
+                        "recent-comment" if verdict == "PASS"
+                        else reason or "missing"})
     return results
 
 
@@ -359,14 +400,20 @@ def _write_log(verdict, reason, ticket):
 
 
 _WHY = {
-    "missing": "no `Waiting-on:` line in this command or in a comment from "
+    "missing": "no `Waiting-on:` line in a comment from this command or from "
                "the last 30 min",
     "owner": "the `Waiting-on:` party is the OWNER — an owner wait is U, not W",
     "self": "the `Waiting-on:` party is us / a session of ours — that is "
             "workable work (I), not a wait",
-    "nobody": "the `Waiting-on:` party is nobody / unknown",
-    "shape": "the `Waiting-on:` line needs three parts: party — event — check",
+    "gatekeeper": "the `Waiting-on:` party is the gatekeeper — a hand-off "
+                  "(`GATEKEEPER-ACTION:` → needs-gatekeeper, #636), never W",
+    "nobody": "the `Waiting-on:` party is nobody / time / unknown — name who "
+              "you wait on",
+    "shape": "the `Waiting-on:` line needs three parts separated by `—`, `–`, "
+             "` -- ` or ` - `: party — event — check",
     "placeholder": "the `Waiting-on:` line still has a `<…>` template field",
+    "create": "`gh issue create` with `ops-wait`: create the ticket, comment the "
+              "`Waiting-on:` line on it, then add `ops-wait`",
 }
 
 
@@ -377,13 +424,14 @@ def block_message(blocks):
         lines.append("  #%s: %s" % (b["ticket"], _WHY.get(b["reason"], b["reason"])))
     lines += [
         "",
-        "W = waiting on a third party for a concrete event. Put this line in "
-        "the same command (a `gh issue comment <N> --body-file …` before the "
-        "edit) or comment it on the ticket first (it counts for 30 min):",
+        "W = waiting on a third party for a concrete event. Comment this line "
+        "on the ticket in the same command (`gh issue comment <N> --body-file "
+        "…` before the edit) or first (a comment counts for 30 min):",
         "  Waiting-on: <third party> — <the concrete event> — <how you check it>",
         "Waiting on the OWNER is U: `--add-label needs-owner-action` (his manual "
         "step) or `needs-answer` (his answer). Work you can do yourself stays in "
-        "I: no parking label.",
+        "I: no parking label. The line is re-read later: none or >7 d old "
+        "counts in I.",
         "Bypass (rare, logged): `# %s <reason>`." % BYPASS_MARKER,
     ]
     return "\n".join(lines)
@@ -392,19 +440,22 @@ def block_message(blocks):
 def main():
     payload = read_payload()
     cmd = command_of(payload)
-    if not cmd or OPS_WAIT_LABEL not in cmd or "issue" not in cmd:
+    low = (cmd or "").lower()
+    if OPS_WAIT_LABEL not in low or "issue" not in low:
         sys.exit(0)
     cwd = field_of(payload, "cwd", "") or os.getcwd()
+    bypass = _BYPASS_RE.search(cmd)
+    if bypass:                     # no gh read for a bypassed command
+        adds, _bodies = parse_command(cmd, cwd)
+        why = bypass.group("reason").strip() or "(no reason)"
+        for add in adds:
+            _write_log("BYPASS", why.replace(" ", "_")[:120], add["key"] or "new")
+        sys.exit(0)
     results = classify_command(cmd, cwd)
-    if not results:
-        sys.exit(0)
-    if BYPASS_MARKER in cmd:
-        for r in results:
-            _write_log("BYPASS", r["reason"], r["ticket"])
-        sys.exit(0)
-    for r in results:
-        _write_log(r["verdict"], r["reason"], r["ticket"])
     blocks = [r for r in results if r["verdict"] == "BLOCK"]
+    for r in results:              # a PASS next to a block labelled nothing
+        verdict = "NOTLABELLED" if blocks and r["verdict"] == "PASS" else r["verdict"]
+        _write_log(verdict, r["reason"], r["ticket"])
     if blocks:
         sys.stderr.write(block_message(blocks) + "\n")
         sys.exit(2)

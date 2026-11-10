@@ -455,7 +455,8 @@ def classify(row, facts=None, box=None, number=None):
        `prio:bounce` keeps it in I (rework was asked for).
        The old U-label veto is gone: step 1 already took every question;
     5. on a reduced-authority box `facts.handed` moves a remaining I row to gk
-       (#391; a handed row parked in W stays there, as the footer counts it).
+       (#391; a handed row parked in W stays there, as the footer counts it;
+       an unbacked ops-wait row is I by step 1, so a handed one is gk).
     `facts=None` stops after the label partition — the `_partition_workable`
     contract. `Facts()` (all unknown) reproduces the label buckets + gk.
     #1213: a row whose `number` is in `box.asked` is U, whatever its labels

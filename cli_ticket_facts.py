@@ -29,7 +29,9 @@ Facts no label can give (#1141 slice 3), read into a
   the SAME batched W comment prefetch the `--ops-wait` stale tags use
   (`cli_quals._ops_wait_prefetch_comments`, O(quals) GraphQL pages, no
   per-row call); a row missing from it (>100 comments, a failed page) is
-  unknown and keeps W. Reused for WAIT_REUSE_S while the W set is unchanged.
+  unknown and keeps W. Reused for WAIT_REUSE_S while the W set is unchanged,
+  so a line posted on an already-read row moves it back to W within that
+  window (the label-time gate checked it when the label went on).
 - `reopened` (ruling 1): for the live (C) candidates only, ONE batched
   GraphQL call reads `stateReason` on every refresh (never reused); REOPENED
   keeps C open, and an unreadable answer is unknown (no C). The quals path

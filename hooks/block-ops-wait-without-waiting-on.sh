@@ -3,12 +3,14 @@ set -euo pipefail
 
 # Hook: PreToolUse (Bash matcher) -- THIN ADAPTER (#1298).
 #
-# Refuses `gh issue edit <N> --add-label ops-wait` (comma lists too) and
-# `gh issue create -l/--label ops-wait` unless a valid
+# Refuses `gh issue edit <N> --add-label ops-wait` (comma lists too) unless a
+# valid
 #   Waiting-on: <third party> — <the concrete event> — <how it is checked>
-# line is in the same command or in a comment on that ticket from the last
-# 30 minutes. The party is never the owner (owner waits are U:
-# needs-owner-action / needs-answer), never us / a session of ours.
+# line is in a `gh issue comment` on that ticket in the same command or in a
+# comment created on it in the last 30 minutes; `gh issue create --label
+# ops-wait` is always refused (create, comment, then label). The party is
+# never the owner (owner waits are U: needs-owner-action / needs-answer),
+# never us / a session of ours, never the gatekeeper.
 # All logic lives in gates/opswait.py; it FAILS OPEN on a gh read error or an
 # unresolvable ticket (logged), logs every verdict to
 # ~/.claude/opswait-gate.log, and honours `# airuleset:opswait-ok <reason>`.
@@ -22,6 +24,11 @@ HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
 REPO_ROOT="$(dirname "$HOOK_DIR")"
 PAYLOAD=$(cat 2>/dev/null || echo "")
 [ -z "$PAYLOAD" ] && PAYLOAD="${TOOL_INPUT:-}"
+# Cheap pre-filter: no python start-up on the many Bash calls without ops-wait.
+case "${PAYLOAD,,}" in
+    *ops-wait*) ;;
+    *) exit 0 ;;
+esac
 RC=0
 env PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:$PYTHONPATH}" \
     python3 -P -m gates.opswait <<<"$PAYLOAD" 1>&2 || RC=$?
