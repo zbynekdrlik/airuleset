@@ -798,7 +798,7 @@ if LC_ALL=C.UTF-8 msg_has "$I_NOT_MINE_FLAT" -qiE "$I_FOOTER_CTX_RX" && \
         echo "    • infra-class            → \`gh issue edit <N> --add-label infra\`      (→ the INFRA window)" >&2
         echo "    • belongs to the stream  → \`gh issue edit <N> --add-label prio:bounce\` (→ back to the stream, leaves your I)" >&2
         echo "    • a question for the owner→ \`--add-label needs-answer\` / \`needs-decision\` (→ U)" >&2
-        echo "    • blocked on a 3rd party → \`--add-label ops-wait\`                       (→ W)" >&2
+        echo "    • blocked on a 3rd party → \`--add-label ops-wait\` + a \`Waiting-on:\` line (→ W, #1298)" >&2
         echo "" >&2
         echo "  Otherwise ACT on it (review → merge → release → return/close). See statusline-vocabulary.md (the I bullet) + skills/statusline-vocabulary-deep/DEEP-1.md (reading \`--list\`)." >&2
         add_hard "Disowned items of the footer I obligation set ('are infra / belong to the stream / not mine') without moving a label — an action-only row is a stream hand-off THIS box must review → merge → release/return, still YOUR I; the ONLY correct act on an item you believe is someone else's is the LABEL move the partition reads: infra → INFRA window, prio:bounce → back to the stream, needs-answer/needs-decision → U, ops-wait → W. Move the label (or act), never explain the number away."

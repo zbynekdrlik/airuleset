@@ -22,6 +22,14 @@ Facts no label can give (#1141 slice 3), read into a
   when one does not yet (M), RELEASED when the repo declares no deploy state
   (C). An unreadable registry, a partial PROD read, an unreadable PROD
   version or an unparseable release version leaves the ticket out (unknown).
+- `wait_unbacked` (#1298): for the PLAIN `ops-wait` W rows only
+  (`cli_ticket_state.plain_ops_wait`), why the row has no valid third-party
+  wait (`gates.opswait.unbacked_reason`: no `Waiting-on:` line, or one older
+  than 7 days with no newer cited push) — such a row counts in I. Read from
+  the SAME batched W comment prefetch the `--ops-wait` stale tags use
+  (`cli_quals._ops_wait_prefetch_comments`, O(quals) GraphQL pages, no
+  per-row call); a row missing from it (>100 comments, a failed page) is
+  unknown and keeps W. Reused for WAIT_REUSE_S while the W set is unchanged.
 - `reopened` (ruling 1): for the live (C) candidates only, ONE batched
   GraphQL call reads `stateReason` on every refresh (never reused); REOPENED
   keeps C open, and an unreadable answer is unknown (no C). The quals path
@@ -48,11 +56,13 @@ import time
 import cli_release_state
 import cli_ticket_state as ts
 import statusbar
+from gates import opswait
 
 FACTS_MAX_AGE_S = 600       # the quals commands trust a cache at most this old
 DEPLOY_TTL_S = 600          # a deploy-state read (HTTP to PROD) is reused this long
 PR_REUSE_S = 60             # panes of one repo share one PR read this long
 PIPELINE_MAX_AGE_S = 3 * 3600   # a head commit older than this is stuck, not P
+WAIT_REUSE_S = 600          # a W comment read (#1298) is reused this long
 
 _ON_MAIN_STATES = (ts.DEPLOYED, ts.RELEASED, ts.PENDING)
 _OID_RE = re.compile(r"[0-9a-f]{7,40}")
@@ -283,7 +293,68 @@ def _ints(values):
             ] if isinstance(values, list) else []
 
 
-def _facts(merged, handed, prs, on_main, reopened=frozenset()):
+def read_wait(numbers, ages_of, now):
+    """`{ticket: reason}` for the plain ops-wait `numbers` PROVEN to have no
+    valid third-party wait (#1298). `ages_of(n)` gives the comment ages
+    (`cli_quals._ages_from_comments`) or None (not read: unknown, keeps W)."""
+    out = {}
+    for n in sorted(numbers):
+        reason = opswait.unbacked_reason(ages_of(n), now)
+        if reason:
+            out[n] = reason
+    return out
+
+
+def _default_wait_ages(root, own_stream, numbers):
+    """`ages_of(n)` over ONE batched comment prefetch of the box's W members
+    (the quals that produced them: the stream's slice or the full box's
+    obligation union). A row absent from the prefetch reads None (unknown):
+    no per-row gh call is ever made here."""
+    import cli_quals
+    quals = (cli_quals._slice_quals(own_stream, root) if own_stream
+             else cli_quals._obligation_quals())
+    prefetch = cli_quals._ops_wait_prefetch_comments(quals, root)
+    login = cli_quals._stream_self_login()
+    return lambda n: (cli_quals._ages_from_comments(prefetch[n], login)
+                      if n in prefetch else None)
+
+
+def _wait_facts(prev, numbers, now, root, own_stream, wait_fn):
+    """`(cache entry, {ticket: reason})`: the previous read when it is fresh
+    and covers every W number now, else a new read. A failed read is logged
+    and unknown (an empty map, not cached)."""
+    entry = prev.get("wait")
+    if (isinstance(entry, dict) and _fresh(entry.get("ts"), now, WAIT_REUSE_S)
+            and numbers <= set(_ints(entry.get("members")))):
+        raw = entry.get("unbacked")
+        raw = raw if isinstance(raw, dict) else {}
+        return entry, {int(k): v for k, v in raw.items() if str(k).isdecimal()
+                       and int(k) in numbers and isinstance(v, str) and v}
+    if not numbers:
+        return {"ts": now, "members": [], "unbacked": {}}, {}
+    try:
+        unbacked = read_wait(numbers, (wait_fn or _default_wait_ages)(
+            root, own_stream, numbers), now)
+    except Exception as e:  # noqa: BLE001 — never break the footer refresh
+        import sys
+        sys.stderr.write("tickets-status: W comment read skipped (%s)\n" % e)
+        return None, {}
+    return ({"ts": now, "members": sorted(numbers),
+             "unbacked": {str(n): r for n, r in unbacked.items()}}, unbacked)
+
+
+def _wait_from_cache(data, now):
+    """The cached `{ticket: reason}` (load path), {} when absent or stale."""
+    entry = data.get("wait")
+    if not (isinstance(entry, dict)
+            and _fresh(entry.get("ts"), now, FACTS_MAX_AGE_S + WAIT_REUSE_S)):
+        return {}
+    raw = entry.get("unbacked")
+    return {int(k): v for k, v in (raw.items() if isinstance(raw, dict) else ())
+            if str(k).isdecimal() and isinstance(v, str) and v}
+
+
+def _facts(merged, handed, prs, on_main, reopened=frozenset(), wait=None):
     """The TicketFacts. `prs` or `reopened` None = UNKNOWN, so no ticket can
     be proven done: a live (DEPLOYED/RELEASED) state is dropped and the
     ticket keeps its label bucket (review round 2, ruling 1)."""
@@ -297,7 +368,8 @@ def _facts(merged, handed, prs, on_main, reopened=frozenset()):
                           pipeline=frozenset(n for n, c in prs.items() if c),
                           on_main=dict(on_main or {}),
                           open_pr=frozenset(prs),
-                          reopened=frozenset(reopened or ()))
+                          reopened=frozenset(reopened or ()),
+                          wait_unbacked=dict(wait or {}))
 
 
 def _fresh(stamp, now, ttl):
@@ -306,7 +378,8 @@ def _fresh(stamp, now, ttl):
 
 
 def refresh(root, slug, numbers, *, gh_fn, merged=(), handed=None, home=None,
-            now=None, released_fn=None, deploy_fn=None, version_at_fn=None):
+            now=None, released_fn=None, deploy_fn=None, version_at_fn=None,
+            wait=(), own_stream=None, wait_fn=None):
     """Read the facts for the open `numbers` of the repo at `root`, cache them
     for the quals commands, and return the `TicketFacts` (with the given
     `merged` numbers and `handed` map). Seams: `gh_fn(args) -> stdout`,
@@ -314,7 +387,9 @@ def refresh(root, slug, numbers, *, gh_fn, merged=(), handed=None, home=None,
     slug) -> None | {"instances", "version_file"}`, `version_at_fn(root,
     file, oid)`. The PR read is shared by the panes of one repo for
     PR_REUSE_S; the deploy read (HTTP to PROD) runs only when a released
-    ticket exists and is reused for DEPLOY_TTL_S."""
+    ticket exists and is reused for DEPLOY_TTL_S. `wait` = the plain
+    ops-wait numbers (#1298), `wait_fn(root, own_stream, numbers) -> ages_of`
+    the comment seam."""
     now = time.time() if now is None else now
     numbers = {int(n) for n in (numbers or ())}
     path = cache_path(root, home)
@@ -343,6 +418,9 @@ def refresh(root, slug, numbers, *, gh_fn, merged=(), handed=None, home=None,
     reopened = read_reopened(
         slug, gh_fn, [n for n, st in states.items()
                       if st in (ts.DEPLOYED, ts.RELEASED)])
+    wait_entry, unbacked = _wait_facts(
+        prev, {int(n) for n in (wait or ()) if str(n).isdecimal()}, now,
+        root, own_stream, wait_fn)
     _write(path, {
         "ts": now, "root": str(root), "pr_ts": pr_ts,
         "pipeline": None if prs is None else sorted(n for n, c in prs.items()
@@ -350,9 +428,11 @@ def refresh(root, slug, numbers, *, gh_fn, merged=(), handed=None, home=None,
         "open_pr": None if prs is None else sorted(prs),
         "on_main": {str(n): s for n, s in sorted(states.items())},
         "reopened": None if reopened is None else sorted(reopened),
-        "deploy": deploy if isinstance(deploy, dict) else None})
+        "deploy": deploy if isinstance(deploy, dict) else None,
+        "wait": wait_entry})
     return _facts(merged, handed, None if prs is None else {
-        n: c for n, c in prs.items() if n in numbers}, states, reopened)
+        n: c for n, c in prs.items() if n in numbers}, states, reopened,
+        wait=unbacked)
 
 
 def load(root, *, merged=(), handed=None, home=None, now=None):
@@ -379,7 +459,8 @@ def load(root, *, merged=(), handed=None, home=None, now=None):
                 continue
     reopened = data.get("reopened")
     return _facts(merged, handed, prs, on_main, frozenset(_ints(reopened))
-                  if isinstance(reopened, list) else None)
+                  if isinstance(reopened, list) else None,
+                  wait=_wait_from_cache(data, now))
 
 
 def _default_released(root, numbers, slug):

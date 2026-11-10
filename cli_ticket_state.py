@@ -84,6 +84,9 @@ _M_MERGED = ("fix merged to the integration branch, not yet on main: waits "
              "for the release cut (#1083)")
 _M_PENDING = ("the fix is on main but a PROD instance does not run it yet: "
               "waits for the deploy (#1141)")
+# The plain `ops-wait` W verdict (#510). Only THIS verdict needs a
+# `Waiting-on:` line (#1298); a sent acceptance + ops-wait keeps its own W.
+_W_OPS_REASON = "ops-wait: parked on an external event or evidence (#510)"
 _M_DOCS = ("the fix is live, and a docs/chore change naming it is merged but "
            "not released: waits for the release cut (#1228)")
 
@@ -116,6 +119,9 @@ class Facts:
     `on_main`: "" (not on main, or unknown), DEPLOYED, RELEASED or PENDING.
     `merged_docs`: only a docs/chore/style/ci change named it merged, not
     released — never M, but it keeps C open (#1228).
+    `wait_unbacked`: why a plain `ops-wait` row has no valid third-party
+    wait (no `Waiting-on:` line, or a stale one), "" = backed or unknown
+    (#1298); a non-empty value moves the row from W to I.
     All defaults = the facts are unknown: the label route and nothing else."""
     merged: bool = False
     handed: Union[bool, str] = False
@@ -124,6 +130,7 @@ class Facts:
     open_pr: bool = False
     reopened: bool = False
     merged_docs: bool = False
+    wait_unbacked: str = ""
 
 
 @dataclass(frozen=True)
@@ -132,7 +139,9 @@ class TicketFacts:
     3): the merged numbers, the `handed` map (keyed like the rows), the numbers
     with a linked PR in CI, with any open linked PR, and the on-main state by
     number, the REOPENED numbers, `m_note` (why the M set is partial, or "";
-    ruling 3) and `merged_docs` (named only by a merged docs change, #1228).
+    ruling 3), `merged_docs` (named only by a merged docs change, #1228) and
+    `wait_unbacked` ({number: reason}, the plain ops-wait rows with no valid
+    `Waiting-on:` line, #1298).
     Empty = unknown: the label buckets (+ gk) of the earlier slices."""
     merged: frozenset = frozenset()
     handed: dict = field(default_factory=dict)
@@ -142,6 +151,7 @@ class TicketFacts:
     reopened: frozenset = frozenset()
     m_note: str = ""
     merged_docs: frozenset = frozenset()   # #1228
+    wait_unbacked: dict = field(default_factory=dict)   # #1298
 
     def of(self, number):
         """The `Facts` of ticket `number` (a non-numeric key has none)."""
@@ -155,7 +165,8 @@ class TicketFacts:
                      on_main=self.on_main.get(n, ""),
                      open_pr=n in self.open_pr,
                      reopened=n in self.reopened,
-                     merged_docs=n in self.merged_docs)
+                     merged_docs=n in self.merged_docs,
+                     wait_unbacked=self.wait_unbacked.get(n, ""))
 
 
 def _names(labels):
@@ -380,7 +391,7 @@ def _partition(labels, box):
         if verify:
             return ("I", "%s beats ops-wait: only the owning stream can verify "
                          "the deployed change (#1053)" % verify[0])
-        return "W", "ops-wait: parked on an external event or evidence (#510)"
+        return "W", _W_OPS_REASON
     if not isinstance(labels, (list, tuple)):
         return "I", "labels unreadable: kept workable (the safe side)"
     if "needs-acceptance" in names:
@@ -432,6 +443,8 @@ def classify(row, facts=None, box=None, number=None):
     Order (first match wins, the #1141 design order):
     1. the label partition (`_partition`): an owner question is decided here
        FIRST (U, or HIDDEN on the full-authority box) and no fact moves it;
+       a plain `ops-wait` W row with `facts.wait_unbacked` is I (#1298: W
+       needs a valid `Waiting-on:` line no older than 7 days);
     2. C — the fix is on main and live (`facts.on_main` DEPLOYED, or RELEASED
        when the repo declares no deploy state), unless `_c_veto` keeps it
        open: a `_C_VETO` label, unreadable labels, or another fix still
@@ -457,6 +470,9 @@ def classify(row, facts=None, box=None, number=None):
                      % (number, bucket))
     if facts is None or bucket in ("U", HIDDEN):
         return bucket, reason
+    if bucket == "W" and reason == _W_OPS_REASON and facts.wait_unbacked:
+        bucket, reason = "I", ("ops-wait with no third-party wait: %s, so it "
+                               "is workable here (#1298)" % facts.wait_unbacked)
     names = _names(labels)
     if facts.on_main in (DEPLOYED, RELEASED):
         veto = _c_veto(labels, names, facts)
@@ -493,6 +509,13 @@ def bucketize(rows, facts=None, box=None):
         one = None if facts is None else facts.of(number)
         out[classify(row, one, box, number=number)[0]][number] = row
     return out
+
+
+def plain_ops_wait(row, box=None):
+    """True when the label partition puts `row` in W as a PLAIN `ops-wait`
+    park (#510), the only W verdict that needs a `Waiting-on:` line (#1298).
+    `cli_ticket_facts` reads the comments of exactly these rows."""
+    return _partition(_labels_of(row), box or Box()) == ("W", _W_OPS_REASON)
 
 
 def _asked_here(number, box):
