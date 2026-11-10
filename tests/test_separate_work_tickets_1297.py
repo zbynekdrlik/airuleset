@@ -181,6 +181,63 @@ class TestCloseWithOpenChecklist(unittest.TestCase):
         text = (ROOT / "settings" / "hooks.json").read_text(encoding="utf-8")
         self.assertIn("hooks/block-close-with-open-checklist.sh", text)
 
+    def test_close_without_repo_flag_resolves_the_cwd_remote(self):
+        cwd = tempfile.mkdtemp(prefix="sw1297-git-")
+        subprocess.run(["git", "init", "-q", cwd], check=True)
+        subprocess.run(["git", "-C", cwd, "remote", "add", "origin",
+                        "https://github.com/o/r.git"], check=True)
+        env = dict(os.environ, HOME=self.home, PATH=self.gh + os.pathsep + os.environ["PATH"])
+        r = subprocess.run(["bash", str(CLOSE_HOOK)], capture_output=True, text=True, env=env,
+                           input=json.dumps({"tool_input": {"command": "gh issue close 5"}}),
+                           cwd=cwd)
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+
+class TestCloseTargets(unittest.TestCase):
+    """Review round 1: the close parser, per segment (no gh needed)."""
+
+    def _t(self, cmd):
+        from gates import closechecklist as cc
+        return sorted((repo, num) for repo, num, *_ in cc.close_targets(cmd)[0])
+
+    def test_a_body_edit_patch_is_not_a_close(self):
+        self.assertEqual(self._t("gh api repos/o/r/issues/5 -X PATCH -F body=@new.md"), [])
+        self.assertEqual(self._t("gh api repos/o/r/issues/5 -X PATCH --input body.json"), [])
+
+    def test_each_close_keeps_its_own_repo(self):
+        self.assertEqual(self._t("gh issue close 5 -R a/b && gh issue close 7 -R c/d"),
+                         [("a/b", "5"), ("c/d", "7")])
+
+    def test_global_repo_flag_and_issue_url(self):
+        self.assertEqual(self._t("gh -R a/b issue close 5"), [("a/b", "5")])
+        self.assertEqual(self._t("gh issue close https://github.com/a/b/issues/9"),
+                         [("a/b", "9")])
+
+    def test_patch_url_shapes(self):
+        for path in ("repos/o/r/issues/5", "https://api.github.com/repos/o/r/issues/5",
+                     "'repos/o/r/issues/5'", "--method=PATCH repos/o/r/issues/5"):
+            cmd = "gh api %s -X PATCH -f state=closed" % path
+            self.assertEqual(self._t(cmd), [("o/r", "5")], cmd)
+        self.assertEqual(self._t("gh api repos/{owner}/{repo}/issues/5 -X PATCH -f state=closed"),
+                         [(None, "5")])
+
+    def test_patch_close_only_counts_its_own_segment(self):
+        self.assertEqual(self._t("gh api repos/o/r/issues/5 -X PATCH -f state=closed && "
+                                 "gh api repos/o/r/issues/6/comments"), [("o/r", "5")])
+        self.assertEqual(self._t("gh api repos/o/r/issues/5 -X PATCH -f state=closed; "
+                                 "echo 'state_reason=not_planned'"), [("o/r", "5")])
+
+    def test_heredoc_body_with_trailing_redirect_is_data(self):
+        cmd = "cat <<EOF > notes.md\ngh issue close 9\nEOF\ngit add notes.md"
+        self.assertEqual(self._t(cmd), [])
+
+    def test_task_lines_in_comments_and_quotes(self):
+        from gates import closechecklist as cc
+        self.assertEqual(cc.unchecked_items("<!-- - [ ] template hint -->\n> - [ ] quoted\n"),
+                         ["quoted"])
+        self.assertEqual(cc.unchecked_items("```\n~~~\n- [ ] in code\n```\n- [ ] real\n"),
+                         ["real"])
+
 
 class TestDoctrine(unittest.TestCase):
 
@@ -194,6 +251,18 @@ class TestDoctrine(unittest.TestCase):
         self.assertIn("Part of #", text)
         self.assertIn("Requested by", text)
         self.assertIn("gh issue create -R", text)
+        self.assertIn("never a comment on its ticket", text)
+
+    def test_no_surface_still_orders_folding_or_a_live_net_drain(self):
+        bad = ("fold the finding onto the existing ticket", "net-drain discipline that gates",
+               "rate-gated EXCEPTION", "which of the six criteria it clears")
+        hits = []
+        for top in ("modules", "skills", "agents", "hooks", "gates", "rules"):
+            for p in (ROOT / top).rglob("*"):
+                if p.is_file() and p.suffix in (".md", ".sh", ".py", ".conf"):
+                    text = p.read_text(encoding="utf-8", errors="replace")
+                    hits += ["%s: %s" % (p.relative_to(ROOT), b) for b in bad if b in text]
+        self.assertEqual(hits, [])
 
     def test_deep_companion_and_durable_decisions_follow(self):
         deep = self._read("skills/no-dropped-work-deep/DEEP.md")
