@@ -28,6 +28,33 @@ SECRET_NAME_RE = re.compile(r"[A-Z_][A-Z0-9_]*")
 
 
 # --------------------------------------------------------------------------- #
+# Declared grants (data). Kept here because cli_account_bootstrap sits at its
+# size-ratchet ceiling.
+
+# Owner 10.11.2026 (#1281 comment): dstack #155 moves dev1's Dante from the USB
+# NIC (dante-net) to VLAN 70 on enp38s0 (dante-vlan). Exact nmcli lines only.
+DSTACK_NMCLI_SUDO = {
+    "sudo": True,
+    "sudo_reason": "dstack #155 on dev1: switch Dante between dante-net and "
+                   "the VLAN 70 connection dante-vlan, and roll back",
+    "sudo_commands": ["/usr/bin/nmcli con " + c for c in (
+        "mod dante-net connection.autoconnect no",
+        "mod dante-net connection.autoconnect yes",
+        "down dante-net",
+        "up dante-net",
+        "add type vlan con-name dante-vlan ifname enp38s0.70 dev enp38s0 id 70"
+        " ipv4.method manual ipv4.addresses 10.77.7.112/24 ipv4.never-default yes"
+        " ipv4.ignore-auto-dns yes ipv4.route-table 70"
+        " ipv4.routing-rules priority 100 from 10.77.7.112 table 70"
+        " ipv6.method disabled connection.autoconnect yes",
+        "up dante-vlan",
+        "down dante-vlan",
+        "delete dante-vlan",
+    )],
+}
+
+
+# --------------------------------------------------------------------------- #
 # sudo
 # --------------------------------------------------------------------------- #
 def _validate_sudo_commands(account, reason, cmds):
