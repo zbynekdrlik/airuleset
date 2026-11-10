@@ -430,5 +430,16 @@
     "overrides": [],
     "onboarded": "2026-11-02",
     "account": "vstack"
+  },
+  {
+    "name": "finances",
+    "host": "dev1",
+    "path": "/home/finances/devel/finances",
+    "branch_model": "2-branch",
+    "default_branch": "master",
+    "work_branch": "dev",
+    "overrides": [],
+    "onboarded": "2026-11-10",
+    "account": "finances"
   }
 ]

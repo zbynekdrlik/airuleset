@@ -703,7 +703,7 @@ WEBTERM_DASHBOARD_TABS = {
     # admin@forestshop-dev.
     "zbynek": [
         "ar", "claudy", "fohmixer", "varos", "wall-bridge", "songplayer",  # #1220, #1267
-        "dstack", "dasio", "iemmixer", "dcontroller", "dsync", "intercom", "obs", "shading", "vstack", "dev1", "dev2", "gatekeeper",  # #1270
+        "dstack", "dasio", "iemmixer", "dcontroller", "dsync", "intercom", "obs", "shading", "vstack", "finances", "dev1", "dev2", "gatekeeper",  # #1270, #1295
         "montalu1-subdev", "montalu2-subdev", "montalu3-subdev",
         "montalu4-subdev", "montalu5-subdev", "montalu6-subdev",
         "david1-subdev", "david2-subdev", "david3-subdev", "david4-subdev",
