@@ -732,7 +732,7 @@ def zbynek_inventory():
         varos_entry(WEBTERM_ZBYNEK_IDENTITY, kind="owner"),      # #1220
         *(dev1_project_entry(a, WEBTERM_ZBYNEK_IDENTITY, "owner")  # #1267, #1270
           for a in ("wall-bridge", "songplayer", "dstack", "dasio", "iemmixer", "dcontroller", "dsync", "intercom", "obs", "shading", "vstack")),
-        dev1_project_entry("finances", WEBTERM_ZBYNEK_IDENTITY, "owner"),   # #1295, owner only
+        dev1_project_entry("nlch-finances", WEBTERM_ZBYNEK_IDENTITY, "owner"),   # #1295, owner only
         {
             "id": "dev1",
             "label": "dev1",

@@ -358,16 +358,16 @@ SERVICE_ACCOUNTS = {
     },
     # #1295 (owner 10.11.): the SNV church finances web app (Fio bank, Discord
     # bot, its own tunnel and deploy runner) leaves `newlevel`. Owner tab only.
-    "finances": {
+    "nlch-finances": {   # renamed from finances the same day (owner)
         "host": "dev1",
         "sudo": False,
-        "repo": "zbynekdrlik/finances",   # private
+        "repo": "zbynekdrlik/nlch-finances",   # private
         "github_app": True, "repo_secrets": [],
         "tools": ["pipx:uv==0.9.18", "playwright:1.63.0/chromium"],   # deploy.sh + postdeploy suite
         "secrets": ["cloudflared-finances-token"],   # + ~/.config/finances/finances.env
-        "project_dir": "devel/finances",
-        "tmux_session": "finances",
-        "webterm_sessions": {"zbynek": {"preferred": "finances", "start_dir_chain": ["devel/finances"]}},
+        "project_dir": "devel/nlch-finances",
+        "tmux_session": "nlch-finances",
+        "webterm_sessions": {"zbynek": {"preferred": "nlch-finances", "start_dir_chain": ["devel/nlch-finances"]}},
     },
     "iemmixer": {
         "host": "dev1",

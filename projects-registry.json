@@ -432,14 +432,14 @@
     "account": "vstack"
   },
   {
-    "name": "finances",
+    "name": "nlch-finances",
     "host": "dev1",
-    "path": "/home/finances/devel/finances",
+    "path": "/home/nlch-finances/devel/nlch-finances",
     "branch_model": "2-branch",
     "default_branch": "master",
     "work_branch": "dev",
     "overrides": [],
     "onboarded": "2026-11-10",
-    "account": "finances"
+    "account": "nlch-finances"
   }
 ]
