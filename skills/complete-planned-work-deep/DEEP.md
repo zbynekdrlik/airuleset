@@ -58,7 +58,7 @@ The `#N` proves the work is tracked. Without it, "deferred" is just abandonment.
 
 #### Follow-up gate — "genuinely out of scope" has STRICT criteria
 
-Before filing a follow-up issue, apply the bundling gate (per `autonomous-batch-issue-development.md`). A discovered task qualifies for follow-up ONLY when ALL of these are true:
+Before filing a follow-up issue, apply the bundling gate (per `autonomous-batch-issue-development.md`). A discovered task qualifies for follow-up ONLY when ANY of these is true:
 
 - Estimated change > 300 LoC, OR
 - Requires DB schema change / migration, OR
@@ -98,9 +98,9 @@ The follow-up gate exists for REAL out-of-scope work (schema migrations, framewo
 **Banned phrases (intent, all rewordings):**
 
 - "Follow-up filed: #N — <small cleanup>"
-- "Filed as #N for next PR"
+- "Filed as #N for next PR" — for a small same-file cleanup
 - "Tracked in #N as separate work" — for a sub-300-LoC cleanup in a file this PR touches
-- "Will address in dedicated PR"
+- "Will address in dedicated PR" — for a small same-file cleanup (a separate deliverable's own ticket is not a deferral)
 - Any phrasing that defers a sub-300-LoC discovered cleanup to a new issue
 
 The intent is banned: punting small same-PR work to a follow-up to send a completion report sooner.
