@@ -237,7 +237,7 @@ SERVICE_ACCOUNTS = {
     # by the iemmixer session); iemmixer migrates out of `newlevel`.
     "dstack": {
         "host": "dev1",
-        "rtprio": 49, "devices": ["cpu_dma_latency"], "nic_noqueue": "dante-net",   # #1281 + #1282: HIL latency gate
+        "rtprio": 49, "devices": ["cpu_dma_latency"], "nic_noqueue": "dante-vlan",   # #1281 + #1282: HIL latency gate (dante-vlan since dstack #155)
         # owner 10.11.2026 (#1281 comment): dstack #155 moves dev1's Dante from
         # the USB NIC (dante-net) to VLAN 70 on enp38s0; exact nmcli lines only.
         "sudo": True,

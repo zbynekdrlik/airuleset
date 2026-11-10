@@ -41,8 +41,10 @@ class TestDeclaration(unittest.TestCase):
     def test_dstack_declares_the_requested_grants(self):
         spec = bootstrap.account_spec("dstack")
         self.assertEqual(spec["devices"], ["cpu_dma_latency"])
-        self.assertEqual(spec["nic_noqueue"], "dante-net")
-        self.assertIs(spec["sudo"], False)
+        # dstack #155 (10.11.2026): Dante moved to the VLAN 70 connection,
+        # with the owner's nmcli-only sudo grant (test_account_rtprio_1281)
+        self.assertEqual(spec["nic_noqueue"], "dante-vlan")
+        self.assertIs(spec["sudo"], True)
 
 
 class TestRender(unittest.TestCase):
