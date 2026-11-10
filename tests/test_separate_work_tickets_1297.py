@@ -231,6 +231,40 @@ class TestCloseTargets(unittest.TestCase):
         cmd = "cat <<EOF > notes.md\ngh issue close 9\nEOF\ngit add notes.md"
         self.assertEqual(self._t(cmd), [])
 
+    def _notes(self, cmd):
+        from gates import closechecklist as cc
+        return cc.close_targets(cmd)[1]
+
+    def test_review2_repo_sources_and_flag_values(self):
+        # a cd the gate cannot follow never falls back to the hook cwd's repo
+        self.assertEqual(self._t("cd $SOMEWHERE && gh issue close 6"), [])
+        self.assertTrue(self._notes("cd $SOMEWHERE && gh issue close 6"))
+        self.assertEqual(self._t("GH_REPO=a/b gh issue close 6"), [("a/b", "6")])
+        # a flag-looking value inside --comment is not a -R flag
+        self.assertEqual(self._t('gh issue close 6 -R o/r -c "-Rework landed"'), [("o/r", "6")])
+
+    def test_review2_wrapped_command_words(self):
+        for cmd in ("(gh issue close 5 -R o/r)", "sudo -u x gh issue close 5 -R o/r",
+                    "for i in 1; do gh issue close 5 -R o/r; done"):
+            self.assertEqual(self._t(cmd), [("o/r", "5")], cmd)
+
+    def test_review2_quoted_heredoc_marker_does_not_swallow_a_close(self):
+        cmd = 'echo "use <<EOF syntax"\ngh issue close 5 -R o/r'
+        self.assertEqual(self._t(cmd), [("o/r", "5")])
+
+    def test_review2_no_read_starts_that_cannot_finish_in_budget(self):
+        from gates import closechecklist as cc
+        body = json.dumps({"number": 5, "body": "- [ ] open"})
+        verdict, note = cc.evaluate("gh issue close 5 -R o/r", "/", runner=lambda a: (0, body, ""),
+                                    budget_s=2.0)
+        self.assertEqual(verdict, "allow")
+        self.assertIn("time budget", note)
+
+    def test_review2_markdown_edges(self):
+        from gates import closechecklist as cc
+        self.assertEqual(cc.unchecked_items("- [ ] real\n<!-- unclosed\n- [ ] hidden\n"), ["real"])
+        self.assertEqual(cc.unchecked_items("```\n```info\n- [ ] code\n```\n"), [])
+
     def test_task_lines_in_comments_and_quotes(self):
         from gates import closechecklist as cc
         self.assertEqual(cc.unchecked_items("<!-- - [ ] template hint -->\n> - [ ] quoted\n"),
@@ -255,7 +289,8 @@ class TestDoctrine(unittest.TestCase):
 
     def test_no_surface_still_orders_folding_or_a_live_net_drain(self):
         bad = ("fold the finding onto the existing ticket", "net-drain discipline that gates",
-               "rate-gated EXCEPTION", "which of the six criteria it clears")
+               "rate-gated EXCEPTION", "which of the six criteria it clears",
+               "'- [ ]' item / comment on the current ticket", "ONLY when ALL of these are true")
         hits = []
         for top in ("modules", "skills", "agents", "hooks", "gates", "rules"):
             for p in (ROOT / top).rglob("*"):
