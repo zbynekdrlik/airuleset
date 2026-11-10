@@ -367,7 +367,7 @@ SERVICE_ACCOUNTS = {
         "secrets": ["cloudflared-finances-token", "gmail_app_password_varos"],   # + finances.env; Gmail = varos's (owner 10.11.)
         "project_dir": "devel/nlch-finances",
         "tmux_session": "nlch-finances",
-        "webterm_sessions": {"zbynek": {"preferred": "nlch-finances", "start_dir_chain": ["devel/nlch-finances"]}},
+        "webterm_sessions": {h: {"preferred": "nlch-finances", "start_dir_chain": ["devel/nlch-finances"]} for h in ("zbynek", "marek")},
     },
     "iemmixer": {
         "host": "dev1",

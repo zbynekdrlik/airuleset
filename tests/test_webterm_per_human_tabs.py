@@ -139,7 +139,7 @@ class TestExclusiveTabListMechanism(unittest.TestCase):
             "montalu1-subdev", "montalu2-subdev",
             "miva1-subdev", "montalu4-subdev",
             "ar", "claudy", "fohmixer", "varos", "wall-bridge", "songplayer",  # #1267
-            "dstack", "dasio", "iemmixer", "dcontroller", "dsync", "intercom", "obs", "shading", "vstack", "dev1", "dev2", "gatekeeper", "forestshop",
+            "dstack", "dasio", "iemmixer", "dcontroller", "dsync", "intercom", "obs", "shading", "vstack", "nlch-finances", "dev1", "dev2", "gatekeeper", "forestshop",
         ])
         html = w.render_dashboard_html(
             profiles.marek_inventory(), ttyd_base="/t", human="marek",
@@ -149,7 +149,7 @@ class TestExclusiveTabListMechanism(unittest.TestCase):
         # gatekeeper->gk, forestshop->fs — from the SINGLE #592 cli_aliases source.
         self.assertEqual(aliases, ["m1", "m2", "miva", "m4", "ar", "claudy",
                                    "fohmixer", "varos", "wall-bri", "songplay",
-                                   "dstack", "dasio", "iemmixer", "dcontrol", "dsync", "intercom", "obs", "shading", "vstack", "dev1", "dev2", "gk", "fs"])
+                                   "dstack", "dasio", "iemmixer", "dcontrol", "dsync", "intercom", "obs", "shading", "vstack", "nlch-fin", "dev1", "dev2", "gk", "fs"])
         # No marek-subdev (dead stream) on the dashboard.
         self.assertNotIn('title="marek@subdev"', html)
 

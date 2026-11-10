@@ -723,7 +723,7 @@ WEBTERM_DASHBOARD_TABS = {
         "montalu1-subdev", "montalu2-subdev",
         "miva1-subdev", "montalu4-subdev",
         "ar", "claudy", "fohmixer", "varos", "wall-bridge", "songplayer",  # #1267
-        "dstack", "dasio", "iemmixer", "dcontroller", "dsync", "intercom", "obs", "shading", "vstack", "dev1", "dev2", "gatekeeper", "forestshop",  # #1270
+        "dstack", "dasio", "iemmixer", "dcontroller", "dsync", "intercom", "obs", "shading", "vstack", "nlch-finances", "dev1", "dev2", "gatekeeper", "forestshop",  # #1270, #1295
     ],
     # david.newlevel.media -- David's working accounts. The david GATEWAY renders
     # its own physically-scoped inventory (cli_webterm_profiles.david_inventory,

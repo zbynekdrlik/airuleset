@@ -436,7 +436,7 @@ def marek_inventory():
         fohmixer_entry(WEBTERM_MAREK_IDENTITY),   # #1183 project account
         varos_entry(WEBTERM_MAREK_IDENTITY),      # #1220 project account
         *(dev1_project_entry(a, WEBTERM_MAREK_IDENTITY)            # #1267, #1270 owner 30.10.
-          for a in ("wall-bridge", "songplayer", "dstack", "dasio", "iemmixer", "dcontroller", "dsync", "intercom", "obs", "shading", "vstack")),
+          for a in ("wall-bridge", "songplayer", "dstack", "dasio", "iemmixer", "dcontroller", "dsync", "intercom", "obs", "shading", "vstack", "nlch-finances")),
         {
             "id": "dev1",
             "label": "dev1 (marek sessions)",

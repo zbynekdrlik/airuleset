@@ -21,13 +21,15 @@ class TestFinancesAccount(unittest.TestCase):
         self.assertIs(self.spec["sudo"], False)
         self.assertEqual(self.spec["repo"], "zbynekdrlik/nlch-finances")
 
-    def test_only_the_owner_gets_a_terminal_tab(self):
-        # a tab is a shell as the account, which holds the church bank token
-        self.assertEqual(set(self.spec["webterm_sessions"]), {"zbynek"})
-        self.assertIn("nlch-finances", w.WEBTERM_DASHBOARD_TABS["zbynek"])
-        self.assertNotIn("nlch-finances", w.WEBTERM_DASHBOARD_TABS["marek"])
+    def test_owner_and_marek_get_a_terminal_tab(self):
+        # owner 10.11.: Marek sees it too; nobody else gets a shell as the account
+        self.assertEqual(set(self.spec["webterm_sessions"]), {"zbynek", "marek"})
+        for human in ("zbynek", "marek"):
+            self.assertIn("nlch-finances", w.WEBTERM_DASHBOARD_TABS[human])
+        for human in ("david", "dominika", "timo"):
+            self.assertNotIn("nlch-finances", w.WEBTERM_DASHBOARD_TABS[human])
         ids = [e["id"] for e in profiles.marek_inventory()]
-        self.assertNotIn("nlch-finances", ids)
+        self.assertIn("nlch-finances", ids)
 
     def test_drop_port_and_peer_link(self):
         self.assertEqual(drop._GENERATED_DROP_PORTS[("dev1", "nlch-finances")], 8906)
