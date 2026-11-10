@@ -364,7 +364,7 @@ SERVICE_ACCOUNTS = {
         "repo": "zbynekdrlik/nlch-finances",   # private
         "github_app": True, "repo_secrets": [],
         "tools": ["pipx:uv==0.9.18", "playwright:1.63.0/chromium"],   # deploy.sh + postdeploy suite
-        "secrets": ["cloudflared-finances-token"],   # + ~/.config/finances/finances.env
+        "secrets": ["cloudflared-finances-token", "gmail_app_password_varos"],   # + finances.env; Gmail = varos's (owner 10.11.)
         "project_dir": "devel/nlch-finances",
         "tmux_session": "nlch-finances",
         "webterm_sessions": {"zbynek": {"preferred": "nlch-finances", "start_dir_chain": ["devel/nlch-finances"]}},
