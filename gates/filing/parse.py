@@ -26,19 +26,19 @@ CATFILE_RE = re.compile(r'^\s*cat\s*>>?\s*([^\s<>&;|]+)')
 ALLOWED = {
     ">300-loc", "schema-migration", "api-break", "security-boundary",
     "cross-cutting", "needs-user-decision", "user-request",
-    # #1259 (owner 24.10.2026): `planned-work` is GONE -- one owner request =
-    # one ticket; a plan step is a `- [ ]` checklist item in that ticket.
+    # #1297 (owner 10.11.2026): a separate deliverable -- a different request,
+    # a task another project hands over, a defect outside the change in hand.
+    "separate-work",
+    # #1259: `planned-work` stays GONE -- a step of the SAME deliverable is a
+    # `- [ ]` checklist item in its ticket, never a new issue.
     # #1137: `architecture-rework` is gone too -- a REWORK is fixed in the same
     # change; a separate defect is a normal-criterion ticket with that LABEL.
 }
 
 
-# #329 -- these criteria skip the daily filing cap AND (#842) the net-drain
-# ratchet: an owner directive must always be able to file; a discovered
-# review-finding/cleanup must not. #1259 -- user-request is still width-capped
-# when it names a parent and daily-capped when unattended (caps.cap_verdict);
-# #1137 -- nothing escapes every cap any more.
-EXEMPT_FROM_CAP = {"user-request"}
+# #842/#962 -- an UNATTENDED session may claim these only when the body quotes
+# a recent owner message (presence gate). #1297 removed every filing cap.
+PRESENCE_GATED = {"user-request"}
 
 
 # #1027/#1033 -- a `Scope-gate: user-request` ticket filed FROM a client Odoo

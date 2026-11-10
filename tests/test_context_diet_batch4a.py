@@ -109,8 +109,8 @@ class TestNoDroppedWorkDeep(_CoverageMixin, TestCase):
     def test_stub_has_three_fates(self):
         self.assertIn("three fates", self.stub)
 
-    def test_stub_has_rate_gated(self):
-        self.assertIn("RATE-GATED", self.stub)
+    def test_stub_has_separate_deliverable(self):
+        self.assertIn("separate deliverable", self.stub)  # #1297 replaced the rate gate
 
     def test_stub_has_pointer(self):
         self.assertIn("skills/no-dropped-work-deep/DEEP.md", self.stub)

@@ -165,8 +165,8 @@ class TestFilingBlockCharacterization(TestCase):
         r = _run("gh api repos/o/r/issues -X POST -f title=t", self.home, self.gh)
         self._assert(r, _BLOCKED_HEADER, "body-unresolved")
 
-    # 9. daily cap (9th non-exempt filing today) — seed 8 PASS lines
-    def test_daily_cap(self):
+    # 9. no daily cap any more (#1297): a 9th filing today still passes
+    def test_no_daily_cap(self):
         log = Path(self.home) / ".claude" / "scope-gate.log"
         log.parent.mkdir(parents=True, exist_ok=True)
         today = time.strftime("%Y-%m-%d")
@@ -185,7 +185,7 @@ class TestFilingBlockCharacterization(TestCase):
                          'title="x%d"  dedup="d"\n' % (today, i))
         r = _run(_filing("ninth", "prose", scope_gate="cross-cutting"),
                  self.home, self.gh)
-        self._assert(r, _BLOCKED_HEADER, "daily-cap")
+        self.assertEqual(r.returncode, 0, r.stderr)
 
     # 10. unattended presence-required (user-request from an away session)
     def test_presence_required(self):

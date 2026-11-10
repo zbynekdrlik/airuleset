@@ -22,16 +22,16 @@ from gates import audit, command_of, field_of, read_payload
 from gates.filing import render
 from gates.filing.parse import (
     ACK_REACTION_CITE_RE, ALLOWED, CLIENT_MSG_ORIGIN_RE, CRITERION_RE,
-    DEDUP_RE, EXEMPT_FROM_CAP, LOC_NUM_RE,
+    DEDUP_RE, LOC_NUM_RE, PRESENCE_GATED,
     extract_heredocs, flag_value, is_issue_create,
     resolve_body, split_top_level, strip_prefix, tokens_of,
     _apply_cd, _chain_parent, _chain_parents, _clean_field,
     _explicit_stream_labels, _no_field_decoy, _target_repo_for_segment,
 )
 from gates.filing.caps import (
-    cap_verdict, cwd_repo_of,
-    _gh_view_text, _near_duplicate, _ratchet_should_block,
-    _stream_routing_block_reason, _today_str,
+    cwd_repo_of,
+    _gh_view_text, _near_duplicate,
+    _stream_routing_block_reason,
 )
 from gates.filing.presence import is_away, _dismissal_word, _has_recent_owner_quote
 
@@ -195,10 +195,11 @@ def _invalid_criterion_reason(body, body_err, crit):
         # at all -- the plain missing-line case.
         reason = "no-scope-gate -- body carries no `Scope-gate: <criterion>` line"
     elif crit.lower() == "planned-work":
-        # #1259: decomposition is no longer a reason to file -- say the right way.
-        reason = ("planned-work-retired -- one owner request = ONE ticket: add this "
-                  "step as a `- [ ]` checklist item in the parent ticket (gh issue "
-                  "edit), never a new issue")
+        # #1259/#1297: a plan step is never a reason to file -- say the right way.
+        reason = ("planned-work-retired -- a step of the SAME deliverable is a "
+                  "`- [ ]` checklist line in that ticket's description (gh issue "
+                  "edit), never a new issue; a separate deliverable files with "
+                  "`Scope-gate: separate-work`")
     elif crit.lower() == "architecture-rework":
         # #1137: a REWORK verdict is no longer an automatic, cap-exempt filing.
         reason = ("architecture-rework-retired -- fix the REWORK in the same change; "
@@ -218,7 +219,7 @@ def _write_log(log_path, results, has_block, sid):
     """Append every result to ~/.claude/scope-gate.log in the exact field order
     the bash epilogue used (every COUNTING field before the two free-text
     fields), best-effort. A PASS in a batch that ALSO blocked is logged
-    NOTFILED so it never charges cap budget (#329 phantom-PASS)."""
+    NOTFILED: the whole command was refused, nothing was filed (#329)."""
     try:
         os.makedirs(os.path.dirname(log_path), exist_ok=True)
         with open(log_path, "a", encoding="utf-8") as fh:
@@ -271,11 +272,8 @@ def classify_command(cmd, sid, cwd, repo_dir, log_path, unattended):
     # cwd-derived repo resolved BEFORE the loop as the caps' FALLBACK target.
     cwd_repo = cwd_repo_of(cwd)
 
-    # Per-BATCH running counters (a batch can file several issues in one call
-    # before anything is written to the log).
-    _local_day_count = {}       # target_repo -> count
-    _local_parent_count = {}    # (target_repo, parent) -> count
-    _batch_titles_by_repo = {}  # target_repo -> [title, ...] already PASSed
+    # Per-BATCH titles already PASSed (the in-batch near-duplicate check).
+    _batch_titles_by_repo = {}  # target_repo -> [title, ...]
 
     # #483 -- the effective cwd a relative `-F` body path resolves against,
     # folded forward by every leading `cd <dir>` segment.
@@ -429,11 +427,11 @@ def classify_command(cmd, sid, cwd, repo_dir, log_path, unattended):
             # user-request ticket. dismissal-word (req 4): a NEW issue
             # body dismissing a test failure (flaky / pre-existing / intermittent /
             # out-of-scope) is the same dismissal in durable form -- fix the test /
-            # root cause, never file its excuse. Both BLOCK BEFORE the dedup/cap/
-            # near-dup/ratchet checks (cheapest first) and `continue` this segment.
+            # root cause, never file its excuse. Both BLOCK BEFORE the dedup/
+            # near-dup checks (cheapest first) and `continue` this segment.
             if unattended:
                 unattended_reason = None
-                if crit_l in EXEMPT_FROM_CAP:
+                if crit_l in PRESENCE_GATED:
                     # #962: exempt when the body quotes an owner message with
                     # 'verbatim' + a date from the last 24h — evidence the
                     # owner WAS present and explicitly asked.
@@ -460,72 +458,22 @@ def classify_command(cmd, sid, cwd, repo_dir, log_path, unattended):
                                  target_repo, ""))
             else:
                 dedup_claim = _clean_field(dedup_match.group(1))[:80]
-                today = _today_str()
                 batch_titles = _batch_titles_by_repo.setdefault(target_repo, [])
-
-                # #329 -- cheap local checks BEFORE the network near-dup call
-                # (adversarial-review finding: a batch of N filings into N
-                # different repos previously paid N network round-trips even
-                # when the local caps alone would already refuse most of
-                # them -- reordering costs nothing for the common case and
-                # bounds the worst case).
-                cap_reason, width_capped, daily_capped = cap_verdict(
-                    log_path, target_repo, today, crit_l, parents, unattended,
-                    _local_day_count, _local_parent_count)
-                if cap_reason:
-                    results.append(("BLOCK", clean_title, cap_reason,
-                                     parents_str, target_repo, dedup_claim))
-                else:
-                    near_dup = _near_duplicate(title, body, cwd, target_repo,
-                                                batch_titles)
-                    if near_dup:
-                        if near_dup == "in-batch":
-                            reason = "near-duplicate:in-this-batch"
-                        else:
-                            reason = "near-duplicate:#%s" % near_dup
-                        results.append(("BLOCK", clean_title, reason, parents_str,
-                                         target_repo, dedup_claim))
-                    elif (crit_l not in EXEMPT_FROM_CAP
-                          and _ratchet_should_block(target_repo, cwd)):
-                        # #842 req 2 -- net-drain ratchet, checked LAST (the only gate
-                        # costing a gh call, so it is never paid for a filing already
-                        # blocked more cheaply). #1070 item 7 (owner ruling
-                        # 2026-09-18): the brake applies to EVERY filing session, no
-                        # longer only the UNATTENDED path -- gk files under the owner
-                        # identity with the owner present at the box and so never met
-                        # the pre-#1070 `unattended` guard, letting the two sources of
-                        # a day's filings sail past the brake the controller already
-                        # saw. A non-exempt discovery filing is allowed ONLY while the
-                        # repo is strictly draining today (created_today <
-                        # closed_today); otherwise BLOCK. A gh error -> BLOCK
-                        # (fail-safe). user-request is exempt (presence-gated
-                        # above via _has_recent_owner_quote).
-                        results.append((
-                            "BLOCK", clean_title,
-                            "net-drain (created_today >= closed_today on this repo "
-                            "-- fix it in-lane now, or fold it as a comment onto the "
-                            "existing ticket it belongs to; this repo must drain "
-                            "today before this session files more -- #1070: the "
-                            "brake applies to every filing session, attended too)",
-                            parents_str, target_repo, dedup_claim))
+                # #1297: no daily cap, no chain-width cap, no net-drain brake --
+                # a separate deliverable always gets its own ticket. Dedup stays.
+                near_dup = _near_duplicate(title, body, cwd, target_repo,
+                                            batch_titles)
+                if near_dup:
+                    if near_dup == "in-batch":
+                        reason = "near-duplicate:in-this-batch"
                     else:
-                        results.append(("PASS", clean_title, crit, parents_str,
-                                         target_repo, dedup_claim))
-                        batch_titles.append(title or "")
-                        # #842 -- the per-repo counter bump (to close the within-TTL
-                        # burst race) is DEFERRED to the print loop below, where
-                        # `has_block` is known: a PASS in a batch that ALSO blocks is
-                        # NOTFILED (the whole command is refused, nothing filed), so
-                        # bumping it here would be a phantom +1 (#842-review 🔵,
-                        # mirroring the #329 phantom-PASS / NOTFILED discipline).
-                        if daily_capped:
-                            _local_day_count[target_repo] = \
-                                _local_day_count.get(target_repo, 0) + 1
-                        if width_capped:
-                            for p in parents:
-                                key = (target_repo, p)
-                                _local_parent_count[key] = \
-                                    _local_parent_count.get(key, 0) + 1
+                        reason = "near-duplicate:#%s" % near_dup
+                    results.append(("BLOCK", clean_title, reason, parents_str,
+                                     target_repo, dedup_claim))
+                else:
+                    results.append(("PASS", clean_title, crit, parents_str,
+                                     target_repo, dedup_claim))
+                    batch_titles.append(title or "")
 
     return results
 

@@ -1807,7 +1807,7 @@ if [ "$IS_COMPLETION" = "1" ]; then
         # A tracking reference EXONERATES the deferral, so ask whether it is
         # MISSING — an unanswerable check must not grant that exemption.
         if msg_missing "$MSG" -qiE "\b(filed|tracked|tracking|tracker|opened|created|logged|recorded)\b[^.]{0,60}#[0-9]+|issue\s+#[0-9]+\b|todo[: ]+#[0-9]+|see\s+#[0-9]+|follow.?up\s+(in|at|as)\s+#[0-9]+|deferred[^.]{0,60}#[0-9]+|root.?cause[^.]{0,60}#[0-9]+|address(ed)?\s+(in|by|via)\s+#[0-9]+"; then
-            echo "VIOLATION: Completion report contains a deferral phrase ('deferred', 'root-cause fix later', 'will be addressed in follow-up', 'remains outstanding', 'workaround for now', 'patched around', 'this PR doesn't fix...', 'punted to...') but NO EXPLICIT tracking-issue reference. The current PR's own #N in the title does NOT count — the user needs proof the DEFERRED work was recorded (a '- [ ]' item / comment on the current ticket, or a separate defect ticket)." >&2
+            echo "VIOLATION: Completion report contains a deferral phrase ('deferred', 'root-cause fix later', 'will be addressed in follow-up', 'remains outstanding', 'workaround for now', 'patched around', 'this PR doesn't fix...', 'punted to...') but NO EXPLICIT tracking-issue reference. The current PR's own #N in the title does NOT count — the user needs proof the DEFERRED work was recorded (a '- [ ]' line in the current ticket's description, or its own linked ticket when separate)." >&2
             echo "" >&2
             echo "  Per complete-planned-work.md, any deferred work MUST be recorded on a ticket BEFORE sending the completion report, and the report MUST cite it explicitly:" >&2
             echo "    • 'Filed as #<N>: <title>'" >&2
@@ -1817,9 +1817,9 @@ if [ "$IS_COMPLETION" = "1" ]; then
             echo "" >&2
             echo "  Without that, the deferred work is permanently lost (the ghost-deferral failure mode)." >&2
             echo "" >&2
-            echo "  Fix NOW (#1259: one owner request = one ticket):" >&2
-            echo "    1. Record it on the CURRENT ticket (a '- [ ]' item via gh issue edit, or a comment) and cite 'Recorded on #<N>', OR" >&2
-            echo "    2. only for a separate defect outside the request: gh issue create, then 'Filed as #<returned-N>: <title>'" >&2
+            echo "  Fix NOW (#1297):" >&2
+            echo "    1. a step of the same deliverable: a '- [ ]' line in the ticket's description (gh issue edit), cite 'Recorded on #<N>', OR" >&2
+            echo "    2. a separate deliverable: gh issue create ('Part of #<N>'), then 'Filed as #<returned-N>: <title>'" >&2
             echo "" >&2
             echo "  See skills/complete-planned-work-deep/DEEP.md → 'CRITICAL — deferral phrases MUST cite the ticket number'." >&2
             add_hard "Deferral phrase in completion report without explicit 'Filed as #N' / 'Tracked as #N' reference"

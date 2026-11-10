@@ -1,8 +1,7 @@
 """#1258/#1259 review round 1 — the gaps two adversarial reviews found.
 
-- `user-request` was the new split door: a child naming a parent is now
-  width-capped whatever its criterion, and an unattended `user-request` is
-  daily-capped.
+- `user-request` was the new split door (#1297 since removed every filing
+  cap: a separate deliverable always gets its own ticket).
 - the untracked-work Stop hook blocked "the rest stays in the #N checklist" and
   ordered one `gh issue create` per part.
 - a no-board account still got the client-board doctrine injected, and an
@@ -34,7 +33,8 @@ import airuleset  # noqa: E402
 import cli_config  # noqa: E402
 import cli_odoo_board  # noqa: E402
 import cli_odoo_ro  # noqa: E402
-from gates.filing.caps import DAILY_CAP  # noqa: E402
+# #1297 removed the daily cap (was 2): more filings than it ever allowed.
+_N = 3
 
 HOOKS = ROOT / "hooks"
 
@@ -60,31 +60,26 @@ class TestUserRequestIsNoSplitDoor(unittest.TestCase):
                 home=self.home, cwd=self.cwd)
         self.assertIn("-> planned-work-retired", r.stderr)
 
-    def test_a_user_request_child_of_a_parent_is_width_capped(self):
+    def test_a_second_child_of_a_parent_is_not_capped(self):
+        # #1297: a separate deliverable always gets its own ticket
         gh = _fake_gh(self.home, {"100": {"title": "the request", "body": "A normal ticket."}})
         r = run(body_cmd("part one (#100 follow-up)", "Part of #100 (#100 follow-up).",
                          scope_gate="cross-cutting"), home=self.home, cwd=self.cwd, gh_bin=gh)
         self.assertEqual(r.returncode, 0, r.stderr)
         r = run(body_cmd("part two (#100 follow-up)", "Another part of #100 (#100 follow-up).",
                          scope_gate="user-request"), home=self.home, cwd=self.cwd, gh_bin=gh)
-        self.assertEqual(r.returncode, 2, r.stderr)
-        self.assertIn("-> chain-width-cap", r.stderr)
+        self.assertEqual(r.returncode, 0, r.stderr)
 
-    def test_an_away_user_request_is_daily_capped(self):
+    def test_an_away_user_request_with_a_quote_is_not_daily_capped(self):
         quote = "Owner %s, verbatim: \"urob to\"." % datetime.date.today().strftime("%d.%m.%Y")
-        for i in range(DAILY_CAP):
+        for i in range(_N):
             r = run(body_cmd("asked %d" % i, "%s Distinct topic %d %s." % (quote, i, uuid.uuid4().hex),
                              scope_gate="user-request"),
                     home=self.home, cwd=self.cwd, session_id=_away_sid(self))
             self.assertEqual(r.returncode, 0, r.stderr)
-        r = run(body_cmd("asked past", "%s One more topic %s." % (quote, uuid.uuid4().hex),
-                         scope_gate="user-request"),
-                home=self.home, cwd=self.cwd, session_id=_away_sid(self))
-        self.assertEqual(r.returncode, 2, r.stderr)
-        self.assertIn("-> daily-cap", r.stderr)
 
     def test_a_present_owner_request_is_not_daily_capped(self):
-        for i in range(DAILY_CAP + 1):
+        for i in range(_N):
             r = run(body_cmd("owner asked %d" % i, "Distinct topic %d %s." % (i, uuid.uuid4().hex),
                              scope_gate="user-request"),
                     home=self.home, cwd=self.cwd, session_id="t-rf-present-" + uuid.uuid4().hex[:8])
@@ -222,10 +217,10 @@ class TestReviewRound2(unittest.TestCase):
         self.assertTrue(self._blocked(
             "Want me to create issues for the #42 checklist items, or hold?"))
 
-    def test_present_owner_requests_do_not_cap_an_away_discovery(self):
+    def test_away_discovery_files_after_present_owner_requests(self):
         home = tempfile.mkdtemp(prefix="rf2-")
         cwd = tempfile.mkdtemp(prefix="rf2-cwd-")
-        for i in range(DAILY_CAP):
+        for i in range(_N):
             r = run(body_cmd("owner asked %d" % i, "Distinct topic %d %s." % (i, uuid.uuid4().hex),
                              scope_gate="user-request"),
                     home=home, cwd=cwd, session_id="t-rf2-present-" + uuid.uuid4().hex[:8])

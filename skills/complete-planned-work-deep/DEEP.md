@@ -28,7 +28,7 @@ If ANY of these are not true, you are NOT done. Keep working.
 
 **Intent, not wording.** The examples above are representative. ANY phrase that shifts incomplete work to a later time, a different session, or a new issue — under any wording — is banned. If you're about to say something that means "I'll do this later," STOP and do it now.
 
-**If you discover something genuinely out of scope** (not in the plan, not in the original prompt, but important), record it on the CURRENT ticket (a `- [ ]` item or comment) BEFORE sending the completion report — the ONLY acceptable way to "postpone" work (#1259: a new issue only when the owner asks, or for a separate defect outside the request).
+**If you discover something genuinely out of scope** (not in the plan, not in the original prompt, but important), file it as its OWN ticket linked to the current one (`Part of #N` + a `- [ ] #<new>` line on `#N`) BEFORE sending the completion report; a step of the SAME deliverable is a `- [ ]` line in the current ticket's description instead (#1297) — the ONLY acceptable ways to "postpone" work.
 
 **CRITICAL — deferral phrases MUST cite the ticket number:**
 
@@ -48,7 +48,7 @@ If the completion report contains ANY of these deferral patterns (or rewordings)
 
 > "The actual root-cause fix for X is deferred — you'll see the real value once Y happens."
 
-NO `#N` → the work has been declared incomplete with NO tracking. This is the failure mode the rule exists to prevent. NEVER write a deferral phrase in a completion report without first recording the work on the current ticket and citing it.
+NO `#N` → the work has been declared incomplete with NO tracking. This is the failure mode the rule exists to prevent. NEVER write a deferral phrase in a completion report without first recording the work (a `- [ ]` line on the current ticket, or its own linked ticket when separate) and citing it.
 
 **Correct pattern:**
 
@@ -58,18 +58,19 @@ The `#N` proves the work is tracked. Without it, "deferred" is just abandonment.
 
 #### Follow-up gate — "genuinely out of scope" has STRICT criteria
 
-Before filing a follow-up issue, apply the bundling gate (per `autonomous-batch-issue-development.md`). A discovered task qualifies for follow-up ONLY when ALL of these are true:
+Before filing a follow-up issue, apply the bundling gate (per `autonomous-batch-issue-development.md`). A discovered task qualifies for follow-up ONLY when ANY of these is true:
 
 - Estimated change > 300 LoC, OR
 - Requires DB schema change / migration, OR
 - Public API breaking change, OR
 - Security boundary modification, OR
 - Cross-cutting refactor (rename across >5 files, dep major bump, framework upgrade), OR
-- Genuine design dependency on a separate decision the user must make
+- Genuine design dependency on a separate decision the user must make, OR
+- It is a separate deliverable (`separate-work`, #1297: another request, a task for another project, a defect outside the change in hand). A <100 LoC cleanup in a file this change already touches is NOT separate — fix it in this PR.
 
 If NONE of these apply → the cleanup is small and MUST land in the CURRENT PR, not a follow-up issue. Fix it, ship it in the same PR.
 
-**This gate is mechanically enforced, not prose-only, on every `gh issue create` / `gh api .../issues` POST** (`hooks/block-ungated-issue-filing.sh`, #137): the issue body must carry a `Scope-gate: <criterion>` line naming which of the six exemptions above applies (`>300-loc`/`schema-migration`/`api-break`/`security-boundary`/`cross-cutting`/`needs-user-decision`), or the owner-asked mode (`user-request`). `planned-work` is retired (#1259): a plan step is a `- [ ]` checklist item in the current ticket, never a new issue. No line, or a fabricated one that doesn't apply → fix it now in the current PR instead of filing.
+**This gate is mechanically enforced, not prose-only, on every `gh issue create` / `gh api .../issues` POST** (`hooks/block-ungated-issue-filing.sh`, #137): the issue body must carry a `Scope-gate: <criterion>` line naming which of the six exemptions above applies (`>300-loc`/`schema-migration`/`api-break`/`security-boundary`/`cross-cutting`/`needs-user-decision`), a separate deliverable (`separate-work`: another request, a task for another project, a defect outside the change in hand, #1297), or the owner-asked mode (`user-request`). `planned-work` is retired: a plan step is a `- [ ]` checklist item in the current ticket, never a new issue. No line, or a fabricated one that doesn't apply → fix it now in the current PR instead of filing.
 
 **Things that DO NOT qualify as "genuinely out of scope" (must be done in current PR):**
 
@@ -92,14 +93,14 @@ If NONE of these apply → the cleanup is small and MUST land in the CURRENT PR,
 
 The follow-up gate exists for REAL out-of-scope work (schema migrations, framework upgrades, multi-day refactors), NOT for small cleanups the agent noticed while touching the file. Filing a follow-up issue for a 20-line refactor wastes a PR cycle, a CI cycle, and a review round.
 
-**The default fate is FIX NOW; a follow-up filing is the rate-gated EXCEPTION (#842, 2026-09-02).** Because the autopilot loop was generating more issues than it closed, the scope-gate hook now BLOCKS an unattended automation follow-up filing while the repo is not net-draining today (`created_today >= closed_today`), and a worktree WORKER has NO `gh issue create` authority at all — it fixes what it finds in-lane and returns `followup_candidates:` for the SUPERVISOR to decide and file. So when in doubt between "file a follow-up" and "fix it in this PR", fix it now — filing is reserved for genuinely out-of-scope work AND is only available when the repo is actually draining (or the owner is present).
+**The default fate is FIX NOW.** A worktree WORKER has NO `gh issue create` authority (#842) — it fixes in-lane and returns `followup_candidates:` for the SUPERVISOR to file. A genuinely separate deliverable is filed as its own linked ticket; there is no daily cap and no net-drain brake (#1297). When in doubt between "file a follow-up" and "fix it in this PR" for a small cleanup in a file you touch, fix it now.
 
 **Banned phrases (intent, all rewordings):**
 
 - "Follow-up filed: #N — <small cleanup>"
-- "Filed as #N for next PR"
-- "Tracked in #N as separate work"
-- "Will address in dedicated PR"
+- "Filed as #N for next PR" — for a small same-file cleanup
+- "Tracked in #N as separate work" — for a sub-300-LoC cleanup in a file this PR touches
+- "Will address in dedicated PR" — for a small same-file cleanup (a separate deliverable's own ticket is not a deferral)
 - Any phrasing that defers a sub-300-LoC discovered cleanup to a new issue
 
 The intent is banned: punting small same-PR work to a follow-up to send a completion report sooner.

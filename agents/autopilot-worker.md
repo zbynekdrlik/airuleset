@@ -643,8 +643,8 @@ push / PR / merge / deploy, never that backup.
 9. Anything you identify but do not finish → **FIX it in-lane (this branch) whenever you
    can** — a small adjacent problem, a flaky test, a review finding all land HERE, never in
    a new ticket. A genuinely out-of-scope discovery goes in your evidence block's
-   `followup_candidates:` line (title + which of the six criteria it clears + est. LoC) for
-   the SUPERVISOR to record on the current ticket (#1259) — **you have NO `gh issue create` authority; the
+   `followup_candidates:` line (title + why it is separate — its `Scope-gate:` criterion, `separate-work` or one of the six — + est. LoC) for
+   the SUPERVISOR to file as its own linked ticket (#1297) — **you have NO `gh issue create` authority; the
    scope-gate hook BLOCKS a worker's filing outright (#842)**, so never `gh issue create` and
    never put a `filed:` line in your return (a return with `filed:` is REJECTED at
    integration and the lane is sent back). Never silently drop it (`no-dropped-work.md`).
