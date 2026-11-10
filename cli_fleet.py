@@ -591,6 +591,7 @@ REMOTE_HOSTS += [
         ("shading", "dev1", "100.104.8.125", False),       # #1280
         ("vstack", "dev1", "100.104.8.125", False),        # #1280
         ("nlch-finances", "dev1", "100.104.8.125", False),  # #1295
+        ("tuke", "dev1", "100.104.8.125", False),           # #1296
     )
 ]
 
@@ -1045,7 +1046,7 @@ AUTHORITY_BY_USER = {
 FULL_AUTHORITY_USERS = frozenset(
     {"newlevel", "gatekeeper", "admin", "stepan", "airuleset", "claudy",
      "fohmixer", "varos", "wall-bridge", "songplayer",
-     "dstack", "dasio", "iemmixer", "dcontroller", "dsync", "intercom", "obs", "shading", "vstack", "nlch-finances"})
+     "dstack", "dasio", "iemmixer", "dcontroller", "dsync", "intercom", "obs", "shading", "vstack", "nlch-finances", "tuke"})
 
 
 # Webterm OBSERVER accounts (airuleset#867). An account that exists ONLY to run a

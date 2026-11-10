@@ -369,6 +369,21 @@ SERVICE_ACCOUNTS = {
         "tmux_session": "nlch-finances",
         "webterm_sessions": {h: {"preferred": "nlch-finances", "start_dir_chain": ["devel/nlch-finances"]} for h in ("zbynek", "marek")},
     },
+    # #1296 (owner 10.11.): Marek's TUKE studies leave `newlevel`: the coursework
+    # (dev1 ~/devel/skola) and the class assistant (dev2 tuke/meetings, NVENC on
+    # dev1's RTX 2070 SUPER after the owner-timed reboot). Pulse for its sinks.
+    "tuke": {
+        "host": "dev1",
+        "sudo": False,
+        "repo": "zbynekdrlik/tuke",   # private, code only
+        "github_app": True, "repo_secrets": [],
+        "system_packages": ["pulseaudio", "pulseaudio-utils"],
+        "secrets": ["tuke-calendar-ics", "tuke-gcal-sa.json", "tuke-email", "tuke-password",
+                    "tuke-moodle-user", "tuke-moodle-password"],   # + ~/.soniox.env, ~/.ssh/id_ed25519_tuke
+        "project_dir": "devel/tuke",
+        "tmux_session": "tuke",
+        "webterm_sessions": {h: {"preferred": "tuke", "start_dir_chain": ["devel/tuke"]} for h in ("zbynek", "marek")},
+    },
     "iemmixer": {
         "host": "dev1",
         "sudo": False,
