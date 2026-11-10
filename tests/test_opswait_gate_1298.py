@@ -41,19 +41,22 @@ class PartyLists(unittest.TestCase):
     """Content locks: the owner / self / nobody wordings stay explicit."""
 
     def test_owner_lists(self):
-        for stem in ("zbyn", "drlik", "owner", "vlastnik", "majitel"):
-            self.assertIn(stem, opswait.OWNER_PARTY_STEMS)
-        self.assertIn("marek", opswait.OWNER_PARTY_WORDS)
-        for word in ("ty", "you", "user", "pouzivatel"):
+        self.assertEqual(opswait.OWNER_NAME_STEMS, ("zbyn", "drlik"))
+        for word in ("owner", "vlastnik", "majitel", "marek", "ty", "you",
+                     "user", "pouzivatel"):
             self.assertIn(word, opswait.OWNER_WHOLE_WORDS)
 
-    def test_self_and_nobody_lists(self):
-        for stem in ("session", "autopilot", "worker", "supervisor"):
+    def test_self_gatekeeper_and_nobody_lists(self):
+        for stem in ("session", "autopilot", "subagent"):
             self.assertIn(stem, opswait.SELF_PARTY_STEMS)
         self.assertIn("lane", opswait.SELF_PARTY_WORDS)
-        for word in ("us", "we", "claude", "nas"):
+        for word in ("us", "we", "claude", "nas", "mna", "worker",
+                     "supervisor", "stream"):
             self.assertIn(word, opswait.SELF_WHOLE_WORDS)
-        for word in ("nobody", "nikto", "unknown", "tbd"):
+        self.assertIn("gatekeeper", opswait.GATEKEEPER_STEMS)
+        self.assertIn("gk", opswait.GATEKEEPER_WORDS)
+        for word in ("nobody", "nikto", "unknown", "tbd", "someone", "time",
+                     "window", "observation", "third", "party"):
             self.assertIn(word, opswait.NOBODY_WHOLE_WORDS)
 
 
@@ -65,19 +68,27 @@ class Party(unittest.TestCase):
             self.assertEqual(opswait.party_problem(party), "owner", party)
 
     def test_self_wordings(self):
-        for party in ("us", "we", "nás", "Claude", "this session",
-                      "táto session", "autopilot worker", "gk lane",
-                      "supervisor", "our session"):
+        for party in ("us", "we", "nás", "mňa", "Claude", "this session",
+                      "táto session", "autopilot worker", "a lane", "worker",
+                      "supervisor", "our session", "another stream"):
             self.assertEqual(opswait.party_problem(party), "self", party)
 
+    def test_gatekeeper_is_a_hand_off(self):
+        for party in ("gk", "the gatekeeper", "gk box", "Gatekeeper review"):
+            self.assertEqual(opswait.party_problem(party), "gatekeeper", party)
+
     def test_nobody_wordings(self):
-        for party in ("", "nikto", "nobody", "n/a", "TBD", "-", "?"):
+        for party in ("", "nikto", "nobody", "n/a", "TBD", "-", "?", "time",
+                      "observation window", "third party", "someone"):
             self.assertEqual(opswait.party_problem(party), "nobody", party)
 
     def test_third_parties_pass(self):
         for party in ("Hetzner support", "klient montalu", "our client",
                       "tvoj klient", "Claude Code release (Anthropic)",
-                      "GitHub", "dodávateľ ESET"):
+                      "GitHub", "dodávateľ ESET", "Cloudflare Workers support",
+                      "client site supervisor", "upstream repo owner",
+                      "vlastník domény (registrátor)", "Marek Novák (montalu)",
+                      "airuleset #1298 fix", "release train"):
             self.assertEqual(opswait.party_problem(party), "", party)
 
 
@@ -86,6 +97,23 @@ class Line(unittest.TestCase):
         self.assertTrue(opswait.has_valid_waiting_on(GOOD))
         self.assertTrue(opswait.has_valid_waiting_on(
             "intro\n  waiting-on: Hetzner -- reply -- read ticket 4711\n"))
+
+    def test_markdown_and_ascii_forms(self):
+        for text in ("- Waiting-on: Hetzner — reply — read ticket",
+                     "**Waiting-on:** Hetzner — reply — read ticket",
+                     "Waiting on: Hetzner — reply — read ticket",
+                     "Waiting-on: Hetzner - reply - read ticket"):
+            self.assertTrue(opswait.has_valid_waiting_on(text), text)
+
+    def test_fenced_example_is_no_line(self):
+        self.assertFalse(opswait.has_valid_waiting_on(
+            "example:\n```\n%s\n```\n" % GOOD))
+        self.assertTrue(opswait.has_valid_waiting_on(
+            "```\nx\n```\n%s\n" % GOOD))
+
+    def test_one_valid_wait_is_enough(self):
+        both = GOOD + "\nWaiting-on: owner — power-cycle — ask him\n"
+        self.assertTrue(opswait.has_valid_waiting_on(both))
 
     def test_shape_placeholder_owner(self):
         self.assertEqual(opswait.line_problem("Hetzner — reply"), "shape")
@@ -112,6 +140,22 @@ class Classify(unittest.TestCase):
         r = _run(cmd, rows=_no_read)
         self.assertEqual(r[0]["verdict"], "PASS")
 
+    def test_cat_heredoc_substitution_body(self):
+        cmd = ("gh issue comment 5 --body \"$(cat <<'EOF'\n%s\nEOF\n)\" && "
+               "gh issue edit 5 --add-label ops-wait" % GOOD)
+        self.assertEqual(_run(cmd, rows=_no_read)[0]["verdict"], "PASS")
+
+    def test_issue_body_never_counts(self):
+        cmd = "gh issue edit 5 --body '%s' --add-label ops-wait" % GOOD
+        self.assertEqual(_run(cmd, rows=[])[0]["verdict"], "BLOCK")
+
+    def test_comment_in_another_repo_does_not_count(self):
+        cmd = ("gh issue comment 5 -R a/b --body '%s' && "
+               "gh issue edit 5 -R c/d --add-label ops-wait" % GOOD)
+        self.assertEqual(_run(cmd, rows=[])[0]["verdict"], "BLOCK")
+        cmd = cmd.replace("-R a/b ", "")
+        self.assertEqual(_run(cmd, rows=_no_read)[0]["verdict"], "PASS")
+
     def test_heredoc_and_cat_file_bodies(self):
         cmd = ("gh issue comment 5 --body-file - <<'EOF'\n%s\nEOF\n"
                "gh issue edit 5 --add-label ops-wait" % GOOD)
@@ -137,7 +181,8 @@ class Classify(unittest.TestCase):
                     "gh issue edit 5 --add-label=ops-wait",
                     "cd /tmp && gh issue edit 5 -R o/r --add-label ops-wait",
                     "gh issue edit https://github.com/o/r/issues/5 "
-                    "--add-label ops-wait"):
+                    "--add-label ops-wait",
+                    "gh issue edit '#5' --add-label OPS-WAIT"):
             r = _run(cmd, rows=[])
             self.assertEqual([(x["verdict"], x["ticket"]) for x in r],
                              [("BLOCK", "5")], cmd)
@@ -168,19 +213,55 @@ class Classify(unittest.TestCase):
         r = opswait.classify_command(cmd, cwd="/x", now=NOW, comments_fn=boom)
         self.assertEqual(r[0]["verdict"], "PASS")
         r = _run('gh issue edit "$N" --add-label ops-wait', rows=_no_read)
-        self.assertEqual(r[0]["reason"], "unresolvable-ticket")
+        self.assertEqual((r[0]["verdict"], r[0]["reason"]),
+                         ("PASS", "unresolvable-ticket"))
 
-    def test_create_needs_the_line_in_its_body(self):
-        bad = "gh issue create -t T -b 'body' -l ops-wait"
-        good = "gh issue create -t T --body '%s' --label ops-wait" % GOOD
-        self.assertEqual(_run(bad, rows=_no_read)[0]["verdict"], "BLOCK")
-        self.assertEqual(_run(good, rows=_no_read)[0]["verdict"], "PASS")
+    def test_create_with_ops_wait_is_always_refused(self):
+        for cmd in ("gh issue create -t T -b 'body' -l ops-wait",
+                    "gh issue create -t T --body '%s' --label ops-wait" % GOOD):
+            r = _run(cmd, rows=_no_read)
+            self.assertEqual((r[0]["verdict"], r[0]["reason"]),
+                             ("BLOCK", "create"), cmd)
+
+    def test_edited_old_comment_does_not_count(self):
+        old = [{"body": GOOD, "ts": NOW - 3 * 86400}]   # ts = created_at
+        r = _run("gh issue edit 5 --add-label ops-wait", rows=old)
+        self.assertEqual(r[0]["verdict"], "BLOCK")
 
     def test_message_points_owner_waits_to_u(self):
         msg = opswait.block_message([{"ticket": "5", "reason": "owner"}])
         for token in ("needs-owner-action", "needs-answer", "Waiting-on:",
                       "airuleset:opswait-ok", "#5", "OWNER"):
             self.assertIn(token, msg)
+
+
+class CommentRead(unittest.TestCase):
+    """`_default_comments` over a fake gh runner (the production read)."""
+
+    def _read(self, rc, out):
+        calls = []
+
+        def runner(argv):
+            calls.append(argv)
+            return rc, out, "boom" if rc else ""
+        rows = opswait._default_comments("5", "o/r", "/x", NOW, runner=runner)
+        return rows, calls
+
+    def test_rows_carry_created_at(self):
+        out = json.dumps([{"body": GOOD, "created_at": "2027-01-15T08:00:00Z",
+                           "updated_at": "2027-01-15T09:00:00Z"}])
+        rows, calls = self._read(0, out)
+        self.assertEqual(rows, [{"body": GOOD, "ts": opswait._parse_ts(
+            "2027-01-15T08:00:00Z")}])
+        self.assertIsNotNone(rows[0]["ts"])
+        since = opswait._iso(NOW - opswait.FRESH_S)
+        self.assertIn("repos/o/r/issues/5/comments?since=%s" % since,
+                      calls[0][2])
+
+    def test_errors_are_unknown(self):
+        self.assertIsNone(self._read(1, "")[0])
+        self.assertIsNone(self._read(0, "not json")[0])
+        self.assertIsNone(self._read(0, "{}")[0])
 
 
 class Hook(unittest.TestCase):
@@ -225,12 +306,25 @@ class Hook(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("gh-unreadable", log)
 
-    def test_bypass_is_logged(self):
+    def test_bypass_is_logged_with_its_reason(self):
         r, log = self._run("gh issue edit 5 --add-label ops-wait  "
                            "# airuleset:opswait-ok owner said so",
-                           fixture={"5": []})
+                           fixture={"5": None})
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("BYPASS", log)
+        self.assertIn("BYPASS owner_said_so 5", log)
+        self.assertNotIn("gh-unreadable", log)      # no read for a bypass
+
+    def test_a_pass_next_to_a_block_labelled_nothing(self):
+        r, log = self._run("gh issue edit 5 6 --add-label ops-wait",
+                           fixture={"5": [{"body": GOOD, "ts": time.time()}],
+                                    "6": []})
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("NOTLABELLED recent-comment 5", log)
+        self.assertIn("BLOCK missing 6", log)
+
+    def test_other_commands_exit_before_python(self):
+        r, log = self._run("echo hi", broken_python=True)
+        self.assertEqual((r.returncode, log), (0, ""), r.stderr)
 
     def test_python_malfunction_fails_closed(self):
         r, _log = self._run("gh issue edit 5 --add-label ops-wait",

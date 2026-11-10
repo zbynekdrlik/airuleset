@@ -45,6 +45,16 @@ class Reason(unittest.TestCase):
         self.assertEqual(opswait.unbacked_reason(
             {"waiting_on": _NOW - 6 * DAY}, _NOW), "")
 
+    def test_the_seven_day_boundary(self):
+        self.assertEqual(opswait.unbacked_reason(
+            {"waiting_on": _NOW - 7 * DAY}, _NOW), "")
+        self.assertTrue(opswait.unbacked_reason(
+            {"waiting_on": _NOW - 7 * DAY - 1}, _NOW))
+
+    def test_an_older_cited_push_does_not_age_a_fresh_line(self):
+        ages = {"waiting_on": _NOW - 2 * DAY, "own_cited": _NOW - 9 * DAY}
+        self.assertEqual(opswait.unbacked_reason(ages, _NOW), "")
+
     def test_old_line_is_unbacked_unless_a_newer_cited_push(self):
         old = {"waiting_on": _NOW - 8 * DAY, "own_cited": None}
         self.assertIn("8 days old", opswait.unbacked_reason(old, _NOW))
@@ -64,6 +74,14 @@ class Ages(unittest.TestCase):
         ], "me")
         self.assertEqual(ages["waiting_on"],
                          cli_quals._parse_iso_ts("2026-09-20T10:00:00Z"))
+
+    def test_the_newest_of_two_valid_lines(self):
+        ages = cli_quals._ages_from_comments([
+            _comment("2026-09-20T10:00:00Z", GOOD),
+            _comment("2026-09-22T10:00:00Z", GOOD),
+        ], "me")
+        self.assertEqual(ages["waiting_on"],
+                         cli_quals._parse_iso_ts("2026-09-22T10:00:00Z"))
 
     def test_legacy_shapes_carry_the_key(self):
         self.assertIsNone(cli_quals._norm_ages((1.0, 2.0))["waiting_on"])
@@ -95,6 +113,13 @@ class Classify(unittest.TestCase):
             row = {"labels": [{"name": "ops-wait"}, {"name": extra}]}
             self.assertFalse(ts.plain_ops_wait(row), extra)
         self.assertFalse(ts.plain_ops_wait({"labels": []}))
+
+    def test_a_handed_unbacked_row_is_gk_on_the_slice_box(self):
+        box = ts.Box(own_stream="david1")
+        self.assertEqual(ts.classify(
+            self.PLAIN, ts.Facts(wait_unbacked="x", handed=True), box)[0], "gk")
+        self.assertEqual(ts.classify(
+            self.PLAIN, ts.Facts(handed=True), box)[0], "W")
 
     def test_bucketize_reads_the_fact_per_row(self):
         rows = {5: _row(5, "ops-wait"), 6: _row(6, "ops-wait")}
@@ -138,6 +163,13 @@ class Facts(unittest.TestCase):
             self.assertEqual(facts.wait_unbacked, {})
             self.assertEqual(cli_ticket_facts.load(
                 "/repo", home=home, now=_NOW).wait_unbacked, {})
+            calls = []
+
+            def wait_fn(_root, _own, numbers):
+                calls.append(sorted(numbers))
+                return {5: {"waiting_on": None}}.get
+            self._refresh(home, [5], wait_fn, now=_NOW + 30)   # not cached
+            self.assertEqual(calls, [[5]])
 
     def test_default_reader_never_reads_per_row(self):
         with mock.patch.object(cli_quals, "_obligation_quals",
@@ -152,6 +184,32 @@ class Facts(unittest.TestCase):
             self.assertIsNone(ages_of(5)["waiting_on"])
             self.assertIsNone(ages_of(6))                # not prefetched
         pre.assert_called_once_with(["q"], "/r")
+
+    def test_the_slice_box_reads_its_own_slice(self):
+        with mock.patch.object(cli_quals, "_slice_quals",
+                               return_value=["s"]) as sq, \
+                mock.patch.object(cli_quals, "_obligation_quals",
+                                  side_effect=AssertionError("core quals")), \
+                mock.patch.object(cli_quals, "_ops_wait_prefetch_comments",
+                                  return_value={}) as pre, \
+                mock.patch.object(cli_quals, "_stream_self_login",
+                                  return_value="me"):
+            cli_ticket_facts._default_wait_ages("/r", "david1", {5})
+        sq.assert_called_once_with("david1", "/r")
+        pre.assert_called_once_with(["s"], "/r")
+
+    def test_footer_hands_its_own_stream_to_the_read(self):
+        seen = {}
+
+        def fake_refresh(*_a, **kw):
+            seen.update(kw)
+            return ts.TicketFacts()
+        with mock.patch.object(cli_ticket_facts, "refresh", fake_refresh), \
+                mock.patch.object(cli_ticket_route, "asked_refs",
+                                  return_value=frozenset()):
+            cli_ticket_route.footer({5: _row(5, "ops-wait")}, "/r", "o/r",
+                                    set(), own_stream="david1")
+        self.assertEqual(seen["own_stream"], "david1")
 
     def test_footer_passes_only_plain_ops_wait_rows(self):
         rows = {5: _row(5, "ops-wait"), 6: _row(6, "ops-wait", "needs-acceptance"),
@@ -179,6 +237,7 @@ class Doctrine(unittest.TestCase):
         self.assertIn("`Waiting-on: <3rd party> — <event> — <check>`", bullet)
         self.assertIn("#1298", bullet)
         self.assertIn(">7 d old → `I`", bullet)
+        self.assertNotIn("own tracking", bullet)   # our own wait is no W
 
 
 if __name__ == "__main__":
