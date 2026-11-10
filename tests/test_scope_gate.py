@@ -853,8 +853,8 @@ class TestScopeGate329ReviewFixes(TestCase):
         # CRITICAL: a Bash command that blocks on ANY segment blocks the
         # WHOLE tool call -- nothing in it runs, including a sibling this
         # hook itself classified PASS. That sibling must be logged as
-        # NOTFILED, never PASS, or it silently burns cap budget for an
-        # issue that was never actually filed.
+        # NOTFILED, never PASS: the log must not claim a filing that never
+        # happened.
         home = tempfile.mkdtemp(prefix="airuleset-dailycap-phantom-")
         self.addCleanup(shutil.rmtree, home, ignore_errors=True)
         with tempfile.TemporaryDirectory() as d:
@@ -1487,9 +1487,9 @@ class TestConcreteBlockReason(TestCase):
         # BLOCKED attempts. Three attempts share ONE home (== one
         # scope-gate.log): (1) missing Scope-gate BLOCKS, (2) an unreadable
         # -F BLOCKS, (3) a fully-compliant heredoc filing of the SAME title
-        # PASSES. Prior BLOCK/NOTFILED lines never charge the daily/width
-        # caps (they count verdict=PASS only) and never manufacture a
+        # PASSES. Prior BLOCK/NOTFILED lines never manufacture a
         # near-duplicate (that check reads open issues, never the log).
+        #
         home = tempfile.mkdtemp(prefix="airuleset-blockreason-retry-")
         self.addCleanup(shutil.rmtree, home, ignore_errors=True)
         gh_bin = _fake_gh_stream(self.tmp, labels=["stream:david", "stream:david2"])

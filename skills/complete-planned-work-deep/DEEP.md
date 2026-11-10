@@ -65,7 +65,8 @@ Before filing a follow-up issue, apply the bundling gate (per `autonomous-batch-
 - Public API breaking change, OR
 - Security boundary modification, OR
 - Cross-cutting refactor (rename across >5 files, dep major bump, framework upgrade), OR
-- Genuine design dependency on a separate decision the user must make
+- Genuine design dependency on a separate decision the user must make, OR
+- It is a separate deliverable (`separate-work`, #1297: another request, a task for another project, a defect outside the change in hand). A <100 LoC cleanup in a file this change already touches is NOT separate — fix it in this PR.
 
 If NONE of these apply → the cleanup is small and MUST land in the CURRENT PR, not a follow-up issue. Fix it, ship it in the same PR.
 
@@ -92,13 +93,13 @@ If NONE of these apply → the cleanup is small and MUST land in the CURRENT PR,
 
 The follow-up gate exists for REAL out-of-scope work (schema migrations, framework upgrades, multi-day refactors), NOT for small cleanups the agent noticed while touching the file. Filing a follow-up issue for a 20-line refactor wastes a PR cycle, a CI cycle, and a review round.
 
-**The default fate is FIX NOW; a follow-up filing is the rate-gated EXCEPTION (#842, 2026-09-02).** Because the autopilot loop was generating more issues than it closed, the scope-gate hook now BLOCKS an unattended automation follow-up filing while the repo is not net-draining today (`created_today >= closed_today`), and a worktree WORKER has NO `gh issue create` authority at all — it fixes what it finds in-lane and returns `followup_candidates:` for the SUPERVISOR to decide and file. So when in doubt between "file a follow-up" and "fix it in this PR", fix it now — filing is reserved for genuinely out-of-scope work AND is only available when the repo is actually draining (or the owner is present).
+**The default fate is FIX NOW.** A worktree WORKER has NO `gh issue create` authority (#842) — it fixes in-lane and returns `followup_candidates:` for the SUPERVISOR to file. A genuinely separate deliverable is filed as its own linked ticket; there is no daily cap and no net-drain brake (#1297). When in doubt between "file a follow-up" and "fix it in this PR" for a small cleanup in a file you touch, fix it now.
 
 **Banned phrases (intent, all rewordings):**
 
 - "Follow-up filed: #N — <small cleanup>"
 - "Filed as #N for next PR"
-- "Tracked in #N as separate work"
+- "Tracked in #N as separate work" — for a sub-300-LoC cleanup in a file this PR touches
 - "Will address in dedicated PR"
 - Any phrasing that defers a sub-300-LoC discovered cleanup to a new issue
 

@@ -16,7 +16,7 @@
 - the parent DESCRIPTION gets a `- [ ] #<child>` line (`- [ ] owner/repo#M`) — GitHub renders its state; tick it `- [x]` once the child is closed.
 - A task FOR ANOTHER PROJECT = `gh issue create -R <receiving repo>` whose body says `Requested by owner/repo#N`, plus a peer tell to that project's session; the requesting ticket lists `- [ ] owner/repo#M`. NEVER a comment on the receiving project's existing ticket.
 
-**The description is the single task list.** A comment that adds work to the SAME deliverable also adds its `- [ ]` line to the body (`gh issue edit <N> --body-file`). A ticket closes only when every `- [ ]` line — child links included — is `- [x]` with its evidence: `hooks/block-close-with-open-checklist.sh` refuses the close otherwise (a `--reason "not planned"` close is exempt).
+**The description is the single task list.** A comment that adds work to the SAME deliverable also adds its `- [ ]` line to the body (`gh issue edit <N> --body-file`). A ticket closes only when every `- [ ]` line — child links included — is `- [x]` with its evidence: `hooks/block-close-with-open-checklist.sh` refuses a `gh issue close` / API PATCH close otherwise (a `--reason "not planned"` close is exempt; GitHub's own auto-close from a merged PR's `Closes #N` never passes the hook, so tick the lines before that merge).
 
 **Default fate = FIX NOW.** A worktree WORKER never files (#842): it fixes in-lane and returns `followup_candidates:`; the SUPERVISOR files each separate one as its own linked ticket. The filing gate keeps the anti-spam parts — `Dedup-checked:` + near-duplicate, no plan-step tickets (`planned-work` is retired), no follow-up-of-a-follow-up review chains — and has no daily cap, no per-parent cap and no net-drain brake.
 
@@ -44,9 +44,9 @@ During a normal run a test fails, a warning appears, or something looks broken. 
 
 **Rule:** a problem you NOTICE for the first time is a problem you just DISCOVERED — "pre-existing" describes its age, not its tracking status. The moment you call something pre-existing / known / unrelated / out-of-scope, you MUST either fix it now or file it as its own ticket (what you observed: the failing test name, the warning text, where it happens, why it matters) and cite `#N`. "Pre-existing" without that `#N` next to it is banned.
 
-- "That test was already failing before my change, so I'll skip it." — **WRONG.** Record it on `#N`, then skip with the reference.
-- "This is a known issue in the upstream lib, nothing we can do here." — **WRONG.** Record the limitation and the upstream link on `#N`.
-- "The console warning is unrelated to this PR." — **WRONG.** Unrelated to the PR ≠ unrelated to the project. Record it.
+- "That test was already failing before my change, so I'll skip it." — **WRONG.** File it as its own ticket (`Part of #N`, `Scope-gate: separate-work`), then skip with `Filed as #M`.
+- "This is a known issue in the upstream lib, nothing we can do here." — **WRONG.** File the limitation + upstream link as its own ticket linked to `#N`.
+- "The console warning is unrelated to this PR." — **WRONG.** Unrelated to the PR ≠ unrelated to the project. File it.
 
 #### The mechanism
 

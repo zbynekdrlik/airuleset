@@ -217,7 +217,7 @@ class TestReviewRound2(unittest.TestCase):
         self.assertTrue(self._blocked(
             "Want me to create issues for the #42 checklist items, or hold?"))
 
-    def test_present_owner_requests_do_not_cap_an_away_discovery(self):
+    def test_away_discovery_files_after_present_owner_requests(self):
         home = tempfile.mkdtemp(prefix="rf2-")
         cwd = tempfile.mkdtemp(prefix="rf2-cwd-")
         for i in range(_N):

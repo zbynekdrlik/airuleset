@@ -3,9 +3,9 @@ set -euo pipefail
 
 # Hook: PreToolUse(Bash) -- THIN ADAPTER (#1020 Part 2 gate-family rework).
 #
-# The Scope-gate / Dedup / chain-depth+width / daily-cap / stream-routing /
-# presence / dismissal-word / net-drain classifier (#137/#329/#390/#842/#962/
-# #993) now lives in the importable, testable `gates/filing` package, run as
+# The Scope-gate / Dedup / chain-depth / stream-routing / presence /
+# dismissal-word classifier (#137/#329/#390/#842/#962/#993; #1297 removed the
+# daily, chain-width and net-drain caps) now lives in the importable, testable `gates/filing` package, run as
 # `python3 -P -m gates.filing`. It reads the JSON payload on STDIN (current CC
 # contract), does the #842 worker (subagent) hard-block, the pre-filter, the
 # `airuleset:scope-gate-ok` bypass, the presence read, all classification + git

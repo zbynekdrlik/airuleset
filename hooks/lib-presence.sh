@@ -5,7 +5,7 @@
 #
 # ONE definition of the UNATTENDED/away signal, shared by
 # block-main-implementation.sh (its away condition) and
-# block-ungated-issue-filing.sh (the #842 net-drain ratchet + presence gates) —
+# block-ungated-issue-filing.sh (the #842 presence + dismissal-word gates) —
 # extracted from block-main-implementation.sh's own inline mtime comparison so
 # the 900s presence read has a single source, never two copy-pasted checks that
 # could drift.

@@ -739,13 +739,12 @@ merge→gates→push at a time per repo across all sessions).
    - **Worker filing authority — NONE (#842).** A worker has NO `gh issue create` / `gh api
      …/issues` POST authority — the scope-gate hook hard-BLOCKS a subagent's filing (payload
      `agent_id`). It FIXES every discovery in-lane and returns a `followup_candidates:` line
-     (title + which of the six criteria it clears + est. LoC) for YOU to file — each separate one as its own ticket (`Part of #N` + a `- [ ] #<new>` line on the current ticket), a step of the same deliverable as a `- [ ]` line (#1297). At
+     (title + why it is separate — its `Scope-gate:` criterion, `separate-work` or one of the six — + est. LoC) for YOU to file — each separate one as its own ticket (`Part of #N` + a `- [ ] #<new>` line on the current ticket), a step of the same deliverable as a `- [ ]` line (#1297). At
      integration (Step 4) a worker return carrying a `filed:` line is REJECTED — send that lane
      back (`SendMessage` if it is alive, else re-dispatch fresh) to fix it in-lane; never accept
-     a worker-filed ticket. This is the same net-drain discipline that gates YOUR OWN
-     unattended main-session filings: the scope-gate hook blocks a discovery filing while
-     `created_today >= closed_today` on the repo (footer shows `I N▲`), so file only while the
-     repo is draining — otherwise fix in-lane or fold the finding onto the existing ticket.
+     a worker-filed ticket. YOUR OWN filings follow the same in-lane-first rule: fix in-lane by
+     default; each separate deliverable becomes its own ticket (`Part of #N` + `- [ ] #<new>` on
+     #N, #1297) — there is no net-drain brake and no daily cap.
    - **Every dispatch RETURNS IMMEDIATELY** (background) — do NOT block waiting on it. End the turn
      `⏳ WORKING`; a worker returning RE-INVOKES this loop, and on each re-invocation you integrate
      any ready branches (Step 4) under the integration mutex as they return.

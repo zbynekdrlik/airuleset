@@ -57,6 +57,9 @@ class TestCapsRemoved1297(unittest.TestCase):
         from gates.filing import render
         self.assertNotIn("soft filing cap", render.BLOCK_MSG)
         self.assertIn("`planned-work` is retired", render.BLOCK_MSG)
+        lists = [ln for ln in render.BLOCK_MSG.splitlines() if "| >300-loc |" in ln]
+        self.assertEqual(len(lists), 2)
+        self.assertFalse(any("planned-work" in ln for ln in lists), lists)
 
 
 class TestFrontmatterYaml(unittest.TestCase):

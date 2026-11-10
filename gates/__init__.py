@@ -15,9 +15,8 @@ exits 0/2. Each migrated bash hook is now a <=40-line stdin adapter that
 resolves REPO_ROOT and ``exec env PYTHONPATH=$REPO_ROOT python3 -m gates.<gate>``.
 
 The FILING gate (block-ungated-issue-filing.sh) is only PARTIALLY migrated in
-#1020: its net-drain counter fold-in lives in the pre-existing
-``ratchet_counts.py`` leaf (``net_drain_blocks_live`` + ``--explain``, no
-cached-increment drift). The full filing classifier -> ``gates/filing`` package
+#1020 (its net-drain brake, once folded into ``ratchet_counts.py``, was
+removed by #1297; that leaf now feeds only the footer ``▲``). The full filing classifier -> ``gates/filing`` package
 extraction (the ~1300-line embedded Scope-gate / Dedup / stream-routing
 classifier, the fleet's highest-blast-radius gate) is a deliberate followup for
 its own reviewed lane.

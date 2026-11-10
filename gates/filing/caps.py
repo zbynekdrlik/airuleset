@@ -10,8 +10,7 @@ readers, _target_repo_for_segment) are imported from ``gates.filing.parse``. The
 per-invocation caches (`_issue_list_cache`/`_label_list_cache`/`_authority_cache`)
 are module-level exactly as in the single-script heredoc: the module loads once
 per hook run, so they scope to one invocation, unchanged. `import airuleset`
-(authority) and `import ratchet_counts` (net-drain) resolve via the adapter's
-PYTHONPATH=REPO_ROOT.
+(authority) resolves via the adapter's PYTHONPATH=REPO_ROOT.
 """
 import json
 import os
