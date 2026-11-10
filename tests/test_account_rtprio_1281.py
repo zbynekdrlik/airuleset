@@ -32,10 +32,16 @@ class TestValidation(unittest.TestCase):
 
 class TestDeclaration(unittest.TestCase):
 
-    def test_dstack_declares_49_and_no_sudo(self):
+    def test_dstack_declares_49_and_only_the_dante_nmcli_grant(self):
+        # owner 10.11.2026: the one sudo grant is nmcli on dante-net / dante-vlan
         spec = bootstrap.account_spec("dstack")
         self.assertEqual(spec["rtprio"], 49)
-        self.assertIs(spec["sudo"], False)
+        self.assertIs(spec["sudo"], True)
+        for cmd in spec["sudo_commands"]:
+            words = cmd.split(" ")
+            self.assertEqual(words[:2], ["/usr/bin/nmcli", "con"], cmd)
+            name = words[words.index("con-name") + 1] if words[2] == "add" else words[3]
+            self.assertIn(name, ("dante-net", "dante-vlan"), cmd)
         self.assertEqual(bootstrap.validate_account("dstack", spec), [])
 
 

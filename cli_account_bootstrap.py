@@ -237,7 +237,25 @@ SERVICE_ACCOUNTS = {
     # by the iemmixer session); iemmixer migrates out of `newlevel`.
     "dstack": {
         "host": "dev1",
-        "sudo": False, "rtprio": 49, "devices": ["cpu_dma_latency"], "nic_noqueue": "dante-net",   # #1281 + #1282: HIL latency gate
+        "rtprio": 49, "devices": ["cpu_dma_latency"], "nic_noqueue": "dante-net",   # #1281 + #1282: HIL latency gate
+        # owner 10.11.2026 (#1281 comment): dstack #155 moves dev1's Dante from
+        # the USB NIC (dante-net) to VLAN 70 on enp38s0; exact nmcli lines only.
+        "sudo": True,
+        "sudo_reason": "dstack #155 on dev1: switch Dante between dante-net and the VLAN 70 connection dante-vlan, and roll back",
+        "sudo_commands": [
+            "/usr/bin/nmcli con mod dante-net connection.autoconnect no",
+            "/usr/bin/nmcli con mod dante-net connection.autoconnect yes",
+            "/usr/bin/nmcli con down dante-net",
+            "/usr/bin/nmcli con up dante-net",
+            "/usr/bin/nmcli con add type vlan con-name dante-vlan ifname enp38s0.70 dev enp38s0 id 70"
+            " ipv4.method manual ipv4.addresses 10.77.7.112/24 ipv4.never-default yes"
+            " ipv4.ignore-auto-dns yes ipv4.route-table 70"
+            " ipv4.routing-rules priority 100 from 10.77.7.112 table 70"
+            " ipv6.method disabled connection.autoconnect yes",
+            "/usr/bin/nmcli con up dante-vlan",
+            "/usr/bin/nmcli con down dante-vlan",
+            "/usr/bin/nmcli con delete dante-vlan",
+        ],
         "repo": "zbynekdrlik/dstack",   # public: iemmixer's CI fetches it keyless
         "github_app": True, "repo_secrets": [],
         "tools": ["rust-toolchain:1.98.1", "pipx:netaudio", "cargo:cargo-mutants@27.1.0", "cargo:cargo-nextest@0.9.150", "rust-target:x86_64-pc-windows-gnu"],
