@@ -377,7 +377,7 @@ SERVICE_ACCOUNTS = {
         "sudo": False,
         "repo": "zbynekdrlik/tuke",   # private, code only
         "github_app": True, "repo_secrets": [],
-        "system_packages": ["pulseaudio", "pulseaudio-utils"],
+        "system_packages": ["pulseaudio", "pulseaudio-utils"], "devices": ["kvm"],   # the OS lab VM (owner 10.11.)
         "secrets": ["tuke-calendar-ics", "tuke-gcal-sa.json", "tuke-email", "tuke-password",
                     "tuke-moodle-user", "tuke-moodle-password"],   # + ~/.soniox.env, ~/.ssh/id_ed25519_tuke
         "project_dir": "devel/tuke",

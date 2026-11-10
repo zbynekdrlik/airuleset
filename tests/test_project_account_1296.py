@@ -5,6 +5,8 @@ import unittest
 from pathlib import Path
 
 import cli_account_bootstrap as bootstrap
+import cli_account_hardening as hardening
+import cli_account_policy as policy
 import cli_drop_lanes as drop
 import cli_webterm as w
 import cli_webterm_profiles as profiles
@@ -35,6 +37,17 @@ class TestTukeAccount(unittest.TestCase):
 
     def test_pulse_for_the_recorder_sinks(self):
         self.assertIn("pulseaudio", self.spec["system_packages"])
+
+    def test_kvm_is_granted_to_tuke_only(self):
+        # owner 10.11.: the OS lab VM runs under tuke; a disk/memory node stays refused
+        self.assertEqual(self.spec["devices"], ["kvm"])
+        for acct, spec in bootstrap.SERVICE_ACCOUNTS.items():
+            if acct != "tuke":
+                self.assertNotIn("kvm", spec.get("devices", []), acct)
+        for bad in (["sda"], ["mem"], ["kvm", "sda"]):
+            self.assertNotEqual(policy.validate_host_grants({"devices": bad}), [], bad)
+        script = hardening.render_host_grants_step("tuke", self.spec)
+        self.assertIn('KERNEL=="kvm", RUN+="/usr/bin/setfacl -m u:tuke:rw /dev/%k"', script)
 
     def test_drop_port_and_peer_link(self):
         self.assertEqual(drop._GENERATED_DROP_PORTS[("dev1", "tuke")], 8907)

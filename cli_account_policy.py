@@ -126,8 +126,9 @@ def validate_sudo(spec, account, declared=()):
     return errs
 
 
-# #1282: the device nodes an account may declare; never a disk, memory or kvm node.
-GRANTABLE_DEVICES = ("cpu_dma_latency",)
+# #1282: the device nodes an account may declare; never a disk or memory node.
+# #1296 (owner 10.11.2026): kvm too, so a project runs its own VM (tuke: the OS lab VM).
+GRANTABLE_DEVICES = ("cpu_dma_latency", "kvm")
 _CONNECTION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 
 
