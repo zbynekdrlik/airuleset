@@ -28,13 +28,22 @@ GOOD = "Waiting-on: Hetzner support — reply on ticket 4711 — read the ticket
 
 
 def _no_read(*_a):
-    raise AssertionError("the gh comment read must not run")
+    """Sentinel for `_run(rows=_no_read)`: the gh comment read must not run."""
 
 
 def _run(cmd, rows=None):
-    return opswait.classify_command(
-        cmd, cwd="/x", now=NOW,
-        comments_fn=(lambda *_a: rows) if rows is not _no_read else _no_read)
+    """classify_command with a fake read returning `rows`. With `_no_read`
+    the test FAILS if the read runs at all: the gate swallows a read error as
+    fail-open, so a raising fake would hide a missed same-command line."""
+    calls = []
+
+    def read(*args):
+        calls.append(args)
+        return None if rows is _no_read else rows
+    out = opswait.classify_command(cmd, cwd="/x", now=NOW, comments_fn=read)
+    if rows is _no_read and calls:
+        raise AssertionError("the gh comment read ran: %r" % (calls,))
+    return out
 
 
 class PartyLists(unittest.TestCase):
