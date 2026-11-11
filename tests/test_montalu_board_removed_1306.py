@@ -14,6 +14,7 @@ import time
 import unittest
 import uuid
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -92,6 +93,37 @@ class GenericPiecesStay(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             self.assertIn("off", cli_odoo_board.write_board_marker(d, "david1"))
             self.assertEqual(Path(d, cli_odoo_board.BOARD_MARKER).read_text(), "off\n")
+
+    def test_handover_gate_ignores_the_old_board_config(self):
+        """The stage id came from the montalu task-hygiene config; a leftover
+        file must not settle a move that names only that numeric id."""
+        from gates import handover
+        tid = "t" + uuid.uuid4().hex[:8]
+        url = "https://erp.example/odoo/project/5/tasks/644"
+        entries = [
+            {"type": "user", "message": {"role": "user", "content": "owner: pošli"}},
+            {"type": "assistant", "message": {"role": "assistant", "content": [
+                {"type": "tool_use", "id": tid, "name": "mcp__odoo__call",
+                 "input": {"model": "project.task", "method": "write", "ids": [644],
+                           "values": {"stage_id": 2880}}}]}},
+            {"type": "user", "message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": tid, "content": "ok"}]}},
+            {"type": "assistant", "message": {"role": "assistant", "content": [
+                {"type": "tool_use", "id": tid + "b", "name": "Bash", "input": {
+                    "command": 'gh issue comment 8606 --body "Acceptance-thread: %s"'
+                               % url}}]}},
+            {"type": "user", "message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": tid + "b", "content": "ok"}]}}]
+        with tempfile.TemporaryDirectory() as home:
+            Path(home, ".clau" + "de").mkdir()
+            Path(home, ".clau" + "de", "odoo-task-tracking.json").write_text(
+                json.dumps({"stage_ids": {"verifikacia": 2880}}))
+            tp = Path(home, "t.jsonl")
+            tp.write_text("".join(json.dumps(e, ensure_ascii=False) + "\n"
+                                  for e in entries), encoding="utf-8")
+            with mock.patch.dict(os.environ, {"HOME": home}):
+                verdict = handover.evaluate(str(tp), "ok", home)[0]
+        self.assertEqual(verdict, "block")
 
     def test_handover_shape_lives_in_the_gate(self):
         from gates import handover
