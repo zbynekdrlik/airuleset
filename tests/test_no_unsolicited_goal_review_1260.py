@@ -89,7 +89,8 @@ class TestLeftoverGone1260(unittest.TestCase):
 class TestDeclaredNudge1260(unittest.TestCase):
     def test_watchdog_rearm_into_declared_window_stays_staged(self):
         with m.patch.object(cli_fleet, "box_windows", return_value=WINS):
-            for origin in ("dark-rearm", "auth-rearm", "fulfilled-rearm", "answer-rearm"):
+            # #1303: auth-rearm left this list (it restores an owner-armed goal)
+            for origin in ("dark-rearm", "fulfilled-rearm", "answer-rearm"):
                 with self.subTest(origin=origin):
                     self.assertEqual(goal._declared_window_nudge(D3_CWD, origin=origin),
                                      "goal-sweep")
