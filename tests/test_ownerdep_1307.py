@@ -372,7 +372,13 @@ class TestReviewRegressions(unittest.TestCase):
                 "Musí to schváliť owner.",
                 "Čaká na Zbyňkov súhlas.",
                 "Rozhodnuteľné až po teste — čaká na tvoje rozhodnutie.",
-                "It has been waiting for the owner since Monday.")
+                "It has been waiting for the owner since Monday.",
+                "The A/B can't run until the owner approves it.",
+                "The fix isn't merged so it needs the owner's approval",
+                "the step that was skipped now needs the owner's approval",
+                "Swap the 5\" panel; needs the owner's approval to buy a 7\" panel.",
+                "Needs Zbynek's approval.",
+                "Waiting for Zbynek to decide.")
         for text in hits:
             self.assertTrue(g.owner_dependency(text), text)
         misses = ("This does not even need the owner's approval.",
@@ -390,7 +396,8 @@ class TestReviewRegressions(unittest.TestCase):
                   "Potrebujem rozhodnutie klienta.",
                   "Potrebujem súhlas klienta.",
                   "Stuck on the owner lookup in the ORM.",
-                  "Repo: https://github.com/zbynekdrlik/dstack/issues/141")
+                  "Repo: https://github.com/zbynekdrlik/dstack/issues/141",
+                  "Repo zbynekdrlik/dstack needs zbynekdrlik approval? no: CI.")
         for text in misses:
             self.assertEqual(g.owner_dependency(text), "", text)
 
@@ -516,6 +523,45 @@ class TestTurnRegressions(unittest.TestCase):
         self.assertLess(time.monotonic() - t0, 2.5)
         self.assertEqual(verdict, "block")
 
+    def test_bypass_at_an_earlier_stop_settles_later_chained_stops(self):
+        self._comment()
+        self.t.lines.append({"type": "assistant", "message": {"content": [
+            {"type": "text", "text": "airuleset:owner-dep-ok rig test is the work\n\n" + DONE_MSG}]}})
+        self.t.feedback("peer message: thanks")
+        self.assertEqual(self._eval("Odpovedané peerovi.\n\n✅ DONE: ok")[0], "allow")
+
+    def test_label_on_the_created_issue_number_settles_its_body(self):
+        self.t.bash("gh issue create --title X --body %s" % json.dumps(C_2058),
+                    "https://github.com/zbynekdrlik/dstack/issues/150")
+        self.t.bash("gh issue edit 150 --add-label needs-owner-action", "")
+        self.assertEqual(self._eval()[0], "allow")
+
+    def test_comment_patch_without_issue_number_settles_with_any_u_label(self):
+        self.t.bash("gh api -X PATCH repos/o/r/issues/comments/55 -f body=%s" % json.dumps(C_2051),
+                    "{}")
+        verdict, reason = self._eval()
+        self.assertEqual(verdict, "block")
+        self.assertIn("#?", reason)
+        self.t.bash("gh issue edit 141 --add-label needs-answer", "")
+        self.assertEqual(self._eval()[0], "allow")
+
+    def test_multi_ticket_label_covers_every_ticket(self):
+        self._comment(n=142)
+        self.t.bash("gh issue edit 141 142 --add-label needs-answer", "")
+        self.assertEqual(self._eval()[0], "allow")
+
+    def test_api_input_body_is_a_write_and_never_a_read(self):
+        path = os.path.join(self.t.dir, "c.json")
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump({"body": C_0924}, fh)
+        self.t.bash("gh api repos/o/r/issues/141/comments --input %s" % path,
+                    json.dumps({"body": C_0924, "html_url": COMMENTED}))
+        self.t.bash("gh issue comment 142 --body %s" % json.dumps(C_0924), COMMENTED)
+        verdict, reason = self._eval()
+        self.assertEqual(verdict, "block")
+        self.assertIn("#141", reason)
+        self.assertIn("#142", reason)
+
     def test_failed_comment_naming_the_issue_url_allows(self):
         self.t.bash("gh issue comment 141 --body %s" % json.dumps(C_2051),
                     "error posting to https://github.com/o/r/issues/141", error=True)
@@ -557,8 +603,8 @@ class TestHookWiring(unittest.TestCase):
 
     def test_retry_cap_and_reset(self):
         hook, sid = _fake_root(self, "2"), self._sid()
-        rcs = [self._run(hook, sid, "2").returncode for _ in range(5)]
-        self.assertEqual(rcs, [2, 2, 2, 0, 2])
+        rcs = [self._run(hook, sid, rc).returncode for rc in ("2",) * 5 + ("0", "2")]
+        self.assertEqual(rcs, [2, 2, 2, 0, 0, 0, 2])
 
     def test_crash_and_other_rc_fail_open(self):
         hook = _fake_root(self, "crash")

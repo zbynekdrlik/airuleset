@@ -23,11 +23,14 @@ line already present in an earlier tool result of the turn (a `gh issue view`
 before a body edit) is a restatement, not a new dependency.
 
 Settled by a DELIVERED question after the write -- an `❓ ASKED:` line or a
-last-line `❓ NEEDS YOU:` in any assistant text of the turn, outside code (the
-notify hook's own delivery rule) -- or by a successful add of a U label
-(`needs-answer` / `needs-decision` / `needs-owner-action`) on that ticket in the
-turn. Escape: a line `airuleset:owner-dep-ok <reason>` (outside code fences) in
-the final message. Bypasses and blocks are logged to `audits/owner-dep-gate.log`.
+last-line `❓ NEEDS YOU:`, outside code (the notify hook's own delivery rule), in
+the final message or in a text that ENDED an earlier stop of the same turn (it
+is followed by Stop feedback / a notification, never by a tool call) -- or by a
+successful add of a U label (`needs-answer` / `needs-decision` /
+`needs-owner-action`) on that ticket in the turn (any U label settles an
+unresolvable `#?` comment edit). Escape: a line `airuleset:owner-dep-ok
+<reason>` (outside code fences) in the final message or in such an earlier
+stop's text. Bypasses and blocks are logged to `audits/owner-dep-gate.log`.
 Fail-OPEN on an unreadable transcript.
 
 Known residual: a ticket already in U whose dependency is restated without a
@@ -39,6 +42,7 @@ Dry-run:
   echo '{"last_assistant_message":"x","transcript_path":"/t.jsonl","cwd":"/r"}' \
     | python3 -m gates.ownerdep ; echo rc=$?
 """
+import json
 import os
 import re
 import sys
@@ -59,23 +63,25 @@ _ASKED_LINE_RX = re.compile(r"^[ \t*_>~-]*❓\s*\**\s*ASKED\s*\**\s*:", re.IGNOR
 _NEEDS_YOU_RX = re.compile(r"^[ \t*_>~-]*❓\s*\**\s*NEEDS\s+YOU\s*\**\s*:", re.IGNORECASE)
 _COMMENT_URL_RX = re.compile(r"issuecomment-\d+")
 _GH_RX = re.compile(r"\bgh\s")
-_READ_RX = re.compile(r"\bgh\s+(?:issue\s+view|api)\b(?![^\n]*\bbody=)")
-_ISSUE_URL_RX = re.compile(r"/issues/\d+")
+_READ_RX = re.compile(r"\bgh\s+(?:issue\s+view|api)\b(?![^\n]*(?:\bbody=|--input|\bgraphql\b|"
+                      r"(?:-X|--method)\s*(?:POST|PATCH|PUT)))")
+_ISSUE_URL_RX = re.compile(r"/issues/(\d+)")
 _API_ISSUE_RX = re.compile(r"(?:^|/)issues/(?:(\d+)(?:/comments)?|comments/\d+)/?(?:\?|$)")
 _API_LABELS_RX = re.compile(r"(?:^|/)issues/(\d+)/labels/?(?:\?|$)")
-_CODE_OR_QUOTE_RX = re.compile(r"`[^`\n]*`|\"[^\"\n]*\"|„[^“\n]*“|“[^”\n]*”")
+_CODE_OR_QUOTE_RX = re.compile(r"`[^`\n]*`|(?<!\w)\"[^\"\n]{1,120}\"(?!\w)|„[^“\n]*“|“[^”\n]*”")
 _SKIP_LINE_RX = re.compile(r"^\s*>|^\W*ROZHODNUT[ÉE]|^\s*[-*]\s+\[[xX]\]")
-_CLAUSE_CUT_RX = re.compile(r"[;:.,!?()—–]|\s(?:and|but|a|ale|aj)\s")
+_CLAUSE_CUT_RX = re.compile(r"[;:.,!?()—–]|\s(?:and|but|so|now|then|because|that|which|a|ale|aj|"
+                            r"preto|takže|lebo|teraz)\s")
 _NEGATIONS = {"not", "never", "nie", "ani", "netreba", "nikdy", "nemusí", "nemusi"}
 _SETTLED = {"was", "were", "had", "previously", "bolo", "bol", "bola"}
 
 # FUTURE / NEEDED forms only; a past or settled form ("owner-approved", "Owner
 # approved", "approved by the owner", ROZHODNUTÉ) has none of these verbs.
-_OWN = r"(?:(?:the|an?)\s+)?(?:owner|zby(?:ně|ň)\w*)(?:['’]s|s['’]?)?"
+_OWN = r"(?:(?:the|an?)\s+)?(?:owner|zby(?:ně|ň|nek(?!drlik))\w*)(?:['’]s|s['’]?)?"
 _NOUN = (r"(?:approval|consent|decision|answer|ok|okay|go[- ]ahead|permission|sign[- ]off|"
          r"confirmation|input|hands|action|reply|response|choice|review)\b")
-_SK_OWN = r"(?:tvoj\w*|ownerov\w*|owner\w*|zby(?:ně|ň)\w*|vlastn[íi]k\w*|teba|tebe)"
-_SK_OWNER_GEN = r"(?:od\s+)?(?:ownera|teba|zby(?:ně|ň)\w*|vlastn[íi]ka)\b"
+_SK_OWN = r"(?:tvoj\w*|ownerov\w*|owner\w*|zby(?:ně|ň|nek(?!drlik))\w*|vlastn[íi]k\w*|teba|tebe)"
+_SK_OWNER_GEN = r"(?:od\s+)?(?:ownera|teba|zby(?:ně|ň|nek(?!drlik))\w*|vlastn[íi]ka)\b"
 _SK_NOUN = r"(?:s[úu]hlas\w*|schv[áa]len\w*|rozhodnut\w*|odpove\w*|povolen\w*|ok)\b"
 _DEP_RX = re.compile("|".join((
     r"\b(?:needs?|requires?|awaiting|awaits|pending)\s+(?:%s|your)\s+%s" % (_OWN, _NOUN),
@@ -91,8 +97,8 @@ _DEP_RX = re.compile("|".join((
     r"\b(?:potrebuj\w*|treba|potrebn\w*|vy[žz]aduj\w*|[čc]ak\w*(?:\s+sa)?\s+na)\s+%s\s+%s"
     % (_SK_NOUN, _SK_OWNER_GEN),
     r"\b[čc]ak(?:á|a|ám|am|áme|ame|ajú|aju|ať|at)\s+na\s+%s" % _SK_OWN,
-    r"\b(?:owner|vlastn[íi]k|zby(?:ně|ň)\w*)\s+mus[íi]\s+(?:schv|rozhod|ods[úu]hlas|potvrd|odpoved)\w*",
-    r"\bmus[íi]\s+(?:to\s+)?(?:schv|rozhod|ods[úu]hlas|potvrd)\w*\s+(?:owner|vlastn[íi]k|zby(?:ně|ň)\w*)\b",
+    r"\b(?:owner|vlastn[íi]k|zby(?:ně|ň|nek(?!drlik))\w*)\s+mus[íi]\s+(?:schv|rozhod|ods[úu]hlas|potvrd|odpoved)\w*",
+    r"\bmus[íi]\s+(?:to\s+)?(?:schv|rozhod|ods[úu]hlas|potvrd)\w*\s+(?:owner|vlastn[íi]k|zby(?:ně|ň|nek(?!drlik))\w*)\b",
 )), re.IGNORECASE)
 
 
@@ -115,7 +121,7 @@ def owner_dependency(text):
             continue
         line = _CODE_OR_QUOTE_RX.sub("", raw)
         for m in _DEP_RX.finditer(line):
-            if not _cancelled(line, m.start()):
+            if m.group(0)[:5].lower() == "until" or not _cancelled(line, m.start()):
                 return raw.strip()[:200]
     return ""
 
@@ -158,10 +164,12 @@ class _Turn:
     def gh_issue(self, tk, seg, cwd, heredocs, ok, result):
         file_bodies, direct_bodies = heredocs
         verb = tk[2]
-        keys = _ticket_keys(tk) if verb != "create" else []
-        ticket = keys[0] if keys else "new"
-        self.label(ticket, _all_flag_values(
-            tk, ("--add-label",) if verb == "edit" else ("-l", "--label")), ok)
+        created = _ISSUE_URL_RX.search(result) if verb == "create" else None
+        keys = [created.group(1) if created else "new"] if verb == "create" else _ticket_keys(tk)
+        ticket = keys[0] if keys else "?"
+        for key in keys:
+            self.label(key, _all_flag_values(
+                tk, ("--add-label",) if verb == "edit" else ("-l", "--label")), ok)
         url = _ISSUE_URL_RX if verb == "create" else _COMMENT_URL_RX
         if not (ok or url.search(result)):
             return
@@ -177,6 +185,11 @@ class _Turn:
 
     def gh_api(self, tk, cwd, ok, result):
         fields = [f.partition("=") for f in _all_values(tk, ("-f", "-F", "--field", "--raw-field"))]
+        for path in _all_values(tk, ("--input",)):
+            try:
+                fields.append(("body", "", str(json.loads(self.read(path, cwd)).get("body") or "")))
+            except (ValueError, AttributeError):
+                continue
         for tok in tk[2:]:
             lm = _API_LABELS_RX.search(tok)
             if lm:
@@ -211,7 +224,7 @@ class _Turn:
                 self.gh_api(tk, cwd, ok, result or "")
 
     def asked(self, text):
-        if asked_in(text):
+        if asked_in(text) or bypass_reason(text):
             for dep in self.deps:
                 dep[2] = True
 
@@ -243,7 +256,8 @@ def evaluate(transcript_path, message, cwd):
             last_text = None
         if name == "Bash" and _READ_RX.search(str(inp.get("command") or "")):
             turn.seen.append(result)
-    open_deps = [(t, line) for t, line, asked in turn.deps if not asked and t not in turn.labelled]
+    open_deps = [(t, line) for t, line, asked in turn.deps if not asked
+                 and t not in turn.labelled and not (t == "?" and turn.labelled)]
     if not open_deps:
         return "allow", ""
     listing = "; ".join("#%s: „%s“" % dep for dep in open_deps[:3])
