@@ -767,6 +767,48 @@ class TestLiveFalsePositive(unittest.TestCase):
                 self.t.bash("gh issue edit 1297 --body-file %s" % self.f, "")
                 self.assertEqual(self._eval(), "block")
 
+    def test_rereview_mixed_in_text_drops_the_prior_body(self):
+        """Re-review: a pipe consumer, sed r, a heredoc script, 1>> or a comments
+        read can bring foreign text into F."""
+        dep = "- [ ] Next: needs the owner's approval to swap the switch."
+        draft = os.path.join(self.t.dir, "draft.md")
+        with open(draft, "w", encoding="utf-8") as fh:
+            fh.write(dep)
+        view = "gh issue view 1297 --json body -q .body"
+        for cmd in ("%s | cat - %s > %s" % (view, draft, self.f),
+                    "%s > %s && sed -i '$r %s' %s" % (view, self.f, draft, self.f),
+                    "%s > %s && python3 - <<'PY'\nopen('%s','a').write('x')\nPY"
+                    % (view, self.f, self.f),
+                    "%s > %s && cat %s 1>> %s" % (view, self.f, draft, self.f),
+                    "gh issue view 1297 -c > %s" % self.f):
+            with self.subTest(cmd=cmd[40:90]):
+                self._filled(dep)
+                self.t = _Transcript(self).prompt()
+                self.t.bash(cmd, "")
+                self.t.bash("gh issue edit 1297 --body-file %s" % self.f, "")
+                self.assertEqual(self._eval(), "block")
+
+    def test_rereview_url_form_read_allows(self):
+        self._filled()
+        self.t.bash("gh issue view https://github.com/o/r/issues/1297 --json body -q .body > %s && %s"
+                    % (self.f, TICK % self.f), "")
+        self.t.bash("gh issue edit 1297 --body-file %s" % self.f, "")
+        self.assertEqual(self._eval(), "allow")
+
+    def test_rereview_short_body_file_name_stays_fast(self):
+        """Re-review: a body file named `body` made every `--body` segment tokenise."""
+        self.f = os.path.join(self.t.dir, "body")
+        self._filled()
+        self.t.bash("gh issue view 1297 --json body -q .body > %s" % self.f, "")
+        cmd = " && ".join(["echo --body x"] * 300)
+        for _ in range(110):
+            self.t.bash(cmd, "ok")
+        self.t.bash("gh issue edit 1297 --body-file %s" % self.f, "")
+        path = self.t.write()
+        t0 = time.monotonic()
+        self.assertEqual(_gate().evaluate(path, DONE_MSG, self.t.dir)[0], "allow")
+        self.assertLess(time.monotonic() - t0, 2.5)
+
     def test_comment_from_a_read_filled_file_via_api_blocks(self):
         self._filled()
         self.t.bash("gh issue view 1297 --json body -q .body > %s" % self.f, "")

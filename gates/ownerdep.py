@@ -74,10 +74,12 @@ _ASKED_LINE_RX = re.compile(r"^[ \t*_>~-]*❓\s*\**\s*ASKED\s*\**\s*:", re.IGNOR
 _NEEDS_YOU_RX = re.compile(r"^[ \t*_>~-]*❓\s*\**\s*NEEDS\s+YOU\s*\**\s*:", re.IGNORECASE)
 _COMMENT_URL_RX = re.compile(r"issuecomment-\d+")
 _WAKE_RX = re.compile(r"\s*<(?:task-notification|channel)\b")
-_REDIRECT_RX = re.compile(r"^(>>?)([^>&].*)$")
+_REDIRECT_RX = re.compile(r"^(?:\d|&)?(>>?)\|?(.*)$")
 _API_BODY_RX = re.compile(r"(?:^|/)issues/(\d+)/?(?:\?|$)")
 _WRITE_API_RX = re.compile(r"\bbody=|--input|(?:-X|--method)\s*(?:POST|PATCH|PUT)")
 _KEEPS_BODY = {"gh", "sed", "cat", "grep", "egrep", "head", "tail", "wc", "diff", "less", "ls"}
+_PIPE_KEEPS = {"sed", "jq", "tr"}             # a transform of the piped read, nothing mixed in
+_SED_FILE_CMD_RX = re.compile(r"(?:^|[;{}\s\d$/])[rRwWe]\s+\S")
 _GH_RX = re.compile(r"\bgh\s")
 _READ_RX = re.compile(r"\bgh\s+(?:issue\s+view|api)\b(?![^\n]*(?:\bbody=|--input|\bgraphql\b|"
                       r"(?:-X|--method)\s*(?:POST|PATCH|PUT)))")
@@ -165,6 +167,7 @@ class _Turn:
         self.deps, self.labelled = [], set()       # deps: [ticket, line, asked]
         self.prior = {}                            # body file -> ticket whose body a read put there
         self._authored, self._norm, self._done = [], [], 0
+        self._touch_key, self._touch_rx = (), None
 
     def author(self, *texts):
         self._authored += [t for t in texts if t]
@@ -200,38 +203,57 @@ class _Turn:
 
     @staticmethod
     def body_read(tk):
-        """N for a read of ticket N's body (`gh issue view N`, `gh api …/issues/N`)."""
-        if tk[:3] == ["gh", "issue", "view"] and "--comments" not in tk:
-            nums = [t.lstrip("#") for t in tk[3:] if t.lstrip("#").isdigit()]
+        """N for a read of ticket N's body (`gh issue view N|URL`, `gh api …/issues/N`)."""
+        if tk[:3] == ["gh", "issue", "view"] and not {"--comments", "-c"} & set(tk) \
+                and "body" in (_flag_value(tk, ("--json",)) or "body"):
+            nums = [m.group(1) if m else t.lstrip("#") for t, m in
+                    ((t, _ISSUE_URL_RX.search(t)) for t in tk[3:]) if m or t.lstrip("#").isdigit()]
         elif tk[:2] == ["gh", "api"] and not _WRITE_API_RX.search(" ".join(tk)):
             nums = [m.group(1) for m in map(_API_BODY_RX.search, tk[2:]) if m]
         else:
             return None
         return nums[0] if nums else None
 
+    def foreign(self, args, cwd, keep):
+        """A command that may mix other text into a file: a head outside `keep`,
+        sed with a file command (r/R/w/e), or (piped) an existing file argument."""
+        if args[0] not in keep:
+            return True
+        if args[0] == "sed" and any(_SED_FILE_CMD_RX.search(t) for t in args[1:] if t[:1] != "-"):
+            return True
+        return keep is _PIPE_KEEPS and any(
+            t[:1] != "-" and os.path.isfile(self.full(t, cwd)) for t in args[1:])
+
     def track(self, tk, cwd, piped):
-        """Body-file provenance: `> F` after a read of N (or a pipe from one) makes
-        F hold N's prior body; any other write to F (`>>`, tee, a script, cp/mv onto
-        it) drops it. `sed`, readers and the gh edit itself keep it."""
-        ticket = self.body_read(tk) or piped
-        mentioned = []
+        """Body-file provenance: `> F` after a read of N (or a pipe from one through
+        sed/jq/tr) makes F hold N's prior body; any other write to F (`>>`, tee, a
+        script, sed r/w, cp/mv onto it) drops it. Readers and the gh edit keep it."""
+        ops, args, skip = [], [], False
         for i, tok in enumerate(tk):
-            if i and tk[i - 1] in (">", ">>"):
-                continue                          # the target of a split redirect
-            op, path = (tok, tk[i + 1]) if tok in (">", ">>") and i + 1 < len(tk) else \
-                _REDIRECT_RX.match(tok).groups() if _REDIRECT_RX.match(tok) else (None, tok)
-            full = self.full(path, cwd)
+            m = None if skip else _REDIRECT_RX.match(tok)
+            if m:
+                path = m.group(2) or (tk[i + 1] if i + 1 < len(tk) else "")
+                ops.append((m.group(1), self.full(path, cwd)))
+                skip = not m.group(2)             # the target of a split redirect
+            elif not skip:
+                args.append(tok)
+            else:
+                skip = False
+        if not args:
+            return None
+        piped = piped if piped and not self.foreign(args, cwd, _PIPE_KEEPS) else None
+        ticket = self.body_read(args) or piped
+        for op, full in ops:
             if op == ">" and ticket:
                 self.prior[full] = ticket
-            elif op:
+            else:
                 self.prior.pop(full, None)
-            elif full in self.prior:
-                mentioned.append(full)
-        if tk[0] in ("cp", "mv") and mentioned and self.full(tk[-1], cwd) not in mentioned:
-            self.prior[self.full(tk[-1], cwd)] = self.prior[mentioned[0]]
-            if tk[0] == "mv":
+        mentioned = [f for f in map(lambda t: self.full(t, cwd), args) if f in self.prior]
+        if args[0] in ("cp", "mv") and mentioned and self.full(args[-1], cwd) not in mentioned:
+            self.prior[self.full(args[-1], cwd)] = self.prior[mentioned[0]]
+            if args[0] == "mv":
                 self.prior.pop(mentioned[0], None)
-        elif tk[0] not in _KEEPS_BODY:
+        elif mentioned and self.foreign(args, cwd, _KEEPS_BODY):
             for full in mentioned:
                 self.prior.pop(full, None)
         return ticket
@@ -283,7 +305,14 @@ class _Turn:
                                    None if "/comments" in tok else path, cwd)
 
     def touches(self, text):
-        return any(os.path.basename(p) in text for p in self.prior)
+        """A bounded match of any read-filled file's name (one regex, review perf)."""
+        if not self.prior:
+            return False
+        if self._touch_key != tuple(self.prior):
+            self._touch_key = tuple(self.prior)
+            self._touch_rx = re.compile(r"(?<![\w.-])(?:%s)(?![\w.-])" % "|".join(
+                re.escape(os.path.basename(f)) for f in self.prior))
+        return bool(self._touch_rx.search(text))
 
     def scan_bash(self, cmd, ok, result):
         touches = self.touches(cmd)
@@ -312,6 +341,8 @@ class _Turn:
                 self.gh_issue(tk, seg, cwd, (file_bodies, direct_bodies), ok, result or "")
             elif tk[:2] == ["gh", "api"]:
                 self.gh_api(tk, cwd, ok, result or "")
+        if any(self.touches(text) for text in direct_bodies.values()):
+            self.prior.clear()                    # a heredoc script naming F may write it
 
     def asked(self, text):
         if asked_in(text) or bypass_reason(text):
