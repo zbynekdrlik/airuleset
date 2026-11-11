@@ -22,9 +22,11 @@ counts only when its result shows the posted comment/issue URL. A dependency
 line already present in an earlier tool result of the turn (a `gh issue view`
 before a body edit) is a restatement, not a new dependency. A body EDIT from a
 file that a read of the same ticket filled this turn (`gh issue view N … > F`,
-then sed / Edit, then `--body-file F` or `body=@F`) counts only a dependency
-phrase the turn itself authored (Bash text, Write content, Edit's new lines):
-the rest is the prior body (#1307 false positive, 11.11.).
+also piped through sed/jq, copied by cp/mv; then sed / Edit, then `--body-file
+F`, `--body "$(cat F)"` or `body=@F`) counts only a dependency phrase the turn
+itself authored (Bash text, Write content, Edit's new lines): the rest is the
+prior body (#1307 false positive, 11.11.). Any other write to F (`>>`, tee, a
+script, a subagent, MultiEdit) drops that provenance, so F counts in full.
 
 Settled by a DELIVERED question after the write -- an `❓ ASKED:` line or a
 last-line `❓ NEEDS YOU:`, outside code (the notify hook's own delivery rule), in
@@ -42,8 +44,10 @@ Fail-OPEN on an unreadable transcript.
 Known residual: a ticket already in U whose dependency is restated without a
 read in the same turn blocks once (the bypass names it); `$VAR` bodies and
 nested `bash -c` are not resolved; the regex is deliberately narrow (needed /
-future verb forms only); a whole-body Write over a read-filled file, or a sed
-PATTERN quoting an old dependency, counts as authored (blocks once).
+future verb forms only); a whole-body Write over a read-filled file, a sed
+PATTERN or grep quoting an old dependency, or an Edit keeping it on a changed
+line counts as authored (blocks once); only the first dependency line of a
+body is judged.
 
 Dry-run:
   echo '{"last_assistant_message":"x","transcript_path":"/t.jsonl","cwd":"/r"}' \
@@ -70,7 +74,10 @@ _ASKED_LINE_RX = re.compile(r"^[ \t*_>~-]*❓\s*\**\s*ASKED\s*\**\s*:", re.IGNOR
 _NEEDS_YOU_RX = re.compile(r"^[ \t*_>~-]*❓\s*\**\s*NEEDS\s+YOU\s*\**\s*:", re.IGNORECASE)
 _COMMENT_URL_RX = re.compile(r"issuecomment-\d+")
 _WAKE_RX = re.compile(r"\s*<(?:task-notification|channel)\b")
-_REDIRECT_RX = re.compile(r"^>[^>&]")
+_REDIRECT_RX = re.compile(r"^(>>?)([^>&].*)$")
+_API_BODY_RX = re.compile(r"(?:^|/)issues/(\d+)/?(?:\?|$)")
+_WRITE_API_RX = re.compile(r"\bbody=|--input|(?:-X|--method)\s*(?:POST|PATCH|PUT)")
+_KEEPS_BODY = {"gh", "sed", "cat", "grep", "egrep", "head", "tail", "wc", "diff", "less", "ls"}
 _GH_RX = re.compile(r"\bgh\s")
 _READ_RX = re.compile(r"\bgh\s+(?:issue\s+view|api)\b(?![^\n]*(?:\bbody=|--input|\bgraphql\b|"
                       r"(?:-X|--method)\s*(?:POST|PATCH|PUT)))")
@@ -122,7 +129,7 @@ def _cancelled(line, start):
 
 
 def _norm(text):
-    return re.sub(r"[\s\\'\"’`]+", "", text).lower()
+    return re.sub(r"\\x27|[\s\\'\"’`]+", "", text).lower()
 
 
 def owner_dependency(text, authored=None):
@@ -156,7 +163,17 @@ class _Turn:
         self.cwd = cwd or os.getcwd()
         self.files, self.seen = {}, []
         self.deps, self.labelled = [], set()       # deps: [ticket, line, asked]
-        self.prior, self.authored = {}, []         # prior: body file -> ticket read into it
+        self.prior = {}                            # body file -> ticket whose body a read put there
+        self._authored, self._norm, self._done = [], [], 0
+
+    def author(self, *texts):
+        self._authored += [t for t in texts if t]
+
+    def authored(self):
+        """The turn's own text, `_norm`ed lazily, each entry once (review: O(edits x turn))."""
+        self._norm += [_norm(t) for t in self._authored[self._done:]]
+        self._done = len(self._authored)
+        return "\n".join(self._norm)
 
     @staticmethod
     def full(path, cwd):
@@ -175,19 +192,49 @@ class _Turn:
     def wrote(self, ticket, body, path=None, cwd=None):
         """A body file filled by a read of this ticket (`snapshot`) holds its
         prior body: only a dependency phrase the turn authored is new."""
-        prior = path and self.prior.get(self.full(path, cwd)) == ticket
-        line = owner_dependency(body, _norm("\n".join(self.authored)) if prior else None)
+        line = owner_dependency(body)
+        if line and path and self.prior.get(self.full(path, cwd)) == ticket:
+            line = owner_dependency(body, self.authored())
         if line and not any(line in seen for seen in self.seen):
             self.deps.append([ticket, line, False])
 
-    def snapshot(self, tk, cwd):
-        """`gh issue view N … > F` / `gh api …/issues/N … > F`: F holds N's body."""
-        nums = [m.group(1) for m in map(_ISSUE_URL_RX.search, tk[2:]) if m]
-        nums += [t.lstrip("#") for t in tk[3:] if tk[1] == "issue" and t.lstrip("#").isdigit()]
+    @staticmethod
+    def body_read(tk):
+        """N for a read of ticket N's body (`gh issue view N`, `gh api …/issues/N`)."""
+        if tk[:3] == ["gh", "issue", "view"] and "--comments" not in tk:
+            nums = [t.lstrip("#") for t in tk[3:] if t.lstrip("#").isdigit()]
+        elif tk[:2] == ["gh", "api"] and not _WRITE_API_RX.search(" ".join(tk)):
+            nums = [m.group(1) for m in map(_API_BODY_RX.search, tk[2:]) if m]
+        else:
+            return None
+        return nums[0] if nums else None
+
+    def track(self, tk, cwd, piped):
+        """Body-file provenance: `> F` after a read of N (or a pipe from one) makes
+        F hold N's prior body; any other write to F (`>>`, tee, a script, cp/mv onto
+        it) drops it. `sed`, readers and the gh edit itself keep it."""
+        ticket = self.body_read(tk) or piped
+        mentioned = []
         for i, tok in enumerate(tk):
-            target = tk[i + 1:i + 2] if tok == ">" else [tok[1:]] if _REDIRECT_RX.match(tok) else []
-            if nums and target:
-                self.prior[self.full(target[0], cwd)] = nums[0]
+            if i and tk[i - 1] in (">", ">>"):
+                continue                          # the target of a split redirect
+            op, path = (tok, tk[i + 1]) if tok in (">", ">>") and i + 1 < len(tk) else \
+                _REDIRECT_RX.match(tok).groups() if _REDIRECT_RX.match(tok) else (None, tok)
+            full = self.full(path, cwd)
+            if op == ">" and ticket:
+                self.prior[full] = ticket
+            elif op:
+                self.prior.pop(full, None)
+            elif full in self.prior:
+                mentioned.append(full)
+        if tk[0] in ("cp", "mv") and mentioned and self.full(tk[-1], cwd) not in mentioned:
+            self.prior[self.full(tk[-1], cwd)] = self.prior[mentioned[0]]
+            if tk[0] == "mv":
+                self.prior.pop(mentioned[0], None)
+        elif tk[0] not in _KEEPS_BODY:
+            for full in mentioned:
+                self.prior.pop(full, None)
+        return ticket
 
     def label(self, ticket, values, ok):
         if ok and U_LABELS & {v.strip().lower() for v in values}:
@@ -210,13 +257,13 @@ class _Turn:
         if bf and bf != "-" and bf not in file_bodies:
             body, path = self.read(bf, cwd), bf if verb == "edit" else None
         elif sub:
-            body = self.read(sub.group(1) or sub.group(2), cwd)
+            sub = sub.group(1) or sub.group(2)
+            body, path = self.read(sub, cwd), sub if verb == "edit" else None
         else:
             body = _comment_body(tk, seg, cwd, file_bodies, direct_bodies)
         self.wrote(ticket, body or "", path, cwd)
 
     def gh_api(self, tk, cwd, ok, result):
-        self.snapshot(tk, cwd)
         fields = [f.partition("=") for f in _all_values(tk, ("-f", "-F", "--field", "--raw-field"))]
         for path in _all_values(tk, ("--input",)):
             try:
@@ -235,27 +282,34 @@ class _Turn:
                         self.wrote(im.group(1) or "?", self.read(path, cwd) if path else val,
                                    None if "/comments" in tok else path, cwd)
 
+    def touches(self, text):
+        return any(os.path.basename(p) in text for p in self.prior)
+
     def scan_bash(self, cmd, ok, result):
-        if "<<" not in cmd and not _GH_RX.search(cmd):
+        touches = self.touches(cmd)
+        if "<<" not in cmd and not _GH_RX.search(cmd) and not touches:
             return                                # cheap: nothing to record
         file_bodies, direct_bodies, skeleton = _capture_heredocs(re.sub(r"\\\r?\n", " ", cmd))
-        cwd = self.cwd
+        cwd, piped, pos = self.cwd, None, 0
         for path, text in file_bodies.items():
             self.files[self.full(path, cwd)] = text
-        if not _GH_RX.search(skeleton):
+            self.prior.pop(self.full(path, cwd), None)
+        if not (_GH_RX.search(skeleton) or touches):
             return
         for seg in split_top_level(skeleton):
-            if not (_GH_RX.search(seg) or seg.lstrip().startswith("cd")):
-                continue
-            tk = _unwrap(_tokens_of(seg))
+            pos = skeleton.find(seg, pos) + len(seg)
+            pipe = re.match(r"\|(?!\|)", skeleton[pos:])
+            tk = _unwrap(_tokens_of(seg)) if (_GH_RX.search(seg) or piped or self.touches(seg)
+                                              or seg.lstrip().startswith("cd")) else []
             if not tk:
+                piped = None
                 continue
+            read = self.track(tk, cwd, piped)
+            piped = read if pipe else None
             if tk[0] == "cd":
                 cwd = _apply_cd(cwd, tk) or cwd
             elif _is_gh_issue_cmd(tk):
                 self.gh_issue(tk, seg, cwd, (file_bodies, direct_bodies), ok, result or "")
-            elif tk[:3] == ["gh", "issue", "view"]:
-                self.snapshot(tk, cwd)
             elif tk[:2] == ["gh", "api"]:
                 self.gh_api(tk, cwd, ok, result or "")
 
@@ -283,22 +337,24 @@ def evaluate(transcript_path, message, cwd):
     turn, last_text = _Turn(cwd), None
     for name, inp, ok, result in calls:
         if name == "Bash":
-            turn.authored.append(str(inp.get("command") or ""))
-            turn.scan_bash(turn.authored[-1], ok, result)
+            turn.author(str(inp.get("command") or ""))
+            turn.scan_bash(str(inp.get("command") or ""), ok, result)
         elif name == "Write" and isinstance(inp.get("file_path"), str):
-            turn.authored.append(str(inp.get("content") or ""))
-            turn.files[turn.full(inp["file_path"], turn.cwd)] = turn.authored[-1]
+            turn.author(str(inp.get("content") or ""))
+            turn.files[turn.full(inp["file_path"], turn.cwd)] = str(inp.get("content") or "")
         elif name == "Edit":
-            old = str(inp.get("old_string") or "").splitlines()
-            turn.authored += [ln for ln in str(inp.get("new_string") or "").splitlines()
-                              if ln not in old]
+            old = set(str(inp.get("old_string") or "").splitlines())
+            turn.author(*(ln for ln in str(inp.get("new_string") or "").splitlines()
+                          if ln not in old))
+        elif name in ("Agent", "Task", "Workflow", "MultiEdit", "NotebookEdit"):
+            turn.prior.clear()            # a writer the gate cannot see into
         if name == "_text":
             last_text = inp.get("text")
         elif name == "_resume" and last_text is not None and _WAKE_RX.match(inp.get("text") or ""):
             turn.settle()                 # an idle wake: every gate passed the stop before it
         elif name == "_resume":           # the text before it ended a stop: delivered
             turn.asked(last_text)
-        else:
+        if name != "_text":               # a wake counts only right after a text
             last_text = None
         if name == "Bash" and _READ_RX.search(str(inp.get("command") or "")):
             turn.seen.append(result)

@@ -726,6 +726,77 @@ class TestLiveFalsePositive(unittest.TestCase):
                 self.t.bash("true", "")
                 self.assertEqual(self._eval(), "allow")
 
+    def test_review_more_incident_shapes_allow(self):
+        """Review round: a pipe from the read, `$(cat F)`, a cp copy, gh api | jq."""
+        view = "gh issue view 1297 --json body -q .body"
+        for cmds in (["%s | sed 's/a/b/' > %s" % (view, self.f), "gh issue edit 1297 --body-file %s"],
+                     ["%s > %s" % (view, self.f), 'gh issue edit 1297 --body "$(cat %s)"'],
+                     ["%s > %s && cp %s %s.new" % (view, self.f, self.f, self.f),
+                      "gh issue edit 1297 --body-file %s.new"],
+                     ["gh api repos/o/r/issues/1297 | jq -r .body > %s" % self.f,
+                      "gh api -X PATCH repos/o/r/issues/1297 -F body=@%s"]):
+            with self.subTest(cmd=cmds[0][:40]):
+                self._filled()
+                shutil_copy = cmds[0].count(" cp ")
+                self.t = _Transcript(self).prompt()
+                self.t.bash(cmds[0], "")
+                if shutil_copy:
+                    self._copy(self.f + ".new")
+                self.t.bash(cmds[1] % self.f, "{}")
+                self.assertEqual(self._eval(), "allow")
+
+    def _copy(self, dst):
+        with open(self.f, encoding="utf-8") as src, open(dst, "w", encoding="utf-8") as fh:
+            fh.write(src.read())
+
+    def test_review_foreign_writers_drop_the_prior_body(self):
+        """Review 🔴: text entering F by a route the gate cannot read counts in full."""
+        dep = "- [ ] Next: needs the owner's approval to swap the switch."
+        view = "gh issue view 1297 --json body -q .body > %s" % self.f
+        for between in (("Bash", {"command": "cat draft.md >> %s" % self.f}),
+                        ("Bash", {"command": "python3 add_next.py %s" % self.f}),
+                        ("Bash", {"command": "gh issue view 1300 --json body -q .body >> %s" % self.f}),
+                        ("Bash", {"command": "sed -i 's/x/needs the owner\\x27s approval/' %s" % self.f}),
+                        ("Agent", {"prompt": "tick the plan in the body file"}),
+                        ("MultiEdit", {"file_path": self.f, "edits": []})):
+            with self.subTest(between=str(between)[:50]):
+                self._filled(dep)
+                self.t = _Transcript(self).prompt()
+                self.t.bash(view, "")
+                self.t.call(*between, result="ok")
+                self.t.bash("gh issue edit 1297 --body-file %s" % self.f, "")
+                self.assertEqual(self._eval(), "block")
+
+    def test_comment_from_a_read_filled_file_via_api_blocks(self):
+        self._filled()
+        self.t.bash("gh issue view 1297 --json body -q .body > %s" % self.f, "")
+        self.t.bash("gh api repos/o/r/issues/1297/comments -F body=@%s" % self.f, "{}")
+        self.assertEqual(self._eval(), "block")
+
+    def test_wake_after_blocked_stop_feedback_does_not_bound_the_turn(self):
+        """Review 🔴: text → Stop feedback (the gate blocked) → wake must keep the debt."""
+        self.t.bash("gh issue comment 141 --body %s" % json.dumps(C_2051), COMMENTED)
+        self.t.lines.append({"type": "assistant", "message": {"content": [
+            {"type": "text", "text": DONE_MSG}]}})
+        self.t.feedback("Stop hook feedback: 🚫 BLOCKED (#1307)")
+        self._wake("<task-notification>done</task-notification>")
+        self.t.bash("true", "")
+        self.assertEqual(self._eval(), "block")
+
+    def test_many_read_filled_edits_stay_fast(self):
+        """Review 🟡: the authored text was re-normalised on every read-filled edit."""
+        self._filled()
+        cmd = "python3 -c 'print(1)' # filler; " * 300
+        for _ in range(600):
+            self.t.bash(cmd, "ok")
+        for _ in range(60):
+            self.t.bash("gh issue view 1297 --json body -q .body > %s && %s && gh issue edit "
+                        "1297 --body-file %s" % (self.f, TICK % self.f, self.f), "ok")
+        path = self.t.write()
+        t0 = time.monotonic()
+        self.assertEqual(_gate().evaluate(path, DONE_MSG, self.t.dir)[0], "allow")
+        self.assertLess(time.monotonic() - t0, 2.5)
+
     def test_wake_after_a_tool_call_does_not_bound_the_turn(self):
         self.t.bash("gh issue comment 141 --body %s" % json.dumps(C_2051), COMMENTED)
         self._wake("<task-notification>done</task-notification>")
