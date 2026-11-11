@@ -12,27 +12,48 @@ a revoked-token stall: job 1's resume (or the owner) got a real reply out of
 the session, which proves the running process holds a working token. CC's
 `Goal cleared …` notice is a `system` entry, which the reader skips, so the
 cleared session reads "still dead" until that real reply lands.
+
+Review round 2: a process STARTED after the newest 401 (job 1's relaunch, or the
+owner's `claude -c`) read the credentials at launch, so the old 401 is history
+(the job 1 `authdead_is_historical` rule) and the re-arm proceeds. The hold is
+journalled once per episode (B9 `first_hold` shape), not every sweep.
 """
-from watchdog.decide import is_oauth_revoked
-from watchdog.transcripts import transcript_first_error_ts
+from watchdog.decide import authdead_is_historical, is_oauth_revoked
+from watchdog.transcripts import transcript_first_error_ts, transcript_last_error_ts
+
+_HOLD_KEY = "auth_rearm_hold"   # state: {sid: True} while a hold was journalled
 
 
-def still_auth_dead(tpath):
-    """True while the transcript's trailing run holds a revoked-token 401 (the
-    session has produced no real reply since). None/unreadable -> False: the
-    caller's other gates decide, as before #1303."""
+def _proc_start(pid, run):
+    from watchdog.tmux_io import _pane_claude_start_epoch
+    return _pane_claude_start_epoch(pid, run)
+
+
+def still_auth_dead(tpath, pid=None, run=None):
+    """True while the transcript's trailing run holds a revoked-token 401 that
+    the running process received (no real reply since, process not restarted
+    after it). Unreadable -> False: the caller's other gates decide, as before
+    #1303."""
     if not tpath:
         return False
-    try:
-        ts = transcript_first_error_ts(tpath, match=is_oauth_revoked)
-    except OSError:
+    if transcript_first_error_ts(tpath, match=is_oauth_revoked) is None:
         return False
-    return ts is not None
+    last_401 = transcript_last_error_ts(tpath)
+    if pid and authdead_is_historical(last_401, _proc_start(pid, run)):
+        return False
+    return True
 
 
-def hold_line(loc, sid, tpath):
-    """The decision-log line that HOLDS the auth re-arm, or None to proceed."""
-    if not still_auth_dead(tpath):
+def hold_line(loc, sid, tpath, pid, run, armed, state):
+    """The decision-log line that HOLDS the auth re-arm, "" for a hold already
+    journalled this episode, or None to proceed. Only an idle dark pane
+    (`armed is False`) is asked: anything else never re-arms anyway."""
+    holds = state.setdefault(_HOLD_KEY, {}) if isinstance(state, dict) else {}
+    if armed is not False or not still_auth_dead(tpath, pid, run):
+        holds.pop(sid, None)
         return None
+    if holds.get(sid):
+        return ""
+    holds[sid] = True
     return ("auth-rearm %s sid=%s -> cleared-by-auth but the session still "
             "ends in a revoked-token 401 (no real reply yet) -- hold" % (loc, sid))

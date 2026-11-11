@@ -3824,19 +3824,18 @@ def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
         armed = watchdog.pane_goal_armed(captured)
 
         if mark is None or mark.get("state") != "set":
-            # #675 -- CC cleared the goal on a TRANSIENT auth failure
-            # (clear_kind=="auth"): the session resumes in seconds, so re-arm it
-            # via the SAME dark-rearm channel (deliver_goal's recent-human +
-            # freshness gates apply). A USER `/goal clear` (or a non-auth `error`
-            # clear) is NEVER re-armed (#170) and just resets the ping/confirm
-            # state below.
-            # #890 -- this block is now ABOVE the compact-pending hold, so auth-
-            # rearm records its request regardless of a pending /compact.
+            # #675 -- CC cleared the goal on an auth failure (clear_kind=="auth"):
+            # re-arm it once the session works again (#1303), via deliver_goal's
+            # gates. A USER `/goal clear` or a non-auth `error` clear is NEVER
+            # re-armed (#170) and just resets the ping/confirm state below.
+            # #890 -- ABOVE the compact-pending hold: records regardless of a /compact.
             if (mark is not None and mark.get("state") == "cleared"
                     and mark.get("clear_kind") == "auth"):
-                ar = _auth_gate.hold_line(loc, sid, tpath) or _auth_rearm_decide(  # #1303
-                    sid, cwd, mark, armed, now, loc, dry_run, rearm_fn,
-                    obligation_fn, requests_path, auth_attempts_state)
+                ar = _auth_gate.hold_line(loc, sid, tpath, pid, run, armed,  # #1303
+                                          None if dry_run else state)
+                if ar is None:
+                    ar = _auth_rearm_decide(sid, cwd, mark, armed, now, loc, dry_run, rearm_fn,
+                                            obligation_fn, requests_path, auth_attempts_state)
                 if ar:
                     logs.append(ar)
             seen_state.pop(sid, None)
