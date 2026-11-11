@@ -19,7 +19,9 @@ owner's `claude -c`) read the credentials at launch, so the old 401 is history
 journalled once per episode (B9 `first_hold` shape), not every sweep. Any
 trailing api-error counts, not only the revoked 401: a "Please run /login"
 clear leaves the process just as dead, and a long retry run of another error
-must not push the 401 out of the reader's 200-line tail.
+must not push the 401 out of the reader's 200-line tail. By design an owner
+`/login` inside the same process writes only user/system entries, so the hold
+lasts until that session's next real turn (job 1's `continue` or the owner's).
 """
 from watchdog.decide import authdead_is_historical
 from watchdog.transcripts import transcript_first_error_ts, transcript_last_error_ts
@@ -41,8 +43,8 @@ def still_auth_dead(tpath, pid=None, run=None):
         return False
     if transcript_first_error_ts(tpath) is None:
         return False
-    last_401 = transcript_last_error_ts(tpath)
-    if pid and authdead_is_historical(last_401, _proc_start(pid, run)):
+    last_err = transcript_last_error_ts(tpath)
+    if pid and authdead_is_historical(last_err, _proc_start(pid, run)):
         return False
     return True
 
