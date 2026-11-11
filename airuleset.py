@@ -8223,12 +8223,6 @@ def cmd_watchdog(args):
                     # existing owner-routed send() path (#710 unchanged).
                     health_probes=box_health_probes(_current_user()),
                     health_probe_fetch=_watchdog_health_probe_fetch,
-                    # #1036 — Job 49 Odoo task-hygiene overseer runs on EVERY
-                    # managed box; it self-gates internally on a present+valid
-                    # ~/.claude/odoo-task-tracking.json config + a ~2h cadence,
-                    # so an unconfigured box costs one config-file read per
-                    # sweep and never touches the network.
-                    task_hygiene_enabled=True,
                     watch_triggers_enabled=True, checkout_freshness_enabled=True,  # #1163 Job 52 (steer=watch window) + #1176 Job 53 (managed checkouts)
                     model_restore_enabled=True,  # #1203 Job 54 (undo a Claude Code model fallback)
                     # #1040 — one shared gh-rate reading per sweep: refreshes the
@@ -9075,7 +9069,6 @@ from cli_quals_cmd import (  # noqa: E402  (#433 cluster I facade — leaf re-ex
     cmd_core_quals as cmd_core_quals,
 )
 
-from cli_task_hygiene import cmd_task_hygiene as cmd_task_hygiene  # noqa: E402  (#1036)
 
 
 UPLOAD_LOG_DIR_ENV = "AIRULESET_UPLOAD_LOG_DIR"
@@ -10219,11 +10212,6 @@ def main():
     p_slice.add_argument("--extra", default=None,
                          help="Extra search qualifier ANDed onto every query "
                               "(e.g. label:prio:bounce)")
-    p_slice.add_argument(
-        "--task-hygiene", action="store_true", dest="task_hygiene",
-        help="Print the persisted task-hygiene A count (unanswered client "
-             "Odoo comments) from the LAST watchdog run — never a live Odoo "
-             "call (#1036)")
 
     p_core = sub.add_parser(
         "core-quals",
@@ -10255,11 +10243,6 @@ def main():
     p_core.add_argument("--extra", default=None,
                         help="Extra search qualifier ANDed onto every query "
                              "(e.g. label:prio:bounce for the bounce seed)")
-    p_core.add_argument(
-        "--task-hygiene", action="store_true", dest="task_hygiene",
-        help="Print the persisted task-hygiene A count (unanswered client "
-             "Odoo comments) from the LAST watchdog run — never a live Odoo "
-             "call (#1036)")
 
     p_lock = sub.add_parser(
         "autopilot-lock",
@@ -10482,26 +10465,6 @@ def main():
                        help="Create the labels if missing")
     p_lbl.add_argument("--repo", default=None,
                        help="Target repo owner/name (default: resolve cwd)")
-
-    # --- #1036: Odoo task-hygiene overseer ---
-    p_th = sub.add_parser(
-        "task-hygiene",
-        help="Odoo client task-hygiene audit (#1036): --init writes the "
-             "per-box config template, --check validates it, default reads "
-             "live A/B/C violations (A=unanswered client comment, "
-             "B=Verifikácia/Realizácia/Potrebuje-ujasniť without a stream "
-             "message, C=Verifikácia past the confirm window)")
-    p_th.add_argument("--init", action="store_true",
-                      help="Write the ~/.claude/odoo-task-tracking.json template "
-                           "(never overwrites an existing file)")
-    p_th.add_argument("--check", action="store_true",
-                      help="Validate the config (prints 'not configured' when "
-                           "absent — never an error)")
-    p_th.add_argument("--json", action="store_true",
-                      help="Print the A/B/C result as JSON")
-    p_th.add_argument("--path", default=None,
-                      help="Override the config path (default "
-                           "~/.claude/odoo-task-tracking.json)")
 
     # --- #994: owner nudge kill switch ---
     p_nudges = sub.add_parser(
@@ -11171,7 +11134,6 @@ SUBCOMMANDS = {
     "model-gateway": cmd_model_gateway,
     "model-backend": cmd_model_backend,
     "volume": cmd_volume,
-    "task-hygiene": cmd_task_hygiene,
     "labels": cmd_labels,
     "stream-priority": cmd_stream_priority,
     "accounts": cmd_accounts,

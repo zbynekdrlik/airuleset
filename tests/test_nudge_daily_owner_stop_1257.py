@@ -38,7 +38,7 @@ HOUR = 3600
 DAY = 24 * HOUR
 NOW = 1_800_000_000
 CAPPED = ("release-gap", "queue-arrival", "partition-audit", "u-freshness",
-          "bounce-verdict", "goal-guard", "infra-priority", "task-hygiene",
+          "bounce-verdict", "goal-guard", "infra-priority",
           "checkout-lag", "goal-sweep", "subagent-stuck", "bounce",
           "gk-request", "card")
 

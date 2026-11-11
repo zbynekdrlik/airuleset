@@ -2348,7 +2348,6 @@ from watchdog import parked_wake as parked_wake  # noqa: E402,F401
 # `import watchdog` inside its keystroke helpers → no cycle; imports NO notify
 # (machine-channel journal only, lock-tested).
 from watchdog import limit_dialog as limit_dialog  # noqa: E402,F401
-from watchdog import task_hygiene as task_hygiene  # noqa: E402,F401  (#1036 Job 49)
 # #959 — Job 51, the erp-test box heartbeat: each subdev stream account's own
 # watchdog, while its Claude is alive, calls odoo-erp's contracted
 # `dev-box-heartbeat-remote.sh <stream>` to extend the box TTL. Stdlib at top
@@ -2635,14 +2634,14 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
              deploy_state_fetch=None,
              infra_queue_fetch=None, resolve_role_fn=None,
              health_probes=None, health_probe_fetch=None,
-             task_hygiene_enabled=False, gh_rate_fetch=None,
+             gh_rate_fetch=None,
              bounceflip_fetch=None, cred_mtime_fn=None, proc_start_fn=None,
              erp_heartbeat_enabled=False, watch_triggers_enabled=False, checkout_freshness_enabled=False,
              model_restore_enabled=False):
-    """Scan every `claude` pane once. 54 numbered jobs per poll — 46 LIVE and 8
+    """Scan every `claude` pane once. 54 numbered jobs per poll — 45 LIVE and 9
     RETIRED (12, 18, 23 removed in #132; 15, 17 in #102; 26 in #402; 46 in
-    #1137; 14 in #1084 — the slot stays registered as a journal-only
-    tombstone), whose numbers are kept addressable so historical log lines
+    #1137; 49 in #1306; 14 in #1084 — the slot stays registered as a
+    journal-only tombstone), whose numbers are kept addressable so historical log lines
     and code comments still resolve.
     The (4a) sub-entry belongs to job 4 and is not separately numbered:
       (1) a session STALLED ON AN API ERROR → auto-resume it (`continue`).
@@ -3433,28 +3432,11 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
           same-sweep job-6 resume is seen as already-woken (no double-fire).
           MACHINE-CHANNEL only (never pings the owner); complementary to job 6.
           `watchdog/parked_wake.py`'s docstring is the SSOT.
-      (49) ODOO TASK-HYGIENE OVERSEER (#1036) — gated on `task_hygiene_enabled`
-          (cmd_watchdog passes True; run_once unit tests leave it False so the
-          real Odoo read never fires) AND a present+valid config
-          (`~/.claude/odoo-task-tracking.json`) AND a ~2h cadence
-          (`state["task_hygiene_last_ts"]`). The GLOBAL, fleet-wide replacement
-          for the per-box audit scripts every Odoo stream ran locally: it reads
-          the A/B/C client-board violations via the read-only JSON-2 client
-          (`cli_odoo_ro`) — A=an open task whose LAST comment is a client's with
-          no stream reaction/message after it, B=a task in Verifikácia/
-          Realizácia/Potrebuje-ujasniť with ZERO stream message (the invariant
-          "awaiting client verification MUST carry a stream handover"), C=a
-          Verifikácia task past `client_confirm_days` — persists them to
-          `~/.claude/task-hygiene/status.json` (the footer `I`, the quals
-          `--task-hygiene` flag, and the Stop gate all read THAT file, never a
-          live Odoo call), and — while A ∪ B is non-empty — delivers ONE gated
-          `task-hygiene` nudge into each eligible idle Claude pane via the
-          existing verified keystroke primitive (`send_verified(nudge=
-          "task-hygiene")`, a MACHINE_NUDGE_KINDS member OFF by default — the
-          supervisor stages it with `nudges on --kind task-hygiene`; bounded by
-          nudge_gate's per-kind floor + cross-kind total cap). MACHINE-CHANNEL
-          only (never pings the owner). `min_budget` = the HTTP-probe class.
-          `watchdog/task_hygiene.py`'s docstring is the SSOT.
+      (49) ODOO TASK-HYGIENE OVERSEER — REMOVED (#1306, 2026-11-11). Read the
+          montalu client board (the only board with a profile) every ~2 h and
+          fed the footer `I`, a quals flag and a Stop gate; the montalu client
+          is gone (owner 11.11.2026). Number retained (not reused) for
+          historical addressability.
       (50) BLIND-LABEL-FLIP REVERT (#1056 L2 (h)) — gated on `bounceflip_fetch`
           being wired (network-free tests for every other job) AND, inside the
           job, the FULL-authority supervisor gate (`_gkreq_supervisor_root` +
@@ -5748,59 +5730,6 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
     _add("parked_wake_job", lambda: True, _job_parked_wake, "parked-wake error",
          min_budget=_BUDGET_MIN_PS_REAPER_S,
          calm_ok=True)   # #1055 P3: wake-parked recovery, ≤60s reaction
-
-    # Job 49 (#1036) — ODOO TASK-HYGIENE OVERSEER. Gated on the enable flag +
-    # a present config + the ~2h cadence, so run_once unit tests (flag False)
-    # never fire the real Odoo read. Reuses the SAME materialized `panes` list
-    # (the parked_wake / model_float_audit template) + the verified keystroke +
-    # nudge_gate cadence. `min_budget` = the HTTP-probe class (one JSON-2 read).
-    def _th_config():
-        import cli_odoo_ro as _ro
-        cfg = _ro.load_config()
-        if cfg is None:
-            return None
-        ok, _missing = _ro.config_valid(cfg)
-        return cfg if ok else None
-
-    def _job_task_hygiene():
-        import cli_odoo_ro as _ro
-        import cli_task_hygiene as _th
-        from watchdog import nudge_gate as _ng
-        cfg = _th_config()
-        if cfg is None:
-            return ["task-hygiene: not configured on this box"]
-        task_hygiene.mark_run(state, now)
-
-        def _compute(c):
-            client = _ro.client_from_config(c)
-            return _th.compute_hygiene(client.call, c)
-
-        def _deliver(pid, tpath, text):
-            return send_verified(pid, text, run, tpath, sleep_fn=sleep_fn, logs=None,
-                                 nudge=task_hygiene.NUDGE_KIND, state=state, now=now)
-
-        def _recent_human(sid, cwd, tpath, pid):
-            from watchdog import goal as _goal_mod   # deferred: avoid import cycle
-            return _goal_mod._recovery_recent_human(sid, cwd, tpath, now,
-                                                    pid=pid, run=run)
-
-        return task_hygiene.task_hygiene_job(
-            now, state, panes, projects_dir, cfg=cfg,
-            compute=_compute, persist=_th.persist_status,
-            deliver=_deliver, gate_ok=_ng.gate_ok, mark_sent=_ng.mark_sent,
-            find_transcript=find_active_transcript,
-            capture=lambda pid: capture_pane(pid, run),
-            in_mode=lambda pid: pane_in_mode(pid, run),
-            at_idle=pane_at_idle_prompt,
-            recent_human=_recent_human,
-            nudges_enabled=lambda k: nudges_enabled(k),
-            dry_run=dry_run)
-
-    _add("task_hygiene_job",
-         lambda: task_hygiene_enabled and task_hygiene.cadence_due(now, state)
-         and _th_config() is not None,
-         _job_task_hygiene, "task-hygiene error",
-         min_budget=_BUDGET_MIN_HTTP_PROBE_S)
 
     # Job 51 (#959) — ERP-TEST BOX HEARTBEAT. Gated on `erp_heartbeat_enabled`
     # (cmd_watchdog passes it; run_once unit tests leave it False so no real ssh

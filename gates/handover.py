@@ -20,7 +20,7 @@ capture, prefix strip, tokenizer, ``cd`` tracking and gh body resolver -- the
 same primitives ``gates.labeledit`` reuses), per top-level segment.
 
 A task is OWED a move when this turn:
-  O1  posted a HANDOVER-SHAPED note (``cli_handover_hygiene.is_handover_body``:
+  O1  posted a HANDOVER-SHAPED note (``is_handover_body``:
       the rule-3 "Čo skúsiť" heading + the literal "stačí 👍") WITHOUT the
       poster's handover mode -- through ``odoo_post.py`` (any wrapper, ``-m``,
       ``bash -c``), the ``odoo_post.post()`` Python API, or ``odoo-task-sync.py
@@ -57,8 +57,6 @@ import json
 import os
 import re
 
-import cli_odoo_ro
-from cli_handover_hygiene import is_handover_body
 from gates import allow, audit, emit_block_stderr, field_of, read_payload
 from gates.selfservice import (
     _apply_cd, _capture_heredocs, _flag_value, _resolve_body, _strip_prefix, _tokens_of,
@@ -91,6 +89,20 @@ _VERIF_WORD = r"(?:[\w.]*verif\w*|Verifik\w*|Na\s+overeni\w*|[ČC]ak[áa])"
 _POST_OK_RX = re.compile(r"OK: (?:mail\.message \d+ posted|resumed)")
 _GH_OK_RX = re.compile(r"issuecomment-\d+")
 _NOT_DONE = {"--help", "-h", "--dry-run"}
+# The rule-3 handover SHAPE: the "Čo skúsiť" section heading AND the literal
+# closing "stačí 👍" — two loose words ("Skúsili ste…? Stačí napísať") are a
+# client question, never a handover. Bounded gap: linear, never nested.
+_GAP = r"(?:\s|&nbsp;|&#160;|<[^>]{0,40}>)*"
+_SHAPE_RX = (re.compile(r"[ČčCc]o" + _GAP + r"sk[úu]si", re.IGNORECASE),
+             re.compile(r"sta[čc][íi][^\n]{0,60}?(?:👍|&#128077;|:\+1:|:thumbsup:)",
+                        re.IGNORECASE))
+# The per-box board config whose ``stage_ids.verifikacia`` id also settles a move.
+_BOARD_CONFIG = os.path.join("~", ".claude", "odoo-task-tracking.json")
+
+
+def is_handover_body(body):
+    """True iff ``body`` carries the rule-3 handover shape (see ``_SHAPE_RX``)."""
+    return isinstance(body, str) and all(rx.search(body) for rx in _SHAPE_RX)
 
 
 # --------------------------------------------------------------------------- #
@@ -410,8 +422,15 @@ def _scan_bash(turn, cmd, ok, result, depth=0):
 
 
 def _verif_stage_id():
-    cfg = cli_odoo_ro.load_config()
-    vid = ((cfg or {}).get("stage_ids") or {}).get("verifikacia")
+    """The configured verification stage id, or None (absent/unreadable file).
+    Whole-line ``#`` comments are dropped before parsing (the config format)."""
+    try:
+        with open(os.path.expanduser(_BOARD_CONFIG), encoding="utf-8") as fh:
+            cfg = json.loads("\n".join(ln for ln in fh.read().splitlines()
+                                       if not ln.lstrip().startswith("#")))
+    except (OSError, ValueError):
+        return None
+    vid = ((cfg if isinstance(cfg, dict) else {}).get("stage_ids") or {}).get("verifikacia")
     return vid if isinstance(vid, int) and not isinstance(vid, bool) else None
 
 

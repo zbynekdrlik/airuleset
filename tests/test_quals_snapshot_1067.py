@@ -261,7 +261,7 @@ _FLAGS = ({41}, set(), {43}, set(), set(), set(), set(), set(), set())
 _ARGS = dict(count=False, list=False, waiting=False, ops_wait=False,
              audit=False, dep_wait=False, count_dispatchable=False,
              list_dispatchable=False, snapshot_json=False, bounces=False,
-             unhandled=False, task_hygiene=False, extra=None, role=None)
+             unhandled=False, extra=None, role=None)
 
 
 class SnapshotJsonParity(unittest.TestCase):

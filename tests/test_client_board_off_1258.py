@@ -7,7 +7,7 @@ zbytocne tokeny, chcem to mat odstavene pre slovnormal".
 The Stop hook's Check 9 (attachments required) forced a david owner question
 into a project.task lookup. A per-user fact in `cli_odoo_board` drives an
 install-written marker `~/.claude/airuleset-client-board` = `off`; the check
-and the task-hygiene config loader honour it. (Check 7, the task URL
+honours it. (Check 7, the task URL
 requirement, was deleted on every box: owner 26.10.2026, #1137.)
 """
 
@@ -26,7 +26,6 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 import cli_odoo_board  # noqa: E402
-import cli_odoo_ro  # noqa: E402
 
 HOOK = ROOT / "hooks" / "stop-check-question-quality.sh"
 
@@ -95,21 +94,12 @@ class TestBoardFact(unittest.TestCase):
         cli_odoo_board.write_board_marker(self.claude, "david3")
         marker = Path(self.claude, cli_odoo_board.BOARD_MARKER)
         self.assertEqual(marker.read_text(encoding="utf-8"), "off\n")
-        self.assertTrue(cli_odoo_board.board_off_here(self.home))
 
     def test_install_removes_a_stale_marker_for_a_board_user(self):
         marker = Path(self.claude, cli_odoo_board.BOARD_MARKER)
         marker.write_text("off\n", encoding="utf-8")
         cli_odoo_board.write_board_marker(self.claude, "montalu1")
         self.assertFalse(marker.exists())
-        self.assertFalse(cli_odoo_board.board_off_here(self.home))
-
-    def test_task_config_is_not_loaded_when_the_board_is_off(self):
-        cfg = Path(self.claude, cli_odoo_ro.CONFIG_BASENAME)
-        cfg.write_text(json.dumps({"url": "https://erp.slovnormal.sk"}), encoding="utf-8")
-        self.assertIsInstance(cli_odoo_ro.load_config(home=self.home), dict)
-        Path(self.claude, cli_odoo_board.BOARD_MARKER).write_text("off\n", encoding="utf-8")
-        self.assertIsNone(cli_odoo_ro.load_config(home=self.home))
 
 
 class TestDoctrineSaysNoBoard(unittest.TestCase):

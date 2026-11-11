@@ -683,7 +683,7 @@ def explain_lines(buckets, box, facts=None, supplement=(), extras=()):
     never be printed.
     `supplement` = question-map U rows the slice search misses (#948).
     `extras` = `(bucket, weight, reason, text)` footer contributions that are
-    not ticket rows (ticketless ❓ pings in U, the task-hygiene A count in I);
+    not ticket rows (ticketless ❓ pings in U);
     each prints as a `-` row and adds `weight` to its bucket's total.
     `buckets[HIDDEN]` = rows this box counts NOWHERE (#1141 slice 2): each
     prints with its reason, so a ticket is never silently missing from the

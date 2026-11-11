@@ -74,7 +74,6 @@ _OWN_NUDGES = ("nudge: [u-freshness] stuck-check: U-reconcile",
                "lane-check: 2 lanes", "goal-guard: x", "recheck: y",
                "UNPARK-AUDIT: z", "stuck-check: w", "bounce-backstop: v",
                "gk-request backstop: u", "resume",
-               "task-hygiene: A=1 B=0 C=0 — klientske úlohy čakajú na teba.",
                "lane-reconcile: 1 worktree lane returned during a compact",
                "Discord pripomienka: ticket #7 bol znovu otvorený",
                "Užívateľ označil túto tvoju Discord správu ikonkou ❓ (x)")

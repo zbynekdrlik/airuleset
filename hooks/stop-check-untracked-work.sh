@@ -22,83 +22,6 @@ MSG=$(echo "$INPUT" | jq -r '.last_assistant_message // empty' 2>/dev/null || ec
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // "unknown"' 2>/dev/null || echo "unknown")
 [ -z "$MSG" ] && exit 0
 
-# --- #1036 task-hygiene Stop gate (exit-2 + stderr, the deny-stderr contract) ---
-# A turn ending ✅ DONE / ⏳ WORKING on a CONFIGURED box (a fresh
-# ~/.claude/task-hygiene/status.json, written by watchdog Job 49) is blocked when
-# a client Odoo obligation is overdue: A > 0 older than 24 h (unanswered client
-# comment), B > 0 for Verifikácia (a task in Verifikácia with no stream
-# message), H > 0 (#1180: this box's handover on a task never moved to
-# Verifikácia), or an A whose reactions are unreadable older than 72 h.
-# Fail-OPEN when the status file is absent/stale (a dead watchdog).
-if echo "$MSG" | grep -qE '✅ DONE|⏳ WORKING'; then
-    TH_STATUS="${HOME}/.claude/task-hygiene/status.json"
-    TH_RETRY="/tmp/airuleset-task-hygiene-block-${SESSION_ID}"
-    TH_RETRIES=$(cat "$TH_RETRY" 2>/dev/null || echo 0)
-    TH_MAX=3
-    # python ALWAYS exits 0 (prints the reason lines when it should block, empty
-    # otherwise) so `set -euo pipefail` never aborts on a non-zero substitution
-    # (#979); `|| true` is a second belt.
-    TH_REASON=$(python3 - "$TH_STATUS" <<'PY' || true
-import json
-import sys
-import time
-
-DAY = 24 * 3600
-STALE = 3 * 3600
-try:
-    with open(sys.argv[1], encoding="utf-8") as h:
-        st = json.load(h)
-except (OSError, ValueError):
-    sys.exit(0)                     # absent/corrupt → fail open
-if not isinstance(st, dict):
-    sys.exit(0)
-ts = st.get("ts")
-now = time.time()
-if not isinstance(ts, (int, float)) or (now - ts) > STALE:
-    sys.exit(0)                     # dead watchdog → fail open
-a = st.get("a", 0)
-a_oldest = st.get("a_oldest_ts")
-b_verif = st.get("b_verif", 0)
-lines = []
-if (isinstance(a, int) and a > 0 and isinstance(a_oldest, (int, float))
-        and (now - a_oldest) > DAY):
-    items = st.get("a_items") or []
-    lines.append("Nezodpovedané komentáre klienta > 24 h (%d): %s"
-                 % (a, ", ".join(items[:8])))
-if isinstance(b_verif, int) and b_verif > 0:
-    items = st.get("b_items") or []
-    lines.append("Verifikácia bez správy streamu je zakázaná (%d): %s"
-                 % (b_verif, ", ".join(items[:8])))
-a_unknown = st.get("a_unknown_oldest_ts")   # #1180: reactions unreadable (403)
-if isinstance(a_unknown, (int, float)) and (now - a_unknown) > 3 * DAY:
-    lines.append("Komentár klienta > 72 h bez odpovede streamu (reakcie sa nedajú "
-                 "prečítať — 👷 sa neráta, odpovedz správou): %s"
-                 % ", ".join((st.get("a_items") or [])[:8]))
-h = st.get("h", 0)                  # #1180 class H (this box's own handovers)
-if isinstance(h, int) and not isinstance(h, bool) and h > 0:
-    items = st.get("h_items") or []
-    lines.append("Odovzdávacia správa bez presunu do Verifikácie (H, %d) — presuň "
-                 "úlohu + assignee, ďalšie odovzdanie cez odoo_post.py --handover: %s"
-                 % (h, ", ".join(items[:8])))
-if lines:
-    print("\n".join(lines))
-sys.exit(0)
-PY
-)
-    if [ -n "$TH_REASON" ] && [ "$TH_RETRIES" -lt "$TH_MAX" ]; then
-        echo "$((TH_RETRIES + 1))" > "$TH_RETRY"
-        {
-            echo "🚫 BLOCKED (task-hygiene #1036): klientske Odoo úlohy čakajú na akciu."
-            echo "$TH_REASON"
-            echo "Akcia: 👷 reakcia na komentár, presun fázy, ticket + lane, "
-            echo "draft do U (po schválení ownerom) — potom môžeš skončiť."
-        } >&2
-        exit 2
-    fi
-    # clean (no overdue obligation) → reset the retry counter for next time
-    [ -z "$TH_REASON" ] && rm -f "$TH_RETRY"
-fi
-
 # --- #1053 verify-on-copy Stop gate (exit-2 + stderr, the deny-stderr contract) ---
 # A turn ending ✅ DONE / ⏳ WORKING with a FRESH ~/.claude/verify-on-copy/
 # status.json (written by the footer refresh) carrying overdue tickets — a
@@ -106,7 +29,7 @@ fi
 # blocked: the gatekeeper deployed and returned the ticket for verification on a
 # fresh PROD copy, and the stream must run REFRESH-DEV-BOX-FROM-PROD, verify, and
 # post the evidence. Fail-OPEN when the status file is absent/stale (a dead
-# writer), the SAME class as the #1036 task-hygiene gate. Dry-runnable per #963
+# writer). Dry-runnable per #963
 # (reads only $MSG + the status file, no side effects).
 if echo "$MSG" | grep -qE '✅ DONE|⏳ WORKING'; then
     VOC_DIR="${HOME}/.claude/verify-on-copy"

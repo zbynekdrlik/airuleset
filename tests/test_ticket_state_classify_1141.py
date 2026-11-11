@@ -505,7 +505,7 @@ class ExplainLinesReviewFixes(unittest.TestCase):
         out = cli_ticket_state.explain_lines(
             {"I": rows}, cli_ticket_state.Box(),
             extras=[("U", 1, "ticketless question ping", "q?"),
-                    ("I", 2, "task-hygiene A", "-")])
+                    ("I", 2, "a footer extra", "-")])
         self.assertEqual(out[0].split("\t")[3], "a b c")
         self.assertEqual(len(out[0].split("\t")), 4)
         self.assertIn("-\tU\tticketless question ping\tq?", out)
@@ -566,7 +566,6 @@ class ExplainReviewRound2(unittest.TestCase):
         from unittest import mock
         import cli_quals_cmd
         import cli_ticket_explain
-        import statusbar
         asked = []
 
         def fake_pings(cwd=None, cover=None):
@@ -580,8 +579,6 @@ class ExplainReviewRound2(unittest.TestCase):
         with TemporaryDirectory() as repo, \
                 mock.patch.object(cli_quals_cmd, "_waiting_ping_entries",
                                   fake_pings), \
-                mock.patch.object(statusbar, "task_hygiene_a_count",
-                                  return_value=2), \
                 mock.patch.object(cli_quals_cmd, "cmd_core_quals", fake_core), \
                 mock.patch.object(airuleset, "_repo_root", return_value=repo), \
                 mock.patch.object(airuleset, "resolve_authority",
@@ -594,7 +591,7 @@ class ExplainReviewRound2(unittest.TestCase):
         self.assertIsNone(cli_ticket_explain._footer_cwd)
         self.assertIn("-\tU\tticketless question ping, no ticket to label "
                       "(#512)\twhich one?", printed)
-        self.assertIn("# explain: I=2 M=0 U=1 W=0 gk=0 count=0", printed)
+        self.assertIn("# explain: I=0 M=0 U=1 W=0 gk=0 count=0", printed)
 
     def test_junk_cache_timestamp_never_crashes(self):
         from unittest import mock

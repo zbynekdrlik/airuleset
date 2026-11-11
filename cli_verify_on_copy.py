@@ -3,11 +3,11 @@ returns a ticket to the sub-dev with `verify-on-copy`, the stream MUST verify th
 deployed change on its own fresh PROD copy (REFRESH-DEV-BOX-FROM-PROD) and post a
 `Verified-on-copy: refresh <id> at <ISO-UTC> — <what was checked>` comment. A
 `verify-on-copy` ticket older than 24 h WITHOUT that comment is the stream's
-Stop-hook obligation — the SAME class as the #1036 task-hygiene gate.
+Stop-hook obligation.
 
 This module is the persisted-status writer + pure classifiers the Stop hook reads
-(`hooks/stop-check-untracked-work.sh`, extending the existing #1036 family — a
-status file + fail-open, never a gh call on the hook). The footer refresh
+(`hooks/stop-check-untracked-work.sh` — a status file + fail-open, never a gh
+call on the hook). The footer refresh
 (`cmd_tickets_status --refresh`) already holds the stream's slice rows, so it is
 the writer: for each verify-on-copy row it reads the ticket timeline ONCE (the
 same bounded per-candidate pattern `_slice_mine_and_handed` already uses) to find
@@ -23,8 +23,7 @@ from pathlib import Path
 
 VERIFY_LABEL = "verify-on-copy"
 OVERDUE_SECONDS = 24 * 3600
-# The hook treats a status file older than this as a dead writer → fail open,
-# mirroring the #1036 task-hygiene STALE window.
+# The hook treats a status file older than this as a dead writer → fail open.
 STALE_SECONDS = 3 * 3600
 
 _STATUS_DIRNAME = "verify-on-copy"

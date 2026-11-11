@@ -281,7 +281,7 @@ class TestCliWiring(unittest.TestCase):
         with mk.patch.object(airuleset, "resolve_authority", return_value="full"), \
                 mk.patch("cli_post_release.run", return_value=0) as run, \
                 contextlib.redirect_stdout(io.StringIO()):
-            airuleset.cmd_core_quals(mk.Mock(post_release=14, task_hygiene=False))
+            airuleset.cmd_core_quals(mk.Mock(post_release=14))
         self.assertIsNone(run.call_args.args[0])
         self.assertEqual(run.call_args.kwargs["days"], 14)
 
@@ -293,7 +293,7 @@ class TestCliWiring(unittest.TestCase):
                                 return_value=["label:stream:m1"]), \
                 mk.patch("cli_post_release.run", return_value=1) as run, \
                 self.assertRaises(SystemExit) as cm:
-            airuleset.cmd_slice_quals(mk.Mock(post_release=30, task_hygiene=False))
+            airuleset.cmd_slice_quals(mk.Mock(post_release=30))
         self.assertEqual(cm.exception.code, 1)
         self.assertEqual(run.call_args.args[0], ["label:stream:m1"])
 
@@ -307,7 +307,7 @@ class TestCliWiring(unittest.TestCase):
                 count=False, list=False, waiting=False, ops_wait=False,
                 audit=False, dep_wait=False, count_dispatchable=False,
                 list_dispatchable=False, snapshot_json=False, conflicts=False,
-                explain=False, task_hygiene=False))
+                explain=False))
         run.assert_not_called()
 
 

@@ -107,10 +107,6 @@ MACHINE_NUDGE_KINDS = frozenset({
     "goal-sweep", "subagent-stuck", "working-stall",
     # idle-pane backstops + report-owed card (jobs 8/11 + cards)
     "bounce", "gk-request", "card",
-    # #1036 Job 49 — Odoo task-hygiene overseer nudge (per-kind staged, OFF by
-    # default; NOT a nudge_gate GATED_CATEGORY — its cadence is decided by
-    # gate_ok("task-hygiene") directly, like bounce/card/goal-sweep).
-    "task-hygiene",
     # #1109 — a RELEASE-BLOCKING infra hand-off into the gk-infra window, staged
     # like every priority kind; since 26.10.2026 bound by the daily cap like them
     # (it joins the queue-arrival batch, nudge_gate.PRIORITY_CAP_EXEMPT_KINDS no

@@ -136,7 +136,7 @@ class ExplainConflicts(unittest.TestCase):
         facts = ts.TicketFacts(pipeline=frozenset({1}),
                                on_main={2: ts.DEPLOYED})
         out = self._explain(rows, facts,
-                            extras=[("I", 4, "task-hygiene A", "-")])
+                            extras=[("I", 4, "a footer extra", "-")])
         # I=1 row + 4 extras is the display total; count = I rows + C = 2,
         # the `--count` number (cli_ticket_route.count)
         self.assertEqual(out[-1],
