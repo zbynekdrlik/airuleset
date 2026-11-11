@@ -1656,11 +1656,15 @@ def _declared_window_nudge(cwd, origin=None):
     switch) for the owner's OWN `self-callback` arm on ANY pane (#1181 -- they
     just typed /autopilot, #752; the staged kind, OFF on every box, withheld every
     keystroke of it on dev1 iemmixer/fohmixer 29.9.) and the owner-authorized
-    `stream-migrate` watcher (#1128). Every watchdog re-arm keeps the staged
-    PRIORITY `goal-sweep`, on a declared window too: #1260 retired #1038's
+    `stream-migrate` watcher (#1128), and the `auth-rearm` (#1303): it restores
+    a goal the OWNER armed that Claude Code cleared on an auth error (the
+    nightly token rotation), a #890 RECOVERY-class origin, so the staged switch
+    must not withhold it. Every other watchdog re-arm keeps the staged PRIORITY
+    `goal-sweep`, on a declared window too: #1260 retired #1038's
     declared-window always-on kind with its virgin arm. `cwd` is kept for the
     callers' signature."""
-    if origin in (_GOAL_SELF_CALLBACK_ORIGIN, _stream_migrate.ORIGIN):
+    if origin in (_GOAL_SELF_CALLBACK_ORIGIN, _stream_migrate.ORIGIN,
+                  _GOAL_AUTH_REARM_ORIGIN):
         return "goal-arm"
     return "goal-sweep"
 
@@ -1805,8 +1809,8 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
         _log_goal_sync("PASS structured-armed sid=%s cwd=%s origin=%s (%s)"
                        % (sid, cwd, origin, _mig_why))
 
-    # #1038/#1128/#1181 -- the keystroke NUDGE identity: always-on `goal-arm` for a declared
-    # window / the owner's own arm / the stream watcher, else the staged `goal-sweep`.
+    # #1128/#1181/#1303 -- the keystroke NUDGE identity: always-on `goal-arm` for the
+    # owner's own arm / the stream watcher / an auth re-arm, else the staged `goal-sweep`.
     _nudge = _declared_window_nudge(cwd, origin)
 
     # Hard age cap -- checked first, no pane resolution needed. Unlike
