@@ -16,9 +16,12 @@ cleared session reads "still dead" until that real reply lands.
 Review round 2: a process STARTED after the newest 401 (job 1's relaunch, or the
 owner's `claude -c`) read the credentials at launch, so the old 401 is history
 (the job 1 `authdead_is_historical` rule) and the re-arm proceeds. The hold is
-journalled once per episode (B9 `first_hold` shape), not every sweep.
+journalled once per episode (B9 `first_hold` shape), not every sweep. Any
+trailing api-error counts, not only the revoked 401: a "Please run /login"
+clear leaves the process just as dead, and a long retry run of another error
+must not push the 401 out of the reader's 200-line tail.
 """
-from watchdog.decide import authdead_is_historical, is_oauth_revoked
+from watchdog.decide import authdead_is_historical
 from watchdog.transcripts import transcript_first_error_ts, transcript_last_error_ts
 
 _HOLD_KEY = "auth_rearm_hold"   # state: {sid: True} while a hold was journalled
@@ -30,13 +33,13 @@ def _proc_start(pid, run):
 
 
 def still_auth_dead(tpath, pid=None, run=None):
-    """True while the transcript's trailing run holds a revoked-token 401 that
-    the running process received (no real reply since, process not restarted
-    after it). Unreadable -> False: the caller's other gates decide, as before
+    """True while the transcript's trailing run is an api-error stall (any
+    error: a revoked 401, a "Please run /login", retries) that the running
+    process received (no real reply since, process not restarted after it). Unreadable -> False: the caller's other gates decide, as before
     #1303."""
     if not tpath:
         return False
-    if transcript_first_error_ts(tpath, match=is_oauth_revoked) is None:
+    if transcript_first_error_ts(tpath) is None:
         return False
     last_401 = transcript_last_error_ts(tpath)
     if pid and authdead_is_historical(last_401, _proc_start(pid, run)):
@@ -56,4 +59,4 @@ def hold_line(loc, sid, tpath, pid, run, armed, state):
         return ""
     holds[sid] = True
     return ("auth-rearm %s sid=%s -> cleared-by-auth but the session still "
-            "ends in a revoked-token 401 (no real reply yet) -- hold" % (loc, sid))
+            "ends in an api-error stall, e.g. a revoked-token 401 (no real reply yet) -- hold" % (loc, sid))
