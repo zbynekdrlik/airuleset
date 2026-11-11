@@ -15,16 +15,13 @@ Locks the main's Approach 1 (a)-(e):
     whose `Acceptance-thread:` comment names a board task with no `--handover`
     run / verification-stage move of it; a non-handover task post, a Discuss
     post, an earlier turn, a `--handover` run and a cited bypass all pass.
-(d) JOB 49 — a 403 on the `reaction_ids` read degrades (A/C still run, one
-    `reactions unavailable (403)` log per day) and never hides another
-    failure; class H flags a stream handover on a task that is NOT in the
-    verification stage 10 min later → nudge + Stop-gate line.
+(d) JOB 49 (class H + the reaction-403 degrade) — removed with the montalu
+    board machinery (#1306); its tests went with it.
 (e) DOCTRINE-AUDIT — a report-only `(memory regex, superseding rule)` table
     flags the montalu `no assignee` memory against #1166, never edits it.
 
 Fixtures only — never a live Odoo, never a real pane.
 """
-import datetime
 import json
 import os
 import subprocess
@@ -42,13 +39,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _hook_state_cleanup import hermetic_hook_env, sweep_session_files  # noqa: E402
 
 import cli_doctrine_audit as da  # noqa: E402
-import cli_odoo_ro as ro  # noqa: E402
-import cli_task_hygiene as th  # noqa: E402
-from watchdog import task_hygiene as job  # noqa: E402
 
 INJECT = REPO / "hooks" / "inject-situational-rule.sh"
 PROSE = REPO / "hooks" / "stop-check-prose-violations.sh"
-UNTRACKED = REPO / "hooks" / "stop-check-untracked-work.sh"
 STAGES = REPO / "skills" / "odoo-client-messaging" / "client-board-stages.md"
 
 TASK_URL = "https://erp.montalu.cloud/odoo/project/5/tasks/%s"
@@ -282,194 +275,6 @@ class TestStopGate(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
-# (d) Job 49 — reaction 403 degrade + class H
-# --------------------------------------------------------------------------- #
-NOW = datetime.datetime(2026, 9, 29, 12, 0, 0, tzinfo=datetime.timezone.utc)
-CFG = {"instance_url": "https://erp.montalu.cloud", "project_ids": [5],
-       "stage_ids": {"verifikacia": 2880, "realizacia": 2879,
-                     "potrebuje_ujasnit": 3350, "hotovo": 2881},
-       "stream_partner_ids": [17244], "own_author_names": ["ZbynekAI"],
-       "client_confirm_days": 3}
-STREAM = [17244, "ZbynekAI"]
-CLIENT = [999, "Patrik Javorský"]
-
-
-def _dt(minutes_ago):
-    return (NOW - datetime.timedelta(minutes=minutes_ago)).strftime("%Y-%m-%d %H:%M:%S")
-
-
-class Fake:
-    """In-memory Odoo for the `call` seam. `deny_reactions` = a 403 whenever the
-    batched read asks for `reaction_ids`; `deny_all` = a 403 on every message
-    read; `status` overrides the status of the reaction-field denial."""
-
-    def __init__(self, tasks, msgs, deny_reactions=False, deny_all=False,
-                 status=403):
-        self.tasks, self.msgs = tasks, msgs
-        self.deny_reactions, self.deny_all, self.status = deny_reactions, deny_all, status
-
-    def call(self, model, method, **body):
-        if model == "project.task":
-            return [dict(t) for t in self.tasks]
-        if method == "message_reactions_guarded":
-            raise ro.OdooError("Odoo mail.message/message_reactions_guarded HTTP 403: denied")
-        fields = body.get("fields", [])
-        if self.deny_all or (self.deny_reactions and "reaction_ids" in fields):
-            raise ro.OdooError("Odoo mail.message/search_read HTTP %s: access denied"
-                               % self.status)
-        rids, terms = set(), []
-        for cond in body.get("domain", []):
-            if cond[0] == "res_id" and cond[1] == "in":
-                rids = set(cond[2])
-            if cond[0] == "body" and cond[1] == "ilike":
-                terms.append(cond[2].lower())
-        rows = [dict(m) for m in self.msgs if m["res_id"] in rids
-                and all(t in (m.get("body") or "").lower() for t in terms)]
-        rows.sort(key=lambda m: m["date"], reverse=True)
-        rows.sort(key=lambda m: m["res_id"])
-        return [{k: v for k, v in m.items() if k in fields or k == "res_id"}
-                for m in rows]
-
-
-def _task(tid, stage, moved_min_ago=600):
-    names = {2880: "Verifikácia", 2879: "Realizácia", 3350: "Potrebuje ujasniť"}
-    return {"id": tid, "name": "T%s" % tid, "stage_id": [stage, names[stage]],
-            "date_last_stage_update": _dt(moved_min_ago)}
-
-
-def _m(mid, rid, author, minutes_ago, body="<p>ok</p>"):
-    return {"id": mid, "res_id": rid, "author_id": author, "date": _dt(minutes_ago),
-            "body": body, "reaction_ids": [], "message_type": "comment"}
-
-
-class TestReaction403(unittest.TestCase):
-    def test_degrades_and_still_reports_a_and_c(self):
-        fake = Fake([_task(1, 2879), _task(2, 2880, moved_min_ago=6 * 1440)],
-                    [_m(10, 1, CLIENT, 60), _m(20, 2, STREAM, 5 * 1440, HANDOVER_BODY)],
-                    deny_reactions=True)
-        # classic C (a non-montalu host): the montalu #1167 auto-close wait
-        # replaces the 3-day C reminder, so it would never flag task 2 here
-        cfg = dict(CFG, instance_url="https://erp.example.test")
-        r = th.compute_hygiene(fake.call, cfg, now=NOW)
-        self.assertEqual([x["task_id"] for x in r["A"]], [1])
-        self.assertEqual([x["task_id"] for x in r["C"]], [2])
-        self.assertTrue(r["reactions_unavailable"])
-
-    def test_healthy_read_reports_reactions_available(self):
-        fake = Fake([_task(1, 2879)], [_m(10, 1, CLIENT, 60)])
-        self.assertFalse(th.compute_hygiene(fake.call, CFG, now=NOW)["reactions_unavailable"])
-
-    def test_a_403_that_is_not_the_reaction_field_still_fails(self):
-        fake = Fake([_task(1, 2879)], [_m(10, 1, CLIENT, 60)], deny_all=True)
-        with self.assertRaises(ro.OdooError):
-            th.compute_hygiene(fake.call, CFG, now=NOW)
-
-    def test_a_non_403_failure_is_not_degraded(self):
-        fake = Fake([_task(1, 2879)], [_m(10, 1, CLIENT, 60)],
-                    deny_reactions=True, status=500)
-        with self.assertRaises(ro.OdooError):
-            th.compute_hygiene(fake.call, CFG, now=NOW)
-
-
-class TestClassH(unittest.TestCase):
-    def _h(self, tasks, msgs):
-        return [x["task_id"] for x in
-                th.compute_hygiene(Fake(tasks, msgs).call, CFG, now=NOW)["H"]]
-
-    def test_handover_on_unmoved_task_after_10_min_is_h(self):
-        self.assertEqual(self._h([_task(1192, 2879)],
-                                 [_m(1, 1192, STREAM, 11, HANDOVER_BODY)]), [1192])
-
-    def test_within_grace_is_not_h(self):
-        self.assertEqual(self._h([_task(1192, 2879)],
-                                 [_m(1, 1192, STREAM, 5, HANDOVER_BODY)]), [])
-
-    def test_task_in_verification_is_not_h(self):
-        self.assertEqual(self._h([_task(1192, 2880)],
-                                 [_m(1, 1192, STREAM, 60, HANDOVER_BODY)]), [])
-
-    def test_stage_move_after_handover_is_not_h(self):
-        self.assertEqual(self._h([_task(1192, 2879, moved_min_ago=30)],
-                                 [_m(1, 1192, STREAM, 60, HANDOVER_BODY)]), [])
-
-    def test_client_or_non_handover_message_is_not_h(self):
-        self.assertEqual(self._h([_task(1, 2879), _task(2, 3350)],
-                                 [_m(1, 1, CLIENT, 60, HANDOVER_BODY),
-                                  _m(2, 2, STREAM, 60, "<p>Stačí odpovedať áno/nie.</p>")]),
-                         [])
-
-    def test_h_persists_and_nudges(self):
-        fake = Fake([_task(1192, 2879)], [_m(1, 1192, STREAM, 11, HANDOVER_BODY)])
-        r = th.compute_hygiene(fake.call, CFG, now=NOW)
-        self.assertIn("H=1", r["summary"])
-        self.assertIn("#1192", th.compose_nudge(r, CFG))
-        home = tempfile.mkdtemp()
-        st = th.persist_status(r, home=home)
-        self.assertEqual(st["h"], 1)
-        self.assertTrue(st["h_items"][0].startswith("#1192"))
-
-
-class _JobDeps:
-    def __init__(self, result):
-        self.result, self.delivered = result, []
-
-    def run(self, state, now):
-        return job.task_hygiene_job(
-            now, state, [("%1", "/home/m/devel/odoo")], "/proj", cfg=CFG,
-            compute=lambda c: self.result, persist=lambda r: None,
-            deliver=lambda pid, tp, text: self.delivered.append(text) or True,
-            gate_ok=lambda *a: True, mark_sent=lambda *a: None,
-            find_transcript=lambda pd, cwd: ("/t/s.jsonl",),
-            capture=lambda pid: "❯ ", in_mode=lambda pid: False,
-            at_idle=lambda c: True, recent_human=lambda *a: False)
-
-
-def _res(h=0, r403=False):
-    return {"A": [], "B": [], "C": [],
-            "H": [{"task_id": 1192 + i, "task_name": "t", "stage": "Realizácia"}
-                  for i in range(h)],
-            "summary": "task-hygiene: A=0 B=0 C=0" + (" H=%d" % h if h else ""),
-            "reactions_unavailable": r403}
-
-
-class TestJob49(unittest.TestCase):
-    def test_reaction_403_logged_once_per_day(self):
-        deps, state = _JobDeps(_res(r403=True)), {}
-        day1 = datetime.datetime(2026, 9, 29, 8, tzinfo=datetime.timezone.utc).timestamp()
-        first = deps.run(state, day1)
-        second = deps.run(state, day1 + 7200)
-        third = deps.run(state, day1 + 86400)
-        tag = "reactions unavailable (403)"
-        self.assertEqual(sum(tag in ln for ln in first), 1)
-        self.assertEqual(sum(tag in ln for ln in second), 0)
-        self.assertEqual(sum(tag in ln for ln in third), 1)
-
-    def test_h_alone_nudges(self):
-        deps = _JobDeps(_res(h=1))
-        logs = deps.run({}, 1_000_000.0)
-        self.assertEqual(len(deps.delivered), 1)
-        self.assertTrue(any("H=1" in ln for ln in logs))
-
-
-class TestUntrackedStopLine(unittest.TestCase):
-    def test_h_blocks_with_its_line(self):
-        home = tempfile.mkdtemp()
-        os.makedirs(os.path.join(home, ".claude", "task-hygiene"))
-        with open(os.path.join(home, ".claude", "task-hygiene", "status.json"), "w") as fh:
-            json.dump({"ts": time.time(), "a": 0, "b": 0, "c": 0, "b_verif": 0,
-                       "h": 1, "h_items": ["#1192 Export faktúr"]}, fh)
-        sid = "h1180u-" + uuid.uuid4().hex[:10]
-        env = dict(os.environ, HOME=home)
-        p = subprocess.run(["bash", str(UNTRACKED)], input=json.dumps(
-            {"last_assistant_message": "hotovo\n✅ DONE: x", "session_id": sid}),
-            capture_output=True, text=True, env=env, timeout=60)
-        sweep_session_files(sid)
-        self.assertEqual(p.returncode, 2, p.stderr)
-        self.assertIn("#1192", p.stderr)
-        self.assertIn("Verifik", p.stderr)
-
-
-# --------------------------------------------------------------------------- #
 # (e) doctrine-audit — superseded memory, report-only
 # --------------------------------------------------------------------------- #
 class TestSupersededMemory(unittest.TestCase):
@@ -621,41 +426,6 @@ class TestStopGateReview1(unittest.TestCase):
         self.assertEqual(_verdict(t, msg="Escape je `airuleset:handover-ok <reason>`.\n✅ DONE"),
                          "block")
         self.assertEqual(_verdict(t, msg="airuleset:handover-ok x\n✅ DONE"), "block")
-
-
-class TestJob49Review1(unittest.TestCase):
-    def test_degraded_without_guarded_marks_a_unknown_and_never_stop_gates_it(self):
-        fake = Fake([_task(1, 2879)], [_m(10, 1, CLIENT, 3 * 1440)], deny_reactions=True)
-        r = th.compute_hygiene(fake.call, CFG, now=NOW)
-        self.assertEqual([x["task_id"] for x in r["A"]], [1])
-        self.assertTrue(r["A"][0]["reaction_unknown"])
-        st = th.persist_status(r, home=tempfile.mkdtemp())
-        self.assertEqual(st["a"], 1)
-        self.assertIsNone(st["a_oldest_ts"])
-
-    def test_degraded_with_guarded_keeps_a_gateable(self):
-        class Guarded(Fake):
-            def call(self, model, method, **body):
-                if method == "message_reactions_guarded":
-                    return []
-                return super().call(model, method, **body)
-        fake = Guarded([_task(1, 2879)], [_m(10, 1, CLIENT, 3 * 1440)], deny_reactions=True)
-        r = th.compute_hygiene(fake.call, CFG, now=NOW)
-        self.assertNotIn("reaction_unknown", r["A"][0])
-
-    def test_unaccented_handover_is_h(self):
-        body = "<p>Co skusit: export</p><p>staci 👍</p>"
-        fake = Fake([_task(1192, 2879)], [_m(1, 1192, STREAM, 30, body)])
-        self.assertEqual([x["task_id"] for x in
-                          th.compute_hygiene(fake.call, CFG, now=NOW)["H"]], [1192])
-
-    def test_h_read_error_logged_once_per_day(self):
-        import cli_handover_hygiene as hh
-        state, res = {}, {"h_error": "class H read failed: boom"}
-        day1 = datetime.datetime(2026, 9, 29, 8, tzinfo=datetime.timezone.utc).timestamp()
-        self.assertEqual(len(hh.daily_notes(res, state, day1)), 1)
-        self.assertEqual(hh.daily_notes(res, state, day1 + 3600), [])
-        self.assertEqual(len(hh.daily_notes(res, state, day1 + 86400)), 1)
 
 
 class TestInstallStepReportsSupersededMemory(unittest.TestCase):
@@ -831,52 +601,10 @@ class TestStopGateReview2b(unittest.TestCase):
 
     def test_shape_and_argv_parsing_stay_linear(self):
         from gates import handover
-
-        from cli_handover_hygiene import is_handover_body
         t0 = time.monotonic()
-        is_handover_body("Čo skúsiť " + "stačí a" * 50000)
+        handover.is_handover_body("Čo skúsiť " + "stačí a" * 50000)
         handover._py_argv_calls("odoo_post.py' '--model', " * 20000)
         self.assertLess(time.monotonic() - t0, 3.0)
-
-
-class TestJob49Review2(unittest.TestCase):
-    def test_h_is_this_boxs_own_signature_only(self):
-        import cli_handover_hygiene as hh
-        rx = hh.own_signature_rx("montalu4")
-        mine = HANDOVER_BODY + "<p>ZbynekAI 4</p>"
-        other = HANDOVER_BODY + "<p>ZbynekAI 1</p>"
-        fake = Fake([_task(1, 2879), _task(2, 2879), _task(3, 2879)],
-                    [_m(1, 1, STREAM, 60, mine), _m(2, 2, STREAM, 60, other),
-                     _m(3, 3, STREAM, 60, HANDOVER_BODY)])
-        tasks = fake.call("project.task", "search_read")
-        res = hh.compute_h(fake.call, tasks, CFG, lambda a: True, NOW, rx)
-        self.assertEqual([x["task_id"] for x in res["H"]], [1])
-        self.assertEqual([x["task_id"] for x in res["H_foreign"]], [2, 3])
-        self.assertIsNone(hh.own_signature_rx("gatekeeper"))
-
-    def test_status_persists_h_error_and_foreign(self):
-        r = {"A": [], "B": [], "C": [], "H": [], "H_foreign": [{"task_id": 9}],
-             "h_error": "class H read failed: 504", "summary": "x"}
-        st = th.persist_status(r, home=tempfile.mkdtemp())
-        self.assertEqual(st["h_error"], "class H read failed: 504")
-        self.assertEqual(st["h_foreign"], 1)
-
-    def _stop(self, st):
-        home = tempfile.mkdtemp()
-        os.makedirs(os.path.join(home, ".clau" + "de", "task-hygiene"))
-        with open(os.path.join(home, ".clau" + "de", "task-hygiene", "status.json"), "w") as fh:
-            json.dump(dict({"ts": time.time(), "a": 1, "b": 0, "c": 0, "b_verif": 0,
-                            "a_oldest_ts": None, "a_items": ["#7 Sklo"]}, **st), fh)
-        sid = "h1180r2-" + uuid.uuid4().hex[:10]
-        p = subprocess.run(["bash", str(UNTRACKED)], input=json.dumps(
-            {"last_assistant_message": "ok\n✅ DONE: x", "session_id": sid}),
-            capture_output=True, text=True, env=dict(os.environ, HOME=home), timeout=60)
-        sweep_session_files(sid)
-        return p
-
-    def test_unknown_a_is_stop_gated_after_72h_only(self):
-        self.assertEqual(self._stop({"a_unknown_oldest_ts": time.time() - 4 * 86400}).returncode, 2)
-        self.assertEqual(self._stop({"a_unknown_oldest_ts": time.time() - 86400}).returncode, 0)
 
 
 class TestTriggerReview2(unittest.TestCase):

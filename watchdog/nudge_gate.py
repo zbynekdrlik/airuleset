@@ -23,7 +23,7 @@ ONE `nudge:` batch. Two bounds carry it:
   otherwise read a hold as a failed delivery (report-owed, dying-subagent).
   `pane_budgeted` says which kinds it binds. A pane, not a session: a restarted
   claude in the same pane gets no fresh slot. Every machine delivery threads
-  `state` (job 49 task-hygiene since B9), so no budgeted path skips it.
+  `state`, so no budgeted path skips it.
 
 EXEMPT: RECOVERY identities (`RECOVERY_NUDGE_KINDS`: resume/`continue` after an
 API error, oauth-resume, compact, the owner's own `/autopilot` goal-arm,

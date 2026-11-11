@@ -112,7 +112,10 @@ def _epoch(ts):
 # review). Resolved at call time from their owning modules (one source each).
 _OWN_EXTRA_PREFIXES = ("recheck:", "UNPARK-AUDIT:", "report-owed:",
                        "gk-freshness backstop", "goal-guard:", "lane-check:",
-                       "lane-reconcile:", "task-hygiene:", "Discord pripomienka:",
+                       "lane-reconcile:", "Discord pripomienka:",
+                       # a kind retired in #1306: its old nudges stay in the
+                       # transcripts of still-running streams
+                       "task-hygiene:",
                        # the card_flags relay of an owner's ❓ REACTION: a new
                        # question about a card, never an answer to ours
                        "Užívateľ označil túto tvoju Discord správu")

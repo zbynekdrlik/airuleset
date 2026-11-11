@@ -32,7 +32,6 @@ sys.path.insert(0, str(ROOT))
 import airuleset  # noqa: E402
 import cli_config  # noqa: E402
 import cli_odoo_board  # noqa: E402
-import cli_odoo_ro  # noqa: E402
 # #1297 removed the daily cap (was 2): more filings than it ever allowed.
 _N = 3
 
@@ -115,19 +114,6 @@ class TestNoBoardAccount(unittest.TestCase):
         self.home = tempfile.mkdtemp(prefix="rf1258-")
         self.claude = Path(self.home, ".claude")
         self.claude.mkdir()
-
-    def test_an_explicit_config_path_is_refused_when_the_board_is_off(self):
-        cfg = self.claude / cli_odoo_ro.CONFIG_BASENAME
-        cfg.write_text(json.dumps({"url": "https://erp.slovnormal.sk"}), encoding="utf-8")
-        (self.claude / cli_odoo_board.BOARD_MARKER).write_text("off\n", encoding="utf-8")
-        self.assertIsNone(cli_odoo_ro.load_config(str(cfg), home=self.home))
-
-    def test_writing_off_clears_a_stale_task_hygiene_status(self):
-        st = self.claude / "task-hygiene" / "status.json"
-        st.parent.mkdir()
-        st.write_text("{}", encoding="utf-8")
-        cli_odoo_board.write_board_marker(self.claude, "david2")
-        self.assertFalse(st.exists())
 
     def test_install_step_writes_and_clears_the_marker(self):
         marker = self.claude / cli_odoo_board.BOARD_MARKER

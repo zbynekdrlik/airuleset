@@ -20,7 +20,7 @@ capture, prefix strip, tokenizer, ``cd`` tracking and gh body resolver -- the
 same primitives ``gates.labeledit`` reuses), per top-level segment.
 
 A task is OWED a move when this turn:
-  O1  posted a HANDOVER-SHAPED note (``cli_handover_hygiene.is_handover_body``:
+  O1  posted a HANDOVER-SHAPED note (``is_handover_body``:
       the rule-3 "Čo skúsiť" heading + the literal "stačí 👍") WITHOUT the
       poster's handover mode -- through ``odoo_post.py`` (any wrapper, ``-m``,
       ``bash -c``), the ``odoo_post.post()`` Python API, or ``odoo-task-sync.py
@@ -42,7 +42,7 @@ successful verification-stage WRITE naming it: a task-CLI ``move``/``--stage``
 segment, a script (python/curl heredoc or ``-c``) that writes ``stage_id`` to
 the verification stage, or an ``mcp__*`` tool call doing the same -- each with
 the task id and a verification target (a Verifik/Na overenie/Čaká/verif word, or
-the configured ``stage_ids.verifikacia`` id). A mention (echo, grep, a comment,
+a caller-injected ``verif_id``). A mention (echo, grep, a comment,
 an Agent prompt, a TodoWrite, a ``stage_id`` READ) is never a move.
 
 Escape: a line ``airuleset:handover-ok <reason>`` (outside code fences) in the
@@ -57,8 +57,6 @@ import json
 import os
 import re
 
-import cli_odoo_ro
-from cli_handover_hygiene import is_handover_body
 from gates import allow, audit, emit_block_stderr, field_of, read_payload
 from gates.selfservice import (
     _apply_cd, _capture_heredocs, _flag_value, _resolve_body, _strip_prefix, _tokens_of,
@@ -91,6 +89,18 @@ _VERIF_WORD = r"(?:[\w.]*verif\w*|Verifik\w*|Na\s+overeni\w*|[ČC]ak[áa])"
 _POST_OK_RX = re.compile(r"OK: (?:mail\.message \d+ posted|resumed)")
 _GH_OK_RX = re.compile(r"issuecomment-\d+")
 _NOT_DONE = {"--help", "-h", "--dry-run"}
+# The rule-3 handover SHAPE: the "Čo skúsiť" section heading AND the literal
+# closing "stačí 👍" — two loose words ("Skúsili ste…? Stačí napísať") are a
+# client question, never a handover. Bounded gap: linear, never nested.
+_GAP = r"(?:\s|&nbsp;|&#160;|<[^>]{0,40}>)*"
+_SHAPE_RX = (re.compile(r"[ČčCc]o" + _GAP + r"sk[úu]si", re.IGNORECASE),
+             re.compile(r"sta[čc][íi][^\n]{0,60}?(?:👍|&#128077;|:\+1:|:thumbsup:)",
+                        re.IGNORECASE))
+
+
+def is_handover_body(body):
+    """True iff ``body`` carries the rule-3 handover shape (see ``_SHAPE_RX``)."""
+    return isinstance(body, str) and all(rx.search(body) for rx in _SHAPE_RX)
 
 
 # --------------------------------------------------------------------------- #
@@ -409,12 +419,6 @@ def _scan_bash(turn, cmd, ok, result, depth=0):
             turn.script_write(code + "\n" + " ".join(argv))
 
 
-def _verif_stage_id():
-    cfg = cli_odoo_ro.load_config()
-    vid = ((cfg or {}).get("stage_ids") or {}).get("verifikacia")
-    return vid if isinstance(vid, int) and not isinstance(vid, bool) else None
-
-
 def bypass_reason(message):
     """The ``airuleset:handover-ok`` reason on its own line outside code fences."""
     m = BYPASS_RX.search(_FENCE_RX.sub("", message or ""))
@@ -422,13 +426,15 @@ def bypass_reason(message):
 
 
 def evaluate(transcript_path, message, cwd, verif_id=None):
-    """``("block", reason)`` or ``("allow", "")`` for this turn."""
+    """``("block", reason)`` or ``("allow", "")`` for this turn. ``verif_id``: a
+    verification stage id that also settles a move (the per-box task-hygiene
+    config that used to supply it went with the montalu board, #1306)."""
     if bypass_reason(message):
         return "allow", ""
     calls = turn_tool_calls(transcript_path)
     if not calls:
         return "allow", ""
-    turn = _Turn(cwd or os.getcwd(), verif_id if verif_id is not None else _verif_stage_id())
+    turn = _Turn(cwd or os.getcwd(), verif_id)
     for name, inp, ok, result in calls:
         if name == "Bash":
             _scan_bash(turn, str(inp.get("command") or ""), ok, result)

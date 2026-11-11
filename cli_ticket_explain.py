@@ -4,7 +4,7 @@ The pure classifier and the text renderer live in `cli_ticket_state`
 (`classify`, `conflicts`, `explain_lines`, `conflict_lines`). This module is
 the I/O shell around them; `--conflicts` prints only the conflict lines. It receives the buckets `core-quals`/`slice-quals` already COUNTED (so
 `--explain` can never re-derive a number), adds the footer-only contributions
-(ticketless ❓ pings in U, the task-hygiene A count in I), and prints.
+(ticketless ❓ pings in U), and prints.
 `tickets-status --explain` runs the same quals derivation from the session's
 cwd with the role the footer resolves for it.
 
@@ -52,23 +52,12 @@ def _refuse_extra(extra, flag="--explain"):
 def _footer_extras(cwd=None, cover=None):
     """The footer contributions that are not ticket rows: each ticketless ❓
     ping adds 1 to U (#512, `statusbar.ticketless_question_pings` against the
-    #1218 label-U `cover`, the SAME source as the footer and `--waiting`), and
-    the task-hygiene A count is
-    added to I (#1036, `statusbar.task_hygiene_a_count`; 0 when unconfigured).
-    `--count` never includes either — they are footer display terms."""
+    #1218 label-U `cover`, the SAME source as the footer and `--waiting`).
+    `--count` never includes them — they are a footer display term."""
     import cli_quals_cmd
-    import statusbar
-    extras = [("U", 1, "ticketless question ping, no ticket to label (#512)",
-               v.get("question") or v.get("block") or "")
-              for v in cli_quals_cmd._waiting_ping_entries(cwd, cover=cover)]
-    try:
-        a_count = statusbar.task_hygiene_a_count()
-    except Exception:  # noqa: BLE001 — a display term, never a crash
-        a_count = 0
-    if a_count:
-        extras.append(("I", a_count, "%d unanswered client comment(s), the "
-                       "task-hygiene A count (#1036)" % a_count, "-"))
-    return extras
+    return [("U", 1, "ticketless question ping, no ticket to label (#512)",
+             v.get("question") or v.get("block") or "")
+            for v in cli_quals_cmd._waiting_ping_entries(cwd, cover=cover)]
 
 
 def _emit(buckets, box, facts=None, supplement=(), only_conflicts=False,

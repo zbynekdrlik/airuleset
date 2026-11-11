@@ -89,7 +89,6 @@ EXPECTED_STANDALONE = [
     "orphan_poll_reaper",               # (45) — #885 orphan bg-poll-loop reaper
     "healthz_probe",                    # (47) — #1005 presenter /healthz.ai external health-check
     "parked_wake_job",                  # (48) — #1034 wake a parked session after a claudy account switch
-    "task_hygiene_job",                 # (49) — #1036 Odoo task-hygiene overseer
     "erp_heartbeat",                    # (51) — #959 erp-test box heartbeat
     "watch_triggers",                   # (52) — #1163 watch-steered window triggers
     "checkout_freshness",               # (53) — #1176 checkout freshness enforcement

@@ -1,5 +1,4 @@
-"""#1053 — the verify-on-copy Stop gate inside hooks/stop-check-untracked-work.sh
-(the #1036 task-hygiene family).
+"""#1053 — the verify-on-copy Stop gate inside hooks/stop-check-untracked-work.sh.
 
 A turn ending ✅ DONE / ⏳ WORKING with a fresh ~/.claude/verify-on-copy/status.json
 carrying overdue tickets (verify-on-copy > 24 h, no Verified-on-copy: comment) is
@@ -28,7 +27,6 @@ def _run(msg, home, sid=None):
     r = subprocess.run(["bash", str(HOOK)], input=payload, text=True,
                        capture_output=True, env=env, timeout=30)
     for pat in ("airuleset-verify-on-copy-block-",
-                "airuleset-task-hygiene-block-",
                 "airuleset-untracked-work-block-"):
         p = "/tmp/" + pat + sid
         if os.path.exists(p):
