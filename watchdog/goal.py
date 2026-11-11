@@ -209,6 +209,7 @@ from watchdog import send_outcome as _send_outcome            # #1157 (delivery 
 from watchdog import goal_arm_failure as _arm_failure         # #1181 (visible failed arm)
 from watchdog import watch_triggers as _wt                    # #1163 (steer=watch windows)
 from watchdog import owner_stop as _owner_stop                # #1257 (owner-stop latch)
+from watchdog import auth_rearm_gate as _auth_gate         # #1303 (re-arm a working session)
 from watchdog.send_outcome import (  # noqa: E402 -- #1157: moved, ONE shared undo
     janitor_undo_if_own_stranded as _janitor_undo_if_own_stranded)
 
@@ -1656,15 +1657,11 @@ def _declared_window_nudge(cwd, origin=None):
     switch) for the owner's OWN `self-callback` arm on ANY pane (#1181 -- they
     just typed /autopilot, #752; the staged kind, OFF on every box, withheld every
     keystroke of it on dev1 iemmixer/fohmixer 29.9.) and the owner-authorized
-    `stream-migrate` watcher (#1128), and the `auth-rearm` (#1303): it restores
-    a goal the OWNER armed that Claude Code cleared on an auth error (the
-    nightly token rotation), a #890 RECOVERY-class origin, so the staged switch
-    must not withhold it. Every other watchdog re-arm keeps the staged PRIORITY
-    `goal-sweep`, on a declared window too: #1260 retired #1038's
-    declared-window always-on kind with its virgin arm. `cwd` is kept for the
-    callers' signature."""
-    if origin in (_GOAL_SELF_CALLBACK_ORIGIN, _stream_migrate.ORIGIN,
-                  _GOAL_AUTH_REARM_ORIGIN):
+    `stream-migrate` watcher (#1128), and `auth-rearm` (#1303: it restores an
+    owner-armed goal an auth error cleared). Every other re-arm keeps the staged
+    `goal-sweep` (#1260 retired the declared-window always-on kind). `cwd` is
+    kept for the callers' signature."""
+    if origin in (_GOAL_SELF_CALLBACK_ORIGIN, _stream_migrate.ORIGIN, _GOAL_AUTH_REARM_ORIGIN):
         return "goal-arm"
     return "goal-sweep"
 
@@ -1809,8 +1806,7 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
         _log_goal_sync("PASS structured-armed sid=%s cwd=%s origin=%s (%s)"
                        % (sid, cwd, origin, _mig_why))
 
-    # #1128/#1181/#1303 -- the keystroke NUDGE identity: always-on `goal-arm` for the
-    # owner's own arm / the stream watcher / an auth re-arm, else the staged `goal-sweep`.
+    # #1128/#1181/#1303 -- keystroke NUDGE identity (see `_declared_window_nudge`).
     _nudge = _declared_window_nudge(cwd, origin)
 
     # Hard age cap -- checked first, no pane resolution needed. Unlike
@@ -3838,9 +3834,9 @@ def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
             # rearm records its request regardless of a pending /compact.
             if (mark is not None and mark.get("state") == "cleared"
                     and mark.get("clear_kind") == "auth"):
-                ar = _auth_rearm_decide(sid, cwd, mark, armed, now, loc, dry_run,
-                                        rearm_fn, obligation_fn, requests_path,
-                                        auth_attempts_state)
+                ar = _auth_gate.hold_line(loc, sid, tpath) or _auth_rearm_decide(  # #1303
+                    sid, cwd, mark, armed, now, loc, dry_run, rearm_fn,
+                    obligation_fn, requests_path, auth_attempts_state)
                 if ar:
                     logs.append(ar)
             seen_state.pop(sid, None)
