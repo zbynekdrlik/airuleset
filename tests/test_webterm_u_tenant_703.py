@@ -63,12 +63,12 @@ class TestUTenantSets703(unittest.TestCase):
         # codex-bridge = newlevel@dev2 (the OWNER's account) — cross-tenant.
         self.assertNotIn(profiles.CODEX_ID, ids)
 
-    def test_marek_set_includes_montalu_streams_882(self):
-        # #882 scope correction: marek's tenant set includes his montalu streams
-        # (montalu1/2/4 + forestshop) but NOT owner-realm boxes (dev1/dev2/gk)
-        # and NOT cross-tenant observe tabs (miva1).
+    def test_marek_tenant_set_882(self):
+        # #882: marek's tenant set is his forestshop box, NOT owner-realm boxes
+        # (dev1/dev2/gk) and NOT cross-tenant observe tabs (miva1). #1302: his
+        # montalu streams left with the montalu client.
         ids = {e["id"] for e in profiles.u_tenant_entries(profiles.MAREK)}
-        for within in ("montalu1-subdev", "montalu2-subdev", "montalu4-subdev", "forestshop"):
+        for within in ("forestshop",):
             self.assertIn(within, ids, "%s should be within-tenant" % within)
         for cross in ("dev1", "dev2", "gatekeeper", "miva1-subdev"):
             self.assertNotIn(cross, ids, "%s should be cross-tenant" % cross)

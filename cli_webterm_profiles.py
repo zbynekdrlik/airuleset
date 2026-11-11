@@ -318,24 +318,19 @@ MAREK_FORESTSHOP_HOST_KEYS = [
 def marek_inventory():
     """marek's SCOPED OBSERVER session set (#882 scope correction 2026-09-05:
     DEV STREAM cancelled but webterm dashboard survives; owner "potrebujem aby
-    marek mal prístup aj k m1") — EIGHT entries, in the owner-defined tab order
-    (WEBTERM_DASHBOARD_TABS["marek"]):
+    marek mal prístup aj k m1"), in the owner-defined tab order
+    (WEBTERM_DASHBOARD_TABS["marek"]). #1302 (owner 11.11.2026): the montalu
+    client is gone, so the montalu1/2/4 tabs (m1/m2/m4) were REMOVED.
 
-      1. montalu1-subdev — his first montalu stream, ssh over loopback with the
-         dedicated key (#882 scope correction: owner requested m1 access);
-      2. montalu2-subdev — his second montalu stream (#787), ssh over loopback
-         with the dedicated key — mirrors montalu4-subdev exactly except for
-         the account name;
-      3. miva1-subdev — an OBSERVE tab (owner request 2026-09-03): the miva1
+      1. miva1-subdev — an OBSERVE tab (owner request 2026-09-03): the miva1
          subdev stream, ssh over loopback with the dedicated key. CROSS-TENANT
          (NO u_tenant): miva1 is a SEPARATE external sub-dev stream;
-      4. montalu4-subdev — his montalu stream, ssh over loopback with the
-         dedicated key (the david1..4 shape);
-      5./6. dev1/dev2 — his `marek` tmux session group on the owner dev boxes,
+      2. ar, claudy and the project accounts (#1183 onward);
+      3. dev1/dev2 — his `marek` tmux session group on the owner dev boxes,
          ssh newlevel@<tailscale IP> with the dedicated key;
-      7. gatekeeper — an OBSERVE tab (owner request 2026-09-03): the gk box,
+      4. gatekeeper — an OBSERVE tab (owner request 2026-09-03): the gk box,
          ssh gatekeeper@<gk tailscale IP> with the dedicated key;
-      8. forestshop — his VPS's principal account admin@forestshop-dev with the
+      5. forestshop — his VPS's principal account admin@forestshop-dev with the
          dedicated key + the #679 strict host-key pin.
 
     marek-subdev LOCAL tab REMOVED (#882: his cancelled dev stream session).
@@ -347,32 +342,6 @@ def marek_inventory():
     sshpass shared-password branch and never touches the gatekeeper key."""
     subdev_host = _subdev_target_host("marek")
     return [
-        {
-            "id": "montalu1-subdev",
-            "label": "montalu1@subdev",
-            "kind": "stream",
-            "local": False,
-            "host": subdev_host,
-            "user": "montalu1",
-            "identity": WEBTERM_MAREK_IDENTITY,
-            "preferred": "montalu1",
-            # #882 scope correction: owner requested m1 access — montalu1 is
-            # within marek's montalu tenant.
-            "u_tenant": True,
-        },
-        {
-            "id": "montalu2-subdev",
-            "label": "montalu2@subdev",
-            "kind": "stream",
-            "local": False,
-            "host": subdev_host,
-            "user": "montalu2",
-            "identity": WEBTERM_MAREK_IDENTITY,
-            "preferred": "montalu2",
-            # #787: mirrors montalu4-subdev — marek's own montalu stream
-            # account, within-tenant.
-            "u_tenant": True,
-        },
         {
             "id": "miva1-subdev",
             "label": "miva1@subdev",
@@ -388,18 +357,6 @@ def marek_inventory():
             # OWNER `zbynek` (notify/__init__.py "miva1": "zbynek"), NOT marek's
             # realm; reading its tickets-status would be a CROSS-TENANT read, the
             # same boundary dev1/dev2 keep by omitting the field.
-        },
-        {
-            "id": "montalu4-subdev",
-            "label": "montalu4@subdev",
-            "kind": "stream",
-            "local": False,
-            "host": subdev_host,
-            "user": "montalu4",
-            "identity": WEBTERM_MAREK_IDENTITY,
-            "preferred": "montalu4",
-            # #703: marek's own montalu stream account — within-tenant.
-            "u_tenant": True,
         },
         {
             # owner request 2026-09-29 ("pridaj ar marekovi do webtermu"): marek's
@@ -763,78 +720,6 @@ def zbynek_inventory():
             "user": "gatekeeper",
             "identity": WEBTERM_ZBYNEK_IDENTITY,
             "preferred": "zbynek",
-        },
-        {
-            "id": "montalu1-subdev",
-            "label": "montalu1@subdev",
-            "kind": "stream",
-            "local": False,
-            "host": subdev_host,
-            "user": "montalu1",
-            "identity": WEBTERM_ZBYNEK_IDENTITY,
-            "preferred": "montalu1",
-            "u_tenant": True,
-            "collect_identity": ZBYNEK_COLLECT_IDENTITY,
-        },
-        {
-            "id": "montalu2-subdev",
-            "label": "montalu2@subdev",
-            "kind": "stream",
-            "local": False,
-            "host": subdev_host,
-            "user": "montalu2",
-            "identity": WEBTERM_ZBYNEK_IDENTITY,
-            "preferred": "montalu2",
-            "u_tenant": True,
-            "collect_identity": ZBYNEK_COLLECT_IDENTITY,
-        },
-        {
-            "id": "montalu3-subdev",
-            "label": "montalu3@subdev",
-            "kind": "stream",
-            "local": False,
-            "host": subdev_host,
-            "user": "montalu3",
-            "identity": WEBTERM_ZBYNEK_IDENTITY,
-            "preferred": "montalu3",
-            "u_tenant": True,
-            "collect_identity": ZBYNEK_COLLECT_IDENTITY,
-        },
-        {
-            "id": "montalu4-subdev",
-            "label": "montalu4@subdev",
-            "kind": "stream",
-            "local": False,
-            "host": subdev_host,
-            "user": "montalu4",
-            "identity": WEBTERM_ZBYNEK_IDENTITY,
-            "preferred": "montalu4",
-            "u_tenant": True,
-            "collect_identity": ZBYNEK_COLLECT_IDENTITY,
-        },
-        {
-            "id": "montalu5-subdev",
-            "label": "montalu5@subdev",
-            "kind": "stream",
-            "local": False,
-            "host": subdev_host,
-            "user": "montalu5",
-            "identity": WEBTERM_ZBYNEK_IDENTITY,
-            "preferred": "montalu5",
-            "u_tenant": True,
-            "collect_identity": ZBYNEK_COLLECT_IDENTITY,
-        },
-        {
-            "id": "montalu6-subdev",
-            "label": "montalu6@subdev",
-            "kind": "stream",
-            "local": False,
-            "host": subdev_host,
-            "user": "montalu6",
-            "identity": WEBTERM_ZBYNEK_IDENTITY,
-            "preferred": "montalu6",
-            "u_tenant": True,
-            "collect_identity": ZBYNEK_COLLECT_IDENTITY,
         },
         {
             "id": "david1-subdev",

@@ -44,13 +44,15 @@ class TestWebtermReadersOnDropLanes1115(unittest.TestCase):
                 checked += 1
         self.assertGreater(checked, 10)
 
-    def test_marek_is_on_his_montalu_and_miva_lanes(self):
-        for host in ("drop-subdev-montalu1.newlevel.media",
-                     "drop-subdev-montalu2.newlevel.media",
-                     "drop-subdev-montalu4.newlevel.media",
-                     "drop-subdev-miva1.newlevel.media"):
-            self.assertIn("drlik.marek@gmail.com",
-                          g.DROP_ACCESS_APPS[host]["allowed_emails"], host)
+    def test_marek_is_on_his_miva_lane_only(self):
+        # #1302 (owner 11.11.2026): the montalu tabs left his dashboard, so
+        # his reader leaves those drop lanes with them.
+        self.assertIn("drlik.marek@gmail.com", g.DROP_ACCESS_APPS[
+            "drop-subdev-miva1.newlevel.media"]["allowed_emails"])
+        for n in (1, 2, 4):
+            host = "drop-subdev-montalu%d.newlevel.media" % n
+            self.assertNotIn("drlik.marek@gmail.com",
+                             g.DROP_ACCESS_APPS[host]["allowed_emails"], host)
 
     def test_no_reader_lands_on_an_account_the_webterm_does_not_open(self):
         # montalu7/8 are on no programmer's dashboard: owner only.

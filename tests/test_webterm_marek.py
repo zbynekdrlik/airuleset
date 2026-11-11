@@ -101,23 +101,19 @@ class TestMarekInventory(unittest.TestCase):
     def test_nine_member_set_in_owner_order(self):
         # #882 scope correction: marek-subdev LOCAL tab REMOVED (cancelled stream),
         # montalu1-subdev ADDED (owner: "potrebujem aby marek mal prístup aj k m1").
-        # #960: claudy tab added before dev1.
+        # #960: claudy tab added before dev1. #1302 (owner 11.11.2026): the
+        # montalu1/2/4 tabs REMOVED, the montalu client is gone.
         inv = p.marek_inventory()
         self.assertEqual([e["id"] for e in inv],
-                         ["montalu1-subdev", "montalu2-subdev", "miva1-subdev",
-                          "montalu4-subdev", "ar", "claudy", "fohmixer", "varos", "wall-bridge", "songplayer", "dstack", "dasio", "iemmixer", "dcontroller", "dsync", "intercom", "obs", "shading", "vstack", "nlch-finances", "tuke", "dev1", "dev2",
+                         ["miva1-subdev", "ar", "claudy", "fohmixer", "varos", "wall-bridge", "songplayer", "dstack", "dasio", "iemmixer", "dcontroller", "dsync", "intercom", "obs", "shading", "vstack", "nlch-finances", "tuke", "dev1", "dev2",
                           "gatekeeper", "forestshop"])
 
-    def test_montalu2_entry_is_ssh_with_dedicated_key(self):
-        # #787: mirrors montalu4-subdev except for the account name.
-        # #870 F4c-marek: host is now SUBDEV_TAILSCALE_HOST (controller origin).
-        e = next(x for x in p.marek_inventory() if x["id"] == "montalu2-subdev")
-        self.assertFalse(e["local"])
-        self.assertEqual(e["host"], p.SUBDEV_TAILSCALE_HOST)
-        self.assertEqual(e["user"], "montalu2")
-        self.assertEqual(e["identity"], p.WEBTERM_MAREK_IDENTITY)
-        self.assertEqual(e["preferred"], "montalu2")
-        self.assertIs(e.get("u_tenant"), True)
+    def test_no_montalu_entry_after_1302(self):
+        # #1302 (owner 11.11.2026): the montalu client is gone; marek keeps no
+        # montalu stream tab (the #787 montalu2 and #882 montalu1 adds left with
+        # montalu4).
+        ids = [x["id"] for x in p.marek_inventory()]
+        self.assertFalse([i for i in ids if i.startswith("montalu")], ids)
 
     def test_miva1_entry_is_ssh_with_dedicated_key(self):
         # Owner request 2026-09-03: mirrors montalu2/montalu4-subdev (ssh,
@@ -168,33 +164,12 @@ class TestMarekInventory(unittest.TestCase):
         self.assertEqual(e["user"], fleet_e["user"])
         self.assertIsNone(fleet_e.get("host_keys"))
 
-    def test_montalu1_entry_is_ssh_with_dedicated_key(self):
-        # #882 scope correction: montalu1-subdev ADDED — his first montalu stream,
-        # within-tenant (u_tenant: True), mirroring the montalu2/4 shape.
-        # #870 F4c-marek: host is now SUBDEV_TAILSCALE_HOST (controller origin).
-        e = next(x for x in p.marek_inventory() if x["id"] == "montalu1-subdev")
-        self.assertFalse(e["local"])
-        self.assertEqual(e["host"], p.SUBDEV_TAILSCALE_HOST)
-        self.assertEqual(e["user"], "montalu1")
-        self.assertEqual(e["identity"], p.WEBTERM_MAREK_IDENTITY)
-        self.assertEqual(e["preferred"], "montalu1")
-        self.assertIs(e.get("u_tenant"), True)
 
     def test_marek_subdev_local_tab_removed_882(self):
         # #882 scope correction: marek-subdev LOCAL tab REMOVED (cancelled stream).
         ids = [x["id"] for x in p.marek_inventory()]
         self.assertNotIn("marek-subdev", ids)
 
-    def test_montalu4_entry_is_ssh_with_dedicated_key(self):
-        # His montalu stream — a subdev unix account reached over the tailnet
-        # with the dedicated key.
-        # #870 F4c-marek: host is now SUBDEV_TAILSCALE_HOST (controller origin).
-        e = next(x for x in p.marek_inventory() if x["id"] == "montalu4-subdev")
-        self.assertFalse(e["local"])
-        self.assertEqual(e["host"], p.SUBDEV_TAILSCALE_HOST)
-        self.assertEqual(e["user"], "montalu4")
-        self.assertEqual(e["identity"], p.WEBTERM_MAREK_IDENTITY)
-        self.assertEqual(e["preferred"], "montalu4")
 
     def test_dev1_and_dev2_entries_attach_the_marek_tmux_group(self):
         # marek-owned tmux sessions on the owner dev boxes: ssh newlevel@<box
@@ -299,21 +274,15 @@ class TestMarekConnectAllowlistScoped(unittest.TestCase):
             self.assertEqual(rc, 2, "foreign id %r must be refused" % foreign)
             ex.assert_not_called()
 
-    def test_montalu1_id_execs_ssh_with_dedicated_key(self):
-        # #882 scope correction: montalu1-subdev ADDED — ssh with the dedicated
-        # marek key, attaching montalu1's tmux group.
-        # #870 F4c-marek: host is SUBDEV_TAILSCALE_HOST (controller origin).
+    def test_montalu1_id_is_refused_after_1302(self):
+        # #1302: montalu1-subdev left marek's connect allowlist with the tab.
         f = self._marek_inv_file()
         with m.patch.dict(os.environ, {"WEBTERM_INVENTORY": str(f)}), \
-                m.patch.object(w.os, "execvp") as ex:
-            w.connect_main(["montalu1-subdev"])
-        ex.assert_called_once()
-        argv = ex.call_args[0][1]
-        self.assertEqual(argv[0], "ssh")
-        self.assertIn("-i", argv)
-        self.assertIn(os.path.expanduser(p.WEBTERM_MAREK_IDENTITY), argv)
-        self.assertIn("montalu1@" + p.SUBDEV_TAILSCALE_HOST, argv)
-        self.assertNotIn("sshpass", argv)
+                m.patch.object(w.os, "execvp",
+                               side_effect=AssertionError("must not exec")) as ex:
+            rc = w.connect_main(["montalu1-subdev"])
+        self.assertEqual(rc, 2)
+        ex.assert_not_called()
 
     def test_dev1_id_execs_ssh_with_dedicated_key_to_marek_group(self):
         f = self._marek_inv_file()
@@ -366,11 +335,12 @@ class TestMarekConnectAllowlistScoped(unittest.TestCase):
         marek_ids = p.allowed_ids(p.MAREK, fleet)
         # #882 scope correction: marek-subdev REMOVED, montalu1-subdev ADDED.
         # #960: claudy tab added.
-        self.assertEqual(marek_ids, {"montalu1-subdev", "montalu2-subdev",
-                                     "miva1-subdev", "montalu4-subdev",
+        # #1302: montalu1/2/4 REMOVED (the montalu client is gone).
+        self.assertEqual(marek_ids, {"miva1-subdev",
                                      "ar", "claudy", "fohmixer", "varos", "wall-bridge", "songplayer", "dstack", "dasio", "iemmixer", "dcontroller", "dsync", "intercom", "obs", "shading", "vstack", "nlch-finances", "tuke", "dev1",
                                      "dev2", "gatekeeper", "forestshop"})
-        for foreign in ("gk", "montalu-subdev", "david1",
+        for foreign in ("gk", "montalu-subdev", "montalu1-subdev",
+                        "montalu2-subdev", "montalu4-subdev", "david1",
                         "codex-bridge", "stepan-forestshop-dev",
                         "admin-forestshop-dev"):
             self.assertNotIn(foreign, marek_ids)
@@ -527,8 +497,7 @@ class TestMarekArtifactsWrite(unittest.TestCase):
             # #882 scope correction: montalu1-subdev replaces marek-subdev.
             # #960: claudy tab added before dev1.
             self.assertEqual([e["id"] for e in inv],
-                             ["montalu1-subdev", "montalu2-subdev", "miva1-subdev",
-                              "montalu4-subdev", "ar", "claudy", "fohmixer", "varos", "wall-bridge", "songplayer", "dstack", "dasio", "iemmixer", "dcontroller", "dsync", "intercom", "obs", "shading", "vstack", "nlch-finances", "tuke", "dev1", "dev2",
+                             ["miva1-subdev", "ar", "claudy", "fohmixer", "varos", "wall-bridge", "songplayer", "dstack", "dasio", "iemmixer", "dcontroller", "dsync", "intercom", "obs", "shading", "vstack", "nlch-finances", "tuke", "dev1", "dev2",
                               "gatekeeper", "forestshop"])
             launcher = (claude / "airuleset-webterm-marek-ttyd.sh").read_text(
                 encoding="utf-8")

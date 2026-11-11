@@ -700,12 +700,11 @@ WEBTERM_DASHBOARD_TABS = {
     # request 2026-09-07 (#934); ar (controller local tab) added as first entry
     # per #938 (was in zbynek_inventory since #870 F4a but missing here).
     # EXCLUDES montalu7/8, simap1, marek@subdev, stepan@forestshop-dev,
-    # admin@forestshop-dev.
+    # admin@forestshop-dev. #1302 (owner 11.11.2026): montalu1-6 (m1..m6)
+    # REMOVED, the montalu client is gone.
     "zbynek": [
         "ar", "claudy", "fohmixer", "varos", "wall-bridge", "songplayer",  # #1220, #1267
         "dstack", "dasio", "iemmixer", "dcontroller", "dsync", "intercom", "obs", "shading", "vstack", "nlch-finances", "tuke", "dev1", "dev2", "gatekeeper",  # #1270, #1295, #1296
-        "montalu1-subdev", "montalu2-subdev", "montalu3-subdev",
-        "montalu4-subdev", "montalu5-subdev", "montalu6-subdev",
         "david1-subdev", "david2-subdev", "david3-subdev", "david4-subdev",
         "miva1-subdev", "spinbike-vps",
     ],
@@ -713,15 +712,14 @@ WEBTERM_DASHBOARD_TABS = {
     # 2026-09-05: DEV STREAM cancelled but webterm dashboard survives; owner
     # "potrebujem aby marek mal prístup aj k m1"). marek-subdev LOCAL tab
     # REMOVED (his cancelled stream session); montalu1-subdev ADDED per owner
-    # request. Remaining: his montalu streams (montalu1/2/4), miva1, dev1/dev2,
-    # gatekeeper, forestshop.
+    # request. #1302 (owner 11.11.2026): montalu1/2/4 REMOVED, the montalu
+    # client is gone. Remaining: miva1, dev1/dev2, gatekeeper, forestshop.
     # #960: claudy tab added before dev1 (his claudy work is reached today via
     # dev1; the controller claudy tab replaces that path after migration).
     # #1220 (owner 2026-10-09): the varos@dev2 project account after fohmixer
     # (its Claude ran in newlevel@dev2's marek group before the migration).
     "marek": [
-        "montalu1-subdev", "montalu2-subdev",
-        "miva1-subdev", "montalu4-subdev",
+        "miva1-subdev",
         "ar", "claudy", "fohmixer", "varos", "wall-bridge", "songplayer",  # #1267
         "dstack", "dasio", "iemmixer", "dcontroller", "dsync", "intercom", "obs", "shading", "vstack", "nlch-finances", "tuke", "dev1", "dev2", "gatekeeper", "forestshop",  # #1270, #1295, #1296
     ],

@@ -33,14 +33,14 @@ ZBYNEK_ORDER = [
     "ar", "claudy", "fohmixer",   # #1183 fohmixer@dev1 project account
     "varos",   # #1220 varos@dev2 project account
     "wall-bridge", "songplayer", "dstack", "dasio", "iemmixer", "dcontroller", "dsync", "intercom", "obs", "shading", "vstack", "nlch-finances", "tuke",   # #1267, #1270, #1295 dev1 project accounts
-    "dev1", "dev2", "gatekeeper",
-    "montalu1-subdev", "montalu2-subdev", "montalu3-subdev",
-    "montalu4-subdev", "montalu5-subdev", "montalu6-subdev",
+    "dev1", "dev2", "gatekeeper",   # #1302: montalu1-6 removed (client gone)
     "david1-subdev", "david2-subdev", "david3-subdev", "david4-subdev",
     "miva1-subdev", "spinbike-vps",
 ]
-# Fleet targets the owner EXCLUDED from his domain (#934: david4 now included).
+# Fleet targets the owner EXCLUDED from his domain (#934 david4 in; #1302 m1-6 out).
 ZBYNEK_EXCLUDED = [
+    "montalu1-subdev", "montalu2-subdev", "montalu3-subdev",
+    "montalu4-subdev", "montalu5-subdev", "montalu6-subdev",
     "montalu7-subdev", "montalu8-subdev",
     "simap1-subdev", "marek-subdev", "stepan-forestshop-dev",
     "admin-forestshop-dev",
@@ -48,7 +48,7 @@ ZBYNEK_EXCLUDED = [
 # The owner's expected tab ALIASES, in his order (spinbike -> "sb").
 ZBYNEK_ALIAS_ORDER = [
     "ar", "claudy", "fohmixer", "varos", "wall-bri", "songplay", "dstack", "dasio", "iemmixer", "dcontrol", "dsync", "intercom", "obs", "shading", "vstack", "nlch-fin", "tuke",   # 8-char cut
-    "dev1", "dev2", "gk", "m1", "m2", "m3", "m4", "m5", "m6",
+    "dev1", "dev2", "gk",
     "d1", "d2", "d3", "d4", "miva", "sb",
 ]
 
@@ -99,11 +99,12 @@ class TestExclusiveTabListMechanism(unittest.TestCase):
 
     def test_marek_observer_lane_882(self):
         # marek DEV STREAM cancelled (#882) but webterm OBSERVER dashboard
-        # survives (owner scope correction 2026-09-05). Tab set has montalu1
-        # (owner requested m1 access) but NOT marek-subdev (dead stream).
+        # survives (owner scope correction 2026-09-05). NOT marek-subdev (dead
+        # stream); #1302: no montalu tab either (the montalu client is gone).
         self.assertIn("marek", w.WEBTERM_DASHBOARD_TABS)
         tabs = w.WEBTERM_DASHBOARD_TABS["marek"]
-        self.assertIn("montalu1-subdev", tabs)
+        for n in range(1, 7):
+            self.assertNotIn("montalu%d-subdev" % n, tabs)
         self.assertNotIn("marek-subdev", tabs)
         self.assertTrue(hasattr(profiles, "marek_inventory"))
         self.assertTrue(hasattr(profiles, "MAREK"))
@@ -131,13 +132,12 @@ class TestExclusiveTabListMechanism(unittest.TestCase):
         self.assertEqual(w.WEBTERM_DASHBOARD_TABS["dominika"], got)
 
     def test_marek_lane_render_alias_order_882(self):
-        # #882 scope correction: marek's OBSERVER set — montalu1/2, miva1,
-        # montalu4, dev1, dev2, gatekeeper, forestshop. marek-subdev REMOVED.
+        # #882 scope correction: marek's OBSERVER set. marek-subdev REMOVED;
+        # #1302: montalu1/2/4 REMOVED (the montalu client is gone).
         got = [e["id"] for e in w.entries_for_tab_list(
             profiles.marek_inventory(), w.WEBTERM_DASHBOARD_TABS["marek"])]
         self.assertEqual(got, [
-            "montalu1-subdev", "montalu2-subdev",
-            "miva1-subdev", "montalu4-subdev",
+            "miva1-subdev",
             "ar", "claudy", "fohmixer", "varos", "wall-bridge", "songplayer",  # #1267
             "dstack", "dasio", "iemmixer", "dcontroller", "dsync", "intercom", "obs", "shading", "vstack", "nlch-finances", "tuke", "dev1", "dev2", "gatekeeper", "forestshop",
         ])
@@ -145,9 +145,9 @@ class TestExclusiveTabListMechanism(unittest.TestCase):
             profiles.marek_inventory(), ttyd_base="/t", human="marek",
             term_grid=(176, 51))
         aliases = re.findall(r'<span class="al">([^<]+)</span>', html)
-        # montalu1->m1, montalu2->m2, miva1->miva, montalu4->m4, dev1, dev2,
-        # gatekeeper->gk, forestshop->fs — from the SINGLE #592 cli_aliases source.
-        self.assertEqual(aliases, ["m1", "m2", "miva", "m4", "ar", "claudy",
+        # miva1->miva, dev1, dev2, gatekeeper->gk, forestshop->fs — from the
+        # SINGLE #592 cli_aliases source.
+        self.assertEqual(aliases, ["miva", "ar", "claudy",
                                    "fohmixer", "varos", "wall-bri", "songplay",
                                    "dstack", "dasio", "iemmixer", "dcontrol", "dsync", "intercom", "obs", "shading", "vstack", "nlch-fin", "tuke", "dev1", "dev2", "gk", "fs"])
         # No marek-subdev (dead stream) on the dashboard.

@@ -52,10 +52,10 @@ class TestMarekLanePresent882(unittest.TestCase):
         self.assertIn("marek", w.WEBTERM_DASHBOARD_TABS,
                       "marek must have a WEBTERM_DASHBOARD_TABS entry (#882)")
 
-    def test_montalu1_in_dashboard_tabs(self):
+    def test_no_montalu_tab_after_1302(self):
+        # #1302 (owner 11.11.2026): montalu client gone, m1/m2/m4 tabs left.
         tabs = w.WEBTERM_DASHBOARD_TABS.get("marek", [])
-        self.assertIn("montalu1-subdev", tabs,
-                      "montalu1-subdev must be in marek's tab list (#882)")
+        self.assertFalse([t for t in tabs if t.startswith("montalu")], tabs)
 
     def test_marek_subdev_not_in_dashboard_tabs(self):
         tabs = w.WEBTERM_DASHBOARD_TABS.get("marek", [])
