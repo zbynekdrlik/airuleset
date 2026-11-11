@@ -643,5 +643,95 @@ class TestHookWiring(unittest.TestCase):
         self.assertIn(" BLOCK ", log.read_text(encoding="utf-8"))
 
 
+HEADING = "## Proposed rule (pending owner decision)"
+TICK = r"sed -i 's|^- \[ \] montalu#621 — same$|- [x] montalu#621 — withdrawn|' %s"
+
+
+class TestLiveFalsePositive(unittest.TestCase):
+    """The supervisor's 11.11. block: a checklist tick re-sent a whole body whose
+    old, already-decided heading looked newly written, and the turn reached
+    back hours across wakes to that edit."""
+
+    def setUp(self):
+        self.t = _Transcript(self).prompt()
+        self.f = os.path.join(self.t.dir, "b1297.md")
+
+    def _eval(self, message=DONE_MSG):
+        return _gate().evaluate(self.t.write(), message, self.t.dir)[0]
+
+    def _filled(self, extra=""):
+        with open(self.f, "w", encoding="utf-8") as fh:
+            fh.write("%s\nBody.\n- [x] montalu#621 — withdrawn\n%s" % (HEADING, extra))
+
+    def _wake(self, text, meta=False):
+        self.t.lines.append({"type": "user", "isMeta": meta,
+                             "message": {"role": "user", "content": text}})
+
+    def test_tick_on_a_body_read_into_the_file_allows(self):
+        self._filled()
+        self.t.bash("gh issue view 1297 -R o/r --json body -q .body > %s && %s && "
+                    "gh issue edit 1297 -R o/r --body-file %s >/dev/null && echo ok"
+                    % (self.f, TICK % self.f, self.f), "ok")
+        self.assertEqual(self._eval(), "allow")
+
+    def test_api_read_and_body_patch_allows(self):
+        self._filled()
+        self.t.bash("gh api repos/o/r/issues/1297 --jq .body >%s" % self.f, "")
+        self.t.bash(TICK % self.f, "")
+        self.t.bash("gh api -X PATCH repos/o/r/issues/1297 -F body=@%s" % self.f, "{}")
+        self.assertEqual(self._eval(), "allow")
+
+    def test_edit_tool_keeping_the_heading_as_context_allows(self):
+        self._filled()
+        self.t.bash("gh issue view 1297 --json body -q .body > %s" % self.f, "")
+        self.t.call("Edit", {"file_path": self.f, "old_string": HEADING + "\nBody.",
+                             "new_string": HEADING + "\nBody, ticked."}, "ok")
+        self.t.bash("gh issue edit 1297 --body-file %s" % self.f, "")
+        self.assertEqual(self._eval(), "allow")
+
+    def test_dependency_added_by_sed_or_edit_still_blocks(self):
+        line = "- [ ] Next: needs the owner's approval to swap the switch."
+        self._filled(line)
+        self.t.bash("gh issue view 1297 --json body -q .body > %s && "
+                    "sed -i '$a %s' %s" % (self.f, line.replace("'", "'\\''"), self.f), "")
+        self.t.bash("gh issue edit 1297 --body-file %s" % self.f, "")
+        self.assertEqual(self._eval(), "block")
+        t = self.t = _Transcript(self).prompt()
+        t.bash("gh issue view 1297 --json body -q .body > %s" % self.f, "")
+        t.call("Edit", {"file_path": self.f, "old_string": "Body.",
+                        "new_string": "Body.\n" + line}, "ok")
+        t.bash("gh issue edit 1297 --body-file %s" % self.f, "")
+        self.assertEqual(self._eval(), "block")
+
+    def test_file_read_from_another_ticket_or_posted_as_comment_blocks(self):
+        self._filled()
+        self.t.bash("gh issue view 1296 --json body -q .body > %s" % self.f, "")
+        self.t.bash("gh issue edit 1297 --body-file %s" % self.f, "")
+        self.assertEqual(self._eval(), "block")
+        t = self.t = _Transcript(self).prompt()
+        t.bash("gh issue view 1297 --json body -q .body > %s" % self.f, "")
+        t.bash("gh issue comment 1297 --body-file %s" % self.f,
+               "https://github.com/o/r/issues/1297#issuecomment-2")
+        self.assertEqual(self._eval(), "block")
+
+    def test_idle_wake_after_an_ended_stop_bounds_the_turn(self):
+        for wake, meta in (("<task-notification>done</task-notification>", False),
+                           ('<channel source="plugin:peer:peer" from="dasio">hi</channel>', True)):
+            with self.subTest(wake=wake[:20]):
+                self.t = _Transcript(self).prompt()
+                self.t.bash("gh issue comment 141 --body %s" % json.dumps(C_2051), COMMENTED)
+                self.t.lines.append({"type": "assistant", "message": {"content": [
+                    {"type": "text", "text": DONE_MSG}]}})
+                self._wake(wake, meta)
+                self.t.bash("true", "")
+                self.assertEqual(self._eval(), "allow")
+
+    def test_wake_after_a_tool_call_does_not_bound_the_turn(self):
+        self.t.bash("gh issue comment 141 --body %s" % json.dumps(C_2051), COMMENTED)
+        self._wake("<task-notification>done</task-notification>")
+        self.t.bash("true", "")
+        self.assertEqual(self._eval(), "block")
+
+
 if __name__ == "__main__":
     unittest.main()
