@@ -26,6 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import watchdog as wd  # noqa: E402
 from watchdog import goal  # noqa: E402
+from watchdog import auth_rearm_gate as gate  # noqa: E402
 from _goal_arm_helpers import (  # noqa: E402
     GOAL_IDLE_CAP, DeliverGoalFakeTmux, _isolate_goal_state,
     _write_goal_marker, _write_marker_transcript)
@@ -129,6 +130,32 @@ class TestAuthRearmWaitsForAWorkingSession(unittest.TestCase):
         _tmux, logs = self._watch(sid, tp, {})
         self.assertNotIn(sid, goal.load_goal_requests(self.reqp), logs)
         self.assertTrue(any("revoked-token 401" in ln for ln in logs), logs)
+
+    def test_process_restarted_after_the_401_is_rearmed(self):
+        # review round 2: job 1's relaunch or the owner's `claude -c` read the
+        # credentials at launch; the transcript still ends in the old 401
+        sid = "sess-1303-restart"
+        tp = self._cleared_by_rotation(sid)
+        with m.patch.object(gate, "_proc_start", return_value=10 ** 9):
+            _tmux, logs = self._watch(sid, tp, {})
+        self.assertIn(sid, goal.load_goal_requests(self.reqp), logs)
+
+    def test_process_running_since_before_the_401_stays_held(self):
+        sid = "sess-1303-old-proc"
+        tp = self._cleared_by_rotation(sid)
+        with m.patch.object(gate, "_proc_start", return_value=100):
+            _tmux, logs = self._watch(sid, tp, {})
+        self.assertNotIn(sid, goal.load_goal_requests(self.reqp), logs)
+
+    def test_hold_is_journalled_once_per_episode(self):
+        sid = "sess-1303-once"
+        tp = self._cleared_by_rotation(sid)
+        state = {}
+        _t, first = self._watch(sid, tp, state)
+        _t, second = self._watch(sid, tp, state)
+        self.assertEqual(sum("revoked-token 401" in ln for ln in first), 1, first)
+        self.assertEqual(sum("revoked-token 401" in ln for ln in second), 0, second)
+        self.assertNotIn(sid, goal.load_goal_requests(self.reqp))
 
     def test_recovered_session_is_rearmed_end_to_end(self):
         sid = "sess-1303-back"
