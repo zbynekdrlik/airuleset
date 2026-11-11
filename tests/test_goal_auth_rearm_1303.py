@@ -147,6 +147,21 @@ class TestAuthRearmWaitsForAWorkingSession(unittest.TestCase):
             _tmux, logs = self._watch(sid, tp, {})
         self.assertNotIn(sid, goal.load_goal_requests(self.reqp), logs)
 
+    def test_plain_login_error_is_held_too(self):
+        # review 🔵: a non-revoked auth clear ("Please run /login") left the
+        # process just as dead; any trailing api-error run means no real reply
+        sid = "sess-1303-login"
+        tp = _write_marker_transcript(self.proj, self.CWD, sid)
+        _write_goal_marker(self.proj, self.CWD, sid, "Goal set: %s" % _COND,
+                           ts_epoch=500)
+        self._append(sid, {"type": "assistant", "isApiErrorMessage": True,
+                           "timestamp": _iso(550), "message": {"id": "e2",
+                               "content": [{"type": "text", "text":
+                                   "Invalid API key · Please run /login"}]}})
+        _write_auth_clear_marker(self.proj, self.CWD, sid, ts_epoch=600)
+        _tmux, logs = self._watch(sid, tp, {})
+        self.assertNotIn(sid, goal.load_goal_requests(self.reqp), logs)
+
     def test_hold_is_journalled_once_per_episode(self):
         sid = "sess-1303-once"
         tp = self._cleared_by_rotation(sid)
