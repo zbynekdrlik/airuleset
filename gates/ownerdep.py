@@ -20,12 +20,18 @@ gate family's shell primitives (`gates.shellcmd` + `gates.selfservice` +
 states a FUTURE or NEEDED owner dependency (`owner_dependency`). A failed call
 counts only when its result shows the posted comment/issue URL. A dependency
 line already present in an earlier tool result of the turn (a `gh issue view`
-before a body edit) is a restatement, not a new dependency.
+before a body edit) is a restatement, not a new dependency. A body EDIT from a
+file that a read of the same ticket filled this turn (`gh issue view N … > F`,
+then sed / Edit, then `--body-file F` or `body=@F`) counts only a dependency
+phrase the turn itself authored (Bash text, Write content, Edit's new lines):
+the rest is the prior body (#1307 false positive, 11.11.).
 
 Settled by a DELIVERED question after the write -- an `❓ ASKED:` line or a
 last-line `❓ NEEDS YOU:`, outside code (the notify hook's own delivery rule), in
 the final message or in a text that ENDED an earlier stop of the same turn (it
-is followed by Stop feedback / a notification, never by a tool call) -- or by a
+is followed by Stop feedback / a notification, never by a tool call), by an idle
+wake (a `<task-notification>` / peer `<channel>` right after such a text: every
+gate passed that stop, so what came before is judged) -- or by a
 successful add of a U label (`needs-answer` / `needs-decision` /
 `needs-owner-action`) on that ticket in the turn (any U label settles an
 unresolvable `#?` comment edit). Escape: a line `airuleset:owner-dep-ok
@@ -36,7 +42,8 @@ Fail-OPEN on an unreadable transcript.
 Known residual: a ticket already in U whose dependency is restated without a
 read in the same turn blocks once (the bypass names it); `$VAR` bodies and
 nested `bash -c` are not resolved; the regex is deliberately narrow (needed /
-future verb forms only).
+future verb forms only); a whole-body Write over a read-filled file, or a sed
+PATTERN quoting an old dependency, counts as authored (blocks once).
 
 Dry-run:
   echo '{"last_assistant_message":"x","transcript_path":"/t.jsonl","cwd":"/r"}' \
@@ -62,6 +69,8 @@ _BYPASS_RX = re.compile(r"^[ \t*-]*airuleset:owner-dep-ok[ \t]+(\S[^\n]{3,})", r
 _ASKED_LINE_RX = re.compile(r"^[ \t*_>~-]*❓\s*\**\s*ASKED\s*\**\s*:", re.IGNORECASE | re.MULTILINE)
 _NEEDS_YOU_RX = re.compile(r"^[ \t*_>~-]*❓\s*\**\s*NEEDS\s+YOU\s*\**\s*:", re.IGNORECASE)
 _COMMENT_URL_RX = re.compile(r"issuecomment-\d+")
+_WAKE_RX = re.compile(r"\s*<(?:task-notification|channel)\b")
+_REDIRECT_RX = re.compile(r"^>[^>&]")
 _GH_RX = re.compile(r"\bgh\s")
 _READ_RX = re.compile(r"\bgh\s+(?:issue\s+view|api)\b(?![^\n]*(?:\bbody=|--input|\bgraphql\b|"
                       r"(?:-X|--method)\s*(?:POST|PATCH|PUT)))")
@@ -112,16 +121,22 @@ def _cancelled(line, start):
         w in _NEGATIONS or w in _SETTLED or w.endswith(("n't", "n’t")) for w in words)
 
 
-def owner_dependency(text):
+def _norm(text):
+    return re.sub(r"[\s\\'\"’`]+", "", text).lower()
+
+
+def owner_dependency(text, authored=None):
     """The first line of `text` that states a future/needed owner dependency, or
     "". Skipped: fenced blocks, inline code and quoted spans, `>` quotes,
-    `ROZHODNUTÉ` records and ticked `- [x]` checklist lines."""
+    `ROZHODNUTÉ` records and ticked `- [x]` checklist lines. With `authored` (a
+    `_norm`ed blob), only a dependency whose phrase the turn itself wrote counts."""
     for raw in _FENCE_RE.sub("", text or "").splitlines():
         if _SKIP_LINE_RX.search(raw):
             continue
         line = _CODE_OR_QUOTE_RX.sub("", raw)
         for m in _DEP_RX.finditer(line):
-            if m.group(0)[:5].lower() == "until" or not _cancelled(line, m.start()):
+            if (m.group(0)[:5].lower() == "until" or not _cancelled(line, m.start())) \
+                    and (authored is None or _norm(m.group(0)) in authored):
                 return raw.strip()[:200]
     return ""
 
@@ -141,9 +156,14 @@ class _Turn:
         self.cwd = cwd or os.getcwd()
         self.files, self.seen = {}, []
         self.deps, self.labelled = [], set()       # deps: [ticket, line, asked]
+        self.prior, self.authored = {}, []         # prior: body file -> ticket read into it
+
+    @staticmethod
+    def full(path, cwd):
+        return os.path.normpath(os.path.join(cwd or "/", os.path.expanduser(str(path))))
 
     def read(self, path, cwd):
-        full = os.path.normpath(os.path.join(cwd or "/", os.path.expanduser(str(path))))
+        full = self.full(path, cwd)
         if full in self.files:
             return self.files[full]
         try:
@@ -152,10 +172,22 @@ class _Turn:
         except OSError:
             return ""
 
-    def wrote(self, ticket, body):
-        line = owner_dependency(body)
-        if line and not any(line in prior for prior in self.seen):
+    def wrote(self, ticket, body, path=None, cwd=None):
+        """A body file filled by a read of this ticket (`snapshot`) holds its
+        prior body: only a dependency phrase the turn authored is new."""
+        prior = path and self.prior.get(self.full(path, cwd)) == ticket
+        line = owner_dependency(body, _norm("\n".join(self.authored)) if prior else None)
+        if line and not any(line in seen for seen in self.seen):
             self.deps.append([ticket, line, False])
+
+    def snapshot(self, tk, cwd):
+        """`gh issue view N … > F` / `gh api …/issues/N … > F`: F holds N's body."""
+        nums = [m.group(1) for m in map(_ISSUE_URL_RX.search, tk[2:]) if m]
+        nums += [t.lstrip("#") for t in tk[3:] if tk[1] == "issue" and t.lstrip("#").isdigit()]
+        for i, tok in enumerate(tk):
+            target = tk[i + 1:i + 2] if tok == ">" else [tok[1:]] if _REDIRECT_RX.match(tok) else []
+            if nums and target:
+                self.prior[self.full(target[0], cwd)] = nums[0]
 
     def label(self, ticket, values, ok):
         if ok and U_LABELS & {v.strip().lower() for v in values}:
@@ -174,16 +206,17 @@ class _Turn:
         if not (ok or url.search(result)):
             return
         bf, inline = _flag_value(tk, ("-F", "--body-file")), _flag_value(tk, ("--body", "-b"))
-        sub = _SUBST_FILE_RX.search(inline or "")
+        sub, path = _SUBST_FILE_RX.search(inline or ""), None
         if bf and bf != "-" and bf not in file_bodies:
-            body = self.read(bf, cwd)
+            body, path = self.read(bf, cwd), bf if verb == "edit" else None
         elif sub:
             body = self.read(sub.group(1) or sub.group(2), cwd)
         else:
             body = _comment_body(tk, seg, cwd, file_bodies, direct_bodies)
-        self.wrote(ticket, body or "")
+        self.wrote(ticket, body or "", path, cwd)
 
     def gh_api(self, tk, cwd, ok, result):
+        self.snapshot(tk, cwd)
         fields = [f.partition("=") for f in _all_values(tk, ("-f", "-F", "--field", "--raw-field"))]
         for path in _all_values(tk, ("--input",)):
             try:
@@ -198,8 +231,9 @@ class _Turn:
             if im and (ok or _COMMENT_URL_RX.search(result)):
                 for name, _, val in fields:
                     if name == "body":
-                        body = self.read(val[1:], cwd) if val.startswith("@") else val
-                        self.wrote(im.group(1) or "?", body)
+                        path = val[1:] if val.startswith("@") else None
+                        self.wrote(im.group(1) or "?", self.read(path, cwd) if path else val,
+                                   None if "/comments" in tok else path, cwd)
 
     def scan_bash(self, cmd, ok, result):
         if "<<" not in cmd and not _GH_RX.search(cmd):
@@ -207,7 +241,7 @@ class _Turn:
         file_bodies, direct_bodies, skeleton = _capture_heredocs(re.sub(r"\\\r?\n", " ", cmd))
         cwd = self.cwd
         for path, text in file_bodies.items():
-            self.files[os.path.normpath(os.path.join(cwd, os.path.expanduser(path)))] = text
+            self.files[self.full(path, cwd)] = text
         if not _GH_RX.search(skeleton):
             return
         for seg in split_top_level(skeleton):
@@ -220,13 +254,18 @@ class _Turn:
                 cwd = _apply_cd(cwd, tk) or cwd
             elif _is_gh_issue_cmd(tk):
                 self.gh_issue(tk, seg, cwd, (file_bodies, direct_bodies), ok, result or "")
+            elif tk[:3] == ["gh", "issue", "view"]:
+                self.snapshot(tk, cwd)
             elif tk[:2] == ["gh", "api"]:
                 self.gh_api(tk, cwd, ok, result or "")
 
     def asked(self, text):
         if asked_in(text) or bypass_reason(text):
-            for dep in self.deps:
-                dep[2] = True
+            self.settle()
+
+    def settle(self):
+        for dep in self.deps:
+            dep[2] = True
 
 
 def bypass_reason(message):
@@ -244,12 +283,19 @@ def evaluate(transcript_path, message, cwd):
     turn, last_text = _Turn(cwd), None
     for name, inp, ok, result in calls:
         if name == "Bash":
-            turn.scan_bash(str(inp.get("command") or ""), ok, result)
+            turn.authored.append(str(inp.get("command") or ""))
+            turn.scan_bash(turn.authored[-1], ok, result)
         elif name == "Write" and isinstance(inp.get("file_path"), str):
-            path = os.path.normpath(os.path.join(turn.cwd, inp["file_path"]))
-            turn.files[path] = str(inp.get("content") or "")
+            turn.authored.append(str(inp.get("content") or ""))
+            turn.files[turn.full(inp["file_path"], turn.cwd)] = turn.authored[-1]
+        elif name == "Edit":
+            old = str(inp.get("old_string") or "").splitlines()
+            turn.authored += [ln for ln in str(inp.get("new_string") or "").splitlines()
+                              if ln not in old]
         if name == "_text":
             last_text = inp.get("text")
+        elif name == "_resume" and last_text is not None and _WAKE_RX.match(inp.get("text") or ""):
+            turn.settle()                 # an idle wake: every gate passed the stop before it
         elif name == "_resume":           # the text before it ended a stop: delivered
             turn.asked(last_text)
         else:

@@ -116,9 +116,14 @@ def _is_turn_boundary(entry):
         kinds = {b.get("type") for b in content if isinstance(b, dict)}
         if "tool_result" in kinds or "text" not in kinds:
             return False
-        content = " ".join(str(b.get("text") or "") for b in content if isinstance(b, dict))
-    return (isinstance(content, str) and bool(content.strip())
-            and not content.lstrip().startswith("<task-notification>"))
+    content = _entry_text(content)
+    return bool(content.strip()) and not content.lstrip().startswith("<task-notification>")
+
+
+def _entry_text(content):
+    if isinstance(content, list):
+        return " ".join(str(b.get("text") or "") for b in content if isinstance(b, dict))
+    return content if isinstance(content, str) else ""
 
 
 def _result_text(blk):
@@ -132,8 +137,8 @@ def turn_tool_calls(transcript_path, tail_bytes=TAIL_BYTES, texts=False):
     """[(tool_name, input, ok, result_text)] of the current turn, oldest first
     (a call with no recorded result counts as ok); with ``texts`` each assistant
     text block is interleaved as ``("_text", {"text": …}, True, "")`` and each
-    non-prompt user entry (Stop feedback, a notification) as ``("_resume", …)``
-    (#1307).
+    non-prompt user entry (Stop feedback, a notification) as ``("_resume",
+    {"text": …}, …)`` (#1307).
     None when the transcript cannot be read (the caller fails open)."""
     try:
         with open(transcript_path, "rb") as fh:
@@ -156,7 +161,7 @@ def turn_tool_calls(transcript_path, tail_bytes=TAIL_BYTES, texts=False):
         content = (entry.get("message") or {}).get("content") or []
         if texts and entry.get("type") == "user" and not (isinstance(content, list) and any(
                 isinstance(b, dict) and b.get("type") == "tool_result" for b in content)):
-            calls.append((None, "_resume", {}))   # feedback / notification: the stop before it ended
+            calls.append((None, "_resume", {"text": _entry_text(content)}))  # feedback / wake
         for blk in content if isinstance(content, list) else []:
             if not isinstance(blk, dict):
                 continue
