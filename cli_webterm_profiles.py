@@ -336,8 +336,8 @@ def marek_inventory():
     marek-subdev LOCAL tab REMOVED (#882: his cancelled dev stream session).
 
     This — and ONLY this — is what marek's ttyd is launched against, so it is
-    his full connect allowlist: no other stream's id, no david id, and no other
-    person's account can ever be present. Every ssh entry carries
+    his full connect allowlist: no other stream's id, no david id except david3 (owner
+    11.11.2026), and no other person's account can ever be present. Every ssh entry carries
     WEBTERM_MAREK_IDENTITY explicitly, so the connect child never takes the
     sshpass shared-password branch and never touches the gatekeeper key."""
     subdev_host = _subdev_target_host("marek")
@@ -357,6 +357,20 @@ def marek_inventory():
             # OWNER `zbynek` (notify/__init__.py "miva1": "zbynek"), NOT marek's
             # realm; reading its tickets-status would be a CROSS-TENANT read, the
             # same boundary dev1/dev2 keep by omitting the field.
+        },
+        {
+            # owner 11.11.2026 ("daj pristup vo webterme marekovi na david3"):
+            # an OBSERVE tab on david3's webterm-only account. NO u_tenant —
+            # david3 is David's stream, not marek's realm. The marek lane key
+            # is authorized there through _CONTROLLER_LANE_WEBTERM_ONLY_TARGETS.
+            "id": "david3-subdev",
+            "label": "david3@subdev",
+            "kind": "stream",
+            "local": False,
+            "host": subdev_host,
+            "user": "david3",
+            "identity": WEBTERM_MAREK_IDENTITY,
+            "preferred": "david3",
         },
         {
             # owner request 2026-09-29 ("pridaj ar marekovi do webtermu"): marek's

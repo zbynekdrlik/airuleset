@@ -137,7 +137,7 @@ class TestExclusiveTabListMechanism(unittest.TestCase):
         got = [e["id"] for e in w.entries_for_tab_list(
             profiles.marek_inventory(), w.WEBTERM_DASHBOARD_TABS["marek"])]
         self.assertEqual(got, [
-            "miva1-subdev",
+            "miva1-subdev", "david3-subdev",
             "ar", "claudy", "fohmixer", "varos", "wall-bridge", "songplayer",  # #1267
             "dstack", "dasio", "iemmixer", "dcontroller", "dsync", "intercom", "obs", "shading", "vstack", "nlch-finances", "tuke", "dev1", "dev2", "gatekeeper", "forestshop",
         ])
@@ -147,7 +147,7 @@ class TestExclusiveTabListMechanism(unittest.TestCase):
         aliases = re.findall(r'<span class="al">([^<]+)</span>', html)
         # miva1->miva, dev1, dev2, gatekeeper->gk, forestshop->fs — from the
         # SINGLE #592 cli_aliases source.
-        self.assertEqual(aliases, ["miva", "ar", "claudy",
+        self.assertEqual(aliases, ["miva", "d3", "ar", "claudy",
                                    "fohmixer", "varos", "wall-bri", "songplay",
                                    "dstack", "dasio", "iemmixer", "dcontrol", "dsync", "intercom", "obs", "shading", "vstack", "nlch-fin", "tuke", "dev1", "dev2", "gk", "fs"])
         # No marek-subdev (dead stream) on the dashboard.

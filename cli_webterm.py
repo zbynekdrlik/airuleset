@@ -719,7 +719,7 @@ WEBTERM_DASHBOARD_TABS = {
     # #1220 (owner 2026-10-09): the varos@dev2 project account after fohmixer
     # (its Claude ran in newlevel@dev2's marek group before the migration).
     "marek": [
-        "miva1-subdev",
+        "miva1-subdev", "david3-subdev",  # david3: owner 11.11.2026
         "ar", "claudy", "fohmixer", "varos", "wall-bridge", "songplayer",  # #1267
         "dstack", "dasio", "iemmixer", "dcontroller", "dsync", "intercom", "obs", "shading", "vstack", "nlch-finances", "tuke", "dev1", "dev2", "gatekeeper", "forestshop",  # #1270, #1295, #1296
     ],

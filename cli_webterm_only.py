@@ -105,7 +105,7 @@ WEBTERM_CONTROLLER_LANE_PUBKEYS = {
 _CONTROLLER_LANE_WEBTERM_ONLY_TARGETS = {
     "zbynek": frozenset({"david1", "david2", "david3", "david4"}),
     "david": frozenset({"david1", "david2", "david3", "david4"}),
-    "marek": frozenset(),
+    "marek": frozenset({"david3"}),  # owner 11.11.2026
     "dominika": frozenset(),
 }
 
