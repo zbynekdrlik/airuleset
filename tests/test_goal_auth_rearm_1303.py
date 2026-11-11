@@ -162,6 +162,18 @@ class TestAuthRearmWaitsForAWorkingSession(unittest.TestCase):
         _tmux, logs = self._watch(sid, tp, {})
         self.assertNotIn(sid, goal.load_goal_requests(self.reqp), logs)
 
+    def test_long_retry_run_cannot_hide_the_401(self):
+        # review 🔵: > 200 retries of another error after the 401 still hold
+        sid = "sess-1303-retries"
+        tp = self._cleared_by_rotation(sid)
+        for i in range(250):
+            self._append(sid, {"type": "assistant", "isApiErrorMessage": True,
+                               "timestamp": _iso(560 + i), "message": {
+                                   "id": "o%d" % i, "content": [{"type": "text",
+                                       "text": "API Error: 529 Overloaded"}]}})
+        _tmux, logs = self._watch(sid, tp, {})
+        self.assertNotIn(sid, goal.load_goal_requests(self.reqp), logs)
+
     def test_hold_is_journalled_once_per_episode(self):
         sid = "sess-1303-once"
         tp = self._cleared_by_rotation(sid)
