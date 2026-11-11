@@ -118,10 +118,13 @@ def _result_text(blk):
     return str(c or "")
 
 
-def turn_tool_calls(transcript_path, tail_bytes=TAIL_BYTES):
+def turn_tool_calls(transcript_path, tail_bytes=TAIL_BYTES, texts=False):
     """[(tool_name, input, ok, result_text)] of the current turn, oldest first
-    (a call with no recorded result counts as ok). None when the transcript
-    cannot be read (the caller fails open)."""
+    (a call with no recorded result counts as ok); with ``texts`` each assistant
+    text block is interleaved as ``("_text", {"text": …}, True, "")`` and each
+    non-prompt user entry (Stop feedback, a notification) as ``("_resume", …)``
+    (#1307).
+    None when the transcript cannot be read (the caller fails open)."""
     try:
         with open(transcript_path, "rb") as fh:
             fh.seek(0, os.SEEK_END)
@@ -140,7 +143,11 @@ def turn_tool_calls(transcript_path, tail_bytes=TAIL_BYTES):
         if _is_turn_boundary(entry):
             calls, results = [], {}
             continue
-        for blk in (entry.get("message") or {}).get("content") or []:
+        content = (entry.get("message") or {}).get("content") or []
+        if texts and entry.get("type") == "user" and not (isinstance(content, list) and any(
+                isinstance(b, dict) and b.get("type") == "tool_result" for b in content)):
+            calls.append((None, "_resume", {}))   # feedback / notification: the stop before it ended
+        for blk in content if isinstance(content, list) else []:
             if not isinstance(blk, dict):
                 continue
             if blk.get("type") == "tool_result":
@@ -148,6 +155,8 @@ def turn_tool_calls(transcript_path, tail_bytes=TAIL_BYTES):
             elif blk.get("type") == "tool_use" and entry.get("type") == "assistant":
                 inp = blk.get("input") if isinstance(blk.get("input"), dict) else {}
                 calls.append((blk.get("id"), str(blk.get("name") or ""), inp))
+            elif texts and blk.get("type") == "text" and entry.get("type") == "assistant":
+                calls.append((None, "_text", {"text": str(blk.get("text") or "")}))
     return [(name, inp) + results.get(tid, (True, "")) for tid, name, inp in calls]
 
 

@@ -146,7 +146,7 @@ if [ -z "$N" ]; then
     OD_RETRY="/tmp/airuleset-owner-dep-block-${SID}"
     OD_N=$(cat "$OD_RETRY" 2>/dev/null || echo 0)
     if [ -n "$OD_TP" ] && [ -f "$OD_TP" ] && [ "$OD_N" -lt 3 ] \
-            && LC_ALL=C grep -qiE 'owner|zbyn|potrebuj|tvoj|teba|tebe|vlastn' <(tail -c 4000000 "$OD_TP" 2>/dev/null); then
+            && LC_ALL=C grep -qiE 'owner|zby(n[^e]|[^n])|your|potrebuj|tvoj|teba|tebe|vlastn' <(tail -c 4000000 "$OD_TP" 2>/dev/null); then
         _OD_ROOT="$(dirname "$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)")"
         _OD_RC=0
         env PYTHONPATH="${_OD_ROOT}${PYTHONPATH:+:$PYTHONPATH}" \

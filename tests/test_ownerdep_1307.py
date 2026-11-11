@@ -349,5 +349,253 @@ class TestHook(unittest.TestCase):
         self.assertIn("replay of the dstack shape", log.read_text(encoding="utf-8"))
 
 
+class TestReviewRegressions(unittest.TestCase):
+    """The two fresh-context reviews' reproductions (issue 1307 review round)."""
+
+    def test_text_teeth(self):
+        g = _gate()
+        hits = ("Not done; needs the owner's approval.",
+                "Not yet done and needs the owner's approval.",
+                "Ešte nie je otestované a čaká na tvoje rozhodnutie.",
+                "Zatiaľ nie je rozhodnuté; čaká na tvoje rozhodnutie.",
+                "Not ROZHODNUTÉ yet — this still needs the owner's OK.",
+                "The no-reply case still needs the owner's decision.",
+                "Test potrebuje tvoj súhlas.",
+                "Test potrebuje súhlas od ownera.",
+                "The owner must answer before the swap.",
+                "Needs approval from the owner.",
+                "Blocked until the owner approves.",
+                "This needs your approval.",
+                "Treba súhlas ownera.",
+                "Čaká sa na súhlas ownera.",
+                "Vyžaduje rozhodnutie ownera.",
+                "Musí to schváliť owner.",
+                "Čaká na Zbyňkov súhlas.",
+                "Rozhodnuteľné až po teste — čaká na tvoje rozhodnutie.",
+                "It has been waiting for the owner since Monday.")
+        for text in hits:
+            self.assertTrue(g.owner_dependency(text), text)
+        misses = ("This does not even need the owner's approval.",
+                  "It doesn't need the owner's approval.",
+                  "No owner approval needed.",
+                  "The A/B needed the owner's OK (given 10.11.).",
+                  "Required the owner's approval, which he gave at 21:04Z.",
+                  "Was blocked on the owner until 10.11.; answered, proceeding.",
+                  "Previously parked on the owner's answer — answered 10.11.",
+                  "- [x] A/B (needs the owner's approval) — done",
+                  '#46 stale "needs the owner\'s approval" line voided',
+                  "The dstack comment said „waiting for the owner“ — that was wrong.",
+                  "Potrebujem odpoveď z API dcontrollera.",
+                  "Potrebujeme povolenie portu 8080.",
+                  "Potrebujem rozhodnutie klienta.",
+                  "Potrebujem súhlas klienta.",
+                  "Stuck on the owner lookup in the ORM.",
+                  "Repo: https://github.com/zbynekdrlik/dstack/issues/141")
+        for text in misses:
+            self.assertEqual(g.owner_dependency(text), "", text)
+
+    def test_asked_requires_a_delivered_marker(self):
+        g = _gate()
+        self.assertTrue(g.asked_in(ASK_MSG))
+        self.assertTrue(g.asked_in(ASKED_MSG))
+        self.assertFalse(g.asked_in("Use `❓ NEEDS YOU:` next time.\n\n✅ DONE: x"))
+        self.assertFalse(g.asked_in("❓ NEEDS YOU: smiem?\n\n✅ DONE: x"))
+        self.assertFalse(g.asked_in("```\n❓ ASKED: x\n```\n✅ DONE: x"))
+
+    def test_bypass_needs_a_reason_outside_fences(self):
+        g = _gate()
+        self.assertIsNone(g.bypass_reason("airuleset:owner-dep-ok x\n✅ DONE"))
+        self.assertIsNone(g.bypass_reason("```\nairuleset:owner-dep-ok replayed shape\n```"))
+        self.assertEqual(g.bypass_reason("airuleset:owner-dep-ok replayed shape"),
+                         "replayed shape")
+
+
+class TestTurnRegressions(unittest.TestCase):
+    def setUp(self):
+        self.t = _Transcript(self).prompt()
+
+    def _eval(self, message=DONE_MSG, cwd=None):
+        return _gate().evaluate(self.t.write(), message, cwd or self.t.dir)
+
+    def _comment(self, body=C_2051, n=141):
+        self.t.bash("gh issue comment %s --body %s" % (n, json.dumps(body)), COMMENTED)
+
+    def test_question_asked_at_an_earlier_stop_of_the_turn_settles(self):
+        self._comment()
+        self.t.lines.append({"type": "assistant", "message": {"content": [
+            {"type": "text", "text": ASKED_MSG}]}})
+        self.t.lines.append({"type": "user", "message": {
+            "role": "user", "content": "<task-notification>done</task-notification>"}})
+        self.t.bash("true", "")
+        self.assertEqual(self._eval()[0], "allow")
+
+    def test_mid_turn_text_question_followed_by_tools_does_not_settle(self):
+        self._comment()
+        self.t.lines.append({"type": "assistant", "message": {"content": [
+            {"type": "text", "text": ASKED_MSG}]}})
+        self.t.bash("true", "")
+        self.assertEqual(self._eval()[0], "block")
+
+    def test_mid_turn_question_then_tools_then_feedback_does_not_settle(self):
+        self._comment()
+        self.t.lines.append({"type": "assistant", "message": {"content": [
+            {"type": "text", "text": ASKED_MSG}]}})
+        self.t.bash("true", "")
+        self.t.feedback()
+        self.assertEqual(self._eval()[0], "block")
+
+    def test_question_before_the_write_does_not_settle_it(self):
+        self.t.lines.append({"type": "assistant", "message": {"content": [
+            {"type": "text", "text": ASKED_MSG}]}})
+        self.t.feedback()
+        self._comment()
+        self.assertEqual(self._eval()[0], "block")
+
+    def test_label_on_another_ticket_does_not_settle(self):
+        self._comment(n=141)
+        self.t.bash("gh issue edit 150 --add-label needs-answer", "")
+        self.assertEqual(self._eval()[0], "block")
+
+    def test_create_with_u_label_settles_its_own_body(self):
+        self.t.bash("gh issue create --title X -l needs-answer --body %s" % json.dumps(C_2058),
+                    "https://github.com/zbynekdrlik/dstack/issues/150")
+        self.assertEqual(self._eval()[0], "allow")
+
+    def test_failed_api_label_does_not_settle(self):
+        self._comment()
+        self.t.bash("gh api repos/o/r/issues/141/labels -f 'labels[]=needs-answer'",
+                    "HTTP 403", error=True)
+        self.assertEqual(self._eval()[0], "block")
+
+    def test_body_edit_restating_a_line_read_this_turn_allows(self):
+        body = PAST_AB + "\n" + CHECKLIST
+        self.t.bash("gh issue view 141 --json body -q .body", body)
+        path = os.path.join(self.t.dir, "b.md")
+        self.t.call("Write", {"file_path": path, "content": body.replace(
+            "- [ ] Reproduce", "- [x] Reproduce")}, "ok")
+        self.t.bash("gh issue edit 141 --body-file %s" % path, "")
+        self.assertEqual(self._eval()[0], "allow")
+
+    def test_draft_read_back_before_posting_still_blocks(self):
+        path = os.path.join(self.t.dir, "d.md")
+        self.t.call("Write", {"file_path": path, "content": C_0924}, "ok")
+        self.t.bash("cat %s" % path, C_0924)
+        self.t.bash("gh issue comment 141 --body-file %s" % path, COMMENTED)
+        self.assertEqual(self._eval()[0], "block")
+
+    def test_cat_subst_body_blocks(self):
+        with open(os.path.join(self.t.dir, "s.md"), "w", encoding="utf-8") as fh:
+            fh.write(C_2051)
+        self.t.bash('cd %s && gh issue comment 141 --body "$(cat s.md)"' % self.t.dir, COMMENTED)
+        self.assertEqual(self._eval(cwd="/")[0], "block")
+
+    def test_cat_heredoc_file_from_an_earlier_call_blocks(self):
+        path = os.path.join(self.t.dir, "h.md")
+        self.t.bash("cat > %s <<'EOF'\n%s\nEOF" % (path, C_2058), "")
+        self.t.bash("gh issue comment 141 -F %s && rm %s" % (path, path), COMMENTED)
+        self.assertEqual(self._eval()[0], "block")
+
+    def test_cd_tracking_resolves_a_relative_body_file(self):
+        sub = os.path.join(self.t.dir, "sub")
+        os.makedirs(sub)
+        with open(os.path.join(sub, "c.md"), "w", encoding="utf-8") as fh:
+            fh.write(C_0924)
+        self.t.bash("cd %s && gh issue comment 141 --body-file c.md" % sub, COMMENTED)
+        self.assertEqual(self._eval(cwd=self.t.dir)[0], "block")
+
+    def test_heavy_non_gh_turn_stays_fast(self):
+        """Review: 1200 long Bash commands took 6.3 s (the hook's timeout is 5 s);
+        a command that never names `gh` is now skipped before any tokenising."""
+        cmd = "python3 -c 'print(1)' # high through light; " * 60
+        for _ in range(1200):
+            self.t.bash(cmd + " && echo ok | tee -a log.txt", "ok")
+        self._comment()
+        path = self.t.write()
+        t0 = time.monotonic()
+        verdict = _gate().evaluate(path, DONE_MSG, self.t.dir)[0]
+        self.assertLess(time.monotonic() - t0, 2.5)
+        self.assertEqual(verdict, "block")
+
+    def test_failed_comment_naming_the_issue_url_allows(self):
+        self.t.bash("gh issue comment 141 --body %s" % json.dumps(C_2051),
+                    "error posting to https://github.com/o/r/issues/141", error=True)
+        self.assertEqual(self._eval()[0], "allow")
+
+
+def _fake_root(testcase, rc_env):
+    """A copy of the hook next to a stub `gates.ownerdep` that exits with
+    $OD_FAKE_RC (or raises when it is `crash`): drives the hook's wiring alone."""
+    root = Path(tempfile.mkdtemp(prefix="od1307-root-"))
+    testcase.addCleanup(lambda: __import__("shutil").rmtree(root, True))
+    (root / "hooks").mkdir()
+    (root / "gates").mkdir()
+    (root / "hooks" / HOOK.name).write_text(HOOK.read_text(encoding="utf-8"), encoding="utf-8")
+    (root / "gates" / "__init__.py").write_text("", encoding="utf-8")
+    (root / "gates" / "ownerdep.py").write_text(
+        "import os, sys\nrc = os.environ.get('OD_FAKE_RC', '2')\n"
+        "if rc == 'crash':\n    raise RuntimeError('boom')\n"
+        "sys.stderr.write('FAKE-BLOCK\\n')\nsys.exit(int(rc))\n", encoding="utf-8")
+    return root / "hooks" / HOOK.name
+
+
+class TestHookWiring(unittest.TestCase):
+    def _run(self, hook, sid, rc, transcript_text="needs the owner's approval"):
+        t = _Transcript(self).prompt()
+        t.bash("gh issue comment 1 --body %s" % json.dumps(transcript_text), COMMENTED)
+        env = hermetic_hook_env(self, OD_FAKE_RC=rc)
+        payload = {"last_assistant_message": DONE_MSG, "session_id": sid,
+                   "transcript_path": t.write(), "cwd": t.dir}
+        return subprocess.run(["bash", str(hook)], input=json.dumps(payload),
+                              capture_output=True, text=True, env=env, timeout=120)
+
+    def _sid(self):
+        sid = "od1307w-" + uuid.uuid4().hex[:12]
+        self.addCleanup(sweep_session_files, sid)
+        self.addCleanup(lambda: Path("/tmp/airuleset-owner-dep-block-" + sid).unlink(
+            missing_ok=True))
+        return sid
+
+    def test_retry_cap_and_reset(self):
+        hook, sid = _fake_root(self, "2"), self._sid()
+        rcs = [self._run(hook, sid, "2").returncode for _ in range(5)]
+        self.assertEqual(rcs, [2, 2, 2, 0, 2])
+
+    def test_crash_and_other_rc_fail_open(self):
+        hook = _fake_root(self, "crash")
+        self.assertEqual(self._run(hook, self._sid(), "crash").returncode, 0)
+        self.assertEqual(self._run(hook, self._sid(), "1").returncode, 0)
+
+    def test_prefilter_skips_a_turn_without_owner_words(self):
+        hook = _fake_root(self, "2")
+        r = self._run(hook, self._sid(), "2", transcript_text="released v0.6.70")
+        self.assertEqual(r.returncode, 0)
+        self.assertNotIn("FAKE-BLOCK", r.stderr)
+
+    def test_real_gate_allows_an_owner_word_turn_with_no_dependency(self):
+        t = _Transcript(self).prompt()
+        t.bash("gh issue comment 141 --body %s" % json.dumps(PAST_OWNER), COMMENTED)
+        sid = self._sid()
+        env = hermetic_hook_env(self)
+        payload = {"last_assistant_message": DONE_MSG, "session_id": sid,
+                   "transcript_path": t.write(), "cwd": t.dir}
+        r = subprocess.run(["bash", str(HOOK)], input=json.dumps(payload),
+                           capture_output=True, text=True, env=env, timeout=120)
+        self.assertEqual((r.returncode, r.stdout), (0, ""), r.stderr)
+        log = Path(env["HOME"]) / "devel" / "airuleset" / "audits" / "owner-dep-gate.log"
+        self.assertFalse(log.exists())
+
+    def test_block_is_logged(self):
+        t = _Transcript(self).prompt()
+        t.bash("gh issue comment 141 --body %s" % json.dumps(C_2051), COMMENTED)
+        env = hermetic_hook_env(self)
+        payload = {"last_assistant_message": DONE_MSG, "session_id": self._sid(),
+                   "transcript_path": t.write(), "cwd": t.dir}
+        r = subprocess.run(["bash", str(HOOK)], input=json.dumps(payload),
+                           capture_output=True, text=True, env=env, timeout=120)
+        self.assertEqual(r.returncode, 2)
+        log = Path(env["HOME"]) / "devel" / "airuleset" / "audits" / "owner-dep-gate.log"
+        self.assertIn(" BLOCK ", log.read_text(encoding="utf-8"))
+
+
 if __name__ == "__main__":
     unittest.main()
