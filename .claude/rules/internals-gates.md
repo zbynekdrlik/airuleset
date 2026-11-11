@@ -2,6 +2,7 @@
 paths:
   - "gates/**"
   - "cli_concurrency.py"
+  - "cli_odoo_board.py"
   - "goal_registry.py"
   - "cli_lane_liveness.py"
 ---
@@ -227,7 +228,7 @@ until the ratchet cap, then the oldest move to `.claude/rules-reference/internal
   - **Evidence must be an ACTION shape, never a keyword.** Round 1 let mentions settle debts
     (echo, grep, `# comment`, TodoWrite, an Agent prompt, the comment itself). Evidence = a task-CLI
     `move`/`--stage` token set, a python/curl script writing `stage_id` bound to the verification
-    target (word or configured id), or an `mcp__*` write; shlex `comments=True` drops `#` tails.
+    target (a word, or an injected `verif_id`: the per-box config id went with #1306), or an `mcp__*` write; shlex `comments=True` drops `#` tails.
   - **Scope content matches to a record LINE** (`^Acceptance-thread:`) so a LANE-RETURN / review
     quoting the token creates no debt. **Bound every gap regex**: a nested `(?:\w+GAP){0,2}` took
     35 s on 20 KB and one DOTALL lazy `.*?…​.*?` over a script went quadratic — keep a timing lock.

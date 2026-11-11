@@ -42,7 +42,7 @@ successful verification-stage WRITE naming it: a task-CLI ``move``/``--stage``
 segment, a script (python/curl heredoc or ``-c``) that writes ``stage_id`` to
 the verification stage, or an ``mcp__*`` tool call doing the same -- each with
 the task id and a verification target (a Verifik/Na overenie/Čaká/verif word, or
-the configured ``stage_ids.verifikacia`` id). A mention (echo, grep, a comment,
+a caller-injected ``verif_id``). A mention (echo, grep, a comment,
 an Agent prompt, a TodoWrite, a ``stage_id`` READ) is never a move.
 
 Escape: a line ``airuleset:handover-ok <reason>`` (outside code fences) in the
@@ -96,8 +96,6 @@ _GAP = r"(?:\s|&nbsp;|&#160;|<[^>]{0,40}>)*"
 _SHAPE_RX = (re.compile(r"[ČčCc]o" + _GAP + r"sk[úu]si", re.IGNORECASE),
              re.compile(r"sta[čc][íi][^\n]{0,60}?(?:👍|&#128077;|:\+1:|:thumbsup:)",
                         re.IGNORECASE))
-# The per-box board config whose ``stage_ids.verifikacia`` id also settles a move.
-_BOARD_CONFIG = os.path.join("~", ".claude", "odoo-task-tracking.json")
 
 
 def is_handover_body(body):
@@ -421,19 +419,6 @@ def _scan_bash(turn, cmd, ok, result, depth=0):
             turn.script_write(code + "\n" + " ".join(argv))
 
 
-def _verif_stage_id():
-    """The configured verification stage id, or None (absent/unreadable file).
-    Whole-line ``#`` comments are dropped before parsing (the config format)."""
-    try:
-        with open(os.path.expanduser(_BOARD_CONFIG), encoding="utf-8") as fh:
-            cfg = json.loads("\n".join(ln for ln in fh.read().splitlines()
-                                       if not ln.lstrip().startswith("#")))
-    except (OSError, ValueError):
-        return None
-    vid = ((cfg if isinstance(cfg, dict) else {}).get("stage_ids") or {}).get("verifikacia")
-    return vid if isinstance(vid, int) and not isinstance(vid, bool) else None
-
-
 def bypass_reason(message):
     """The ``airuleset:handover-ok`` reason on its own line outside code fences."""
     m = BYPASS_RX.search(_FENCE_RX.sub("", message or ""))
@@ -441,13 +426,15 @@ def bypass_reason(message):
 
 
 def evaluate(transcript_path, message, cwd, verif_id=None):
-    """``("block", reason)`` or ``("allow", "")`` for this turn."""
+    """``("block", reason)`` or ``("allow", "")`` for this turn. ``verif_id``: a
+    verification stage id that also settles a move (the per-box task-hygiene
+    config that used to supply it went with the montalu board, #1306)."""
     if bypass_reason(message):
         return "allow", ""
     calls = turn_tool_calls(transcript_path)
     if not calls:
         return "allow", ""
-    turn = _Turn(cwd or os.getcwd(), verif_id if verif_id is not None else _verif_stage_id())
+    turn = _Turn(cwd or os.getcwd(), verif_id)
     for name, inp, ok, result in calls:
         if name == "Bash":
             _scan_bash(turn, str(inp.get("command") or ""), ok, result)
