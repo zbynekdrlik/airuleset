@@ -138,6 +138,28 @@ elif grep -qE '^[[:space:]]*[*_>~-]*[[:space:]]*❓' <<<"$LAST_LINE"; then
 fi
 if [ -z "$N" ]; then
     rm -f "$RETRY_FILE" 2>/dev/null || true
+    # #1307 — a turn that wrote an OWNER DEPENDENCY into a ticket must ask it
+    # (gates.ownerdep reads this turn's tool calls). Prefilter on the transcript
+    # tail (process substitution, #1180 shape); rc 2 = block, any other rc =
+    # infra hiccup → fail OPEN. Retry cap: after 3 blocks the same debt passes
+    # (never a wedge) until a clean evaluation resets the counter.
+    OD_TP=$(echo "$INPUT" | jq -r '.transcript_path // empty' 2>/dev/null || echo "")
+    OD_RETRY="/tmp/airuleset-owner-dep-block-${SID}"
+    OD_N=$(cat "$OD_RETRY" 2>/dev/null || echo 0)
+    case "$OD_N" in ''|*[!0-9]*) OD_N=0 ;; esac
+    if [ -n "$OD_TP" ] && [ -f "$OD_TP" ] \
+            && LC_ALL=C grep -qiE 'owner|zby(n[^e]|[^n])|zbynek[^d]|your|potrebuj|tvoj|teba|tebe|vlastn|body-file|body=@' <(tail -c 4000000 "$OD_TP" 2>/dev/null); then
+        _OD_ROOT="$(dirname "$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)")"
+        _OD_RC=0
+        env PYTHONPATH="${_OD_ROOT}${PYTHONPATH:+:$PYTHONPATH}" \
+            python3 -P -m gates.ownerdep <<<"$INPUT" || _OD_RC=$?
+        if [ "$_OD_RC" -eq 2 ]; then
+            [ "$OD_N" -ge 3 ] && exit 0
+            echo "$((OD_N+1))" > "$OD_RETRY"
+            exit 2
+        fi
+    fi
+    rm -f "$OD_RETRY" 2>/dev/null || true
     exit 0                       # not a question turn — nothing to gate
 fi
 
