@@ -105,7 +105,7 @@ class TestMarekInventory(unittest.TestCase):
         # montalu1/2/4 tabs REMOVED, the montalu client is gone.
         inv = p.marek_inventory()
         self.assertEqual([e["id"] for e in inv],
-                         ["miva1-subdev", "david3-subdev", "ar", "claudy", "fohmixer", "varos", "wall-bridge", "songplayer", "dstack", "dasio", "iemmixer", "dcontroller", "dsync", "intercom", "obs", "shading", "vstack", "nlch-finances", "tuke", "dev1", "dev2",
+                         ["miva1-subdev", "david3-subdev", "ar", "claudy", "fohmixer", "varos", "wall-bridge", "songplayer", "dstack", "dasio", "iemmixer", "dcontroller", "dsync", "intercom", "obs", "shading", "vstack", "nlch-finances", "tuke", "mikrotik-pz", "dev1", "dev2",
                           "gatekeeper", "forestshop"])
 
     def test_no_montalu_entry_after_1302(self):
@@ -337,7 +337,7 @@ class TestMarekConnectAllowlistScoped(unittest.TestCase):
         # #960: claudy tab added.
         # #1302: montalu1/2/4 REMOVED (the montalu client is gone).
         self.assertEqual(marek_ids, {"miva1-subdev", "david3-subdev",
-                                     "ar", "claudy", "fohmixer", "varos", "wall-bridge", "songplayer", "dstack", "dasio", "iemmixer", "dcontroller", "dsync", "intercom", "obs", "shading", "vstack", "nlch-finances", "tuke", "dev1",
+                                     "ar", "claudy", "fohmixer", "varos", "wall-bridge", "songplayer", "dstack", "dasio", "iemmixer", "dcontroller", "dsync", "intercom", "obs", "shading", "vstack", "nlch-finances", "tuke", "mikrotik-pz", "dev1",
                                      "dev2", "gatekeeper", "forestshop"})
         for foreign in ("gk", "montalu-subdev", "montalu1-subdev",
                         "montalu2-subdev", "montalu4-subdev", "david1",
@@ -497,7 +497,7 @@ class TestMarekArtifactsWrite(unittest.TestCase):
             # #882 scope correction: montalu1-subdev replaces marek-subdev.
             # #960: claudy tab added before dev1.
             self.assertEqual([e["id"] for e in inv],
-                             ["miva1-subdev", "david3-subdev", "ar", "claudy", "fohmixer", "varos", "wall-bridge", "songplayer", "dstack", "dasio", "iemmixer", "dcontroller", "dsync", "intercom", "obs", "shading", "vstack", "nlch-finances", "tuke", "dev1", "dev2",
+                             ["miva1-subdev", "david3-subdev", "ar", "claudy", "fohmixer", "varos", "wall-bridge", "songplayer", "dstack", "dasio", "iemmixer", "dcontroller", "dsync", "intercom", "obs", "shading", "vstack", "nlch-finances", "tuke", "mikrotik-pz", "dev1", "dev2",
                               "gatekeeper", "forestshop"])
             launcher = (claude / "airuleset-webterm-marek-ttyd.sh").read_text(
                 encoding="utf-8")

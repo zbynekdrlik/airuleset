@@ -32,7 +32,7 @@ import cli_webterm_profiles as profiles  # noqa: E402
 ZBYNEK_ORDER = [
     "ar", "claudy", "fohmixer",   # #1183 fohmixer@dev1 project account
     "varos",   # #1220 varos@dev2 project account
-    "wall-bridge", "songplayer", "dstack", "dasio", "iemmixer", "dcontroller", "dsync", "intercom", "obs", "shading", "vstack", "nlch-finances", "tuke",   # #1267, #1270, #1295 dev1 project accounts
+    "wall-bridge", "songplayer", "dstack", "dasio", "iemmixer", "dcontroller", "dsync", "intercom", "obs", "shading", "vstack", "nlch-finances", "tuke", "mikrotik-pz",   # #1267, #1270, #1295, #1310 dev1 project accounts
     "dev1", "dev2", "gatekeeper",   # #1302: montalu1-6 removed (client gone)
     "david1-subdev", "david2-subdev", "david3-subdev", "david4-subdev",
     "miva1-subdev", "spinbike-vps",
@@ -47,7 +47,7 @@ ZBYNEK_EXCLUDED = [
 ]
 # The owner's expected tab ALIASES, in his order (spinbike -> "sb").
 ZBYNEK_ALIAS_ORDER = [
-    "ar", "claudy", "fohmixer", "varos", "wall-bri", "songplay", "dstack", "dasio", "iemmixer", "dcontrol", "dsync", "intercom", "obs", "shading", "vstack", "nlch-fin", "tuke",   # 8-char cut
+    "ar", "claudy", "fohmixer", "varos", "wall-bri", "songplay", "dstack", "dasio", "iemmixer", "dcontrol", "dsync", "intercom", "obs", "shading", "vstack", "nlch-fin", "tuke", "mt-pz",   # 8-char cut
     "dev1", "dev2", "gk",
     "d1", "d2", "d3", "d4", "miva", "sb",
 ]
@@ -139,7 +139,7 @@ class TestExclusiveTabListMechanism(unittest.TestCase):
         self.assertEqual(got, [
             "miva1-subdev", "david3-subdev",
             "ar", "claudy", "fohmixer", "varos", "wall-bridge", "songplayer",  # #1267
-            "dstack", "dasio", "iemmixer", "dcontroller", "dsync", "intercom", "obs", "shading", "vstack", "nlch-finances", "tuke", "dev1", "dev2", "gatekeeper", "forestshop",
+            "dstack", "dasio", "iemmixer", "dcontroller", "dsync", "intercom", "obs", "shading", "vstack", "nlch-finances", "tuke", "mikrotik-pz", "dev1", "dev2", "gatekeeper", "forestshop",
         ])
         html = w.render_dashboard_html(
             profiles.marek_inventory(), ttyd_base="/t", human="marek",
@@ -149,7 +149,7 @@ class TestExclusiveTabListMechanism(unittest.TestCase):
         # SINGLE #592 cli_aliases source.
         self.assertEqual(aliases, ["miva", "d3", "ar", "claudy",
                                    "fohmixer", "varos", "wall-bri", "songplay",
-                                   "dstack", "dasio", "iemmixer", "dcontrol", "dsync", "intercom", "obs", "shading", "vstack", "nlch-fin", "tuke", "dev1", "dev2", "gk", "fs"])
+                                   "dstack", "dasio", "iemmixer", "dcontrol", "dsync", "intercom", "obs", "shading", "vstack", "nlch-fin", "tuke", "mt-pz", "dev1", "dev2", "gk", "fs"])
         # No marek-subdev (dead stream) on the dashboard.
         self.assertNotIn('title="marek@subdev"', html)
 

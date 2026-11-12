@@ -452,5 +452,16 @@
     "overrides": [],
     "onboarded": "2026-11-10",
     "account": "tuke"
+  },
+  {
+    "name": "mikrotik-pz",
+    "host": "dev1",
+    "path": "/home/mikrotik-pz/devel/mikrotik-pz",
+    "branch_model": "2-branch",
+    "default_branch": "main",
+    "work_branch": "dev",
+    "overrides": [],
+    "onboarded": "2026-11-12",
+    "account": "mikrotik-pz"
   }
 ]

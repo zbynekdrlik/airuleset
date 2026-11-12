@@ -70,6 +70,8 @@ def short_target_alias(user, box_name):
     user = (user or "").strip()
     if user == "gatekeeper":
         return "gk"
+    if user == "mikrotik-pz":
+        return "mt-pz"   # #1310: the 8-char cut "mikrotik" reads as the SNV project
     mo = re.match(r"^montalu(\d+)$", user)
     if mo:
         return "m" + mo.group(1)
