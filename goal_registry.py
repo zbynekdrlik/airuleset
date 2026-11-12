@@ -26,7 +26,7 @@ space, reproducing the original line exactly.
 import os as _os
 import re as _re
 
-from goal_legacy_1309 import pre_1309 as _pre_1309
+from goal_legacy_1309 import pre_1309 as _pre_1309, prior_1309_lines
 
 PROFILES = ("full", "branch-merge", "fork-no-merge")
 
@@ -251,8 +251,8 @@ _REVIEW_ROLE = (
     "na ownerovu odpoveď (per #1007 iba keď nebeží žiadna lane). "
     "REVIEW ROLE — "
     "(a) infra tickety (label infra) sa TU NEpracujú, iba zakladajú; "
-    "vlastné I tickety (`core-quals --role review --list`) pracuj v každom "
-    "cykle — čakanie na waitery nie je práca (#1309); "
+    "vlastné I tickety (`core-quals --role review --list`) pracuj každý cyklus "
+    "po (b)/(c), dep-wait odblokuj či založ; waiter nie je práca (#1309); "
     "(b) SUBDEVS NIKDY NEČAKAJÚ NA GK: každý OTVORENÝ stream PR→develop "
     "(montalu/*, david*/kvaskodev, miva*, simap*) dostane skoré advisory review "
     "do 1 h od posledného pushu (koment „gk skoré review (advisory, pred "
@@ -465,7 +465,7 @@ def all_goal_line_variants():
         except Exception:  # noqa: BLE001 — a nonsensical combo is simply skipped
             continue
         lines.append(line)
-        lines += [_pre_1309(line, role)] if role == "review" else []
+        lines += prior_1309_lines(line, role)
         for new, legacy in _LEGACY_POINTER:
             line = line.replace(new, legacy, 1)
         lines.append(line)
