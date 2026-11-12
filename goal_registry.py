@@ -243,11 +243,14 @@ _REVIEW_D = ("(d) čakanie na CI nikdy neblokuje ďalšiu prácu (review / "
 _REVIEW_ROLE = (
     "(B) BACKLOG EMPTY — gk REVIEW okno, PROVEN IN THIS TURN, NEVER CLAIMED: "
     "HOTOVO iba keď 0 hand-offov starších než 1 h bez akcie A 0 otvorených "
-    "stream PR bez skorého review ≤ 1 h A montalu/slovnormal/miva == main — inak "
+    "stream PR bez skorého review ≤ 1 h A montalu/slovnormal/miva == main A "
+    "`core-quals --role review --count` == 0 — inak "
     "CONTINUE bez akéhokoľvek turn limitu; hlavný ďalší stop je (A) ❓ NEEDS YOU "
     "na ownerovu odpoveď (per #1007 iba keď nebeží žiadna lane). "
     "REVIEW ROLE — "
     "(a) infra tickety (label infra) sa TU NEpracujú, iba zakladajú; "
+    "vlastné I tickety (`core-quals --role review --list`) pracuj v každom "
+    "cykle — čakanie na waitery nie je práca (#1309); "
     "(b) SUBDEVS NIKDY NEČAKAJÚ NA GK: každý OTVORENÝ stream PR→develop "
     "(montalu/*, david*/kvaskodev, miva*, simap*) dostane skoré advisory review "
     "do 1 h od posledného pushu (koment „gk skoré review (advisory, pred "
@@ -425,11 +428,31 @@ _LEGACY_REVIEW = (
 )
 
 
+# #1309 (owner 12.11.2026): the review (B) gained the window's own count and
+# the "work your own I tickets" directive. Review lines armed before that stay
+# recognised (the janitor must still clear its own leftover).
+_PRE_1309_REVIEW = (
+    ("montalu/slovnormal/miva == main A `core-quals --role review --count` == 0"
+     " — inak", "montalu/slovnormal/miva == main — inak"),
+    ("iba zakladajú; vlastné I tickety (`core-quals --role review --list`) "
+     "pracuj v každom cykle — čakanie na waitery nie je práca (#1309); ",
+     "iba zakladajú; "),
+)
+
+
+def _pre_1309(line, role):
+    if role != "review":
+        return line
+    for new, old in _PRE_1309_REVIEW:
+        line = line.replace(new, old, 1)
+    return line
+
+
 def legacy_goal_line_variants():
     """The pre-#1137 sequential + parallel `/goal` lines (recognition only)."""
     out = []
     for authority, role in variant_specs():
-        line = render_goal_line(authority, role)
+        line = _pre_1309(render_goal_line(authority, role), role)
         for i, sat in enumerate(_LEGACY_SATURATION):
             old = line.replace(_BUNDLE, sat + " " + _LEGACY_DELIVERY[authority], 1)
             for new, legacy in _LEGACY_BOUNCE + _LEGACY_POINTER:
@@ -460,6 +483,8 @@ def all_goal_line_variants():
         except Exception:  # noqa: BLE001 — a nonsensical combo is simply skipped
             continue
         lines.append(line)
+        if role == "review":
+            lines.append(_pre_1309(line, role))
         for new, legacy in _LEGACY_POINTER:
             line = line.replace(new, legacy, 1)
         lines.append(line)

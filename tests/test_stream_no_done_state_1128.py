@@ -40,7 +40,7 @@ FULL_GOLDEN = {
     ("full", None): "b64c7333d9315915a3a0356f",
     ("full", "infra"): "9c9e1016e1ebecb7a9ec9f8f",
     ("full", "quality"): "db7d4af0bc0ade2cec966636",
-    ("full", "review"): "644e95bf176d7476dc25b526",
+    ("full", "review"): "9bda3a031f68d5449409e861",
 }
 
 

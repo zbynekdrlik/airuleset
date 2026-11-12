@@ -230,3 +230,28 @@ class TestReviewRoleVariant1000(TestCase):
 
 if __name__ == "__main__":
     main()
+
+
+# --------------------------------------------------------------------------- #
+# #1309 (owner 12.11.2026): gk's review window spent a whole night reporting
+# release/hand-off waiters while `core-quals --role review --count` printed 5
+# every cycle. The review (B) never required that count to be 0 and nothing
+# told the window to WORK its own tickets, so "print the count" was the whole
+# obligation. The count is now part of (B) and the window works it each cycle.
+# --------------------------------------------------------------------------- #
+class TestReviewOwnBacklog1309(TestCase):
+    def _review_b(self):
+        line = gr.render_goal_line("full", "review")
+        start = line.index("(B) BACKLOG EMPTY — gk REVIEW okno")
+        end = line.index("REVIEW ROLE —")
+        return line, line[start:end]
+
+    def test_review_B_requires_own_count_zero(self):
+        _, b = self._review_b()
+        self.assertIn("`core-quals --role review --count` == 0", b)
+
+    def test_review_window_works_its_own_tickets_each_cycle(self):
+        line, _ = self._review_b()
+        self.assertIn("vlastné I tickety (`core-quals --role review --list`) "
+                      "pracuj v každom cykle", line)
+        self.assertIn("čakanie na waitery nie je práca", line)
