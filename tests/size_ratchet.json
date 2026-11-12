@@ -76,7 +76,7 @@
     "design_gate.py": 26,
     "discuss_close_guard.py": 270,
     "discuss_thread_guard.py": 835,
-    "filedrop/__init__.py": 302,
+    "filedrop/__init__.py": 305,
     "filedrop/server.py": 247,
     "filedrop/share.py": 103,
     "filedrop/show_server.py": 511,

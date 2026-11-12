@@ -151,6 +151,7 @@ def _is_private(ip):
         only auth and the upload endpoint is a WRITE surface, so a public bind would
         put an open write endpoint on the internet;
       • loopback (127/8) and IPv6;
+      • the Dante audio VLAN 10.77.7.0/24 (#1308): Dante/PTP UDP only;
       • 172.16.0.0/12 — on the managed boxes that range is docker/bridge-internal,
         so a URL there is unreachable noise, not a real interface for the user."""
     if ":" in ip:
@@ -165,7 +166,9 @@ def _is_private(ip):
     if a == 100 and 64 <= b <= 127:      # tailscale CGNAT (100.64.x – 100.127.x)
         return True
     if a == 10:                          # RFC1918 /8 — the dev LAN (10.77.*)
-        return True
+        # #1308: except the Dante audio VLAN (VLAN 70), which carries only
+        # Dante/PTP UDP, mDNS and ICMP — never a TCP drop server.
+        return not (b == 77 and parts[2] == "7")
     if a == 192 and b == 168:            # RFC1918 /16
         return True
     return False                         # public / 172.16-31 docker / 169.254 link-local / …
