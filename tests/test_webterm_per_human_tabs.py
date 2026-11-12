@@ -47,7 +47,7 @@ ZBYNEK_EXCLUDED = [
 ]
 # The owner's expected tab ALIASES, in his order (spinbike -> "sb").
 ZBYNEK_ALIAS_ORDER = [
-    "ar", "claudy", "fohmixer", "varos", "wall-bri", "songplay", "dstack", "dasio", "iemmixer", "dcontrol", "dsync", "intercom", "obs", "shading", "vstack", "nlch-fin", "tuke", "mikrotik",   # 8-char cut
+    "ar", "claudy", "fohmixer", "varos", "wall-bri", "songplay", "dstack", "dasio", "iemmixer", "dcontrol", "dsync", "intercom", "obs", "shading", "vstack", "nlch-fin", "tuke", "mt-pz",   # 8-char cut
     "dev1", "dev2", "gk",
     "d1", "d2", "d3", "d4", "miva", "sb",
 ]
@@ -149,7 +149,7 @@ class TestExclusiveTabListMechanism(unittest.TestCase):
         # SINGLE #592 cli_aliases source.
         self.assertEqual(aliases, ["miva", "d3", "ar", "claudy",
                                    "fohmixer", "varos", "wall-bri", "songplay",
-                                   "dstack", "dasio", "iemmixer", "dcontrol", "dsync", "intercom", "obs", "shading", "vstack", "nlch-fin", "tuke", "mikrotik", "dev1", "dev2", "gk", "fs"])
+                                   "dstack", "dasio", "iemmixer", "dcontrol", "dsync", "intercom", "obs", "shading", "vstack", "nlch-fin", "tuke", "mt-pz", "dev1", "dev2", "gk", "fs"])
         # No marek-subdev (dead stream) on the dashboard.
         self.assertNotIn('title="marek@subdev"', html)
 

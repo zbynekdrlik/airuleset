@@ -4,7 +4,7 @@
     "backlog_marker_gate.py": 90,
     "burn/__init__.py": 2413,
     "cli_account_bootstrap.py": 895,
-    "cli_aliases.py": 177,
+    "cli_aliases.py": 179,
     "cli_authorship.py": 356,
     "cli_autopilot_lock.py": 793,
     "cli_bashrc_appliers.py": 1190,

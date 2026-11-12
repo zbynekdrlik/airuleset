@@ -60,3 +60,10 @@ class TestMikrotikPzAccount(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestShortAlias1310(unittest.TestCase):
+    def test_tab_alias_is_mt_pz_not_the_snv_mikrotik_cut(self):
+        from cli_aliases import short_target_alias
+        self.assertEqual(short_target_alias("mikrotik-pz", "mikrotik-pz-dev1"), "mt-pz")
+
