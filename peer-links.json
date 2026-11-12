@@ -190,6 +190,10 @@
         [
           "airuleset",
           "tuke"
+        ],
+        [
+          "airuleset",
+          "mikrotik-pz"
         ]
       ],
       "topics": {
@@ -210,6 +214,7 @@
         "airuleset|dstack": "airuleset infra: accounts, permissions, peer links, tooling. Ask or report here; airuleset decides and a ticket alone wakes no session",
         "airuleset|nlch-finances": "airuleset infra: accounts, permissions, peer links, tooling. Ask or report here; airuleset decides and a ticket alone wakes no session",
         "airuleset|tuke": "airuleset infra: accounts, permissions, peer links, tooling. Ask or report here; airuleset decides and a ticket alone wakes no session",
+        "airuleset|mikrotik-pz": "airuleset infra: accounts, permissions, peer links, tooling. Ask or report here; airuleset decides and a ticket alone wakes no session",
         "airuleset|fohmixer": "airuleset infra: accounts, permissions, peer links, tooling. Ask or report here; airuleset decides and a ticket alone wakes no session",
         "airuleset|iemmixer": "airuleset infra: accounts, permissions, peer links, tooling. Ask or report here; airuleset decides and a ticket alone wakes no session",
         "airuleset|mikrotik": "airuleset infra: accounts, permissions, peer links, tooling. Ask or report here; airuleset decides and a ticket alone wakes no session",

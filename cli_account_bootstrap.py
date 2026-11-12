@@ -384,6 +384,18 @@ SERVICE_ACCOUNTS = {
         "tmux_session": "tuke",
         "webterm_sessions": {h: {"preferred": "tuke", "start_dir_chain": ["devel/tuke"]} for h in ("zbynek", "marek")},
     },
+    # #1310 (owner 12.11.): a Claude manager for the MikroTik router at slovnormal's
+    # PZ site, one account per manager. No device or sudo grant until it asks.
+    "mikrotik-pz": {
+        "host": "dev1",
+        "sudo": False,
+        "repo": "zbynekdrlik/mikrotik-pz",   # private
+        "github_app": True, "repo_secrets": [],
+        "secrets": [],
+        "project_dir": "devel/mikrotik-pz",
+        "tmux_session": "mikrotik-pz",
+        "webterm_sessions": {h: {"preferred": "mikrotik-pz", "start_dir_chain": ["devel/mikrotik-pz"]} for h in ("zbynek", "marek")},
+    },
     "iemmixer": {
         "host": "dev1",
         "sudo": False,

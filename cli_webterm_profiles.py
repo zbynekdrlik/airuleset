@@ -407,7 +407,7 @@ def marek_inventory():
         fohmixer_entry(WEBTERM_MAREK_IDENTITY),   # #1183 project account
         varos_entry(WEBTERM_MAREK_IDENTITY),      # #1220 project account
         *(dev1_project_entry(a, WEBTERM_MAREK_IDENTITY)            # #1267, #1270 owner 30.10.
-          for a in ("wall-bridge", "songplayer", "dstack", "dasio", "iemmixer", "dcontroller", "dsync", "intercom", "obs", "shading", "vstack", "nlch-finances", "tuke")),
+          for a in ("wall-bridge", "songplayer", "dstack", "dasio", "iemmixer", "dcontroller", "dsync", "intercom", "obs", "shading", "vstack", "nlch-finances", "tuke", "mikrotik-pz")),
         {
             "id": "dev1",
             "label": "dev1 (marek sessions)",
@@ -705,6 +705,7 @@ def zbynek_inventory():
           for a in ("wall-bridge", "songplayer", "dstack", "dasio", "iemmixer", "dcontroller", "dsync", "intercom", "obs", "shading", "vstack")),
         dev1_project_entry("nlch-finances", WEBTERM_ZBYNEK_IDENTITY, "owner"),   # #1295, owner only
         dev1_project_entry("tuke", WEBTERM_ZBYNEK_IDENTITY, "owner"),   # #1296
+        dev1_project_entry("mikrotik-pz", WEBTERM_ZBYNEK_IDENTITY, "owner"),   # #1310
         {
             "id": "dev1",
             "label": "dev1",

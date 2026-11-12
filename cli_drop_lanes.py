@@ -91,6 +91,7 @@ _GENERATED_DROP_PORTS = {
     ("dev1", "dcontroller"): 8900, ("dev1", "dsync"): 8901, ("dev1", "intercom"): 8902, ("dev1", "obs"): 8903, ("dev1", "shading"): 8904, ("dev1", "vstack"): 8905,   # #1280
     ("dev1", "nlch-finances"): 8906,   # #1295
     ("dev1", "tuke"): 8907,   # #1296
+    ("dev1", "mikrotik-pz"): 8908,   # #1310
 }
 
 
