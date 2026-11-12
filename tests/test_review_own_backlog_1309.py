@@ -25,8 +25,11 @@ class TestReviewOwnBacklog1309(TestCase):
     def test_review_window_works_its_own_tickets_each_cycle(self):
         line, _ = self._review_b()
         self.assertIn("vlastné I tickety (`core-quals --role review --list`) "
-                      "pracuj v každom cykle", line)
-        self.assertIn("čakanie na waitery nie je práca", line)
+                      "pracuj každý cyklus", line)
+        self.assertIn("waiter nie je práca", line)
+        # review round 2: hand-off SLAs first, dep-wait rows get unblocked
+        self.assertIn("po (b)/(c)", line)
+        self.assertIn("dep-wait odblokuj či založ", line)
 
 
     def test_pre_1309_review_line_stays_recognised(self):
