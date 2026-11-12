@@ -128,7 +128,9 @@ def render_sudo_path_checks(paths):
         "        exit 1\n"
         "    fi\n"
         '    D="$P"\n'
+        '    case "$P" in /*) ;; *) echo "ERROR: $P (read by sudo -f) is not absolute" >&2; exit 1 ;; esac\n'
         "    while :; do\n"
+        '        if [ -L "$D" ]; then echo "ERROR: $D (read by sudo -f) is a symlink" >&2; exit 1; fi\n'
         '        case "$(stat -c \'%%U %%A\' "$D")" in\n'
         '            "root "?????-??-?) ;;\n'
         '            *) echo "ERROR: $D (sudo command $P) is not root-owned + '
@@ -254,15 +256,19 @@ def render_sudo_file_checks(commands):
     """#1308: a scoped line ``<bin> -f <path>`` makes root read ``<path>``, so
     that file and every ancestor dir must be root-owned and not
     group/other-writable, or the account could feed root its own input.
-    Empty for rules without ``-f`` (the golden renders stay byte-identical)."""
-    files = sorted({w[i + 1] for w in (c.split(" ") for c in commands)
-                    for i in range(len(w) - 1) if w[i] == "-f"})
+    Only ``/usr/sbin/nft -f <abs path>`` counts (``nmcli -f`` is --fields);
+    a symlink anywhere on the path is refused, like render_sudo_path_checks.
+    Empty for rules without it (the golden renders stay byte-identical)."""
+    files = sorted({w[2] for w in (c.split(" ") for c in commands)
+                    if w[0] == "/usr/sbin/nft" and len(w) == 3 and w[1] == "-f"})
     if not files:
         return ""
     return (
         "for P in %s; do\n"
         '    D="$P"\n'
+        '    case "$P" in /*) ;; *) echo "ERROR: $P (read by sudo -f) is not absolute" >&2; exit 1 ;; esac\n'
         "    while :; do\n"
+        '        if [ -L "$D" ]; then echo "ERROR: $D (read by sudo -f) is a symlink" >&2; exit 1; fi\n'
         '        case "$(stat -L -c \'%%U %%A\' "$D")" in\n'
         '            "root "?????-??-?) ;;\n'
         '            *) echo "ERROR: $D (read by sudo -f) is not root-owned + non-group/other-writable" >&2; exit 1 ;;\n'

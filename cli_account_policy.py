@@ -54,7 +54,9 @@ DSTACK_NMCLI_SUDO = {
         "delete dante-vlan",
     )] + [
         # #1308 (owner 12.11.2026, option 1): the Dante-leg filter and avahi.
-        # The ruleset file is root-owned (airuleset installs it), so `nft -f`
+        # The ruleset file is root-owned (airuleset installs it by hand after
+        # reviewing dstack's text, #1308; the bootstrap refuses until it
+        # exists root-owned, render_sudo_file_checks), so `nft -f`
         # never reads a file dstack can write: an `include` there would read
         # other accounts' files as root.
         "/usr/sbin/nft -f /etc/nftables.d/dante-guard.nft",
