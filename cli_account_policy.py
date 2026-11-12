@@ -36,7 +36,9 @@ SECRET_NAME_RE = re.compile(r"[A-Z_][A-Z0-9_]*")
 DSTACK_NMCLI_SUDO = {
     "sudo": True,
     "sudo_reason": "dstack #155 on dev1: switch Dante between dante-net and "
-                   "the VLAN 70 connection dante-vlan, and roll back",
+                   "the VLAN 70 connection dante-vlan, and roll back; "
+                   "#1308: load/list/delete the dante_guard nft table, "
+                   "restart avahi",
     "sudo_commands": ["/usr/bin/nmcli con " + c for c in (
         "mod dante-net connection.autoconnect no",
         "mod dante-net connection.autoconnect yes",
@@ -50,7 +52,16 @@ DSTACK_NMCLI_SUDO = {
         "up dante-vlan",
         "down dante-vlan",
         "delete dante-vlan",
-    )],
+    )] + [
+        # #1308 (owner 12.11.2026, option 1): the Dante-leg filter and avahi.
+        # The ruleset file is root-owned (airuleset installs it), so `nft -f`
+        # never reads a file dstack can write: an `include` there would read
+        # other accounts' files as root.
+        "/usr/sbin/nft -f /etc/nftables.d/dante-guard.nft",
+        "/usr/sbin/nft list table inet dante_guard",
+        "/usr/sbin/nft delete table inet dante_guard",
+        "/usr/bin/systemctl restart avahi-daemon",
+    ],
 }
 
 
