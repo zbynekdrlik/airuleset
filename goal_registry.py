@@ -26,6 +26,8 @@ space, reproducing the original line exactly.
 import os as _os
 import re as _re
 
+from goal_legacy_1309 import pre_1309 as _pre_1309
+
 PROFILES = ("full", "branch-merge", "fork-no-merge")
 
 # Claude Code refuses a `/goal` condition longer than this and never arms
@@ -428,26 +430,6 @@ _LEGACY_REVIEW = (
 )
 
 
-# #1309 (owner 12.11.2026): the review (B) gained the window's own count and
-# the "work your own I tickets" directive. Review lines armed before that stay
-# recognised (the janitor must still clear its own leftover).
-_PRE_1309_REVIEW = (
-    ("montalu/slovnormal/miva == main A `core-quals --role review --count` == 0"
-     " — inak", "montalu/slovnormal/miva == main — inak"),
-    ("iba zakladajú; vlastné I tickety (`core-quals --role review --list`) "
-     "pracuj v každom cykle — čakanie na waitery nie je práca (#1309); ",
-     "iba zakladajú; "),
-)
-
-
-def _pre_1309(line, role):
-    if role != "review":
-        return line
-    for new, old in _PRE_1309_REVIEW:
-        line = line.replace(new, old, 1)
-    return line
-
-
 def legacy_goal_line_variants():
     """The pre-#1137 sequential + parallel `/goal` lines (recognition only)."""
     out = []
@@ -483,8 +465,7 @@ def all_goal_line_variants():
         except Exception:  # noqa: BLE001 — a nonsensical combo is simply skipped
             continue
         lines.append(line)
-        if role == "review":
-            lines.append(_pre_1309(line, role))
+        lines += [_pre_1309(line, role)] if role == "review" else []
         for new, legacy in _LEGACY_POINTER:
             line = line.replace(new, legacy, 1)
         lines.append(line)

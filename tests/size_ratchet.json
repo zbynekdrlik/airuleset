@@ -106,7 +106,7 @@
     "gates/secrets.py": 388,
     "gates/shellcmd.py": 88,
     "gates/testskips.py": 238,
-    "goal_registry.py": 628,
+    "goal_registry.py": 634,
     "notify/__init__.py": 3441,
     "ratchet_counts.py": 264,
     "statusbar.py": 1097,
