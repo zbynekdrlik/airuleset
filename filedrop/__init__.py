@@ -168,7 +168,7 @@ def _is_private(ip):
     if a == 10:                          # RFC1918 /8 — the dev LAN (10.77.*)
         # #1308: except the Dante audio VLAN (VLAN 70), which carries only
         # Dante/PTP UDP, mDNS and ICMP — never a TCP drop server.
-        return not (b == 77 and parts[2] == "7")
+        return not (b == 77 and parts[2].isdigit() and int(parts[2]) == 7)
     if a == 192 and b == 168:            # RFC1918 /16
         return True
     return False                         # public / 172.16-31 docker / 169.254 link-local / …

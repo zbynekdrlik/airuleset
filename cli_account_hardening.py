@@ -246,7 +246,31 @@ def render_sudo_step(account, spec):
         '        "root "?????-??-?) ;;\n'
         '        *) echo "ERROR: $BIN is not root-owned + non-group/other-writable" >&2; exit 1 ;;\n'
         "    esac\n"
-        "done\n" % " ".join(binaries)) + _SUDOERS_INSTALL % (header, rule)
+        "done\n" % " ".join(binaries)) + render_sudo_file_checks(
+            spec["sudo_commands"]) + _SUDOERS_INSTALL % (header, rule)
+
+
+def render_sudo_file_checks(commands):
+    """#1308: a scoped line ``<bin> -f <path>`` makes root read ``<path>``, so
+    that file and every ancestor dir must be root-owned and not
+    group/other-writable, or the account could feed root its own input.
+    Empty for rules without ``-f`` (the golden renders stay byte-identical)."""
+    files = sorted({w[i + 1] for w in (c.split(" ") for c in commands)
+                    for i in range(len(w) - 1) if w[i] == "-f"})
+    if not files:
+        return ""
+    return (
+        "for P in %s; do\n"
+        '    D="$P"\n'
+        "    while :; do\n"
+        '        case "$(stat -L -c \'%%U %%A\' "$D")" in\n'
+        '            "root "?????-??-?) ;;\n'
+        '            *) echo "ERROR: $D (read by sudo -f) is not root-owned + non-group/other-writable" >&2; exit 1 ;;\n'
+        "        esac\n"
+        '        [ "$D" = / ] && break\n'
+        '        D=$(dirname "$D")\n'
+        "    done\n"
+        "done\n" % " ".join(files))
 
 
 def render_rtprio_step(account, spec):
