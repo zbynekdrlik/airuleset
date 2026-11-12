@@ -8,7 +8,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import cli_account_bootstrap as bootstrap  # noqa: E402
+import cli_account_bootstrap as bootstrap
+from test_dstack_dante_guard_sudo_1308 import GUARD as GUARD_1308  # noqa: E402
 import cli_account_hardening as hardening  # noqa: E402
 import cli_account_policy as policy  # noqa: E402
 import cli_account_verify as verify  # noqa: E402
@@ -40,7 +41,7 @@ class TestDeclaration(unittest.TestCase):
         # #1308 (owner 12.11.2026) adds the dante_guard nft + avahi lines,
         # pinned in test_dstack_dante_guard_sudo_1308; every OTHER line is nmcli.
         for cmd in spec["sudo_commands"]:
-            if cmd.startswith(("/usr/sbin/nft ", "/usr/bin/systemctl ")):
+            if cmd in GUARD_1308:
                 continue
             words = cmd.split(" ")
             self.assertEqual(words[:2], ["/usr/bin/nmcli", "con"], cmd)

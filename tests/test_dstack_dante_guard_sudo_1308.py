@@ -3,9 +3,13 @@ Dante-leg nftables filter and the avahi restart, on top of its nmcli lines.
 
 The ruleset file is root-owned, so `nft -f` never reads a file dstack can
 write (an `include` would read other accounts' files as root)."""
+import os
+import subprocess
+import tempfile
 import unittest
 
 import cli_account_bootstrap as bootstrap
+import cli_account_hardening as hardening
 
 GUARD = [
     "/usr/sbin/nft -f /etc/nftables.d/dante-guard.nft",
@@ -37,6 +41,46 @@ class TestDanteGuardSudo(unittest.TestCase):
     def test_declaration_still_valid(self):
         spec = bootstrap.account_spec("dstack")
         self.assertEqual(bootstrap.validate_account("dstack", spec), [])
+
+
+class TestRender(unittest.TestCase):
+
+    def setUp(self):
+        self.out = hardening.render_sudo_step("dstack", bootstrap.account_spec("dstack"))
+
+    def test_rule_is_noexec(self):
+        self.assertIn("dstack ALL=(root) NOPASSWD:NOEXEC: ", self.out)
+
+    def test_ruleset_file_is_checked(self):
+        self.assertIn("for P in /etc/nftables.d/dante-guard.nft; do", self.out)
+
+    def _run_checks(self, owner_of, dir_owner=None):
+        snippet = hardening.render_sudo_file_checks(GUARD)
+        with tempfile.TemporaryDirectory() as tmp:
+            stub = os.path.join(tmp, "stat")
+            with open(stub, "w") as fh:
+                fh.write('#!/bin/bash\nif [ "${@: -1}" = /etc/nftables.d ]; '
+                         'then echo "%s"; else echo "%s"; fi\n'
+                         % (dir_owner or owner_of, owner_of))
+            os.chmod(stub, 0o755)
+            env = dict(os.environ, PATH=tmp + ":" + os.environ["PATH"])
+            return subprocess.run(["bash", "-c", "set -euo pipefail\n" + snippet],
+                                  env=env, capture_output=True, text=True)
+
+    def test_root_owned_passes(self):
+        self.assertEqual(self._run_checks("root -rw-r--r--").returncode, 0)
+
+    def test_account_owned_or_writable_fails(self):
+        self.assertEqual(self._run_checks("dstack -rw-r--r--").returncode, 1)
+        self.assertEqual(self._run_checks("root -rw-rw-r--").returncode, 1)
+
+    def test_writable_parent_dir_fails(self):
+        r = self._run_checks("root -rw-r--r--", dir_owner="dstack drwxr-xr-x")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("/etc/nftables.d ", r.stderr)
+
+    def test_no_dash_f_renders_nothing(self):
+        self.assertEqual(hardening.render_sudo_file_checks(["/usr/bin/nmcli con up x"]), "")
 
 
 if __name__ == "__main__":

@@ -29,9 +29,10 @@ class TestDanteLeg(unittest.TestCase):
             self.assertEqual(filedrop.bind_ips(), ["10.77.9.195"])
 
     def test_neighbour_subnets_stay(self):
-        for ip in ("10.77.6.255", "10.77.8.1", "10.77.9.195"):
+        for ip in ("10.77.6.255", "10.77.8.1", "10.77.9.195", "10.77.70.1", "10.77.71.5"):
             self.assertTrue(filedrop._is_private(ip), ip)
         self.assertFalse(filedrop._is_private("10.77.7.1"))
+        self.assertFalse(filedrop._is_private("10.77.07.1"))
 
 
 if __name__ == "__main__":
