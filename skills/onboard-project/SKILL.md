@@ -6,6 +6,8 @@ user-invocable: true
 
 # Onboard a project under airuleset management
 
+**A NEW project with its own unix account: follow `new-project-account.md` in this directory step by step (#1310).** Migrating a legacy `newlevel` project: `legacy-newlevel.md`.
+
 **All logic lives in the CLI (`cli_onboard.py`); this skill is a thin wrapper — invoke the command and report. Never re-implement any step here.** The command is IDEMPOTENT: a second run on an already-onboarded project reports every step "satisfied" and changes nothing, and it NEVER touches a project's dirty (in-progress) worktree files.
 
 ## Onboard one project
