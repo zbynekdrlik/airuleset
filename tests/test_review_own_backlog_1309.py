@@ -1,4 +1,5 @@
 """#1309: the gk review goal requires its own count at 0 and works its own tickets."""
+import hashlib
 from unittest import TestCase
 
 import goal_registry as gr
@@ -33,3 +34,13 @@ class TestReviewOwnBacklog1309(TestCase):
         old = pre_1309(line, "review")
         self.assertNotIn("#1309", old)
         self.assertIn(old, gr.all_goal_line_variants())
+
+    def test_pre_1309_reverses_to_the_frozen_shipped_line(self):
+        # sha256 of render_goal_line("full", "review") at 8f4c791d (0.1.638),
+        # the text armed in gk's live loop before #1309. A later edit of either
+        # replaced substring would make pre_1309 a silent no-op; this catches it.
+        line, _ = self._review_b()
+        old = pre_1309(line, "review")
+        self.assertEqual(
+            hashlib.sha256(old.encode()).hexdigest(),
+            "644e95bf176d7476dc25b5264a23349cec87655fa81001c0532b3e1054908674")
