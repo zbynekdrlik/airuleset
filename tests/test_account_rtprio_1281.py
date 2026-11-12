@@ -37,7 +37,11 @@ class TestDeclaration(unittest.TestCase):
         spec = bootstrap.account_spec("dstack")
         self.assertEqual(spec["rtprio"], 49)
         self.assertIs(spec["sudo"], True)
+        # #1308 (owner 12.11.2026) adds the dante_guard nft + avahi lines,
+        # pinned in test_dstack_dante_guard_sudo_1308; every OTHER line is nmcli.
         for cmd in spec["sudo_commands"]:
+            if cmd.startswith(("/usr/sbin/nft ", "/usr/bin/systemctl ")):
+                continue
             words = cmd.split(" ")
             self.assertEqual(words[:2], ["/usr/bin/nmcli", "con"], cmd)
             name = words[words.index("con-name") + 1] if words[2] == "add" else words[3]
