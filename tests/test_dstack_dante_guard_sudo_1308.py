@@ -79,6 +79,33 @@ class TestRender(unittest.TestCase):
         self.assertEqual(r.returncode, 1)
         self.assertIn("/etc/nftables.d ", r.stderr)
 
+    def test_relative_path_fails_fast(self):
+        snippet = hardening.render_sudo_file_checks(["/usr/sbin/nft -f x.nft"])
+        r = subprocess.run(["bash", "-c", "set -euo pipefail\n" + snippet],
+                           capture_output=True, text=True, timeout=20)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("not absolute", r.stderr)
+
+    def test_symlink_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            os.symlink("/etc/hostname", os.path.join(tmp, "g.nft"))
+            snippet = hardening.render_sudo_file_checks(
+                ["/usr/sbin/nft -f %s/g.nft" % tmp])
+            r = subprocess.run(["bash", "-c", "set -euo pipefail\n" + snippet],
+                               capture_output=True, text=True, timeout=20)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("is a symlink", r.stderr)
+
+    def test_missing_file_fails(self):
+        snippet = hardening.render_sudo_file_checks(["/usr/sbin/nft -f /nonexistent/g.nft"])
+        r = subprocess.run(["bash", "-c", "set -euo pipefail\n" + snippet],
+                           capture_output=True, text=True, timeout=20)
+        self.assertNotEqual(r.returncode, 0)
+
+    def test_nmcli_fields_flag_is_not_a_file(self):
+        self.assertEqual(hardening.render_sudo_file_checks(
+            ["/usr/bin/nmcli -f name con show"]), "")
+
     def test_no_dash_f_renders_nothing(self):
         self.assertEqual(hardening.render_sudo_file_checks(["/usr/bin/nmcli con up x"]), "")
 
