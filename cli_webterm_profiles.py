@@ -389,8 +389,7 @@ def marek_inventory():
         },
         {
             # #960: claudy project — SSH to the `claudy` account on the
-            # controller. `preferred: "marek"` targets marek's OWN tmux session
-            # on the claudy account (R1 Fable review: per-human sessions).
+            # controller. #1316: joins the ONE shared `claudy` session.
             # NO u_tenant — owner-realm account (#703 boundary).
             "id": "claudy",
             "label": "claudy (controller)",
@@ -399,7 +398,7 @@ def marek_inventory():
             "host": ZBYNEK_CLAUDY_HOST,
             "user": "claudy",
             "identity": WEBTERM_MAREK_IDENTITY,
-            "preferred": MAREK_GATEWAY_USER,
+            "preferred": "claudy",
             # #961: claudy tab opens in devel/claudy, not the default
             # STREAM_DEV_CWD_CHAIN.
             "start_dir_chain": ["devel/claudy"],
@@ -684,9 +683,7 @@ def zbynek_inventory():
         {
             # #960: claudy project — SSH to the `claudy` account on the same
             # controller box. NOT local (different unix user, needs SSH).
-            # `preferred: "zbynek"` targets the owner's OWN tmux session on
-            # the claudy account (R1 Fable review: per-human sessions, not a
-            # shared "claudy" session — mirrors today's dev1 setup).
+            # #1316: every human joins the ONE shared `claudy` session.
             "id": "claudy",
             "label": "claudy (controller)",
             "kind": "owner",
@@ -694,7 +691,7 @@ def zbynek_inventory():
             "host": ZBYNEK_CLAUDY_HOST,
             "user": "claudy",
             "identity": WEBTERM_ZBYNEK_IDENTITY,
-            "preferred": "zbynek",
+            "preferred": "claudy",
             # #961: claudy tab opens in devel/claudy, not the default
             # STREAM_DEV_CWD_CHAIN.
             "start_dir_chain": ["devel/claudy"],

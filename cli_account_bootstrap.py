@@ -101,11 +101,10 @@ SERVICE_ACCOUNTS = {
         # #1207: the repo venv's playwright 1.62.0 (chromium 1234), in /opt
         "tools": ["playwright:1.62.0/chromium"],
         "project_dir": "devel/claudy",
+        "tmux_session": "claudy",   # #1316: ONE shared session, never per human
         "webterm_sessions": {
-            # human → {preferred, start_dir_chain} — the forced command
-            # opens in the project dir, not the default STREAM_DEV_CWD_CHAIN.
-            "zbynek": {"preferred": "zbynek", "start_dir_chain": ["devel/claudy"]},
-            "marek": {"preferred": "marek", "start_dir_chain": ["devel/claudy"]},
+            human: {"preferred": "claudy", "start_dir_chain": ["devel/claudy"]}
+            for human in ("zbynek", "marek")
         },
         # Playwright chromium headless shell deps for the claudy-controller
         # runner (#973).  Without these the E2E test job cannot launch
