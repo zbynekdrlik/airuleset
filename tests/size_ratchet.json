@@ -722,7 +722,7 @@
     "watchdog/stash.py": 1714,
     "watchdog/subprocess_budget.py": 151,
     "watchdog/sweep_jobs.py": 392,
-    "watchdog/tmux_io.py": 1813,
+    "watchdog/tmux_io.py": 1815,
     "watchdog/tmux_servers.py": 260,
     "watchdog/transcripts.py": 1848,
     "watchdog/u_freshness.py": 386,

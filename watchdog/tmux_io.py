@@ -358,7 +358,9 @@ def keys(pane_id, *keystrokes, kind, nudge=None, user_authored=False, run=None,
         watchdog._suppress_nudge(nudge or kind, snippet, logs)
         return False
     run = run or watchdog._default_run
-    run(["tmux", "send-keys", "-t", pane_id, *keystrokes])
+    from watchdog.literal_keys import split_trailing_semicolons   # #1319
+    for ks in split_trailing_semicolons(keystrokes):
+        run(["tmux", "send-keys", "-t", pane_id, *ks])
     return True
 
 
