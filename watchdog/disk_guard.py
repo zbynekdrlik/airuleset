@@ -57,7 +57,6 @@ of ``watchdog.reaper`` is a DEFERRED import inside the function that needs it,
 so this module has no import cycle with the ``watchdog`` package that hosts it.
 """
 
-import contextlib
 import fcntl
 import json
 import math
@@ -70,6 +69,8 @@ import time
 from pathlib import Path
 
 from watchdog import disk_guard_post as _dgp
+from watchdog import disk_guard_cargo_sweep as _dcs
+from watchdog import disk_guard_stale_build as _dsb
 from watchdog import disk_guard_timing as _dgt
 
 # --- thresholds (#834 req 1) ------------------------------------------------ #
@@ -120,7 +121,7 @@ RECLAIMABLE_CLASSES = frozenset({
     # #980 — dead-session /tmp/claude-<uid>/ scratchpad dirs:
     "session-scratch",
     # #1286 — Cargo output outside an agent worktree:
-    "stale-build", "build-incremental",
+    "stale-build", "build-incremental", "stale-target-artifacts",  # + #1318
 })
 
 # #854 — the ROOT-owned cache classes: their deletes go through `sudo -n` when
@@ -2593,6 +2594,7 @@ def _default_planners(home, now, scratch_rows=None, wt_cache=False, level=None):
          lambda: _plan_stale_agent_worktrees(home, now, wt_cache, level=level)),
         ("scratch-worktree", lambda: _plan_scratch_worktrees(home, now)),
         ("stale-build", lambda: _plan_stale_build(home, now)),
+        ("stale-target-artifacts", lambda: _dcs.plan_stale_units(home, now, level, _norm_action)),
         ("build-incremental", lambda: _plan_idle_incremental(home, now, level=level)),
         ("journal", lambda: _plan_journal(home, now)),
         ("docker-image", lambda: _plan_docker(home, now)),
@@ -2771,14 +2773,10 @@ def _perform_action(a, sudo_ok=False, run_fn=None, scratch_live_fn=None, now=Non
             if (live_fn(path, now) if floor is None
                     else live_fn(path, now, floor_days=floor)):
                 return -1
-        from watchdog.disk_guard_stale_build import reclaim_guard
-        # #1286: a build or a test run may have started since the plan.
-        with (reclaim_guard(a["cls"], path, now or time.time())
-              if a.get("cls") in ("stale-build", "build-incremental", "tmp-test")
-              else contextlib.nullcontext(True)) as allowed:
-            if not allowed:
-                return -1
-            _rm_path(path, sudo=use_sudo, run_fn=run_fn)
+        if a.get("cls") in _dsb.GUARDED_CLASSES:    # #1286/#1318: re-checked at act time
+            return _dsb.reclaim(a, path, now or time.time(), nbytes,
+                                lambda p: _rm_path(p, sudo=use_sudo, run_fn=run_fn))
+        _rm_path(path, sudo=use_sudo, run_fn=run_fn)
         return nbytes
     return 0
 
@@ -2937,7 +2935,7 @@ def execute_drain(status, home, planners, recheck_fn, do_action_fn,
                 # #1195 item 5: a scratchpad child is refused when used/held since.
                 if freed is not None and freed < 0:
                     why = ("build started or target in use since plan (#1286)"
-                           if a.get("cls") in ("stale-build", "build-incremental", "tmp-test")
+                           if a.get("cls") in _dsb.GUARDED_CLASSES
                            else "scratchpad child used/held/unstatable since plan (#1195)"
                            if Path(path).parent.name == "scratchpad"
                            else "session live/undeterminable since plan (#863)")
@@ -2952,7 +2950,8 @@ def execute_drain(status, home, planners, recheck_fn, do_action_fn,
                 # deletes (outside RECLAIMABLE_CLASSES).
                 if not dry_run:
                     _append_deletion_journal(
-                        home, now, rung=_label, path=path, nbytes=planned,
+                        home, now, rung=_label, path=path,
+                        nbytes=planned if freed is None else freed,
                         mtime=a.get("mtime", 0),
                         level=pressure or status.get("level", "drain"))
                 rung_freed += (freed or 0)

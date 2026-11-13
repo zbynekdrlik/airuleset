@@ -21,6 +21,9 @@ import os
 
 CLS = "stale-build"
 INCREMENTAL_CLS = "build-incremental"
+SWEEP_CLS = "stale-target-artifacts"      # #1318, watchdog/disk_guard_cargo_sweep.py
+# Classes whose act re-checks a build or test run before it removes anything.
+GUARDED_CLASSES = frozenset({CLS, INCREMENTAL_CLS, "tmp-test", SWEEP_CLS})
 MIN_AGE_DAYS = 14
 INCREMENTAL_MIN_IDLE_S = 3600      # a session between two builds keeps its cache
 MAX_DEPTH = 5                      # ~/copy/src-tauri/target, ~/devel/app/plugins/x/ffi/target
@@ -109,12 +112,16 @@ def _subdirs(path):
 
 
 def _incremental_dirs(target):
-    """``<profile>/incremental`` and ``<triple-or-custom>/<profile>/incremental``, where
+    return profile_children(target, "incremental")
+
+
+def profile_children(target, name):
+    """``<profile>/<name>`` and ``<triple-or-custom>/<profile>/<name>``, where
     Cargo's own lock file beside it proves that it is a Cargo profile dir."""
     found = []
     for first in _subdirs(target):
         for parent in [first] + _subdirs(first):
-            path = os.path.join(parent, "incremental")
+            path = os.path.join(parent, name)
             if (os.path.isdir(path) and not os.path.islink(path)
                     and os.path.isfile(os.path.join(parent, ".cargo-lock"))):
                 found.append(path)
@@ -176,6 +183,19 @@ def reclaim_guard(cls, path, now):
         finally:
             for fd in fds or ():
                 os.close(fd)
+
+
+def reclaim(a, path, now, nbytes, rm):
+    """The act for a GUARDED class: freed bytes, or -1 when a build or a test run
+    started since the plan. A profile sweep (#1318) removes only its stale units."""
+    if a.get("cls") == SWEEP_CLS:
+        from watchdog.disk_guard_cargo_sweep import sweep_profile
+        return sweep_profile(path, now)
+    with reclaim_guard(a["cls"], path, now) as allowed:
+        if not allowed:
+            return -1
+        rm(path)
+    return nbytes
 
 
 def _can_delete(path):
