@@ -32,6 +32,7 @@ from watchdog import idle_pane, model_restore as mr  # noqa: E402
 from watchdog.send_outcome import SendOutcome  # noqa: E402
 
 MANAGED = "claude-opus-5-5[1m]"
+OWN = model_lineup.OWNER_SELECTABLE_MAIN_MODELS  # #1314: every project may also run these
 PZ = "claude-opus-4-6"
 PZ_KEY = "-home-newlevel-devel-pz-server"
 NOW = 1_800_000_000
@@ -76,17 +77,17 @@ class Resolver(unittest.TestCase):
 
     def test_pz_server_transcript_resolves_to_its_model_and_the_managed_one(self):
         t = "/home/newlevel/.claude/projects/%s/3b6d.jsonl" % PZ_KEY
-        self.assertEqual(model_lineup.main_models_for_transcript(t), (PZ, (PZ, MANAGED)))
+        self.assertEqual(model_lineup.main_models_for_transcript(t), (PZ, (PZ, MANAGED) + OWN))
 
     def test_another_project_resolves_to_the_managed_model_only(self):
         t = "/home/newlevel/.claude/projects/-home-newlevel-devel-restreamer/x.jsonl"
-        self.assertEqual(model_lineup.main_models_for_transcript(t), (MANAGED, (MANAGED,)))
+        self.assertEqual(model_lineup.main_models_for_transcript(t), (MANAGED, (MANAGED,) + OWN))
 
     def test_a_longer_name_or_a_non_devel_parent_never_matches(self):
         for key in ("-home-newlevel-devel-foo-pz-server", "-home-x-notdevel-pz-server",
                     PZ_KEY + "-sub", ""):
             self.assertEqual(model_lineup.main_models(model_lineup.project_of_key(key)),
-                             (MANAGED, (MANAGED,)), key)
+                             (MANAGED, (MANAGED,) + OWN), key)
 
     def test_a_launch_dir_encodes_like_claude_code(self):
         self.assertEqual(model_lineup.dir_key("/home/newlevel/devel/pz-server"), PZ_KEY)
@@ -96,11 +97,11 @@ class Resolver(unittest.TestCase):
     def test_a_path_object_resolves_like_its_string(self):
         # review A: watchdog.newest_transcript returns a pathlib.Path
         t = Path("/home/newlevel/.claude/projects/%s/3b6d.jsonl" % PZ_KEY)
-        self.assertEqual(model_lineup.main_models_for_transcript(t), (PZ, (PZ, MANAGED)))
+        self.assertEqual(model_lineup.main_models_for_transcript(t), (PZ, (PZ, MANAGED) + OWN))
 
     def test_garbage_never_raises(self):
         for v in (None, 3, [], "x"):
-            self.assertEqual(model_lineup.main_models_for_transcript(v), (MANAGED, (MANAGED,)))
+            self.assertEqual(model_lineup.main_models_for_transcript(v), (MANAGED, (MANAGED,) + OWN))
 
 
 class Verdict(unittest.TestCase):
