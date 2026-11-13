@@ -90,7 +90,7 @@ class TestClaudyWebterm(unittest.TestCase):
         entry = [e for e in inv if e["id"] == "claudy"][0]
         self.assertEqual(entry["user"], "claudy")
         self.assertFalse(entry["local"])
-        self.assertEqual(entry["preferred"], "zbynek")
+        self.assertEqual(entry["preferred"], "claudy")   # #1316: one shared session
         self.assertEqual(entry["identity"], profiles.WEBTERM_ZBYNEK_IDENTITY)
 
     def test_marek_inventory_has_claudy_entry(self):
@@ -103,17 +103,17 @@ class TestClaudyWebterm(unittest.TestCase):
         entry = [e for e in inv if e["id"] == "claudy"][0]
         self.assertEqual(entry["user"], "claudy")
         self.assertFalse(entry["local"])
-        self.assertEqual(entry["preferred"], profiles.MAREK_GATEWAY_USER)
+        self.assertEqual(entry["preferred"], "claudy")   # #1316: one shared session
         self.assertEqual(entry["identity"], profiles.WEBTERM_MAREK_IDENTITY)
 
-    def test_per_human_sessions_differ(self):
-        """R1 Fable review: zbynek's and marek's claudy tabs target different
-        tmux sessions, so they don't collapse into one pane."""
+    def test_humans_share_one_session(self):
+        """#1316 (owner 13.11.2026) reverses the #960 R1 per-human sessions:
+        both claudy tabs join the ONE shared session (one Claude per project)."""
         zinv = profiles.zbynek_inventory()
         minv = profiles.marek_inventory()
         ze = [e for e in zinv if e["id"] == "claudy"][0]
         me = [e for e in minv if e["id"] == "claudy"][0]
-        self.assertNotEqual(ze["preferred"], me["preferred"])
+        self.assertEqual(ze["preferred"], me["preferred"])
 
     def test_zbynek_tab_list_has_claudy(self):
         self.assertIn("claudy", w.WEBTERM_DASHBOARD_TABS["zbynek"])
@@ -196,8 +196,8 @@ class TestClaudyBootstrap(unittest.TestCase):
     def test_service_accounts_claudy_sessions(self):
         """The claudy service account has per-human sessions with chain."""
         spec = bootstrap.SERVICE_ACCOUNTS["claudy"]
-        self.assertEqual(spec["webterm_sessions"]["zbynek"]["preferred"], "zbynek")
-        self.assertEqual(spec["webterm_sessions"]["marek"]["preferred"], "marek")
+        self.assertEqual(spec["webterm_sessions"]["zbynek"]["preferred"], "claudy")   # #1316
+        self.assertEqual(spec["webterm_sessions"]["marek"]["preferred"], "claudy")
         self.assertEqual(spec["webterm_sessions"]["zbynek"]["start_dir_chain"],
                          ["devel/claudy"])
         self.assertEqual(spec["webterm_sessions"]["marek"]["start_dir_chain"],
