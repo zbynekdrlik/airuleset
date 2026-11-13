@@ -317,12 +317,16 @@ class TestLadder(unittest.TestCase):
             with mock.patch("cli_live_snapshot.batch_checker", return_value=lambda p: False):
                 return d, planners["stale-target-artifacts"]()
 
-    def test_critical_level_plans_a_delete(self):
-        d, rows = self._plan("critical")
-        self.assertEqual([(r["path"], r["kind"]) for r in rows], [(str(d / "debug"), "delete")])
+    def test_drain_and_critical_levels_plan_a_delete(self):
+        # owner 13.11.: the disk must never reach the edge again, so unused units
+        # (no rebuild cost) go from the 80 % drain level, not only at 90 %.
+        for level in ("drain", "critical"):
+            d, rows = self._plan(level)
+            self.assertEqual([(r["path"], r["kind"]) for r in rows],
+                             [(str(d / "debug"), "delete")], level)
 
-    def test_below_critical_plans_nothing(self):
-        for level in ("drain", "notice", None):
+    def test_below_drain_plans_nothing(self):
+        for level in ("notice", "ok", None):
             self.assertEqual(self._plan(level)[1], [])
 
     def test_an_acted_sweep_is_journalled_and_a_refusal_names_the_build(self):
