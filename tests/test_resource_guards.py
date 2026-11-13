@@ -43,8 +43,8 @@ class TestDropInRendering(unittest.TestCase):
     def test_guard_dropin_exact_keys_and_values(self):
         d = g.render_guard_dropin()
         self.assertIn("[Slice]", d)
-        self.assertIn("MemoryHigh=12%", d)
-        self.assertIn("MemoryMax=18%", d)
+        self.assertIn("MemoryHigh=30%", d)   # #1321: 12% (~1.9 GB) throttled one Claude session
+        self.assertIn("MemoryMax=40%", d)
         self.assertIn("TasksMax=512", d)
         # #922: CPUWeight lowered from 100 (default, no advantage) to 30 —
         # stream users get 30/130 (~23%) of CPU when contending with root
@@ -55,7 +55,7 @@ class TestDropInRendering(unittest.TestCase):
         # DELIBERATELY absent in #775 (the collapse was memory thrash, not CPU),
         # but the owner's live incident (david3 test at 98% CPU, owner can't
         # scroll) showed the CPU gap is real.
-        self.assertIn("CPUQuota=300%", d)
+        self.assertIn("CPUQuota=600%", d)   # #1321: 6 of 8 cores
         # percentages, never absolute bytes (survive a box resize).
         self.assertNotIn("MemoryMax=18G", d)
 
@@ -145,15 +145,15 @@ class TestApplyScript(unittest.TestCase):
         # #922: the live-apply loop must set CPUWeight + CPUQuota alongside
         # the existing MemoryHigh/MemoryMax/TasksMax.
         self.assertIn("CPUWeight=30", self.s)
-        self.assertIn("CPUQuota=300%", self.s)
+        self.assertIn("CPUQuota=600%", self.s)
 
     def test_read_back_verify_checks_cpu_weight_and_quota(self):
         # #922: the read-back verify must check CPUWeight AND CPUQuotaPerSecUSec.
         self.assertIn("-p CPUWeight", self.s)
         self.assertIn("-p CPUQuotaPerSecUSec", self.s)
-        # The verify checks CPUWeight == 30 and CPUQuotaPerSecUSec == 3s.
+        # The verify checks CPUWeight == 30 and CPUQuotaPerSecUSec == 6s (#1321).
         self.assertIn('cpuw" != "30"', self.s)
-        self.assertIn('cpuq" != "3s"', self.s)
+        self.assertIn('cpuq" != "6s"', self.s)
 
     def test_swap_verify_only_on_non_shared_stream(self):
         """#925-C: non-shared-stream path retains verify-only swap check."""

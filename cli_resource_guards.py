@@ -16,7 +16,7 @@ it did not protect sshd/tailscaled → kex-reset, box dead.
 MECHANISM (settled DESIGN phase, #775 comment 5489114579):
   * A TEMPLATE systemd drop-in on `user-.slice` (one file covers EVERY present
     AND future stream user — no per-uid list to drift when a stream is added or
-    renamed): MemoryHigh=12%, MemoryMax=18%, TasksMax=512, CPUWeight=100. The
+    renamed): MemoryHigh=30%, MemoryMax=40% (#1321; was 12/18), TasksMax=512. The
     limits are PERCENTAGES (systemd computes them from physical RAM), so they
     survive a box resize — the exact change (8→16 GB) that already staled the
     ticket body.
@@ -88,19 +88,21 @@ SWAP_SIZE_GB = 10
 # The numeric policy (percentages of physical RAM + absolutes). Kept as named
 # constants so the render functions AND the read-back verify in the apply
 # script derive from ONE source.
-MEMORY_HIGH_PCT = 12
-MEMORY_MAX_PCT = 18
+# #1321: 12/18 % (~1.9/2.8 GB of 15.6 GB) throttled one Claude session with
+# subagents (david3: 934k memory.high events, typing lag); 30/40 % fit it.
+MEMORY_HIGH_PCT = 30
+MEMORY_MAX_PCT = 40
 TASKS_MAX = 512
 # #922: CPUWeight lowered from 100 (default, no advantage) to 30 — root
 # (weight 100 via the root-exempt drop-in) gets scheduling priority over
 # any stream user under contention. Under no contention, streams use any
 # idle CPU. The root-exempt drop-in restores CPUWeight=100 for uid 0.
 CPU_WEIGHT = 30
-# #922: CPUQuota hard-caps each stream at 300% (3 of 8 vCPU cores). Was
+# #922: CPUQuota hard-caps each stream at 600% since #1321 (was 300%). Was
 # DELIBERATELY absent in #775 (the collapse was memory thrash, not CPU),
 # but the owner's live incident (david3 test at 98% CPU, owner can't
 # scroll) showed the CPU gap is real.
-CPU_QUOTA_PCT = 300
+CPU_QUOTA_PCT = 600   # #1321: 6 of 8 cores (300 % throttled david3 for days)
 OOM_SCORE_ADJUST = -900
 MEMORY_MIN = "128M"
 VM_SWAPPINESS = 10
@@ -522,7 +524,7 @@ def build_apply_script() -> str:
     # Read-back verify (fail-loud). A skipped slice is exempt (infinity expected
     # there); every applied slice must show finite MemoryMax/MemoryHigh within a
     # tolerance band, TasksMax exactly the policy value, CPUWeight exactly 30,
-    # and CPUQuotaPerSecUSec exactly 3s (= 300%).
+    # and CPUQuotaPerSecUSec CPU_QUOTA_PCT // 100 seconds.
     parts.append(
         'lo_max=$((exp_max * 3 / 4)); hi_max=$((exp_max * 3 / 2))\n'
         'lo_high=$((exp_high * 3 / 4)); hi_high=$((exp_high * 3 / 2))\n'
