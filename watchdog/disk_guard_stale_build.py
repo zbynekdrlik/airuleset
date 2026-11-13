@@ -112,12 +112,16 @@ def _subdirs(path):
 
 
 def _incremental_dirs(target):
-    """``<profile>/incremental`` and ``<triple-or-custom>/<profile>/incremental``, where
+    return profile_children(target, "incremental")
+
+
+def profile_children(target, name):
+    """``<profile>/<name>`` and ``<triple-or-custom>/<profile>/<name>``, where
     Cargo's own lock file beside it proves that it is a Cargo profile dir."""
     found = []
     for first in _subdirs(target):
         for parent in [first] + _subdirs(first):
-            path = os.path.join(parent, "incremental")
+            path = os.path.join(parent, name)
             if (os.path.isdir(path) and not os.path.islink(path)
                     and os.path.isfile(os.path.join(parent, ".cargo-lock"))):
                 found.append(path)

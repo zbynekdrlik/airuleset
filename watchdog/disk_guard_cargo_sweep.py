@@ -26,7 +26,7 @@ import re
 import shutil
 
 from watchdog.disk_guard_stale_build import (_cargo_targets, _hold_build_locks,
-                                             _is_cargo_target, _subdirs)
+                                             _owning_target, profile_children)
 
 CLS = "stale-target-artifacts"
 MAX_AGE_DAYS = 3
@@ -42,28 +42,19 @@ def _hash_of(name):
 
 def profile_dirs(target):
     """Cargo profile dirs of ``target``, proven by ``.fingerprint/`` + ``.cargo-lock``."""
-    found = []
-    for first in _subdirs(target):
-        for parent in [first] + _subdirs(first):
-            fp = os.path.join(parent, ".fingerprint")
-            if (os.path.isdir(fp) and not os.path.islink(fp)
-                    and os.path.isfile(os.path.join(parent, ".cargo-lock"))):
-                found.append(parent)
-    return sorted(found)
+    return [os.path.dirname(p) for p in profile_children(target, ".fingerprint")]
 
 
 def _last_use(path):
-    """Newest ``max(atime, mtime)`` under a fingerprint dir (the dir itself if empty)."""
+    """Newest ``max(atime, mtime)`` of the files in a fingerprint dir. An empty dir
+    gives its mtime only: listing it here bumps its own atime."""
     newest = None
     with os.scandir(path) as it:
         for e in it:
             st = e.stat(follow_symlinks=False)
             t = max(st.st_atime, st.st_mtime)
             newest = t if newest is None else max(newest, t)
-    if newest is None:
-        st = os.lstat(path)
-        newest = max(st.st_atime, st.st_mtime)
-    return newest
+    return os.lstat(path).st_mtime if newest is None else newest
 
 
 def _unit_ages(profile):
@@ -164,19 +155,12 @@ def _remove(path):
     return freed
 
 
-def _owning_target(profile):
-    for cand in (os.path.dirname(profile), os.path.dirname(os.path.dirname(profile))):
-        if _is_cargo_target(cand):
-            return cand
-    return None
-
-
 def sweep_profile(profile, now):
     """The act: freed bytes, or -1 when a build runs or the target is in use.
     The liveness read comes before the holds: our own open lock files would read
     as a live process in the target."""
     from cli_target_purge import _target_in_live_use
-    target = _owning_target(profile)
+    target = _owning_target(os.path.join(profile, "deps"))
     if (target is None or os.path.realpath(profile) != os.path.join(
             os.path.realpath(target), os.path.relpath(profile, target))
             or _target_in_live_use(target)):
@@ -185,12 +169,15 @@ def sweep_profile(profile, now):
     if fds is None:
         return -1
     try:
-        freed = 0
+        freed, failed = 0, set()
         for path in _entries(profile, stale_hashes(profile, now)):
+            h = _hash_of(os.path.basename(path))
+            if h in failed:         # keep its fingerprint: the next pass retries the unit
+                continue
             try:
                 freed += _remove(path)
             except OSError:
-                continue            # the unit stays stale and the next pass retries
+                failed.add(h)
         return freed
     finally:
         for fd in fds:

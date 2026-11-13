@@ -179,6 +179,54 @@ class TestSweep(unittest.TestCase):
         self.sweep()
         self.assertTrue((self.profile / "deps" / ("libserde-%s.rlib" % OLD)).is_file())
 
+    def test_a_hash_with_a_fresh_main_dir_and_a_stale_twin_is_kept(self):
+        """The mirror order of the twin test: a fresh dir must win whichever is read last."""
+        _age(self.profile / ".fingerprint" / ("serde-" + OLD), 60)
+        twin = self.profile / ".fingerprint" / ("serde-build-" + OLD)
+        twin.mkdir()
+        (twin / "run").write_text("x")
+        _age(twin, 10 * DAY)
+        self.sweep()
+        self.assertTrue((self.profile / "deps" / ("libserde-%s.rlib" % OLD)).is_file())
+        self.assertTrue(twin.is_dir())
+
+    def test_a_symlinked_deps_dir_is_never_entered(self):
+        outside = self.target.parent / "outside-deps"
+        (self.profile / "deps").rename(outside)
+        (self.profile / "deps").symlink_to(outside)
+        self.sweep()
+        self.assertTrue((outside / ("libserde-%s.rlib" % OLD)).is_file())
+
+    def test_a_profile_reached_through_a_symlinked_triple_refuses(self):
+        real = self.target.parent / "real-triple"
+        (real / "debug").mkdir(parents=True)
+        (real / "debug" / ".cargo-lock").write_text("")
+        _unit(real / "debug", "serde", OLD, 10 * DAY)
+        (self.target / "x86_64-pc-windows-gnu").symlink_to(real)
+        with mock.patch("cli_target_purge._target_in_live_use", return_value=False):
+            freed = cs.sweep_profile(str(self.target / "x86_64-pc-windows-gnu" / "debug"), NOW)
+        self.assertEqual(freed, -1)
+        self.assertTrue((real / "debug" / "deps" / ("libserde-%s.rlib" % OLD)).is_file())
+
+    def test_a_unit_whose_files_cannot_go_keeps_its_fingerprint_for_the_next_pass(self):
+        deps = self.profile / "deps"
+        deps.chmod(0o555)
+        self.addCleanup(deps.chmod, 0o755)
+        self.sweep()
+        self.assertTrue((deps / ("libserde-%s.rlib" % OLD)).is_file())
+        self.assertTrue((self.profile / ".fingerprint" / ("serde-" + OLD)).is_dir())
+
+    def test_an_empty_fingerprint_dir_is_aged_by_its_mtime(self):
+        """Listing the dir bumps its own atime, so the atime must not keep it alive."""
+        h = "1111111111111111"
+        fp = self.profile / ".fingerprint" / ("empty-" + h)
+        fp.mkdir()
+        os.utime(fp, (NOW - 60, NOW - 10 * DAY))
+        (self.profile / "deps" / ("libempty-%s.rlib" % h)).write_bytes(b"e" * 10)
+        self.sweep()
+        self.assertFalse(os.path.lexists(self.profile / "deps" / ("libempty-%s.rlib" % h)))
+        self.assertFalse(os.path.lexists(fp))
+
     def test_a_target_that_became_live_refuses_without_deleting(self):
         freed, _use = self.sweep(live=True)
         self.assertEqual(freed, -1)
