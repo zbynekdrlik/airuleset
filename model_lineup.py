@@ -61,6 +61,13 @@ PROJECT_MAIN_MODELS = {
     "pz-server": "claude-opus-4-6",
 }
 
+# Owner-SELECTABLE mains (#1314, owner 13.11.2026: "vies doplnit moznost ze si
+# viem aj fable 5.2 model pouzit"). Any project's session may run one of these
+# after the owner types `/model <id>`: the #1203 gate does not block it and
+# Job 54 does not switch it back. Never a launch or restore target, never a
+# MODEL_TIERS dispatch tier. The one exact-id exception to the #1248 Fable ban.
+OWNER_SELECTABLE_MAIN_MODELS = ("claude-fable-5-2",)
+
 
 def dir_key(path):
     """Claude Code's project key for a launch dir: `/`, `.`, `_` become `-`
@@ -83,11 +90,12 @@ def project_of_key(key):
 def main_models(name=None):
     """`(target, allowed)` for project `name` (None = no declared project):
     the model a session launches on and is restored to, and every model it may
-    run on without being blocked (the target plus MANAGED_MODEL)."""
+    run on without being blocked (the target, MANAGED_MODEL and the owner-
+    selectable mains, #1314)."""
     target = PROJECT_MAIN_MODELS.get(name) if isinstance(name, str) else None
     if not target:
-        return MANAGED_MODEL, (MANAGED_MODEL,)
-    return target, (target, MANAGED_MODEL)
+        return MANAGED_MODEL, (MANAGED_MODEL,) + OWNER_SELECTABLE_MAIN_MODELS
+    return target, (target, MANAGED_MODEL) + OWNER_SELECTABLE_MAIN_MODELS
 
 
 def launcher_model_lines():

@@ -59,7 +59,7 @@ MANAGED_EFFORT_LEVEL = "high"
 # Model lineup (MODEL_TIERS) + the managed main-session model (MANAGED_MODEL)
 # live in model_lineup.py (#1203: a per-tool-call hook reads them without
 # importing this module); re-exported here unchanged.
-from model_lineup import MODEL_TIERS, MANAGED_MODEL, PROJECT_MAIN_MODELS  # noqa: E402,F401
+from model_lineup import MODEL_TIERS, MANAGED_MODEL, PROJECT_MAIN_MODELS, OWNER_SELECTABLE_MAIN_MODELS  # noqa: E402,F401
 
 # Models BANNED as a DISPATCH value fleet-wide (owner directive 2026-08-13,
 # reaffirmed #991 2026-09-11): Opus 5 (the exact id `claude-opus-5`) is
@@ -162,7 +162,8 @@ def is_banned_model_for_audit(value):
     if v in BANNED_MODELS:
         return True
     core = _strip_served_date_suffix(_PROVIDER_PREFIX_RE.sub("", v))
-    return core in BANNED_MODELS or core.startswith("claude-fable")  # #1248 family
+    return core not in OWNER_SELECTABLE_MAIN_MODELS and (  # #1314 owner choice; #1248 family
+        core in BANNED_MODELS or core.startswith("claude-fable"))
 
 # Managed default subagent-spawn ceiling (#288, 2026-08-07): Claude Code's
 # own default `CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION` is 200, and on CC

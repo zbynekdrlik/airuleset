@@ -34,6 +34,8 @@ _is_banned() {
     v="${v// /}"
     v=$(printf '%s' "$v" | sed -E 's/\[[0-9]+m\]$//; s/^((us|eu|apac|global)\.)?anthropic[./]//')
     core=$(printf '%s' "$v" | sed -E 's/-[0-9]{8}$//')
+    # #1314: the owner may pick Fable 5.2 (model_lineup.OWNER_SELECTABLE_MAIN_MODELS).
+    [ "$core" = "claude-fable-5-2" ] && return 1
     case "$v" in opus|opusplan|claude-opus-5|fable|claude-fable-5|claude-fable-5-1|fable*|claude-fable*) return 0 ;; esac
     case "$core" in claude-opus-5|claude-fable|claude-fable-*) return 0 ;; esac
     return 1
