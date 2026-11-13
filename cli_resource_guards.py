@@ -92,7 +92,7 @@ SWAP_SIZE_GB = 10
 # subagents (david3: 934k memory.high events, typing lag); 30/40 % fit it.
 MEMORY_HIGH_PCT = 30
 MEMORY_MAX_PCT = 40
-TASKS_MAX = 512
+TASKS_MAX = 2048   # #1321: david3 peaked at 501 tasks (512 was never live: 50-fairness.conf set 8192)
 # #922: CPUWeight lowered from 100 (default, no advantage) to 30 — root
 # (weight 100 via the root-exempt drop-in) gets scheduling priority over
 # any stream user under contention. Under no contention, streams use any
@@ -123,6 +123,8 @@ from cli_resource_guards_quota import (  # noqa: E402, F401
     _render_quota_apply_block, _render_quota_apply_lock_block,
     _render_quota_timer_enable_block,
 )
+
+from cli_resource_guards_conflicts import render_stale_fairness_removal  # noqa: E402 (#1321)
 
 # Shared Playwright browser install path (#950-B)
 PLAYWRIGHT_SHARED_PATH = "/opt/ms-playwright"
@@ -455,7 +457,7 @@ def build_apply_script() -> str:
     parts.append("")
     # daemon-reload MUST precede any set-property (systemd must re-read the
     # template drop-in first). sysctl is best-effort LOUD.
-    parts.append("systemctl daemon-reload")
+    parts.append(render_stale_fairness_removal() + "\nsystemctl daemon-reload")  # #1321
     parts.append(
         'sysctl --system >/dev/null 2>&1 '
         '|| echo "  ⚠ resource-guards: sysctl --system failed (non-fatal)"'

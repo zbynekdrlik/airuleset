@@ -45,7 +45,7 @@ class TestDropInRendering(unittest.TestCase):
         self.assertIn("[Slice]", d)
         self.assertIn("MemoryHigh=30%", d)   # #1321: 12% (~1.9 GB) throttled one Claude session
         self.assertIn("MemoryMax=40%", d)
-        self.assertIn("TasksMax=512", d)
+        self.assertIn("TasksMax=2048", d)   # #1321
         # #922: CPUWeight lowered from 100 (default, no advantage) to 30 —
         # stream users get 30/130 (~23%) of CPU when contending with root
         # (weight 100 via root-exempt drop-in). Under no contention, streams
