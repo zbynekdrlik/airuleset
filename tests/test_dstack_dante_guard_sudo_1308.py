@@ -11,12 +11,8 @@ import unittest
 import cli_account_bootstrap as bootstrap
 import cli_account_hardening as hardening
 
-GUARD = [
-    "/usr/sbin/nft -f /etc/nftables.d/dante-guard.nft",
-    "/usr/sbin/nft list table inet dante_guard",
-    "/usr/sbin/nft delete table inet dante_guard",
-    "/usr/bin/systemctl restart avahi-daemon",
-]
+# #1317: dev1 moved to dstack's generic Dante-leg filter; the guard lines follow it.
+from test_dstack_dante_leg_sudo_1317 import LEG as GUARD  # noqa: E402
 
 
 class TestDanteGuardSudo(unittest.TestCase):
@@ -52,14 +48,14 @@ class TestRender(unittest.TestCase):
         self.assertIn("dstack ALL=(root) NOPASSWD:NOEXEC: ", self.out)
 
     def test_ruleset_file_is_checked(self):
-        self.assertIn("for P in /etc/nftables.d/dante-guard.nft; do", self.out)
+        self.assertIn("for P in /etc/dstack/dante-leg.nft; do", self.out)
 
     def _run_checks(self, owner_of, dir_owner=None):
         snippet = hardening.render_sudo_file_checks(GUARD)
         with tempfile.TemporaryDirectory() as tmp:
             stub = os.path.join(tmp, "stat")
             with open(stub, "w") as fh:
-                fh.write('#!/bin/bash\nif [ "${@: -1}" = /etc/nftables.d ]; '
+                fh.write('#!/bin/bash\nif [ "${@: -1}" = /etc/dstack ]; '
                          'then echo "%s"; else echo "%s"; fi\n'
                          % (dir_owner or owner_of, owner_of))
             os.chmod(stub, 0o755)
@@ -77,7 +73,7 @@ class TestRender(unittest.TestCase):
     def test_writable_parent_dir_fails(self):
         r = self._run_checks("root -rw-r--r--", dir_owner="dstack drwxr-xr-x")
         self.assertEqual(r.returncode, 1)
-        self.assertIn("/etc/nftables.d ", r.stderr)
+        self.assertIn("/etc/dstack ", r.stderr)
 
     def test_relative_path_fails_fast(self):
         snippet = hardening.render_sudo_file_checks(["/usr/sbin/nft -f x.nft"])
