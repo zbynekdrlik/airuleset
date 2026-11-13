@@ -135,8 +135,9 @@ def discover_stale_units(home=None, now=None, live_fn=None):
 
 
 def plan_stale_units(home, now, level, norm_action):
-    """#1318 — at critical disk only, like build-incremental (#1286)."""
-    if level != "critical":
+    """#1318 — from the drain level (80 %): unused units cost no rebuild, and
+    waiting for critical (90 %) let dev1 reach the edge every week (owner 13.11.)."""
+    if level not in ("drain", "critical"):
         return []
     try:
         return [norm_action(CLS, r, "delete") for r in discover_stale_units(home=home, now=now)]

@@ -1,5 +1,5 @@
 """#1318 (dev1, 13.11.2026): a Cargo target built daily keeps every old-hash unit in
-deps/, build/ and .fingerprint/ forever. At critical disk the guard removes the units
+deps/, build/ and .fingerprint/ forever. From the 80 % drain level the guard removes the units
 whose fingerprint was not used for 3 days (the cargo-sweep 0.8.0 ``--time`` rule)."""
 import fcntl
 import json
