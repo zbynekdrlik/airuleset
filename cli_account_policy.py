@@ -37,7 +37,7 @@ DSTACK_NMCLI_SUDO = {
     "sudo": True,
     "sudo_reason": "dstack #155 on dev1: switch Dante between dante-net and "
                    "the VLAN 70 connection dante-vlan, and roll back; "
-                   "#1308: load/list/delete the dante_guard nft table, "
+                   "#1308/#1317: load/list/delete the dstack_dante_leg nft table, "
                    "restart avahi",
     "sudo_commands": ["/usr/bin/nmcli con " + c for c in (
         "mod dante-net connection.autoconnect no",
@@ -53,15 +53,15 @@ DSTACK_NMCLI_SUDO = {
         "down dante-vlan",
         "delete dante-vlan",
     )] + [
-        # #1308 (owner 12.11.2026, option 1): the Dante-leg filter and avahi.
+        # #1308 (owner 12.11.2026, option 1): the Dante-leg filter and avahi;
+        # #1317: dstack's generic filter (dstack #264), `=` escaped for sudoers.
         # The ruleset file is root-owned (airuleset installs it by hand after
-        # reviewing dstack's text, #1308; the bootstrap refuses until it
-        # exists root-owned, render_sudo_file_checks), so `nft -f`
-        # never reads a file dstack can write: an `include` there would read
-        # other accounts' files as root.
-        "/usr/sbin/nft -f /etc/nftables.d/dante-guard.nft",
-        "/usr/sbin/nft list table inet dante_guard",
-        "/usr/sbin/nft delete table inet dante_guard",
+        # reviewing dstack's text; the bootstrap refuses until it exists
+        # root-owned, render_sudo_file_checks), so `nft -f` never reads a file
+        # dstack can write: an `include` there would read other accounts' files.
+        "/usr/sbin/nft -D dante_leg\\=enp38s0.70 -f /etc/dstack/dante-leg.nft",
+        "/usr/sbin/nft list table inet dstack_dante_leg",
+        "/usr/sbin/nft delete table inet dstack_dante_leg",
         "/usr/bin/systemctl restart avahi-daemon",
     ],
 }

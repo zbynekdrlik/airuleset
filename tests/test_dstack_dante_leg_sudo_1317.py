@@ -46,3 +46,13 @@ class TestFileCheck(unittest.TestCase):
     def test_f_not_last_is_not_a_file(self):
         self.assertEqual(hardening.render_sudo_file_checks(
             ["/usr/sbin/nft -f /etc/x.nft -c"]), "")
+
+
+class TestEscapedEquals(unittest.TestCase):
+    def test_escaped_equals_accepted(self):
+        self.assertIsNone(hardening.sudo_command_problem(LEG[0]))
+
+    def test_bare_equals_and_other_sudoers_specials_refused(self):
+        for cmd in ("/usr/sbin/nft -D a=b -f /x", "/usr/sbin/nft -D a\\\\=b",
+                    "/usr/bin/nmcli a,b", "/usr/bin/nmcli a:b", "/usr/bin/nmcli a\\b"):
+            self.assertIsNotNone(hardening.sudo_command_problem(cmd), cmd)

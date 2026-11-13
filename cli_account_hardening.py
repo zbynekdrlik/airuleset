@@ -52,8 +52,9 @@ PRIVILEGED_GROUPS = ("sudo", "admin", "wheel", "root", "docker", "lxd", "disk",
 PAM_SU_LINE = "auth required pam_wheel.so deny use_uid group=%s" % PROJECT_GROUP
 
 # A scoped sudo command runs a binary from the system bin dirs ONLY (never an
-# account-writable path, never `..`), with explicit plain arguments.
-SUDO_CMD_RE = re.compile(r"(/usr)?/s?bin/[A-Za-z0-9_.+-]+( [A-Za-z0-9_./+-]+)+")
+# account-writable path, never `..`), with explicit plain arguments; `\=` is a
+# sudoers-escaped literal `=` (#1317: `nft -D var\=value`), a bare `=` never.
+SUDO_CMD_RE = re.compile(r"(/usr)?/s?bin/[A-Za-z0-9_.+-]+( (?:[A-Za-z0-9_./+-]|\\=)+)+")
 
 # Basenames a "scoped" sudo rule may never name: shells, interpreters, editors,
 # pagers and generic exec/copy tools are root-equivalent whatever the args.
@@ -256,11 +257,12 @@ def render_sudo_file_checks(commands):
     """#1308: a scoped line ``<bin> -f <path>`` makes root read ``<path>``, so
     that file and every ancestor dir must be root-owned and not
     group/other-writable, or the account could feed root its own input.
-    Only ``/usr/sbin/nft -f <abs path>`` counts (``nmcli -f`` is --fields);
-    a symlink anywhere on the path is refused, like render_sudo_path_checks.
+    Only an ``/usr/sbin/nft`` line ending ``-f <abs path>`` counts (``nmcli
+    -f`` is --fields; #1317: also the ``-D <var> -f <path>`` form); a symlink
+    anywhere on the path is refused, like render_sudo_path_checks.
     Empty for rules without it (the golden renders stay byte-identical)."""
-    files = sorted({w[2] for w in (c.split(" ") for c in commands)
-                    if w[0] == "/usr/sbin/nft" and len(w) == 3 and w[1] == "-f"})
+    files = sorted({w[-1] for w in (c.split(" ") for c in commands)
+                    if w[0] == "/usr/sbin/nft" and len(w) >= 3 and w[-2] == "-f"})
     if not files:
         return ""
     return (
