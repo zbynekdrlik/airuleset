@@ -400,7 +400,7 @@ SERVICE_ACCOUNTS = {
     "devbridge": {
         "host": "dev1",
         "sudo": False,
-        "repo": "zbynekdrlik/devbridge",
+        "repo": "zbynekdrlik/devbridge", "extra_repos": ["zbynekdrlik/devbridge-releases"],  # devbridge#123
         "github_app": True, "repo_secrets": [],
         "secrets": [],
         "project_dir": "devel/devbridge",

@@ -113,5 +113,12 @@ class TestDevbridgeAccount(unittest.TestCase):
                          (ACCT, "/home/devbridge/devel/devbridge"))
 
 
+class TestReleasesMirror(unittest.TestCase):
+    def test_token_also_covers_the_public_releases_repo(self):
+        # devbridge#123 (owner 4.11.2026): code private, installers in a public mirror.
+        self.assertEqual(bootstrap.account_spec(ACCT)["extra_repos"],
+                         ["zbynekdrlik/devbridge-releases"])
+
+
 if __name__ == "__main__":
     unittest.main()
