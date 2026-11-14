@@ -55,6 +55,18 @@ class TestStreamRows(unittest.TestCase):
         reg = REG + [{"name": "s1", "host": "h1", "account": "ua", "path": "/s"}]
         self.assertEqual(pc.host_projects(reg, "h1", _doc())["s1"]["account"], "ua")
 
+    def test_a_bridge_far_end_wins_over_a_stream_of_the_same_name(self):
+        doc = _doc()
+        doc["bridges"] = {"s1": {"account": "x", "path": "~/p",
+                                 "hosts": {"h1": {"account": "s1-peer"}}}}
+        self.assertEqual(pc.host_projects(REG, "h1", doc)["s1"]["account"], "s1-peer")
+
+    def test_an_account_that_is_no_user_name_is_never_a_project(self):
+        # review A: a NUL reaches pwd.getpwnam as ValueError, not the caught KeyError
+        for acct in ("s\x001", "s 1", "../s1", ""):
+            self.assertNotIn("s1", pc.host_projects(
+                REG, "h1", _doc(streams={"s1": {"account": acct, "path": "~/w"}})), acct)
+
 
 class TestStreamValidation(unittest.TestCase):
     def errors(self, streams):
@@ -87,11 +99,58 @@ class TestStreamValidation(unittest.TestCase):
     def test_streams_must_be_an_object(self):
         self.assertTrue([e for e in self.errors(["s1"]) if "streams" in e])
 
-    def test_fleet_users_of_subdev(self):
+    def test_a_stream_never_shadows_a_bridge_far_end(self):
+        doc = _doc(streams={"s1": {"account": "s1", "path": "~/w"}})
+        doc["bridges"] = {"s1": {"account": "x", "home": "dev1", "path": "~/p",
+                                 "hosts": {"h1": {"account": "s1"}}}}
+        errs = cpc.validate_links(doc, REG, root_hosts={"h1", "dev1"}, stream_users=_users)
+        self.assertTrue([e for e in errs if "collides" in e], errs)
+
+    def test_stream_users_are_the_reduced_authority_accounts_of_the_host(self):
         users = cpc.stream_users("subdev")
         self.assertIn("david3", users)
-        self.assertNotIn("simap1", users)               # #851 paused: never named
+        self.assertIn("simap1", users)        # paused is a runtime skip, not a config error
+        # review A: a shared or full-authority account would let every project on it
+        # speak as the stream (#1266), and a project account is a registry project
+        self.assertEqual(cpc.stream_users("dev1"), set())
+        self.assertEqual(cpc.stream_users("gatekeeper"), set())
         self.assertEqual(cpc.stream_users("nope"), set())
+
+    def test_a_shared_account_is_refused_as_a_stream(self):
+        doc = {"hosts": {"dev1": {"links": [["a", "newlevel"]], "topics": {"a|newlevel": "t"},
+                                  "streams": {"newlevel": {"account": "newlevel",
+                                                           "path": "~/devel"}}}}}
+        errs = cpc.validate_links(doc, [dict(REG[0], host="dev1")], root_hosts={"dev1"})
+        self.assertTrue([e for e in errs if "stream account" in e], errs)
+
+    def test_a_paused_stream_leaves_the_root_leg_but_breaks_no_host(self):
+        # review B: a validation error would stop the root leg on EVERY host
+        import airuleset
+        hosts = [dict(h, paused="x") if h.get("user") == "david3" else h
+                 for h in airuleset.REMOTE_HOSTS]
+        doc, reg = cpc.load_links(), cpc.load_registry()
+        with mock.patch.object(airuleset, "REMOTE_HOSTS", hosts):
+            self.assertEqual(cpc.validate_links(doc, reg), [])
+            self.assertEqual(cpc.accounts_for_host("subdev", doc, reg), ["devbridge-peer"])
+
+    def test_a_partner_reached_both_locally_and_over_a_bridge_is_refused(self):
+        # review A: inbound carries only `from`, so the two links could not be told apart
+        doc = _doc(links=[["a", "s1"], ["a", "p"]])
+        doc["hosts"]["h1"]["topics"]["a|p"] = "t"
+        doc["hosts"]["dev1"] = {"links": [["a", "p"]], "topics": {"a|p": "t"}}
+        doc["bridges"] = {"p": {"account": "pa", "home": "dev1", "path": "~/p",
+                                "hosts": {"h1": {"account": "p-peer", "ssh": "p-peer@1.2.3.4",
+                                                 "identity": "~/k", "path": cpc.SNAPSHOT_DIR,
+                                                 "key": KEY}}}}
+        reg = REG + [dict(REG[0], host="dev1"),
+                     {"name": "p", "host": "dev1", "account": "pa", "path": "~/p"}]
+        errs = cpc.validate_links(doc, reg, root_hosts={"h1", "dev1"}, stream_users=_users)
+        self.assertTrue([e for e in errs if "both" in e], errs)
+        doc["hosts"]["dev1"]["links"] = [["p", "q"]]
+        doc["hosts"]["dev1"]["topics"] = {"p|q": "t"}
+        reg.append({"name": "q", "host": "dev1", "account": "qa", "path": "~/q"})
+        self.assertEqual(cpc.validate_links(doc, reg, root_hosts={"h1", "dev1"},
+                                            stream_users=_users), [])
 
 
 class TestCommittedLink(unittest.TestCase):
@@ -157,18 +216,23 @@ class TestCommittedLink(unittest.TestCase):
         run = mock.Mock(return_value=Ok())
         self.assertTrue(cpc.install_step(user="david3", host="subdev", claude_dir=d, run=run))
         self.assertTrue(Path(d, cpc.MARKER_NAME).exists())
+        self.assertTrue(run.called)
+        run.reset_mock()
+        Path(d, cpc.MARKER_NAME).unlink()
         for other in ("david1", "david2", "simap1", "montalu1", "miva1"):
             self.assertTrue(cpc.install_step(user=other, host="subdev", claude_dir=d, run=run))
             self.assertFalse(Path(d, cpc.MARKER_NAME).exists(), other)
-            Path(d, cpc.MARKER_NAME).write_text("x")
-        Path(d, cpc.MARKER_NAME).unlink()
+        run.assert_not_called()          # no `claude plugin` call for an unlinked stream
 
     def test_snapshot_carries_the_stream_for_old_code(self):
         rows = [r for r in cpc.snapshot_registry(self.reg, self.doc) if r.get("name") == "david3"]
         self.assertEqual([(r["host"], r["account"]) for r in rows], [("subdev", "david3")])
 
-    def test_no_issue_token_for_a_stream(self):
-        self.assertNotIn("zbynekdrlik/david3", cpc.peer_repos("devbridge", self.doc, self.reg))
+    def test_no_committed_stream_is_paused_or_pending(self):
+        import airuleset
+        idle = {h["user"] for h in airuleset.REMOTE_HOSTS if h.get("paused") or h.get("pending")}
+        for host, entry in self.doc["hosts"].items():
+            self.assertFalse(set(entry.get("streams", {})) & idle, host)
 
 
 class TestStreamRuntime(_Env):
@@ -237,17 +301,21 @@ class TestCompositeHome(_Env):
         home.notify = lambda text, meta: seen.append((text, meta))
         home.start_listener()
         self.addCleanup(home.close)
-        for _ in range(200):
+        for _ in range(500):
             if self.far.listener is not None and home.children:
                 break
             time.sleep(0.01)
+        else:
+            self.fail("the bridge never came up")
         return home, seen
 
     def wait(self, box):
-        for _ in range(200):
+        for _ in range(500):
             if box:
                 break
             time.sleep(0.01)
+        else:
+            self.fail("nothing arrived")
 
     def test_the_local_link_still_works_both_ways(self):
         got = []
@@ -292,6 +360,15 @@ class TestCompositeHome(_Env):
                        sock_dir=self.lsock, config_dir=self.cfg, log=_Recorder())
         self.assertIsNone(pc.home_peer(("home", self.SPEC), bare, True, self.home,
                                        log=_Recorder()).local)
+
+    def test_an_unarmed_home_still_lists_its_local_links(self):
+        home = pc.home_peer(("home", self.SPEC), self.local_peer("home"), False, self.home,
+                            log=_Recorder())
+        ok, text = home.list_peers()
+        self.assertTrue(ok, text)
+        self.assertIn("loc", text)
+        self.assertEqual(home.send("alpha", "x"), (False, pc.NOT_ARMED))
+        home.close()
 
     def test_close_closes_the_local_listener(self):
         home, _ = self.start()
