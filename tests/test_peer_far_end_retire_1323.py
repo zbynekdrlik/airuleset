@@ -163,6 +163,57 @@ class TestRetire(_World):
         self.assertNotEqual(r.returncode, 0)
         self.assertTrue(self.marked("old-peer"))
 
+    def test_a_far_end_that_moved_to_another_host_is_removed_from_the_old_one(self):
+        self.add_account("live-peer")
+        doc = _doc("live-peer")    # declared on h1 only
+        r = self.run_script(cpc.render_teardown_script(doc, host="h2"), keys_of="live-peer")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn("live-peer", self.accounts())
+        self.add_account("live-peer")
+        r = self.run_script(cpc.render_teardown_script(doc, host="h1"))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("live-peer", self.accounts())
+
+    def test_a_bad_marker_name_is_dropped_never_userdel(self):
+        os.makedirs(self.root + MARKERS)
+        Path(self.root + MARKERS, "Bad_Name").write_text("x\n")
+        r = self.teardown_with(_doc())
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertFalse(self.marked("Bad_Name"))
+        self.assertEqual(Path(self.log).read_text(), "")
+        self.assertIn("Bad_Name", r.stderr)
+
+    def test_an_unsafe_keep_entry_is_refused_at_render(self):
+        doc = _doc("live-peer")
+        doc["bridges"]["b0"]["hosts"]["h1"]["account"] = "x$(id)"
+        with self.assertRaises(ValueError):
+            cpc.render_teardown_script(doc)
+
+    def test_a_symlinked_ssh_dir_is_refused_and_fails_loud(self):
+        self.add_account("old-peer", key=False)
+        os.rmdir(os.path.join(self.home("old-peer"), ".ssh"))
+        os.symlink(self.root, os.path.join(self.home("old-peer"), ".ssh"))
+        r = self.teardown_with(_doc())
+        self.assertEqual(r.returncode, 5, r.stdout + r.stderr)
+        self.assertIn("old-peer", self.accounts())
+        self.assertTrue(self.marked("old-peer"))
+
+    def test_one_stuck_account_neither_skips_the_others_nor_the_teardown(self):
+        self.add_account("a-peer")
+        self.add_account("b-peer")
+        Path(self.bindir, "userdel").write_text(
+            '#!/bin/bash\n[ "$1" = a-peer ] && exit 8\n'
+            'grep -v "^$1:" "$FAKE_PASSWD" > "$FAKE_PASSWD.n"; mv "$FAKE_PASSWD.n" "$FAKE_PASSWD"\n')
+        os.makedirs(os.path.dirname(self.root + cpc.POLICY_PATH))
+        Path(self.root + cpc.POLICY_PATH).write_text("x")
+        r = self.teardown_with(_doc())
+        self.assertEqual(r.returncode, 5, r.stdout + r.stderr)
+        self.assertIn("a-peer", self.accounts())
+        self.assertTrue(self.marked("a-peer"))
+        self.assertNotIn("b-peer", self.accounts())
+        self.assertIn("torn down", r.stdout)
+        self.assertFalse(os.path.exists(self.root + cpc.POLICY_PATH))
+
     def test_the_home_script_sweeps_too(self):
         self.add_account("old-peer")
         with mock.patch.object(cpc, "load_links", return_value=_doc()):
