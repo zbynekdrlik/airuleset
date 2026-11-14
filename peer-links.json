@@ -198,6 +198,10 @@
         [
           "airuleset",
           "devbridge"
+        ],
+        [
+          "camera-box",
+          "fohmixer"
         ]
       ],
       "topics": {
@@ -249,7 +253,8 @@
         "camera-box|restreamer": "the E2E YouTube leg: camera-box measures the stream end to end; restreamer owns its av-gate session and the egress to YouTube",
         "presenter|songplayer": "SongPlayer playback and the Presenter screens at SNV: what plays and what is shown, and the cues between them",
         "dstack|presenter": "the Dante side of presenter's PC (SNV, presenter.lan): its audio in by dlink instead of VBAN (the preacher's audio for translation), and SNV's network (one NIC, Dante as VLAN 70)",
-        "dstack|mikrotik": "one NIC per production PC (dstack #155): Dante VLAN 70 plus a LAN VLAN, CRS310 port tagging, .lan records to LAN addresses; dstack coordinates, mikrotik owns switch and router config"
+        "dstack|mikrotik": "one NIC per production PC (dstack #155): Dante VLAN 70 plus a LAN VLAN, CRS310 port tagging, .lan records to LAN addresses; dstack coordinates, mikrotik owns switch and router config",
+        "camera-box|fohmixer": "the FOH mix and the camera-box rig: the FOH audio that reaches the stream and OBS, and tests or windows on the SNV show rig that touch the FOH mixer; a Dante question still goes to dstack"
       }
     }
   },
