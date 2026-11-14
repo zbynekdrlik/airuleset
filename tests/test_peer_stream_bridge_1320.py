@@ -141,9 +141,10 @@ class TestCommittedLink(unittest.TestCase):
             calls.append(argv)
             return R()
         import airuleset
-        hosts = [h for h in airuleset.DISK_GUARD_ROOT_HOSTS if h["name"] == "subdev"]
         with mock.patch.object(cpc, "apply_home_policy", return_value=[]):
-            self.assertEqual(cpc.provision_peer_channel_root(hosts=hosts, run=run), [])
+            self.assertEqual(cpc.provision_peer_channel_root(
+                hosts=airuleset.DISK_GUARD_ROOT_HOSTS, run=run, only="subdev"), [])
+        self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0][-2], "root@100.118.174.27")
         self.assertIn("peer-channel-root: ok", calls[0][-1])
         self.assertNotIn("torn down", calls[0][-1])
