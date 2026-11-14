@@ -429,8 +429,8 @@ def _far_end_script(accounts, links_doc):
                        "--shell /bin/sh %s\n" % (acct, home, acct))
             # #1323: mark it ours only with the exact signature our useradd makes,
             # which also adopts a far end created before the marker existed
-            script += ("if [ \"$(getent passwd %s | cut -d: -f6,7)\" = %s ]; then _install %s "
-                       "<<< %s; else echo \"peer-channel-root: far end %s is not ours, not "
+            script += ("if [ \"$(getent passwd %s | cut -d: -f6,7)\" = %s ]; then _c=$CHANGED; "
+                       "_install %s <<< %s; CHANGED=$_c; else echo \"peer-channel-root: far end %s is not ours, not "
                        "marked\" >&2; fi\n"
                        % (acct, shlex.quote(home + ":/bin/sh"),
                           shlex.quote(os.path.join(FAR_MARKER_DIR, acct)), acct, acct))
@@ -439,37 +439,57 @@ def _far_end_script(accounts, links_doc):
     return script
 
 
-def _far_end_sweep(links_doc):
+FAR_ACCOUNT_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
+
+
+def _far_end_sweep(links_doc, host=None):
     """#1323: remove a far-end account the root leg created (marker + our passwd
-    signature) once no ``bridges`` entry names it, on ANY host: key first, then
-    its processes (the open bridge ssh), the account and its home, the marker
-    last, so a failure (``set -e``) leaves the marker for the next run."""
+    signature) once no ``bridges`` entry names it on ``host`` (any host when None,
+    the conservative keep set): key first, then its processes (the open bridge
+    ssh), the account and its home, the marker last. A failed account is logged,
+    keeps its marker for the next run and the others still go; ``_far_end_failed``
+    ends the script non-zero."""
     keep = sorted({far["account"] for spec in peer_channel._bridges(links_doc).values()
                    if isinstance(spec, dict)
-                   for far in (spec.get("hosts") or {}).values()
-                   if isinstance(far, dict) and far.get("account")})
+                   for h, far in (spec.get("hosts") or {}).items()
+                   if (host is None or h == host)
+                   and isinstance(far, dict) and far.get("account")})
+    for a in keep:
+        if not FAR_ACCOUNT_RE.match(str(a)):
+            raise ValueError("bad far-end account %r" % (a,))
     log = "peer-channel-root: retired far end $a"
     return (
+        "SWEEP_FAILED=''\n"
         "for m in %s/*; do\n"
         "    [ -f \"$m\" ] || continue\n"
         "    a=$(basename \"$m\")\n"
         "    case \" %s \" in *\" $a \"*) continue ;; esac\n"
-        "    case \"$a\" in ''|-*|*[!a-z0-9-]*) echo \"peer-channel-root: bad far-end marker\" >&2;"
-        " rm -f \"$m\"; continue ;; esac\n"
+        "    case \"$a\" in ''|-*|*[!a-z0-9-]*) echo \"peer-channel-root: bad far-end marker $m "
+        "removed\" >&2; rm -f \"$m\"; continue ;; esac\n"
         "    if ! getent passwd \"$a\" >/dev/null; then rm -f \"$m\"; continue; fi\n"
         "    if [ \"$(getent passwd \"$a\" | cut -d: -f6,7)\" != \"/var/lib/$a:/bin/sh\" ]; then\n"
         "        echo \"peer-channel-root: far end $a is no longer ours, left untouched\" >&2\n"
         "        rm -f \"$m\"; continue\n"
         "    fi\n"
+        "    if [ -L \"/var/lib/$a\" ] || [ -L \"/var/lib/$a/.ssh\" ]; then\n"
+        "        echo \"%s: FAILED, symlinked home or .ssh\" >&2; SWEEP_FAILED=1; continue\n"
+        "    fi\n"
         "    rm -f \"/var/lib/$a/.ssh/authorized_keys\"; echo \"%s: key removed\"\n"
         "    pkill -KILL -u \"$a\" || true\n"
         "    for _ in 1 2 3 4 5 6 7 8 9 10; do pgrep -u \"$a\" >/dev/null || break; sleep 0.5; done\n"
-        "    userdel \"$a\"; rm -rf -- \"/var/lib/$a\"; rm -f \"$m\"\n"
+        "    userdel \"$a\" || { echo \"%s: FAILED, userdel rc=$?\" >&2; SWEEP_FAILED=1; continue; }\n"
+        "    rm -rf -- \"/var/lib/$a\"; rm -f \"$m\"\n"
         "    echo \"%s: account removed\"\n"
-        "done\n" % (FAR_MARKER_DIR, " ".join(keep), log, log))
+        "done\n" % (FAR_MARKER_DIR, " ".join(keep), log, log, log, log))
 
 
-def render_root_script(accounts, links_doc=None, registry=None):
+def _far_end_failed():
+    """#1323: the sweep's verdict, at the very end of each root script."""
+    return ("[ -z \"$SWEEP_FAILED\" ] || "
+            "{ echo 'peer-channel-root: far-end sweep failed' >&2; exit 5; }\n")
+
+
+def render_root_script(accounts, links_doc=None, registry=None, host=None):
     """Idempotent root script: mount unit + tmpfiles + policy drop-in + the host
     snapshot of the links and registry (#1270), applied only when changed, then a
     strict read-back. Exit 3 = a named account does not exist, 4 = read-back
@@ -514,13 +534,14 @@ def render_root_script(accounts, links_doc=None, registry=None):
         "{ echo \"peer-channel-root: subdir $a wrong\" >&2; exit 4; }; done\n" % (want, d),
         "python3 -I -c 'import json,sys; json.load(open(sys.argv[1]))' %s || "
         "{ echo 'peer-channel-root: policy unreadable' >&2; exit 4; }\n" % POLICY_PATH,
-        _far_end_sweep(links_doc),
+        _far_end_sweep(links_doc, host),
         "echo \"peer-channel-root: ok dir=%s accounts=[%s] changed=[${CHANGED# }]\"\n"
         % (d, " ".join(accounts)),
+        _far_end_failed(),
     ])
 
 
-def render_home_script(official, links_doc=None):
+def render_home_script(official, links_doc=None, host=None):
     """#1266/#1293: a bridge home box needs only the managed channel allowlist; its
     sockets live on the far end. Idempotent, with a read-back. A shared root host
     keeps Anthropic's official channels too, as the full leg does. #1323: it also
@@ -529,25 +550,26 @@ def render_home_script(official, links_doc=None):
     return ("set -euo pipefail\ncd /\numask 022\nCHANGED=''\n" + _INSTALL_FN
             + _heredoc(POLICY_PATH, render_policy(official))
             + "python3 -I -c 'import json,sys; json.load(open(sys.argv[1]))' %s\n" % POLICY_PATH
-            + _far_end_sweep(links_doc)
-            + "echo \"peer-channel-home: ok changed=[${CHANGED# }]\"\n")
+            + _far_end_sweep(links_doc, host)
+            + "echo \"peer-channel-home: ok changed=[${CHANGED# }]\"\n" + _far_end_failed())
 
 
-def render_teardown_script(links_doc=None):
+def render_teardown_script(links_doc=None, host=None):
     """A root host no longer named in peer-links.json: remove our files (only if
     present) and stop the mount. Idempotent no-op on a host that never had it.
     #1323: retired far ends are swept first, even with nothing else to tear down."""
     links_doc = load_links() if links_doc is None else links_doc
     unit = shlex.quote(MOUNT_UNIT)
-    return ("set -euo pipefail\ncd /\n" + _far_end_sweep(links_doc) +
-            "[ -e %s ] || [ -e %s ] || { echo 'peer-channel-root: nothing to tear down'; exit 0; }\n"
+    return ("set -euo pipefail\ncd /\n" + _far_end_sweep(links_doc, host) +
+            "if [ -e %s ] || [ -e %s ]; then\n"
             "systemctl disable --now %s >/dev/null 2>&1 || true\n"
             "rm -f %s %s %s %s %s\nsystemctl daemon-reload\n"
             "echo 'peer-channel-root: torn down'\n"
+            "else echo 'peer-channel-root: nothing to tear down'; fi\n"
             % (shlex.quote(TMPFILES_PATH), shlex.quote(POLICY_PATH), unit,
                shlex.quote(MOUNT_UNIT_PATH), shlex.quote(TMPFILES_PATH),
                shlex.quote(POLICY_PATH), shlex.quote(SNAPSHOT_LINKS),
-               shlex.quote(SNAPSHOT_REGISTRY)))
+               shlex.quote(SNAPSHOT_REGISTRY)) + _far_end_failed())
 
 
 def apply_home_policy(run=subprocess.run, links_doc=None):
@@ -606,11 +628,11 @@ def provision_peer_channel_root(hosts=None, run=None, links_doc=None, registry=N
             continue
         accounts = accounts_for_host(name, links_doc, registry) if name in named else []
         if accounts:
-            script = render_root_script(accounts, links_doc, registry)
+            script = render_root_script(accounts, links_doc, registry, name)
         elif name in bridge_home_hosts(links_doc):
-            script = render_home_script(OFFICIAL_CHANNEL_PLUGINS, links_doc)  # #1293: keep the policy, never tear it down
+            script = render_home_script(OFFICIAL_CHANNEL_PLUGINS, links_doc, name)  # #1293: keep the policy
         else:
-            script = render_teardown_script(links_doc)
+            script = render_teardown_script(links_doc, name)
         remote = ("sudo -n " if h.get("sudo") else "") + "bash -c " + shlex.quote(script)
         argv = ["ssh", "-i", os.path.expanduser(h["identity"]), "-o", "BatchMode=yes",
                 "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=15",
@@ -742,7 +764,8 @@ def main(argv=None, dirty=uncommitted_config, apply=provision_peer_channel_root)
         print("\n".join(status_lines(a.host)))
         return 0
     if a.action == "render-root":
-        sys.stdout.write(render_root_script(accounts_for_host(a.host or this_host())))
+        host = a.host or this_host()
+        sys.stdout.write(render_root_script(accounts_for_host(host), host=host))
         return 0
     if a.action == "tell":
         return tell(a.to, Path(a.file).read_text(encoding="utf-8"), relay_for(a.to))
