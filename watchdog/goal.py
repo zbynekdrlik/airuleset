@@ -253,12 +253,19 @@ _GOAL_RETIRED_STATE_KEYS = ("goal_dark_rearm_attempts", "goal_fulfilled_rearm",
                             "auth_rearm_hold")
 
 
+def _not_owner_origin(origin):
+    """#1324 -- a NAMED origin that is not the owner's (retired or unknown): only
+    ever dropped. An empty origin is the legacy owner form."""
+    return bool(origin) and origin not in _GOAL_USER_CALLBACK_ORIGINS
+
+
 def request_is_live(req):
-    """#1260 -- True for a pending request delivery will act on. A retired-origin
-    leftover is only ever dropped, so `status` never reads it as "arming" (on a
-    box with the goal kill-switch, `run_once` never runs the sweep that purges it)."""
+    """#1260/#1324 -- True for a pending request delivery will act on. A
+    non-owner leftover is only ever dropped, so `status` never reads it as
+    "arming" (on a box with the goal kill-switch, `run_once` never runs the
+    sweep that purges it)."""
     return isinstance(req, dict) and bool(req) \
-        and req.get("origin") not in _GOAL_RETIRED_ORIGINS
+        and not _not_owner_origin(req.get("origin"))
 
 
 # #757 -- the genuine USER-callback origins: a request written because a HUMAN
@@ -300,7 +307,7 @@ def record_goal_request(session, cwd, text, authority, now=None, path=None,
         return False
     now = time.time() if now is None else now
     new_origin = str(origin or "").strip()
-    if new_origin and new_origin not in _GOAL_USER_CALLBACK_ORIGINS:
+    if _not_owner_origin(new_origin):
         _log_goal_sync("REFUSE record origin=%s sid=%s cwd=%s (#1324: only the "
                        "owner arms a /goal)" % (new_origin, session, cwd))
         return False
@@ -1488,7 +1495,7 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
     if origin in _GOAL_RETIRED_ORIGINS:
         _log_goal_sync("DROP %s-retired sid=%s cwd=%s" % (origin, sid, cwd))
         return "drop:%s-retired" % origin
-    if origin and origin not in _GOAL_USER_CALLBACK_ORIGINS:   # #1324 allowlist
+    if _not_owner_origin(origin):   # #1324 allowlist
         _log_goal_sync("DROP non-owner-origin sid=%s cwd=%s origin=%s"
                        % (sid, cwd, origin))
         return "drop:non-owner-origin"
@@ -1759,10 +1766,12 @@ def goal_sweep(now, run=None, dry_run=False, projects_dir=None,
     # "arming" status on a paused box (david3's 25.10. 14:56 leftover).
     for _rsid, _req in sorted(load_goal_requests(requests_path).items()):
         _rorig = (_req or {}).get("origin") if isinstance(_req, dict) else None
-        if _rorig in _GOAL_RETIRED_ORIGINS and not dry_run:
+        if _not_owner_origin(_rorig) and not dry_run:   # #1324: any non-owner
+            _word = ("%s-retired" % _rorig if _rorig in _GOAL_RETIRED_ORIGINS
+                     else "non-owner-origin")
             clear_goal_request(_rsid, path=requests_path)
-            _log_goal_sync("DROP %s-retired sid=%s (sweep purge)" % (_rorig, _rsid))
-            logs.append("DROP (goal-sweep) sid=%s -> %s-retired" % (_rsid, _rorig))
+            _log_goal_sync("DROP %s sid=%s (sweep purge)" % (_word, _rsid))
+            logs.append("DROP (goal-sweep) sid=%s -> %s" % (_rsid, _word))
     if state is not None and not dry_run:
         state.pop("goal_virgin_arm", None)     # #1260: the retired #1038 rate-floor store
     if watchdog._owner_disabled("goal"):
@@ -2665,10 +2674,12 @@ def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
             seen_state.pop(sid, None)
             pinged_state.pop(sid, None)
             continue
-        # #766/#1324 -- a loop whose last real turn is the `🏁 BACKLOG EMPTY`
-        # proof with no owner act after it FINISHED (CC writes no achieved
-        # marker): journal it once, never report it as lost.
-        if _queue_own.ended_on_flag(tpath):
+        # #766/#767/#1324 -- a loop with a `🏁 BACKLOG EMPTY` proof AFTER its
+        # arm FINISHED (CC writes no achieved marker; later chores or owner chat
+        # never shadow the proof): journal it once, never report it as lost.
+        _bts = watchdog.transcript_last_backlog_empty_ts(tpath)
+        if _bts is not None and isinstance(mark_ts, (int, float)) \
+                and _bts >= mark_ts:
             confirm_state.pop(sid, None)
             logs += _dark_episode_line(pinged_state, sid, loc, mark_ts, now,
                                        "goal-ended:fulfilled (🏁, not reported)")

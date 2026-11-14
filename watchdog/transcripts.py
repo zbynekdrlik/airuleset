@@ -778,6 +778,26 @@ def transcript_last_assistant_text(path):
 _BACKLOG_EMPTY_RX = re.compile(r"🏁\s*BACKLOG EMPTY")
 
 
+def transcript_last_backlog_empty_ts(path, tail_bytes=2_000_000, max_entries=2000):
+    """#767/#1324 -- epoch of the NEWEST real assistant turn carrying the `🏁
+    BACKLOG EMPTY` proof, else None. Later chore / api-error / owner-chat turns
+    never SHADOW it (the #767 gk case). Bounded byte tail, never a whole-file
+    read. Fail-safe None on any error or an unparseable 🏁 timestamp (the
+    caller then cannot prove the 🏁 came after the arm)."""
+    for entry in reversed(_read_jsonl_byte_tail(path, tail_bytes, max_entries)):
+        if (not isinstance(entry, dict) or entry.get("type") != "assistant"
+                or entry.get("isApiErrorMessage") is True):
+            continue
+        if not _BACKLOG_EMPTY_RX.search((_entry_text(entry) or "").strip()):
+            continue
+        try:
+            return datetime.fromisoformat(
+                str(entry.get("timestamp")).replace("Z", "+00:00")).timestamp()
+        except (ValueError, TypeError):
+            return None
+    return None
+
+
 # #522 -- the BLOCKED-on-my-answer status marker line the `/goal` stop-condition
 # (A) keys on: an assistant turn whose LAST marker is `❓ NEEDS YOU`. Deliberately
 # NOT a bare `❓` (that also matches a `❓ ASKED:` body line — but an ask-and-
