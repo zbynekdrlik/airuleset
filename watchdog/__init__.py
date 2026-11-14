@@ -652,7 +652,6 @@ from watchdog.transcripts import (  # noqa: E402
     transcript_last_marker_bounded as transcript_last_marker_bounded,   # #599 bounded ❓-veto read
     transcript_last_assistant_text as transcript_last_assistant_text,
     transcript_last_assistant_model as transcript_last_assistant_model,   # #871 model-float audit
-    transcript_last_backlog_empty_ts as transcript_last_backlog_empty_ts,   # #764 fulfilled-rearm 🏁 proof
     session_live_bg_bash as session_live_bg_bash,             # #599 pure bg-bash pairing
     session_has_live_bg_bash as session_has_live_bg_bash,     # #599 bg-bash liveness (#848 retired the compact veto)
     live_bg_bash_ids as live_bg_bash_ids,                     # #605 pure bg-bash live ids (log detail)
@@ -1611,27 +1610,24 @@ from watchdog.long_turn import (  # noqa: E402
 #             `_is_bottom_chrome` peel every other job here uses) — a pane
 #             whose CONVERSATION merely quotes the indicator (this ticket's
 #             own discussion) must never read as armed.
-# INTENT says armed + REALITY says dark = this exact failure -> re-arm.
+# INTENT says armed + REALITY says dark = this exact failure -> journalled
+# as a lost goal (#1324: never re-armed; the owner re-arms with /autopilot).
 #
 # This ALSO covers #76's original restart case with no per-job patching: a
 # a watchdog restart (jobs 12/18, removed in #132) relaunched via `claude -c`, which CONTINUED
 # the same transcript, so the marker still says `set` while the fresh process
-# has no goal — precisely the mismatch above, healed on the next sweep.
+# has no goal — precisely the mismatch above, reported on the next sweep.
 #
 # #403's REPLACEMENT for everything below this line: rather than bounding a
 # RETRY loop (the old `GOAL_REARM_MAX_ATTEMPTS`/`GOAL_REARM_STREAK_S` shape),
-# `watchdog.goal.goal_dark_watch` either RE-ARMS a CONFIRMED-dead loop
-# (#478/#524 -- records a request for job 9 to type, ONLY after a hardened
-# death-confirmation run; an idle-but-alive flicker never reaches it) or, when
-# it cannot self-heal the loop, sends ONE Discord ping asking the user to
-# re-run `/autopilot`. For the RE-ARM path `goal_dark_watch` types nothing --
-# that keystroke happens in `goal_sweep`/`deliver_goal` (the #617 stranded-
-# truncated-/goal CLEAR is the one keystroke path in `goal_dark_watch` itself,
-# `_clear_stranded_truncated_goal` -> `_janitor_clear_box`), so the delivery-
-# discipline concerns (fresh-capture verify, the #36 truncation hazard,
-# `deliver_with_stash` coordination) apply to `goal_sweep`'s own delivery of a
-# genuinely PENDING (explicitly recorded) request -- INCLUDING a `dark-rearm`
-# one -- and to `goal_lane_sweep`'s watchdog-initiated nudge.
+# `watchdog.goal.goal_dark_watch` JOURNALS a CONFIRMED-dead loop (#524 run;
+# an idle-but-alive flicker never reaches it) and sends ONE keystroke-free
+# report; #1324 retired every automatic re-arm. Its one keystroke path is the
+# #617 stranded-truncated-/goal CLEAR (`_clear_stranded_truncated_goal` ->
+# `_janitor_clear_box`); the delivery-discipline concerns (fresh-capture
+# verify, the #36 truncation hazard, `deliver_with_stash` coordination) apply
+# to `goal_sweep`'s delivery of the owner's own recorded arm and to
+# `goal_lane_sweep`'s watchdog-initiated nudge.
 # --------------------------------------------------------------------------- #
 
 GOAL_INDICATOR = "◎ /goal"          # CC's own armed-goal footer indicator
@@ -2501,8 +2497,8 @@ from watchdog.resource_guard import (  # noqa: E402
 # 🟡).
 #
 # DELIBERATELY EXCLUDED: (a) recovery keeps running (#851) — the `/goal`-loop
-# machinery (`goal_sweep`/`goal_dark_watch`/`goal_lane_sweep`) is RECOVERY (re-arm
-# / lane-liveness), and its rare un-suppressed owner sub-pings (goalarm-attempt-
+# machinery (`goal_sweep`/`goal_dark_watch`/`goal_lane_sweep`) is RECOVERY (the
+# owner's arm / lane-liveness), and its rare un-suppressed owner sub-pings (goalarm-attempt-
 # cap / acctblock) require an armed `/goal` pane a frozen box never has;
 # `goal_question_repoke_watch` sends NOTHING (a `/goal clear` keystroke only).
 # (b) NOT a human-channel nudge on a reduced-stream box: release-gap / u-freshness
@@ -5199,11 +5195,9 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
     #     candidate pane FIRST (the one sweep still guaranteed to visit
     #     every pane every ~60s regardless of pending requests, matching
     #     job 20's old visit cadence), then, for a session whose transcript
-    #     says armed but whose footer has gone dark, either RE-ARMS a
-    #     CONFIRMED-dead loop (#478/#524 -- records a request for job 9 to
-    #     type, gated on a hardened death-confirmation run) or pings the user;
-    #     for the RE-ARM path `goal_dark_watch` itself never types (that
-    #     keystroke is job 9's) -- its ONLY keystroke is the #617 stranded-
+    #     says armed but whose footer has gone dark (or an auth-cleared goal),
+    #     JOURNALS the lost goal once per episode (#524 confirmation run; #1324:
+    #     never re-armed) -- its ONLY keystroke is the #617 stranded-
     #     truncated-/goal CLEAR (`_clear_stranded_truncated_goal`, Escape+
     #     BSpace, gated on a clean boundary + fail-closed recent-human + a
     #     byte-exact-prefix content proof + a bounded give-up).
@@ -5216,8 +5210,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
             now, run=run, state=state, send_fn=send_fn,
             dry_run=dry_run, projects_dir=projects_dir,
             sleep_fn=sleep_fn, time_fn=time_fn,
-            sweep_deadline=tail_deadline,
-            requests_path=goal_requests_path)
+            sweep_deadline=tail_deadline)
     _add("goal_dark_watch", lambda: goal_jobs_enabled and not _goal_jobs_disabled,
          _job_goal_dark_watch, "goal-dark-watch error")
 

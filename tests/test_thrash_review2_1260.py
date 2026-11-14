@@ -83,7 +83,9 @@ class GoalRearmSkipsAHeldSession(TestCase):
     def setUp(self):
         _isolate_goal_state(self)
 
-    def test_dark_rearm_is_not_typed_into_a_held_pane(self):
+    def test_no_watchdog_rearm_is_typed_into_a_held_pane(self):
+        # #1324: every watchdog re-arm origin is retired, so a leftover one is
+        # dropped before any pane read -- never typed into the held session.
         d = tempfile.TemporaryDirectory()
         self.addCleanup(d.cleanup)
         proj = Path(d.name)
@@ -94,5 +96,5 @@ class GoalRearmSkipsAHeldSession(TestCase):
             word = goal.deliver_goal(SID, self.CWD, self.TEXT, "full", run=tmux,
                                      projects_dir=proj, sleep_fn=lambda s: None,
                                      origin="dark-rearm")
-        self.assertEqual(word, "skip:thrash-held")
+        self.assertEqual(word, "drop:dark-rearm-retired")
         self.assertEqual(tmux.sent, [])

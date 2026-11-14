@@ -126,22 +126,19 @@ class TestStaleArmedRearmObserved(unittest.TestCase):
         self.addCleanup(d.cleanup)
         return Path(d.name)
 
-    def _sweep(self, sid, cond, obl=(7, 100000), tmpl=_NEW_TEMPLATE, now=100000,
-               reqs=None, state=None, dry_run=False):
+    def _sweep(self, sid, cond, tmpl=_NEW_TEMPLATE, now=100000, state=None,
+               dry_run=False):
         proj = self._dir()
         _write_marker_transcript(proj, self.CWD, sid)
         _write_goal_marker(proj, self.CWD, sid, "Goal set: " + cond, ts_epoch=500)
         tmux = DeliverGoalFakeTmux([("%9", "claude", self.CWD, "111")],
                                    GOAL_ARMED_CAP)
-        reqs = reqs if reqs is not None else self._dir() / "goal-requests.json"
         logs = goal.goal_dark_watch(
             now, run=tmux, send_fn=lambda mm, **k: None,
             projects_dir=proj, state={} if state is None else state,
             sleep_fn=lambda s: None,
-            obligation_fn=lambda cwd: obl,
-            rearm_fn=lambda cwd: (tmpl, "branch-merge"),
-            requests_path=reqs, dry_run=dry_run)
-        return goal.load_goal_requests(reqs), tmux, logs, reqs
+            rearm_fn=lambda cwd: (tmpl, "branch-merge"), dry_run=dry_run)
+        return goal.load_goal_requests(), tmux, logs, None
 
     def test_stale_armed_loop_observes_drift_without_recording(self):
         reqs, tmux, logs, _ = self._sweep("sess-stale-1", _OLD_COND)
@@ -163,21 +160,6 @@ class TestStaleArmedRearmObserved(unittest.TestCase):
                                        "fix the login bug and ship it")
         self.assertEqual(reqs, {}, "a hand-armed foreign goal is never observed")
         self.assertFalse(any("stale-drift" in ln for ln in logs), logs)
-
-    def test_drift_observed_regardless_of_backlog(self):
-        # #1113: the former workability/cache/attempt-cap gates governed a
-        # KEYSTROKE, which no longer happens -- an empty/stale-cache backlog no
-        # longer suppresses the pure OBSERVATION.
-        reqs, _, logs, _ = self._sweep("sess-stale-empty", _OLD_COND,
-                                       obl=(0, 100000))
-        self.assertEqual(reqs, {})
-        self.assertTrue(any("stale-drift" in ln for ln in logs), logs)
-
-    def test_drift_observed_even_on_stale_cache(self):
-        reqs, _, logs, _ = self._sweep("sess-stale-oldcache", _OLD_COND,
-                                       obl=(7, 1), now=400000)
-        self.assertEqual(reqs, {})
-        self.assertTrue(any("stale-drift" in ln for ln in logs), logs)
 
     def test_dry_run_observes_but_records_nothing(self):
         reqs, tmux, logs, _ = self._sweep("sess-stale-dry", _OLD_COND,
@@ -275,22 +257,6 @@ class TestDeliverStaleRearmRetired(unittest.TestCase):
         self.assertEqual(pings, [],
                          "a retired stale-rearm gets NO arm-failed ping")
 
-    def test_dark_rearm_expiry_still_pings(self):
-        # contrast: a dead-loop dark-rearm expiry DOES ping (unchanged).
-        proj = self._dir()
-        sid = "sess-exp-dark"
-        _write_marker_transcript(proj, self.CWD, sid)
-        tmux = DeliverGoalFakeTmux([("%9", "claude", self.CWD, "111")],
-                                   GOAL_ARMED_CAP)
-        pings = []
-        word = goal.deliver_goal(
-            sid, self.CWD, "/goal x", "full", run=tmux, projects_dir=proj,
-            now=100000 + goal.GOAL_REQUEST_MAX_AGE_S + 10, request_ts=100000,
-            send_fn=lambda mm, **k: pings.append(mm), sleep_fn=lambda s: None,
-            origin="dark-rearm")
-        self.assertEqual(word, "expired")
-        self.assertEqual(len(pings), 1, "a dead-loop dark-rearm expiry pings")
-
     def test_stale_rearm_retired_is_terminal_so_goal_sweep_clears_it(self):
         self.assertIn("drop:stale-rearm-retired", goal._GOAL_TERMINAL_WORDS)
 
@@ -299,11 +265,10 @@ class TestDeliverStaleRearmRetired(unittest.TestCase):
         # drop:already-current) is deleted, so the terminal word is gone.
         self.assertNotIn("drop:already-current", goal._GOAL_TERMINAL_WORDS)
 
-    def test_stale_rearm_origin_left_the_partition_tuples(self):
-        self.assertNotIn(goal._GOAL_STALE_REARM_ORIGIN,
-                         goal._GOAL_WATCHDOG_REARM_ORIGINS)
-        self.assertNotIn(goal._GOAL_STALE_REARM_ORIGIN,
-                         goal._GOAL_ATTEMPTS_STATE_KEYS)
+    def test_stale_rearm_origin_is_retired(self):
+        self.assertIn("stale-rearm", goal._GOAL_RETIRED_ORIGINS)
+        self.assertNotIn("stale-rearm", goal._GOAL_USER_CALLBACK_ORIGINS)
+
 
 if __name__ == "__main__":
     unittest.main()

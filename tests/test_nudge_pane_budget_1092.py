@@ -286,81 +286,6 @@ class TestJanitorUndoHelper(unittest.TestCase):
         self.assertNotIn("BSpace", [x for a in tmux.sent for x in a])
 
 
-class TestRearmThroughPaneBudget(unittest.TestCase):
-    """#1092 (e) — a watchdog RE-ARM (`deliver_goal` for a watchdog re-arm origin)
-    types into an ACTIVE stream pane, so it goes through the SAME per-pane budget +
-    empty-box-at-idle precondition as a nudge (deliver_goal delivers via
-    _send_goal_verified, not send_verified, so it is enforced there)."""
-
-    CWD = "/home/newlevel/devel/rearmbudget"
-
-    def setUp(self):
-        sys.path.insert(0, str(Path(__file__).resolve().parent))
-        from _goal_arm_helpers import _isolate_goal_state
-        self.reqp, self.syncp = _isolate_goal_state(self)
-
-    def _dir(self):
-        from tempfile import TemporaryDirectory
-        d = TemporaryDirectory()
-        self.addCleanup(d.cleanup)
-        return Path(d.name)
-
-    def _deliver(self, sid, armed_cond, template, state, now=100000,
-                 initial_box="", origin="dark-rearm"):
-        # #1113 -- the pane-budget path is exercised via a DARK-rearm keystroke
-        # into an IDLE (dark) pane. The old vehicle (a stale-rearm REPLACE into
-        # an ARMED pane) is deleted: an armed footer now drops `already-armed`
-        # and stale-rearm drops `stale-rearm-retired`, neither typing -- so a
-        # DARK loop's dark-rearm is the live keystroke path the budget governs.
-        import unittest.mock as m
-        import watchdog as wd
-        from watchdog import goal
-        from _goal_arm_helpers import (
-            DeliverGoalFakeTmux, GOAL_IDLE_CAP,
-            _write_marker_transcript, _write_goal_marker)
-        proj = self._dir()
-        _write_marker_transcript(proj, self.CWD, sid)
-        _write_goal_marker(proj, self.CWD, sid, "Goal set: " + armed_cond,
-                           ts_epoch=500)
-        tmux = DeliverGoalFakeTmux([("%9", "claude", self.CWD, "111")],
-                                   GOAL_IDLE_CAP, model_type=True,
-                                   initial_box=initial_box)
-        with m.patch.object(wd, "_goal_autoarm_recent_human_activity",
-                            return_value=(False, "test")):
-            word = goal.deliver_goal(
-                sid, self.CWD, template, "branch-merge", run=tmux, projects_dir=proj,
-                now=now, request_ts=now, sleep_fn=lambda s: None, state=state,
-                origin=origin)
-        return word, tmux
-
-    _OLD = ("STOP CONDITIONS — the loop is DONE the moment EITHER holds, both "
-            "checkable from the transcript: (A) an OLDER wording of the stop "
-            "conditions, from before the shipped template changed.")
-    _TMPL = ("/goal STOP CONDITIONS — the loop is DONE the moment EITHER holds, "
-             "both checkable from the transcript: (A) the NEW wording carrying "
-             "the saturation clause: SATURATE parallel isolation:worktree lanes.")
-
-    def test_rearm_deferred_when_pane_budget_exhausted(self):
-        state = {"nudge_pane_attempts": {"%9": [100000 - 10, 100000 - 5]}}
-        word, tmux = self._deliver("sess-rb-1", self._OLD, self._TMPL, state)
-        self.assertEqual(word, "skip:pane-budget")
-        self.assertEqual(tmux.sent, [], "no keystroke on a pane-budget defer")
-
-    def test_rearm_into_bare_box_marks_a_pane_attempt(self):
-        state = {}
-        word, tmux = self._deliver("sess-rb-2", self._OLD, self._TMPL, state)
-        self.assertEqual(word, "sent", "a dark-rearm into a bare box types")
-        self.assertEqual(len(state.get("nudge_pane_attempts", {}).get("%9", [])), 1)
-
-    def test_rearm_deferred_on_a_foreign_draft_never_stashes(self):
-        state = {}
-        word, tmux = self._deliver("sess-rb-3", self._OLD, self._TMPL, state,
-                                   initial_box="moja vlastná poznámka k tiketu")
-        self.assertEqual(word, "skip:pane-busy-draft")
-        # never typed / stashed around the owner's own draft
-        self.assertNotIn("-l", [x for a in tmux.sent for x in a])
-
-
 class TestStaleRearmOncePerTemplateVersion(unittest.TestCase):
     """#1092 (e) / #1113 — a template change is NOT an emergency. The #623
     stale-rearm RECORD path is RETIRED (never re-typed into an active loop): the
@@ -402,9 +327,8 @@ class TestStaleRearmOncePerTemplateVersion(unittest.TestCase):
         logs = goal.goal_dark_watch(
             now, run=tmux, send_fn=lambda mm, **k: None, projects_dir=proj,
             state=state, sleep_fn=lambda s: None,
-            obligation_fn=lambda cwd: (7, now), rearm_fn=lambda cwd: (tmpl, "branch-merge"),
-            requests_path=reqs, dry_run=False)
-        return goal.load_goal_requests(reqs), logs
+            rearm_fn=lambda cwd: (tmpl, "branch-merge"), dry_run=False)
+        return goal.load_goal_requests(), logs
 
     def test_second_sweep_same_version_observes_once_no_record(self):
         st = {}
@@ -429,10 +353,10 @@ class TestStaleRearmOncePerTemplateVersion(unittest.TestCase):
 
 
 class TestNudgesStatusRecoveryLine(unittest.TestCase):
-    """#1092 (e) — `nudges status` names the recovery re-arm family's typing state
-    + whether the box carries `~/.claude/watchdog-disable-goal`, so a `nudges: OFF`
-    summary never again reads as 'nothing types' (the addendum: the owner saw
-    'goal' arriving after every nudge kind was off)."""
+    """#1092 (e) / #1324 — `nudges status` names the goal-arm typing state (only
+    the owner's own /autopilot; the watchdog never re-arms) + whether the box
+    carries `~/.claude/watchdog-disable-goal`, so a `nudges: OFF` summary never
+    again reads as 'nothing types'."""
 
     def _status_out(self, disable_goal):
         import io
@@ -457,7 +381,7 @@ class TestNudgesStatusRecoveryLine(unittest.TestCase):
         out = self._status_out(disable_goal=False)
         self.assertIn("re-arm", out.lower())
         self.assertIn("watchdog-disable-goal", out)
-        # absent -> the re-arm family still types (through the gate)
+        # absent -> the owner's own arm still types (through its gates)
         self.assertIn("absent", out.lower())
 
     def test_reports_the_flag_when_present(self):

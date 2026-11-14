@@ -8,13 +8,11 @@ activity veto). These tests lock:
 
   * a `self-callback` arm is NEVER deferred by a recent attached-client input
     (delivery is attempted on the first idle sweep);
-  * a WATCHDOG re-arm (dark/stale/auth) still IS deferred (the veto is preserved
-    for the unattended-injection hazard, via the recent-human gate that since
-    #731 includes the same client-input signal);
+  * (#1324 retired the watchdog re-arm origins the veto once deferred);
   * a future-skewed `client_activity` renders no confusing "in the future" text;
-  * a `self-callback` request older than GOAL_DARK_REARM_STALE_S (300 s) but
+  * a `self-callback` request older than the retired dark-rearm 300-s gate but
     younger than GOAL_REQUEST_MAX_AGE_S (1800 s) is NOT dropped as stale -- it is
-    governed by the 30-min max-age, never the dark-rearm 300-s gate.
+    governed by the 30-min max-age.
 """
 
 import unittest
@@ -49,28 +47,6 @@ class _ClientFake(DeliverGoalFakeTmux):
             if not self.client_epochs:
                 return ""
             return "\n".join(str(int(e)) for e in self.client_epochs) + "\n"
-        return super().__call__(argv, timeout)
-
-
-class _MidSweepClientFake(DeliverGoalFakeTmux):
-    """`tmux list-clients` returns NO clients on the FIRST call (so the
-    recent-human gate at deliver_goal line ~1381 finds no live human and
-    proceeds) and a FRESH epoch on every LATER call (a human who began typing
-    AFTER that gate passed but BEFORE the keystroke). This isolates the RETAINED
-    watchdog-origin client-active re-check at line ~1458 -- the LATER re-read of
-    `#{client_activity}` closest to the keystroke -- from the earlier gate."""
-
-    def __init__(self, *a, fresh_epoch=None, **kw):
-        super().__init__(*a, **kw)
-        self.fresh_epoch = fresh_epoch
-        self._lc_calls = 0
-
-    def __call__(self, argv, timeout=8):
-        if "list-clients" in " ".join(argv):
-            self._lc_calls += 1
-            if self._lc_calls == 1:
-                return ""                      # no client -> recent-human passes
-            return "%d\n" % int(self.fresh_epoch)   # a human now typing
         return super().__call__(argv, timeout)
 
 
@@ -109,63 +85,11 @@ class TestSelfCallbackClientVeto752(unittest.TestCase):
                          "attached client")
         self.assertTrue(any("OK (goal-sweep)" in ln for ln in logs), logs)
 
-    def test_watchdog_rearm_still_vetoed_by_client_input(self):
-        # The veto is PRESERVED for a watchdog-initiated re-arm: a dark-rearm
-        # into a pane with a recent attached-client input is deferred (no
-        # keystroke), so an unexpected /goal never lands in a human-active pane.
-        proj = self._dir()
-        sid = "sess-dark-active"
-        _write_marker_transcript(proj, self.CWD, sid)
-        goal.record_goal_request(sid, self.CWD, "/goal x", "full",
-                                 now=2000, path=self.reqp, origin="dark-rearm")
-        # client input 60 s ago -- inside the 5-min veto window.
-        tmux = _ClientFake([("%9", "claude", self.CWD, "111")],
-                           GOAL_IDLE_CAP, model_type=True, client_epochs=[1940])
-        logs = goal.goal_sweep(2000, run=tmux, projects_dir=proj,
-                               requests_path=self.reqp,
-                               send_fn=lambda msg, **k: None,
-                               sleep_fn=lambda *a, **k: None)
-        self.assertEqual(tmux.typed_texts(), [],
-                         "a watchdog re-arm must NOT type into a human-active "
-                         "pane")
-        self.assertTrue(any("skip:" in ln for ln in logs), logs)
-        self.assertIn(sid, goal.load_goal_requests(self.reqp),
-                      "a deferred re-arm leaves the request pending")
-
-    def test_retained_watchdog_check_catches_mid_sweep_typing(self):
-        # TEETH for the RETAINED origin-gated client-active check: a human who
-        # starts typing AFTER the recent-human gate passed but BEFORE the
-        # keystroke is caught by the LATER re-read (deliver_goal ~line 1458).
-        # DELETING that gated block makes this test fail (no second read -> the
-        # re-arm types) -- so the "this is NOT dead code" claim has real teeth.
-        proj = self._dir()
-        sid = "sess-dark-midsweep"
-        _write_marker_transcript(proj, self.CWD, sid)
-        goal.record_goal_request(sid, self.CWD, "/goal x", "full",
-                                 now=2000, path=self.reqp, origin="dark-rearm")
-        # 1st list-clients (recent-human signal 3) -> none; 2nd (the retained
-        # re-check) -> a fresh epoch = a human now typing.
-        tmux = _MidSweepClientFake([("%9", "claude", self.CWD, "111")],
-                                   GOAL_IDLE_CAP, model_type=True,
-                                   fresh_epoch=2000)
-        logs = goal.goal_sweep(2000, run=tmux, projects_dir=proj,
-                               requests_path=self.reqp,
-                               send_fn=lambda msg, **k: None,
-                               sleep_fn=lambda *a, **k: None)
-        self.assertTrue(any("skip:client-active" in ln for ln in logs),
-                        "the retained watchdog re-check must catch a human who "
-                        "began typing after the recent-human gate: %s" % logs)
-        self.assertEqual(tmux.typed_texts(), [],
-                         "no keystroke lands when the late re-check vetoes")
-        self.assertIn(sid, goal.load_goal_requests(self.reqp))
-
     def test_self_callback_governed_by_max_age_not_stale_rearm(self):
-        # Max-age reconcile lock (#752): a self-callback older than
-        # GOAL_DARK_REARM_STALE_S (300 s) but younger than
-        # GOAL_REQUEST_MAX_AGE_S (1800 s) is NOT dropped as stale -- that
-        # 300-s gate is reached ONLY for dark/auth-rearm. It proceeds to
-        # delivery, so the shortened-veto self path can never expire early.
-        self.assertLess(goal.GOAL_DARK_REARM_STALE_S, 959)
+        # Max-age reconcile lock (#752): a self-callback older than the old
+        # 300-s dark-rearm gate (retired with its origin, #1324) but younger
+        # than GOAL_REQUEST_MAX_AGE_S (1800 s) proceeds to delivery, so the
+        # shortened-veto self path can never expire early.
         self.assertLess(959, goal.GOAL_REQUEST_MAX_AGE_S)
         proj = self._dir()
         sid = "sess-self-959"

@@ -83,9 +83,8 @@ NUDGE_MIN_INTERVAL_MIN_S = DAY_S
 NUDGE_TOTAL_GAP_S = DAY_S            # #913/#1023 cross-kind TOTAL cap
 NUDGE_TOTAL_GAP_MIN_S = DAY_S
 
-# RECOVERY revival identities (#1023 addendum; #1038/#1181/#1260 goal-arm =
-# the owner's own `/autopilot` arm + the owner-authorized stream-migrate
-# watcher; #1063 goal-disarm; #1084 the inert `compact`; #1203 model-restore).
+# RECOVERY revival identities (#1023 addendum; #1038/#1181/#1260/#1324
+# goal-arm = the owner's own `/autopilot` arm only; #1063 goal-disarm; #1084 the inert `compact`; #1203 model-restore).
 # MUST mirror tmux_io.RECOVERY_NUDGE_KINDS (a drift-lock test asserts identity);
 # duplicated so nudge_gate stays an import-safe LEAF module.
 RECOVERY_NUDGE_KINDS = frozenset(  # #1203 model-restore: watchdog/model_restore.py

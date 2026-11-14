@@ -13,10 +13,9 @@ that keep ANY remaining failure visible:
   * `nudge_off` -- a delivery the owner's per-kind switch withholds is reported
     as what it is: `drop:nudge-off`, decided BEFORE any pane read, nothing typed,
     never a failed verify with a misleading `ARM-CONFIRM-FAIL box=empty`. It is
-    TERMINAL and books ONE origin attempt (`_record_delivered_attempt`), so a
-    watchdog re-arm recorder stays bounded by its own 24 h attempt cap and then
-    falls through to its keystroke-free ping -- the same bound the old
-    three-sweep verify-failed drop gave, without typing or a misleading ping;
+    TERMINAL (the request is cleared), so nothing re-types it -- the same bound
+    the old three-sweep verify-failed drop gave, without typing or a misleading
+    ping;
   * the SELF-CALLBACK failure record + notice -- when a `self-callback` arm is
     dropped at the strict attempt cap, the failure is kept in the watchdog state
     (`airuleset.py status` shows `goal: arm failed (<reason> xN) — paste the
@@ -24,12 +23,10 @@ that keep ANY remaining failure visible:
     a new request is pending, or `SHOW_S` passes) and ONE pointer line is typed
     into the pane.
 
-A watchdog re-arm origin is NOT covered by the notice (its failures are bounded
-by its own attempt caps and pings). The notice never types a `/goal`, and it
+The watchdog has no arm origin of its own (#1324). The notice never types a `/goal`, and it
 starts with the watchdog's own `stuck-check: ` prefix, so every reader of human
 prompts (`_MACHINE_PROMPT_PREFIXES`: the U-count / answered-question prune, the
-recent-human gates; `stream_migrate._own_keystroke`: the #1133 answer detector;
-the janitor's own-content proof) reads it as machine text, never an answer.
+recent-human gates; the janitor's own-content proof) reads it as machine text, never an answer.
 
 Keystroke safety of the notice. It is typed ONLY into a pane at rest, checked
 right before the keystroke with the SAME primitives the arm path uses: not in
@@ -59,16 +56,13 @@ NOTICE = ("stuck-check: goal arm failed {attempts}x. Owner: paste /goal above or
           "re-run /autopilot. Claude: no action")   # <= 100 cells (#1157)
 
 
-def nudge_off(sid, cwd, text, nudge, logs, out, log_fn, record_fn=None):
+def nudge_off(sid, cwd, text, nudge, logs, out, log_fn):
     """The honest disposition of a delivery the per-kind switch withholds: the
     SAME `nudges OFF: suppressed <kind>` journal line the `keys` primitive
-    writes, a `DROP nudge-off(<kind>)` goal-sync line, ONE booked origin attempt
-    (`record_fn`, None on a dry run) and the terminal `drop:nudge-off`. Zero
-    keystrokes, zero pane reads."""
+    writes, a `DROP nudge-off(<kind>)` goal-sync line and the terminal
+    `drop:nudge-off`. Zero keystrokes, zero pane reads."""
     watchdog._suppress_nudge(nudge, text, logs)
     log_fn("DROP nudge-off(%s) sid=%s cwd=%s (nothing typed)" % (nudge, sid, cwd))
-    if record_fn is not None:
-        record_fn()
     if out is not None:
         out["detail"] = "nudge kind %s is OFF, nothing typed" % nudge
     return "drop:nudge-off"

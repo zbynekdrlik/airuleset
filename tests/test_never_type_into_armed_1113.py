@@ -153,14 +153,11 @@ class TestArmedLoopNeverReArmed(unittest.TestCase):
         _write_marker_transcript(proj, CWD, sid)
         _write_goal_marker(proj, CWD, sid, "Goal set: " + cond, ts_epoch=500)
         tmux = DeliverGoalFakeTmux(PANE, GOAL_ARMED_CAP)
-        reqs = self._dir() / "goal-requests.json"
         logs = goal.goal_dark_watch(
             now, run=tmux, send_fn=lambda mm, **k: None, projects_dir=proj,
             state={} if state is None else state, sleep_fn=lambda s: None,
-            obligation_fn=lambda cwd: (7, 100000),
-            rearm_fn=lambda cwd: (_NEW_TEMPLATE, "fork-no-merge"),
-            requests_path=reqs, dry_run=False)
-        return goal.load_goal_requests(reqs), tmux, logs
+            rearm_fn=lambda cwd: (_NEW_TEMPLATE, "fork-no-merge"), dry_run=False)
+        return goal.load_goal_requests(), tmux, logs
 
     def test_drift_observed_no_request_no_keystroke(self):
         reqs, tmux, logs = self._sweep("sess-drift-1", _OLD_COND)
@@ -224,9 +221,10 @@ class TestDeliverRefusesArmed(unittest.TestCase):
         self.assertEqual(word, "drop:already-armed")
         self.assertEqual(tmux.sent, [], "no keystroke into an armed footer")
 
-    def test_auth_rearm_drops_already_armed(self):
-        word, tmux = self._deliver("sess-b-auth", "auth-rearm")
-        self.assertEqual(word, "drop:already-armed")
+    def test_auth_rearm_leftover_dropped_retired(self):
+        # #1324 -- a leftover auth-rearm request is dropped before any pane work.
+        word, tmux = self._deliver("sess-b-auth", "auth-rearm", cap=GOAL_IDLE_CAP)
+        self.assertEqual(word, "drop:auth-rearm-retired")
         self.assertEqual(tmux.sent, [])
 
     def test_leftover_stale_rearm_request_dropped_retired(self):
@@ -240,12 +238,9 @@ class TestDeliverRefusesArmed(unittest.TestCase):
     def test_stale_rearm_retired_is_terminal(self):
         self.assertIn("drop:stale-rearm-retired", goal._GOAL_TERMINAL_WORDS)
 
-    def test_stale_rearm_origin_left_the_typing_origins(self):
-        self.assertNotIn(goal._GOAL_STALE_REARM_ORIGIN,
-                         goal._GOAL_WATCHDOG_REARM_ORIGINS,
-                         "the stale-rearm origin no longer types")
-        self.assertNotIn(goal._GOAL_STALE_REARM_ORIGIN,
-                         goal._GOAL_ATTEMPTS_STATE_KEYS)
+    def test_stale_rearm_origin_is_retired(self):
+        self.assertIn("stale-rearm", goal._GOAL_RETIRED_ORIGINS,
+                      "the stale-rearm origin no longer types")
 
 
 # --------------------------------------------------------------------------- #

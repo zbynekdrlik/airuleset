@@ -530,8 +530,7 @@ class Steering(unittest.TestCase):
                     logs += goal.goal_dark_watch(
                         5000 + i * 700, run=tmux, state=state,
                         send_fn=lambda *a, **k: sent.append(a),
-                        projects_dir=proj, requests_path=self.reqp,
-                        obligation_fn=lambda c: (3, 5000 + i * 700),
+                        projects_dir=proj,
                         rearm_fn=lambda c: ("/goal STOP CONDITIONS q", "full"))
             if label == "watch":
                 self.assertTrue(any("skip:watch-window" in ln for ln in logs),

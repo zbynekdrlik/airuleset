@@ -335,17 +335,16 @@ class TestQuestionRepokeDisarm(_Base):
 # --------------------------------------------------------------------------- #
 class TestDarkWatchHonoursVeto(_Base):
     """Mutation-verified: removing the `_qdisarm_veto` call (or its `if vetoed:
-    continue`) lets dark_watch re-accumulate / re-arm the disarmed loop."""
+    continue`) lets dark_watch re-accumulate / report the disarmed loop."""
 
     def _dark(self, proj, tmux, state, now, human_ts_fn):
         return goal.goal_dark_watch(
             now, run=tmux, state=state, projects_dir=proj,
             send_fn=lambda msg, **k: None, sleep_fn=lambda s: None,
             rearm_fn=lambda cwd: ("/goal x", "full"),
-            obligation_fn=lambda cwd: (5, now),
             human_ts_fn=human_ts_fn)
 
-    def test_veto_active_blocks_rearm_accumulation(self):
+    def test_veto_active_blocks_accumulation(self):
         proj = self._dir()
         sid = "sess-veto-1"
         # mark=set + un-armed footer = the silently-dark shape dark_watch acts on
@@ -365,7 +364,7 @@ class TestDarkWatchHonoursVeto(_Base):
         self.assertNotIn(sid, state.get("goal_dark_confirm", {}))
         self.assertTrue(any("disarm veto ACTIVE" in ln for ln in logs))
 
-    def test_veto_clears_and_rearm_resumes_after_human_answer(self):
+    def test_veto_clears_and_dark_watch_resumes_after_human_answer(self):
         proj = self._dir()
         sid = "sess-veto-2"
         from _goal_arm_helpers import _write_marker_transcript

@@ -14,8 +14,8 @@ The fix (design-by main, Approach 1 (a)+(b)+(c), issue #1113 comment 5790100100)
   (a) `deliver_goal` refuses EVERY watchdog-originated re-arm origin with ZERO
       keystrokes (`refuse:structured-armed`) while the transcript-derived
       `goal_mark` state for the sid is "set" — the pane render can NEVER authorise
-      typing over the structured truth. A virgin arm proceeds only when NO
-      goal_mark record exists.
+      typing over the structured truth. (#1324 retired every watchdog re-arm
+      origin, and the refusal with them; its tests left this file.)
   (b) `_box_is_own_leftover` recognises the box as OUR leftover when it is a
       verbatim run of ANY rendered `/goal` template variant (goal_registry), NOT
       only the single request payload, and WITHOUT provenance — verbatim template
@@ -25,24 +25,15 @@ The fix (design-by main, Approach 1 (a)+(b)+(c), issue #1113 comment 5790100100)
 """
 
 import unittest
-import unittest.mock as m
 from pathlib import Path
-from tempfile import TemporaryDirectory
 
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import watchdog as wd
-from watchdog import goal, stash, janitor
+from watchdog import stash, janitor
 import goal_registry
 
-from _goal_arm_helpers import (  # noqa: E402
-    DeliverGoalFakeTmux,
-    GOAL_IDLE_CAP,
-    _isolate_goal_state,
-    _write_marker_transcript,
-)
 
 from test_never_type_into_armed_1113 import (  # noqa: E402
     _grid_scroll_capture,
@@ -71,80 +62,6 @@ class _StickyGridFake(_GridScrollFake):
             self.sent.append(argv)
             return ""            # record keystrokes, never mutate the box
         return super().__call__(argv, timeout)
-
-
-# --------------------------------------------------------------------------- #
-# (a) deliver_goal refuses EVERY watchdog re-arm origin when goal_mark is "set",
-#     even if the PANE render reads dark; a virgin arm (no goal_mark) proceeds.
-# --------------------------------------------------------------------------- #
-class TestStructuredArmedRefusal(unittest.TestCase):
-    def setUp(self):
-        self.reqp, self.syncp = _isolate_goal_state(self)
-        # Isolate STATE_PATH so `_structured_goal_mark_state`'s persisted-goal_mark
-        # fallback reads an EMPTY fixture file, never the box's real
-        # ~/.claude/api-watchdog-state.json (the #732/#548 hermeticity discipline).
-        d = TemporaryDirectory()
-        self.addCleanup(d.cleanup)
-        sp = Path(d.name) / "api-watchdog-state.json"
-        sp.write_text("{}", encoding="utf-8")
-        p = m.patch.object(wd, "STATE_PATH", sp)
-        p.start()
-        self.addCleanup(p.stop)
-
-    def _dir(self):
-        d = TemporaryDirectory()
-        self.addCleanup(d.cleanup)
-        return Path(d.name)
-
-    def _deliver(self, sid, origin, goal_mark_state="set"):
-        proj = self._dir()
-        _write_marker_transcript(proj, CWD, sid)
-        # The PANE renders DARK (no `◎ /goal`) — the exact 02:17 mis-read.
-        tmux = DeliverGoalFakeTmux(PANE, GOAL_IDLE_CAP, model_type=True)
-        state = {}
-        if goal_mark_state is not None:
-            state["goal_mark"] = {sid: {"mark": {"state": goal_mark_state}}}
-        with m.patch.object(wd, "_goal_autoarm_recent_human_activity",
-                            return_value=(False, "test")):
-            word = goal.deliver_goal(
-                sid, CWD, _FORK, "fork-no-merge", run=tmux,
-                projects_dir=proj, now=100000, request_ts=100000,
-                state=state, sleep_fn=lambda s: None, origin=origin)
-        return word, tmux, Path(self.syncp).read_text(encoding="utf-8")
-
-    def test_every_watchdog_origin_refused_when_goal_mark_set(self):
-        for origin in goal._GOAL_WATCHDOG_REARM_ORIGINS:
-            with self.subTest(origin=origin):
-                word, tmux, log = self._deliver("rec-a-%s" % origin, origin)
-                self.assertEqual(
-                    word, "drop:already-armed",
-                    "origin %s must be refused at a structured-armed goal_mark"
-                    % origin)
-                self.assertEqual(
-                    tmux.sent, [],
-                    "ZERO keystrokes into a structured-armed loop (origin %s)"
-                    % origin)
-                self.assertIn(
-                    "refuse:structured-armed", log,
-                    "the refusal writes the refuse:structured-armed line "
-                    "(origin %s)" % origin)
-
-    def test_pane_render_dark_never_overrides_structured_set(self):
-        # The whole recurrence: the PANE reads dark (GOAL_IDLE_CAP has no
-        # `◎ /goal`) yet goal_mark is set -> refuse, never type.
-        self.assertIs(wd.pane_goal_armed(GOAL_IDLE_CAP), False,
-                      "the fixture pane render is dark (the 02:17 mis-read)")
-        word, tmux, _log = self._deliver("rec-a-darkpane", "dark-rearm")
-        self.assertEqual(word, "drop:already-armed")
-        self.assertEqual(tmux.sent, [])
-
-    def test_cleared_goal_mark_does_not_refuse(self):
-        # A "cleared" mark (e.g. CC's transient-auth clear) is NOT armed, so the
-        # structured gate must not refuse (auth-rearm etc. legitimately re-arm a
-        # cleared loop).
-        word, tmux, log = self._deliver(
-            "rec-a-cleared", "dark-rearm", goal_mark_state="cleared")
-        self.assertNotIn("refuse:structured-armed", log)
 
 
 # --------------------------------------------------------------------------- #

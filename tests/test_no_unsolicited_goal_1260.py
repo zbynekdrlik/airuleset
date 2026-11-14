@@ -102,8 +102,8 @@ class TestNoUnsolicitedGoal1260(unittest.TestCase):
         self.assertIn("DROP declared-virgin-retired",
                       Path(self.syncp).read_text(encoding="utf-8"))
 
-    def test_declared_virgin_is_no_longer_a_watchdog_rearm_origin(self):
-        self.assertNotIn("declared-virgin", goal._GOAL_WATCHDOG_REARM_ORIGINS)
+    def test_declared_virgin_is_a_retired_origin(self):
+        self.assertIn("declared-virgin", goal._GOAL_RETIRED_ORIGINS)
         self.assertNotIn("declared-virgin", goal._GOAL_USER_CALLBACK_ORIGINS)
 
 

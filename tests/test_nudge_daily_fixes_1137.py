@@ -23,10 +23,9 @@ from watchdog import nudge_gate as ng  # noqa: E402
 
 
 class StrandedOwnGoalBudget(unittest.TestCase):
-    """Review finding 10: submitting our own stranded `/goal` stamped the pane
-    budget for EVERY watchdog re-arm origin, the recovery ones included
-    (auth-rearm = the API-error resume of a loop, answer-rearm); the bare-box
-    path already used `_rearm_budgeted`."""
+    """Review finding 10: submitting our own stranded `/goal` must not stamp the
+    pane budget. #1324 retired every watchdog re-arm origin (the budgeted
+    `_rearm_budgeted` path with them), so the owner's own arm never spends it."""
 
     def setUp(self):
         stranded._isolate_goal_state(self)
@@ -46,12 +45,8 @@ class StrandedOwnGoalBudget(unittest.TestCase):
         self.assertEqual(word, "sent", origin)
         return state.get("nudge_pane_attempts", {}).get("%9", [])
 
-    def test_a_recovery_rearm_spends_no_daily_attempt(self):
-        for origin in ("auth-rearm", "answer-rearm"):
-            self.assertEqual(self._submit(origin), [], origin)
-
-    def test_a_work_rearm_spends_the_day(self):
-        self.assertEqual(self._submit("dark-rearm"), [2_000_000.0])
+    def test_the_owners_arm_spends_no_daily_attempt(self):
+        self.assertEqual(self._submit("self-callback"), [])
 
 
 class PriorityWaveInTheBatch(prio._RiderBase):
