@@ -704,7 +704,7 @@ WEBTERM_DASHBOARD_TABS = {
     # REMOVED, the montalu client is gone.
     "zbynek": [
         "ar", "claudy", "fohmixer", "varos", "wall-bridge", "songplayer",  # #1220, #1267
-        "dstack", "dasio", "iemmixer", "dcontroller", "dsync", "intercom", "obs", "shading", "vstack", "nlch-finances", "tuke", "mikrotik-pz", "dev1", "dev2", "gatekeeper",  # #1270, #1295, #1296, #1310
+        "dstack", "dasio", "iemmixer", "dcontroller", "dsync", "intercom", "obs", "shading", "vstack", "nlch-finances", "tuke", "mikrotik-pz", "devbridge", "dev1", "dev2", "gatekeeper",  # #1270, #1295, #1296, #1310, #1320
         "david1-subdev", "david2-subdev", "david3-subdev", "david4-subdev",
         "miva1-subdev", "spinbike-vps",
     ],
@@ -721,7 +721,7 @@ WEBTERM_DASHBOARD_TABS = {
     "marek": [
         "miva1-subdev", "david3-subdev",  # david3: owner 11.11.2026
         "ar", "claudy", "fohmixer", "varos", "wall-bridge", "songplayer",  # #1267
-        "dstack", "dasio", "iemmixer", "dcontroller", "dsync", "intercom", "obs", "shading", "vstack", "nlch-finances", "tuke", "mikrotik-pz", "dev1", "dev2", "gatekeeper", "forestshop",  # #1270, #1295, #1296, #1310
+        "dstack", "dasio", "iemmixer", "dcontroller", "dsync", "intercom", "obs", "shading", "vstack", "nlch-finances", "tuke", "mikrotik-pz", "devbridge", "dev1", "dev2", "gatekeeper", "forestshop",  # #1270, #1295, #1296, #1310, #1320
     ],
     # david.newlevel.media -- David's working accounts. The david GATEWAY renders
     # its own physically-scoped inventory (cli_webterm_profiles.david_inventory,

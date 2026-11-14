@@ -593,7 +593,7 @@ REMOTE_HOSTS += [
         ("nlch-finances", "dev1", "100.104.8.125", False),  # #1295
         ("tuke", "dev1", "100.104.8.125", False),           # #1296
         ("mikrotik-pz", "dev1", "100.104.8.125", False),    # #1310
-        ("devbridge", "dev1", "100.104.8.125", True),      # #1320, pending root bootstrap
+        ("devbridge", "dev1", "100.104.8.125", False),     # #1320, live 14.11.
     )
 ]
 
