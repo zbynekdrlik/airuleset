@@ -214,6 +214,56 @@ class TestRetire(_World):
         self.assertIn("torn down", r.stdout)
         self.assertFalse(os.path.exists(self.root + cpc.POLICY_PATH))
 
+    def test_a_symlinked_home_is_refused_and_fails_loud(self):
+        real = os.path.join(self.root, "elsewhere")
+        os.makedirs(real)
+        os.makedirs(self.root + "/var/lib")
+        os.symlink(real, self.home("old-peer"))
+        self.add_account("old-peer", key=False)
+        r = self.teardown_with(_doc())
+        self.assertEqual(r.returncode, 5, r.stdout + r.stderr)
+        self.assertIn("old-peer", self.accounts())
+        self.assertTrue(self.marked("old-peer"))
+        self.assertTrue(os.path.isdir(real))
+
+    def test_the_home_script_fails_loud_on_a_stuck_account(self):
+        self.add_account("old-peer")
+        Path(self.bindir, "userdel").write_text("#!/bin/sh\nexit 8\n")
+        with mock.patch.object(cpc, "load_links", return_value=_doc()):
+            script = cpc.render_home_script(cpc.OFFICIAL_CHANNEL_PLUGINS)
+        r = self.run_script(script)
+        self.assertEqual(r.returncode, 5, r.stdout + r.stderr)
+        self.assertNotIn("peer-channel-home: ok", r.stdout)
+
+    def test_the_root_script_never_says_ok_before_a_sweep_failure(self):
+        script = cpc.render_root_script(["live-peer"], _doc("live-peer"), [], host="h1")
+        self.assertLess(script.index("far-end sweep failed"), script.index("peer-channel-root: ok"))
+
+    def test_the_root_script_keeps_only_this_hosts_far_ends(self):
+        doc = _doc("live-peer")
+        self.assertIn('case " live-peer " in',
+                      cpc.render_root_script(["live-peer"], doc, [], host="h1"))
+        self.assertIn('case "  " in', cpc.render_root_script(["live-peer"], doc, [], host="h2"))
+
+    def test_the_root_leg_hands_each_host_its_own_live_far_ends(self):
+        import airuleset
+        sent = {}
+
+        class R:
+            returncode, stdout, stderr = 0, "ok", ""
+
+        def run(argv, **kw):
+            if argv[0] == "ssh":
+                sent[argv[-2].split("@")[1]] = argv[-1]
+            return R()
+        hosts = [dict(h, identity=h.get("identity") or "~/k", host=h.get("host") or h["name"])
+                 for h in airuleset.DISK_GUARD_ROOT_HOSTS]
+        failed = cpc.provision_peer_channel_root(hosts=hosts, run=run)
+        self.assertEqual([f for f in failed if f[0] != "home"], [])
+        by_name = {h["name"]: sent[h["host"]] for h in hosts}
+        self.assertIn('case " airuleset-peer presenter-peer " in', by_name["dev1"])
+        self.assertIn('case " devbridge-peer " in', by_name["subdev"])
+
     def test_the_home_script_sweeps_too(self):
         self.add_account("old-peer")
         with mock.patch.object(cpc, "load_links", return_value=_doc()):
