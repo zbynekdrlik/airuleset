@@ -1,8 +1,8 @@
 """#1320 (owner 13.11.2026): `devbridge` leaves the shared `newlevel` account for
 its own project account on dev1, the first step towards a peer bridge to david3.
 Declared pending, then flipped live once the root bootstrap ran on dev1
-(uid 1017, 14.11.) with the owner + marek tab (#1267). The registry row stays
-on `newlevel` until the cutover (transfer-session)."""
+(uid 1017, 14.11.) with the owner + marek tab (#1267). The registry row moved
+to the account at the cutover (transfer-session, 14.11.)."""
 import io
 import json
 import unittest
@@ -79,10 +79,10 @@ class TestDevbridgeAccount(unittest.TestCase):
         self.assertIn("project-gh-token: %s: SKIPPED — pending" % ACCT, out)
         self.assertNotIn(ACCT, [c.args[0] for c in s.call_args_list])
 
-    def test_no_peer_socket_before_the_cutover(self):
-        # The registry still maps the devbridge project to `newlevel`, so the
-        # peer root leg has no devbridge socket dir until the cutover moves it.
-        self.assertNotIn(ACCT, cpc.accounts_for_host("dev1"))
+    def test_peer_socket_after_the_cutover(self):
+        # The cutover (14.11.) moved the registry row to the account, so the
+        # peer root leg gives devbridge its own socket dir.
+        self.assertIn(ACCT, cpc.accounts_for_host("dev1"))
 
     def test_the_tab_opens_the_project_chat_for_marek_and_owner_only(self):
         self.assertEqual(set(self.spec["webterm_sessions"]), {"zbynek", "marek"})
@@ -106,10 +106,11 @@ class TestDevbridgeAccount(unittest.TestCase):
         self.assertEqual(pairs, [["airuleset", ACCT]])
         self.assertIn("airuleset|devbridge", hosts["dev1"]["topics"])
 
-    def test_registry_row_stays_on_newlevel_until_cutover(self):
+    def test_registry_row_moved_to_the_account_at_cutover(self):
         reg = json.loads((ROOT / "projects-registry.json").read_text(encoding="utf-8"))
         (row,) = [r for r in reg if r["name"] == ACCT]
-        self.assertEqual((row["account"], row["path"]), ("newlevel", "~/devel/devbridge"))
+        self.assertEqual((row["account"], row["path"]),
+                         (ACCT, "/home/devbridge/devel/devbridge"))
 
 
 if __name__ == "__main__":

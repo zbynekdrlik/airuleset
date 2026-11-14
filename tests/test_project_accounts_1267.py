@@ -240,12 +240,12 @@ class TestPeerLinks(unittest.TestCase):
         # wall-bridge never reaches the root script's `account missing` exit 3
         with _pending():
             accts = cpc.accounts_for_host("dev1")
-        self.assertEqual(accts, ["airuleset-peer", "dasio", "dcontroller", "dstack", "dsync", "fohmixer", "iemmixer", "intercom", "mikrotik-pz", "newlevel", "nlch-finances", "obs", "presenter-peer", "shading", "tuke", "vstack"])
+        self.assertEqual(accts, ["airuleset-peer", "dasio", "dcontroller", "devbridge", "dstack", "dsync", "fohmixer", "iemmixer", "intercom", "mikrotik-pz", "newlevel", "nlch-finances", "obs", "presenter-peer", "shading", "tuke", "vstack"])
         self.assertNotIn("wall-bridge", cpc.render_tmpfiles(accts))
 
     def test_wall_bridge_joins_once_live(self):
         self.assertEqual(cpc.accounts_for_host("dev1"),
-                         ["airuleset-peer", "dasio", "dcontroller", "dstack", "dsync", "fohmixer", "iemmixer", "intercom", "mikrotik-pz",
+                         ["airuleset-peer", "dasio", "dcontroller", "devbridge", "dstack", "dsync", "fohmixer", "iemmixer", "intercom", "mikrotik-pz",
                           "newlevel", "nlch-finances", "obs", "presenter-peer", "shading", "songplayer", "tuke", "vstack", "wall-bridge"])
 
 
