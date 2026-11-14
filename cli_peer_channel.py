@@ -535,9 +535,9 @@ def render_root_script(accounts, links_doc=None, registry=None, host=None):
         "python3 -I -c 'import json,sys; json.load(open(sys.argv[1]))' %s || "
         "{ echo 'peer-channel-root: policy unreadable' >&2; exit 4; }\n" % POLICY_PATH,
         _far_end_sweep(links_doc, host),
+        _far_end_failed(),
         "echo \"peer-channel-root: ok dir=%s accounts=[%s] changed=[${CHANGED# }]\"\n"
         % (d, " ".join(accounts)),
-        _far_end_failed(),
     ])
 
 
@@ -550,8 +550,8 @@ def render_home_script(official, links_doc=None, host=None):
     return ("set -euo pipefail\ncd /\numask 022\nCHANGED=''\n" + _INSTALL_FN
             + _heredoc(POLICY_PATH, render_policy(official))
             + "python3 -I -c 'import json,sys; json.load(open(sys.argv[1]))' %s\n" % POLICY_PATH
-            + _far_end_sweep(links_doc, host)
-            + "echo \"peer-channel-home: ok changed=[${CHANGED# }]\"\n" + _far_end_failed())
+            + _far_end_sweep(links_doc, host) + _far_end_failed()
+            + "echo \"peer-channel-home: ok changed=[${CHANGED# }]\"\n")
 
 
 def render_teardown_script(links_doc=None, host=None):
