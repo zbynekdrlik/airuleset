@@ -106,10 +106,12 @@ class TestSelfCallbackArmTypesAtAllOff(unittest.TestCase):
                          "goal-arm")
         self.assertIn("goal-arm", wd.RECOVERY_NUDGE_KINDS)
 
-    def test_a_watchdog_rearm_on_the_same_pane_keeps_the_staged_kind(self):
-        # scope lock: only the owner's own arm changes identity
-        self.assertEqual(goal._declared_window_nudge(CWD, "dark-rearm"),
-                         "goal-sweep")
+    def test_any_other_origin_keeps_the_staged_kind(self):
+        # scope lock: only the owner's own arm rides the always-on kind (#1324:
+        # the automatic origins that once shared it are retired)
+        for origin in (None, "", "auth-rearm", "stream-migrate"):
+            self.assertEqual(goal._declared_window_nudge(CWD, origin),
+                             "goal-sweep", origin)
 
 
 class TestWithheldRearmIsNamedNotVerifyFailed(unittest.TestCase):
@@ -119,7 +121,7 @@ class TestWithheldRearmIsNamedNotVerifyFailed(unittest.TestCase):
         self.reqp, self.syncp = _isolate_goal_state(self)
         _real_kill_switch(self)
 
-    def test_off_rearm_is_drop_nudge_off_with_zero_keystrokes(self):
+    def test_off_staged_arm_is_drop_nudge_off_with_zero_keystrokes(self):
         sid = "sess-1181-off"
         proj, tmux = _pane(self, sid)
         calls, logs = [], []
@@ -131,7 +133,7 @@ class TestWithheldRearmIsNamedNotVerifyFailed(unittest.TestCase):
         word = goal.deliver_goal(sid, CWD, PAYLOAD, "full", run=run,
                                  projects_dir=proj, now=now, request_ts=now,
                                  state={}, sleep_fn=lambda s: None,
-                                 logs=logs, origin="dark-rearm")
+                                 logs=logs, origin=None)   # legacy: staged kind
         self.assertEqual(word, "drop:nudge-off", logs)
         self.assertEqual(tmux.keys(), [], "nothing may be typed at OFF")
         self.assertFalse(any("capture-pane" in a for a in calls), calls)
@@ -142,13 +144,12 @@ class TestWithheldRearmIsNamedNotVerifyFailed(unittest.TestCase):
                          "a withheld keystroke is not a failed arm confirm")
         self.assertIn("DROP nudge-off(goal-sweep)", sync)
 
-    def test_nudge_off_is_terminal_and_bounded_by_the_origin_attempt_cap(self):
-        # one sweep: cleared, never re-typed, no misleading attempt-cap ping, and
-        # ONE booked dark-rearm attempt so dark-watch stays under its 24 h cap
+    def test_nudge_off_is_terminal(self):
+        # one sweep: cleared, never re-typed, no misleading attempt-cap ping
         sid = "sess-1181-off-sweep"
         proj, tmux = _pane(self, sid)
         goal.record_goal_request(sid, CWD, PAYLOAD, "full", now=100000,
-                                 path=self.reqp, origin="dark-rearm")
+                                 path=self.reqp, origin="")
         state, pings = {}, []
         logs = goal.goal_sweep(100010, run=tmux, projects_dir=proj,
                                requests_path=self.reqp, state=state,
@@ -158,8 +159,6 @@ class TestWithheldRearmIsNamedNotVerifyFailed(unittest.TestCase):
         self.assertNotIn(sid, goal.load_goal_requests(self.reqp))
         self.assertTrue(any("drop:nudge-off" in ln for ln in logs), logs)
         self.assertEqual(pings, [])
-        key = goal._GOAL_ATTEMPTS_STATE_KEYS["dark-rearm"]
-        self.assertEqual(len(state.get(key, {}).get(sid, [])), 1, state)
 
 
 QUIET = (False, "")
@@ -223,11 +222,10 @@ class TestCappedSelfArmIsVisible(unittest.TestCase):
 
     def test_the_notice_is_machine_text_never_an_owner_answer(self):
         # #1133: an answer / human-presence detector must reject our own line
-        from watchdog import goal_arm_failure as gaf, questions, stream_migrate
+        from watchdog import goal_arm_failure as gaf, questions
         line = gaf.NOTICE.format(attempts=3)
         entry = {"type": "user", "message": {"content": line}}
         self.assertFalse(questions._is_genuine_human_prompt(entry))
-        self.assertTrue(stream_migrate._own_keystroke(line))
 
     def test_no_notice_into_a_box_holding_a_draft(self):
         draft = "● Hotovo.\n❯ rozpisany draft\n  ctx ███░  caveman:lite\n"
@@ -270,14 +268,6 @@ class TestCappedSelfArmIsVisible(unittest.TestCase):
         self.assertTrue(any("notice already typed" in ln for ln in logs), logs)
         self.assertEqual(state["goal_arm_failed"][sid]["ts"], 100500,
                          "the status row is refreshed by the later cap")
-
-    def test_a_watchdog_rearm_at_the_cap_gets_no_pane_line(self):
-        sid = "sess-1181-rearm-cap"
-        with m.patch.object(wd, "_goal_autoarm_recent_human_activity",
-                            return_value=(False, "test")):
-            tmux, state, logs = self._sweep(sid, "dark-rearm")
-        self.assertEqual(self._notices(tmux), [])
-        self.assertFalse(state.get("goal_arm_failed"))
 
     def _status(self, sid, state_doc, captured=GOAL_IDLE_CAP):
         import airuleset

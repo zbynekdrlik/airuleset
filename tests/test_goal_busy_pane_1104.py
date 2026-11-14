@@ -1,7 +1,6 @@
 """#1104 — a SUSPENDED turn ("Waiting for N background agents" / an activity
 spinner) is BUSY for every keystroke nudge; verify-failed cleanup deferred to the
-first true idle tick; attempt-budget booked only on a REAL send; the enable CLI
-warns on a busy pane.
+first true idle tick; the enable CLI warns on a busy pane.
 
 Incident (owner, montalu1, 21.9.2026): the watchdog goal-sweep typed the ~3.8 kB
 `/goal STOP CONDITIONS …` template into a pane whose turn was suspended on
@@ -53,10 +52,8 @@ from watchdog import goal  # noqa: E402
 from watchdog import ops_wait_recheck as owr  # noqa: E402
 from _goal_arm_helpers import (  # noqa: E402
     DeliverGoalFakeTmux,
-    GOAL_IDLE_CAP,
     _isolate_goal_state,
     _write_marker_transcript,
-    _write_goal_marker,
 )
 
 # A bare `❯` box with a GENERIC ACTIVITY spinner rendered above it (a turn mid-
@@ -306,79 +303,7 @@ class TestVerifyFailedDefersCleanupOnLiveTurn(unittest.TestCase):
                          "a foreign draft never arms the deferred cleanup")
 
 
-# --------------------------------------------------------------------------- #
-# 4. ATTEMPT BOOKING — only a REAL (not OFF-suppressed) keystroke consumes the
-#    per-pane budget.
-# --------------------------------------------------------------------------- #
-# #1113 -- the pane-budget booking is exercised via a DARK-rearm keystroke into
-# an IDLE (dark) pane. (The old vehicle was a stale-rearm REPLACE into an ARMED
-# pane; that path is deleted -- an armed footer now drops `already-armed` and the
-# stale-rearm origin drops `stale-rearm-retired`, neither typing, so it can no
-# longer prove the budget-books-on-a-real-send behaviour. A dark-rearm into a
-# dead/dark loop is the live keystroke path that still books.)
-_REARM_TMPL = ("/goal STOP CONDITIONS — the loop is DONE the moment EITHER holds, "
-               "both checkable from the transcript: (A) the NEW wording carrying "
-               "the saturation clause: SATURATE parallel isolation:worktree lanes.")
-
-
-class TestAttemptBookingOnlyOnRealSend(unittest.TestCase):
-    CWD = "/home/newlevel/devel/bookrb1104"
-
-    def setUp(self):
-        self.reqp, self.syncp = _isolate_goal_state(self)
-
-    def _dir(self):
-        d = TemporaryDirectory()
-        self.addCleanup(d.cleanup)
-        return Path(d.name)
-
-    def _deliver(self, sid, state, nudges_on):
-        proj = self._dir()
-        _write_marker_transcript(proj, self.CWD, sid)
-        # a dark/dead loop's own marker (set); the DARK pane (GOAL_IDLE_CAP) reads
-        # armed=False so the dark-rearm keystroke path proceeds and books.
-        _write_goal_marker(proj, self.CWD, sid, "Goal set: " + _REARM_TMPL[len("/goal "):],
-                           ts_epoch=500)
-        tmux = DeliverGoalFakeTmux([("%9", "claude", self.CWD, "111")],
-                                   GOAL_IDLE_CAP, model_type=True)
-        ctx = []
-        # a NON-declared window keeps the staged `goal-sweep` (suppressible) nudge.
-        ctx.append(m.patch.object(goal, "_declared_window_nudge",
-                                  return_value="goal-sweep"))
-        ctx.append(m.patch.object(wd, "_goal_autoarm_recent_human_activity",
-                                  return_value=(False, "test")))
-        # nudges_on=False → goal-sweep OFF (keys suppressed, nothing typed).
-        ctx.append(m.patch.object(wd, "nudges_enabled",
-                                  side_effect=lambda k=None, **kw: bool(nudges_on)))
-        for p in ctx:
-            p.start()
-            self.addCleanup(p.stop)
-        now = 100000
-        word = goal.deliver_goal(
-            sid, self.CWD, _REARM_TMPL, "branch-merge", run=tmux, projects_dir=proj,
-            now=now, request_ts=now, sleep_fn=lambda s: None, state=state,
-            origin="dark-rearm")
-        return word, tmux
-
-    def test_off_suppressed_send_leaves_the_budget_untouched(self):
-        # RED: pre-fix `mark_pane_attempt` fires regardless of the send outcome,
-        # so an OFF-suppressed send (nothing typed) still burns a budget slot.
-        state = {}
-        word, tmux = self._deliver("sess-off-rb", state, nudges_on=False)
-        self.assertEqual(tmux.sent, [], "OFF suppresses the keystroke entirely")
-        self.assertEqual(state.get("nudge_pane_attempts", {}).get("%9", []), [],
-                         "an OFF-suppressed send must not consume the pane budget")
-        from watchdog import nudge_gate as ng
-        self.assertTrue(ng.pane_budget_ok(state, "%9", 100000))
-
-    def test_real_send_books_one_attempt(self):
-        # Regression lock: a genuinely delivered re-arm keystroke IS booked.
-        state = {}
-        word, tmux = self._deliver("sess-on-rb", state, nudges_on=True)
-        self.assertEqual(word, "sent")
-        self.assertEqual(
-            len(state.get("nudge_pane_attempts", {}).get("%9", [])), 1,
-            "a really sent keystroke books exactly one attempt")
+# (4. the re-arm ATTEMPT BOOKING locks left with the watchdog re-arm origins, #1324.)
 
 
 # --------------------------------------------------------------------------- #

@@ -451,7 +451,7 @@ class LatchRefusesArm(_Latched):
 
     def test_no_origin_arms_a_latched_session(self):
         self.assertIn("drop:owner-stop", goal._GOAL_TERMINAL_WORDS)
-        for origin in (None, "self-callback", "dark-rearm", "auth-rearm"):
+        for origin in (None, "self-callback"):   # #1324: the only live origins
             tmux = self._tmux()
             word = goal.deliver_goal(self.SID, self.CWD, "/goal STOP CONDITIONS x",
                                      "full", run=tmux, projects_dir=self.proj,

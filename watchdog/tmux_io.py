@@ -132,14 +132,11 @@ MACHINE_NUDGE_KINDS = frozenset({
 # dropping the switch gate removed no rate bound. PRIORITY nudges (every
 # MACHINE_NUDGE_KINDS member) stay gated + floored + per-kind staged.
 #
-# #1038/#1181/#1260 — `goal-arm`: the ALWAYS-ON identity of the owner's own
-# `/autopilot` arm (`self-callback`, on any pane) and of the owner-authorized
-# `stream-migrate` watcher (#1128); NEVER suppressed by the machine-nudge OFF
-# switch, because the owner just asked for it. Every watchdog re-arm keeps the
-# staged PRIORITY `goal-sweep` identity, on a declared window too: #1260
-# (owner 25.10.2026) retired #1038's declared-window always-on arm together
-# with its virgin arm, because a goal exists only when the owner typed
-# `/autopilot`. Delivery picks the identity from the request's origin; see
+# #1038/#1181/#1260/#1324 — `goal-arm`: the ALWAYS-ON identity of the owner's
+# own `/autopilot` arm (`self-callback`, on any pane) -- its ONLY user, since the
+# watchdog never arms or re-arms a goal on its own (#1324, owner 14.11.2026);
+# NEVER suppressed by the machine-nudge OFF switch, because the owner just asked
+# for it. Delivery picks the identity from the request's origin; see
 # `watchdog/goal.py` `_declared_window_nudge` / `deliver_goal`. Its own
 # recent-human + tri-state-armed + boundary gates bound it, exactly as the
 # other recovery nudges keep theirs.

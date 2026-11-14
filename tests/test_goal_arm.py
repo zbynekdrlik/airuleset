@@ -15,10 +15,10 @@ single source of truth for the design this file locks:
     every SKIP leaves the request pending for the next sweep.
   - `goal_sweep` (job 9's new body) re-evaluates every still-pending
     request through that SAME function, clearing only on a TERMINAL word.
-  - `goal_dark_watch` (job 20, half 1) itself types no keystroke, but for a
-    transcript-says-armed/footer-says-dark mismatch it either RECORDS a
-    re-arm for job 9 to type (only on a #524 CONFIRMED death) or sends a
-    Discord ping; a `cleared` marker or no marker at all stays silent.
+  - `goal_dark_watch` (job 20, half 1) itself types no keystroke and never
+    records a re-arm (#1324): a #524 CONFIRMED transcript-says-armed/footer-
+    says-dark mismatch is journalled + reported once; a `cleared` marker or
+    no marker at all stays silent.
   - `goal_lane_occupancy_nudge` (job 20, half 2) is the ONE remaining
     watchdog-INITIATED keystroke action, and is the only one of the two
     that DOES apply the recent-human-activity gate (arm delivery
@@ -79,74 +79,39 @@ class GoalRequestState(unittest.TestCase):
         self.assertFalse(goal.record_goal_request("", "/x", "/goal x", "full", path=p))
         self.assertEqual(goal.load_goal_requests(p), {})
 
-    def test_ts_is_never_refreshed_by_an_automatic_re_record(self):
-        # #757 DELIBERATE REVERSAL of the #400/#478 invariant this test used
-        # to assert. The old form ("the anchor is NEVER refreshed by a later
-        # re-record, incl. a self→self one") was too broad: it froze the anchor
-        # even when the owner re-ran /autopilot, so a fresh user arm expired
-        # early. The SURVIVING invariant is narrower and is what still guards
-        # #400: an AUTOMATIC (watchdog) re-record never refreshes the cap —
-        # only a genuine human /autopilot callback (self-callback) does (it
-        # needs a human action each time, so it can never refresh-forever).
-        # The self→self fresh-ts case is now locked by
-        # test_self_callback_re_record_gets_a_fresh_ts. Here we lock that a
-        # dark-rearm re-record still preserves, while latest cwd/text/authority
-        # still win.
+    def test_ts_is_never_refreshed_by_a_non_user_re_record(self):
+        # #757: only a genuine human /autopilot callback (self-callback) refreshes
+        # the #400 age-cap anchor (it needs a human action each time, so it can
+        # never refresh-forever); the self→self case is locked by
+        # test_self_callback_re_record_gets_a_fresh_ts. An unknown/empty origin
+        # (the ALLOWLIST's fail-safe branch; #1324 retired every automatic one)
+        # preserves the anchor while latest cwd/text/authority still win.
         p = self._p()
         goal.record_goal_request("sess-1", "/x", "/goal a", "full", now=1000,
-                                 path=p, origin="dark-rearm")
+                                 path=p, origin="")
         goal.record_goal_request("sess-1", "/y", "/goal b", "branch-merge",
-                                 now=5000, path=p, origin="dark-rearm")
+                                 now=5000, path=p, origin="")
         d = goal.load_goal_requests(p)
-        self.assertEqual(d["sess-1"]["ts"], 1000)          # anchor frozen on an automatic re-record
+        self.assertEqual(d["sess-1"]["ts"], 1000)          # anchor frozen
         self.assertEqual(d["sess-1"]["cwd"], "/y")          # latest cwd wins
         self.assertEqual(d["sess-1"]["text"], "/goal b")    # latest text wins
         self.assertEqual(d["sess-1"]["authority"], "branch-merge")
 
-    def test_dark_rearm_never_clobbers_a_pending_self_callback(self):
-        # #478 adversarial-review MAJOR — record_goal_request now has TWO
-        # writers. A watchdog dark-rearm must NEVER overwrite a still-pending
-        # user (self-callback) arm: the user's own explicit /goal request
-        # stands entirely intact (origin, text, authority, ts).
+    def test_user_callback_replaces_a_leftover_dark_rearm_with_a_fresh_ts(self):
+        # #478 review MAJOR (path 2) / #1324 — a user callback landing on a
+        # LEFTOVER (pre-retire, on-disk) dark-rearm entry takes the user's fresh
+        # values AND a FRESH ts anchor, so the owner's brand-new arm is never
+        # judged expired against the stale watchdog anchor.
         p = self._p()
-        goal.record_goal_request("sess-1", "/user/cwd", "/goal USER", "full",
-                                 now=1000, path=p,
-                                 origin="self-callback")
-        ok = goal.record_goal_request("sess-1", "/wd/cwd", "/goal WATCHDOG",
-                                      "branch-merge", now=2000, path=p,
-                                      origin="dark-rearm")
-        self.assertTrue(ok, "a refused downgrade is a successful no-op")
-        e = goal.load_goal_requests(p)["sess-1"]
-        self.assertEqual(e["origin"], "self-callback")
-        self.assertEqual(e["text"], "/goal USER")
-        self.assertEqual(e["authority"], "full")
-        self.assertEqual(e["ts"], 1000)
-
-    def test_user_callback_upgrades_a_pending_dark_rearm_with_a_fresh_ts(self):
-        # #478 adversarial-review MAJOR (path 2) — a genuine user callback
-        # landing on a pending dark-rearm entry takes the user's fresh values
-        # AND a FRESH ts anchor, so the user's brand-new arm is never judged
-        # expired against the stale watchdog anchor.
-        p = self._p()
-        goal.record_goal_request("sess-1", "/wd/cwd", "/goal WATCHDOG", "full",
-                                 now=1000, path=p, origin="dark-rearm")
+        goal._save_goal_requests({"sess-1": {
+            "cwd": "/wd/cwd", "ts": 1000, "origin": "dark-rearm",
+            "authority": "full", "text": "/goal WATCHDOG"}}, p)
         goal.record_goal_request("sess-1", "/user/cwd", "/goal USER", "full",
                                  now=9000, path=p, origin="self-callback")
         e = goal.load_goal_requests(p)["sess-1"]
         self.assertEqual(e["origin"], "self-callback")
         self.assertEqual(e["text"], "/goal USER")
         self.assertEqual(e["ts"], 9000, "user upgrade resets the ts anchor")
-
-    def test_dark_rearm_re_record_preserves_ts_same_origin(self):
-        # A same-origin dark-rearm re-record (the backoff/cap path) preserves
-        # the non-refreshable #400 anchor exactly like self-callback does —
-        # the downgrade guard must not accidentally reset it.
-        p = self._p()
-        goal.record_goal_request("sess-1", "/wd", "/goal a", "full", now=1000,
-                                 path=p, origin="dark-rearm")
-        goal.record_goal_request("sess-1", "/wd", "/goal a", "full", now=5000,
-                                 path=p, origin="dark-rearm")
-        self.assertEqual(goal.load_goal_requests(p)["sess-1"]["ts"], 1000)
 
     def test_self_callback_re_record_gets_a_fresh_ts(self):
         # #757 — a same-origin self→self re-record (owner re-runs /autopilot
@@ -183,18 +148,19 @@ class GoalRequestState(unittest.TestCase):
             age_at_sweep, goal.GOAL_REQUEST_MAX_AGE_S,
             "fresh re-armed request must not be expired inside its own window")
 
-    def test_unknown_origin_re_record_preserves_ts_failsafe(self):
-        # #757 fail-safe lock — the allowlist (not a denylist) direction:
-        # an UNKNOWN novel origin re-recording over a user prior must PRESERVE
-        # the anchor, so a future automatic origin nobody classified can never
-        # silently gain refresh-forever rights and reopen #400.
+    def test_unknown_origin_never_touches_a_user_prior(self):
+        # #757 fail-safe lock, tightened by #1324: an UNKNOWN novel origin is
+        # refused outright (an allowlist), so it can neither gain refresh-forever
+        # rights (#400) nor arm a goal; the owner's pending request stands.
         p = self._p()
         goal.record_goal_request("s", "/x", "/goal a", "full", now=1000,
                                  path=p, origin="self-callback")
-        goal.record_goal_request("s", "/x", "/goal a", "full", now=9000,
-                                 path=p, origin="some-future-origin")
-        self.assertEqual(goal.load_goal_requests(p)["s"]["ts"], 1000,
-                         "unknown origin must fail safe to preserve")
+        self.assertFalse(goal.record_goal_request(
+            "s", "/x", "/goal b", "full", now=9000, path=p,
+            origin="some-future-origin"))
+        e = goal.load_goal_requests(p)["s"]
+        self.assertEqual((e["ts"], e["text"], e["origin"]),
+                         (1000, "/goal a", "self-callback"))
 
     def test_empty_origin_re_record_over_user_prior_preserves_ts(self):
         # #757 — a None/empty new origin (legacy/hand-edited store) is not in
@@ -220,25 +186,6 @@ class GoalRequestState(unittest.TestCase):
         e = goal.load_goal_requests(p)["s"]
         self.assertNotIn("dl_fails", e, "dl_fails reset on a fresh episode")
         self.assertEqual(e["ts"], 5000, "ts reset on the same fresh episode")
-
-    def test_stale_rearm_re_record_preserves_ts(self):
-        # #757 — a watchdog stale-rearm re-record PRESERVES the anchor (an
-        # automatic re-arm must never refresh the cap forever).
-        p = self._p()
-        goal.record_goal_request("s", "/wd", "/goal a", "full", now=1000,
-                                 path=p, origin="stale-rearm")
-        goal.record_goal_request("s", "/wd", "/goal a", "full", now=5000,
-                                 path=p, origin="stale-rearm")
-        self.assertEqual(goal.load_goal_requests(p)["s"]["ts"], 1000)
-
-    def test_auth_rearm_re_record_preserves_ts(self):
-        # #757 — a watchdog auth-rearm re-record PRESERVES the anchor too.
-        p = self._p()
-        goal.record_goal_request("s", "/wd", "/goal a", "full", now=1000,
-                                 path=p, origin="auth-rearm")
-        goal.record_goal_request("s", "/wd", "/goal a", "full", now=5000,
-                                 path=p, origin="auth-rearm")
-        self.assertEqual(goal.load_goal_requests(p)["s"]["ts"], 1000)
 
     def test_clear_removes_one_request_only(self):
         p = self._p()
@@ -345,7 +292,7 @@ class GoalTemplateResolution(unittest.TestCase):
         # #617 -- the refuse ALREADY happens (returns None). The #169
         # regression was SILENT, so a re-grown template disabled the whole
         # autopilot loop with no signal. An optional `logs` list surfaces the
-        # over-cap refusal LOUDLY (the dark-rearm path passes one), so a
+        # over-cap refusal LOUDLY (`_default_rearm_fn` passes one), so a
         # recurrence is visible in the watchdog log, not a silent no-arm.
         long_line = "/goal " + ("x" * (goal.GOAL_ARM_CHAR_CAP + 50))
         p = self._p(_skill_md(("full", long_line)))
@@ -460,37 +407,6 @@ class TestDeliverGoal(unittest.TestCase):
         word, tmux, _ = self._go(GOAL_ARMED_CAP)
         self.assertEqual(word, "drop:already-armed")
         self.assertEqual(tmux.sent, [])
-
-    def test_stale_dark_rearm_request_is_dropped_at_delivery(self):
-        # #524 -- a dark-rearm decision goes stale FAST (recorded from a dark
-        # READ; the loop's state changes within a sweep or two). A dark-rearm
-        # request older than GOAL_DARK_REARM_STALE_S is DROPPED at delivery,
-        # never typed late (the H1 "stale request delivered late" concern,
-        # closed on the ONE origin that can spontaneously TYPE).
-        now = 1_000_000
-        old_ts = now - goal.GOAL_DARK_REARM_STALE_S - 1
-        word, tmux, _ = self._go(GOAL_IDLE_CAP, now=now, request_ts=old_ts,
-                                 origin=goal._GOAL_REARM_ORIGIN)
-        self.assertEqual(word, "drop:stale-rearm")
-        self.assertEqual(tmux.sent, [])
-
-    def test_fresh_dark_rearm_request_still_delivers(self):
-        # The freshness gate is TIGHT, not a blanket refusal: a just-recorded
-        # dark-rearm still types.
-        now = 1_000_000
-        word, tmux, _ = self._go(GOAL_IDLE_CAP, now=now, request_ts=now - 10,
-                                 origin=goal._GOAL_REARM_ORIGIN)
-        self.assertEqual(word, "sent")
-
-    def test_dark_rearm_freshness_gate_is_origin_scoped(self):
-        # A NON-rearm origin at the SAME stale age is NOT dropped by this gate
-        # (only the 30-min generic age cap governs it) -- the tight staleness
-        # is dark-rearm-ONLY, never applied to a user self-callback arm.
-        now = 1_000_000
-        old_ts = now - goal.GOAL_DARK_REARM_STALE_S - 1   # < 30-min generic cap
-        word, tmux, _ = self._go(GOAL_IDLE_CAP, now=now, request_ts=old_ts,
-                                 origin="self-callback")
-        self.assertEqual(word, "sent")
 
     def test_draft_pane_delivers_via_stash(self):
         # A draft in the box must be delivered through deliver_with_stash,
@@ -628,30 +544,10 @@ class TestDeliverGoal(unittest.TestCase):
         self.assertEqual(word, "sent")
 
     # ----------------------------------------------------------------- #
-    # #478 — a watchdog-INITIATED auto-re-arm (origin="dark-rearm") must
-    # honour the recent-human gate at the keystroke point, UNLIKE the user's
-    # own /autopilot callback (whose origin IS the user, so it stays exempt).
+    # The owner's own /autopilot callback is exempt from the recent-human gate
+    # (its origin IS the user); #1324 retired the watchdog re-arm origins that
+    # once honoured it.
     # ----------------------------------------------------------------- #
-
-    def test_dark_rearm_origin_skips_on_recent_human(self):
-        # A dark-watch auto-re-arm is watchdog-INITIATED, so at DELIVERY time
-        # it MUST refuse while a human is active — never type /goal into a
-        # pane a human just touched (they may have deliberately stopped the
-        # loop without a `/goal clear`). RED: deliver_goal has no origin gate.
-        with m.patch.object(wd, "_goal_autoarm_recent_human_activity",
-                            return_value=(True, "presence marker fresh")):
-            word, tmux, _ = self._go(GOAL_IDLE_CAP, origin="dark-rearm")
-        self.assertEqual(word, "skip:recent-human")
-        self.assertEqual(tmux.sent, [])          # never typed
-
-    def test_dark_rearm_origin_sends_when_no_recent_human(self):
-        # With the gate returning "no recent human", a dark-rearm delivers
-        # normally through the verified keystroke path.
-        with m.patch.object(wd, "_goal_autoarm_recent_human_activity",
-                            return_value=(False, "")):
-            word, tmux, _ = self._go(GOAL_IDLE_CAP, origin="dark-rearm")
-        self.assertEqual(word, "sent")
-        self.assertIn(self.TEXT, tmux.typed_texts())
 
     def test_normal_origin_stays_exempt_from_recent_human(self):
         # The self-callback (user typed /autopilot) origin stays EXEMPT: its
@@ -665,26 +561,9 @@ class TestDeliverGoal(unittest.TestCase):
         self.assertEqual(word, "sent")
         self.assertIn(self.TEXT, tmux.typed_texts())
 
-    def test_dark_rearm_skips_when_transcript_vanished(self):
-        # #478 review MINOR — if the transcript vanished between pane
-        # resolution and deliver_goal's own re-query (delete/archive race),
-        # a dark-rearm must refuse on unprovable state (no recent-human gate
-        # possible) rather than type blind. Forced by resolving a pane but
-        # making find_active_transcript return None.
-        from watchdog import compact as _compact
-        proj = self._dir()
-        tmux = DeliverGoalFakeTmux([("%9", "claude", self.CWD, "111")], GOAL_IDLE_CAP)
-        with m.patch.object(_compact, "_find_pane_for_session", return_value="%9"), \
-             m.patch.object(wd, "find_active_transcript", return_value=None):
-            word = goal.deliver_goal(self.SID, self.CWD, self.TEXT, "full",
-                                     run=tmux, projects_dir=proj,
-                                     origin="dark-rearm", sleep_fn=lambda s: None)
-        self.assertEqual(word, "skip:no-transcript")
-        self.assertEqual(tmux.sent, [])                  # never typed
-
     def test_normal_origin_not_gated_on_a_missing_transcript(self):
-        # The mirror: the no-transcript refusal is dark-rearm-ONLY. A normal
-        # (non-dark-rearm) origin passes THROUGH to the keystroke machinery
+        # The mirror: no no-transcript refusal (it was dark-rearm-ONLY, retired
+        # by #1324). A normal origin passes THROUGH to the keystroke machinery
         # even when the transcript is absent — it must never hit
         # skip:no-transcript. (The contrived no-transcript fake makes the
         # verified-send readback fail, so assert only the property under
@@ -698,7 +577,7 @@ class TestDeliverGoal(unittest.TestCase):
                                      run=tmux, projects_dir=proj,
                                      sleep_fn=lambda s: None)
         self.assertNotEqual(word, "skip:no-transcript",
-                            "the no-transcript refusal is dark-rearm-only")
+                            "no no-transcript refusal for the owner's arm")
 
     def test_bootstrap_turn_ending_needs_you_still_arms(self):
         # #403-review CRITICAL C1: the /autopilot bootstrap turn that

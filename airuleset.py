@@ -7958,8 +7958,8 @@ def cmd_watchdog(args):
     — since an armed `/goal` can die SILENTLY, in the same process, without
     ever writing a `Goal cleared:` marker — cross-checks each session's
     transcript marker against CC's own `◎ /goal` footer indicator and
-    re-arms a proven mismatch with the marker's exact bytes, bounded, with
-    one ping on give-up (#76 job 20). Driven by the systemd timer.
+    journals a confirmed mismatch as a lost goal, never re-arming it (#76 job
+    20; #1324: only the owner's /autopilot arms). Driven by the systemd timer.
 
     Job logs print UNCONDITIONALLY (issue #36) — the systemd unit runs
     `watchdog --once` with NO `--verbose`, so gating the print behind that
@@ -10764,32 +10764,20 @@ def _print_nudges_status(home=None):
     recovery = sorted(_wd.RECOVERY_NUDGE_KINDS)
     if recovery:
         print("  %s: always-on (recovery)" % ", ".join(recovery))
-    # #1092 (e) — a SECOND recovery line: the goal RE-ARM family (dark/stale/auth/
-    # fulfilled-rearm, delivered via the `goal-arm` recovery kind) TYPES into an
-    # active pane and is EXEMPT from the `nudges off` switch, so a plain `nudges:
-    # OFF` summary must never read as "nothing types". State whether the box
-    # carries the owner's `~/.claude/watchdog-disable-goal` kill switch — the ONE
-    # flag that silences ALL goal jobs (re-arms included). Read the flag directly
-    # (NOT `_owner_disabled`, which the test-ignore env would mask) so the line is
-    # honest on a live box.
+    # #1092 (e) / #1324 — a SECOND line on goal arms, so a plain `nudges: OFF`
+    # summary never reads as "nothing types": the owner's own `/autopilot` arm
+    # (`goal-arm --self`) rides the always-on `goal-arm` recovery kind, and the
+    # watchdog never arms or re-arms a goal on its own (#1324). Read the owner's
+    # `~/.claude/watchdog-disable-goal` kill switch directly (NOT
+    # `_owner_disabled`, which the test-ignore env would mask).
     _flag = os.path.exists(
         os.path.join(home or os.path.expanduser("~"), ".claude",
                      "watchdog-disable-goal"))
-    if _flag:
-        print("  goal re-arms: SUPPRESSED — this box carries "
-              "~/.claude/watchdog-disable-goal (present; the owner kill switch "
-              "that silences ALL goal jobs, re-arms included)")
-    else:
-        # #1092 F2 — be honest per WINDOW CLASS: a DECLARED managed window's arm
-        # rides the always-on `goal-arm` recovery kind (NOT covered by 'nudges
-        # OFF'); a non-declared box's re-arm rides `goal-sweep`, a machine nudge
-        # that DOES follow the OFF switch. Both, when they type, go through the
-        # per-pane budget + human-active guard + empty-box precondition.
-        print("  goal re-arms: a DECLARED window's arm (goal-arm) is always-on "
-              "recovery, NOT covered by 'nudges OFF'; a non-declared box's re-arm "
-              "rides goal-sweep and DOES follow the switch. Both type via the "
-              "per-pane budget + human-active guard "
-              "(~/.claude/watchdog-disable-goal: absent)")
+    print("  goal arms: only the owner's own /autopilot (goal-arm, always-on); "
+          "the watchdog never re-arms a goal (#1324). "
+          "~/.claude/watchdog-disable-goal: %s"
+          % ("present — ALL goal jobs suppressed, the owner's arm included"
+             if _flag else "absent"))
 
 
 def _nudge_profile_install_step():
