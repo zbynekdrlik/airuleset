@@ -204,6 +204,94 @@ class DarkWatchJournals(unittest.TestCase):
         self.assertEqual(len(sends), 1, "one goal-dark report per episode")
         self.assertTrue(sends[0][1]["dedup_key"].startswith("goal-dark:"))
 
+    def test_a_loop_that_ended_on_the_flag_is_finished_not_lost(self):
+        # review 🟡: a 🏁 BACKLOG EMPTY completion leaves the mark "set" and the
+        # footer dark; it is journalled once as fulfilled, never reported lost.
+        sid = "sid-fulfilled"
+        proj = _tmp(self)
+        _write_marker_transcript(proj, CWD, sid)
+        _write_goal_marker(proj, CWD, sid, "Goal set: %s" % _COND, ts_epoch=500)
+        tp = proj / wd.encode_project_dir(CWD) / (sid + ".jsonl")
+        with open(tp, "a", encoding="utf-8") as f:
+            f.write(json.dumps({"type": "assistant", "timestamp":
+                                "1970-01-01T00:10:00.000Z", "message": {
+                                    "id": "m2", "content":
+                                    "🏁 BACKLOG EMPTY: 0 open, main green"}})
+                    + "\n")
+        aged = time.time() - 3600
+        os.utime(tp, (aged, aged))
+        state, sends, lines = {}, [], []
+        for i in range(14):
+            lines += self._watch(proj, 100000 + 90 * i, state, sends)
+        self.assertFalse(any("goal-lost" in ln for ln in lines), lines)
+        self.assertEqual(sum("goal-ended:fulfilled" in ln for ln in lines), 1, lines)
+        self.assertEqual(sends, [])
+
+    def test_auth_latch_survives_a_transient_skip(self):
+        # review 🔵: a pane skipped one sweep (copy-mode) keeps its latch, so the
+        # episode is never journalled twice.
+        sid = "sid-auth-skip"
+        proj = self._auth_fixture(sid)
+        state, sends, lines = {}, [], []
+        lines += self._watch(proj, 100000, state, sends)
+        with m.patch.object(wd, "pane_in_mode", return_value=True):
+            lines += self._watch(proj, 100060, state, sends)
+        lines += self._watch(proj, 100120, state, sends)
+        self.assertEqual(sum("goal-lost:auth-clear" in ln for ln in lines), 1, lines)
+
+    def test_retired_stores_dropped_even_with_the_kill_switch(self):
+        state = {"goal_auth_rearm_attempts": {"s": [1]}, "auth_rearm_hold": {"s": 1}}
+        with m.patch.object(wd, "_owner_disabled", return_value=True):
+            goal.goal_dark_watch(1000, run=lambda *a, **k: "", state=state)
+        self.assertEqual(state, {})
+
+
+class OwnerOnlyAllowlist(unittest.TestCase):
+    def setUp(self):
+        _isolate_goal_state(self)
+
+    def test_an_unknown_named_origin_is_refused_and_dropped(self):
+        self.assertFalse(goal.record_goal_request(
+            "sid-new", CWD, _TEMPLATE, "full", now=1000, origin="future-rearm"))
+        self.assertEqual(goal.load_goal_requests(), {})
+
+        def run(argv, timeout=None):
+            raise AssertionError("pane touched for a non-owner origin")
+        word = goal.deliver_goal("sid-new", CWD, _TEMPLATE, "full", run=run,
+                                 projects_dir=_tmp(self), now=1000, state={},
+                                 request_ts=990, origin="future-rearm")
+        self.assertEqual(word, "drop:non-owner-origin")
+        self.assertIn(word, goal._GOAL_TERMINAL_WORDS)
+
+    def test_only_the_owner_paths_call_the_arm_store_and_delivery(self):
+        # structural lock: in non-test code `record_goal_request` is called only
+        # by `_goal_sync_attempt`, `deliver_goal` only by `_goal_sync_attempt`
+        # and `goal_sweep` (the owner's `goal-arm --self` and its re-evaluation).
+        import ast
+        import glob
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        allowed = {"record_goal_request": {"_goal_sync_attempt"},
+                   "deliver_goal": {"_goal_sync_attempt", "goal_sweep"}}
+        seen = {k: set() for k in allowed}
+        rels = [os.path.relpath(f, root)
+                for f in glob.glob(root + "/**/*.py", recursive=True)]
+        paths = [os.path.join(root, r) for r in rels
+                 if not r.startswith(("tests/", ".claude/", "scripts/repro_"))]
+        for path in paths:
+            tree = ast.parse(open(path, encoding="utf-8").read())
+            for fn in ast.walk(tree):
+                if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                for call in ast.walk(fn):
+                    if isinstance(call, ast.Call):
+                        f = call.func
+                        name = getattr(f, "attr", None) or getattr(f, "id", None)
+                        if name in allowed:
+                            seen[name].add(fn.name)
+        for name, callers in seen.items():
+            self.assertLessEqual(callers, allowed[name], name)
+            self.assertTrue(callers, name)
+
 
 if __name__ == "__main__":
     unittest.main()
