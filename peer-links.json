@@ -256,6 +256,23 @@
         "dstack|mikrotik": "one NIC per production PC (dstack #155): Dante VLAN 70 plus a LAN VLAN, CRS310 port tagging, .lan records to LAN addresses; dstack coordinates, mikrotik owns switch and router config",
         "camera-box|fohmixer": "the FOH mix and the camera-box rig: the FOH audio that reaches the stream and OBS, and tests or windows on the SNV show rig that touch the FOH mixer; a Dante question still goes to dstack"
       }
+    },
+    "subdev": {
+      "links": [
+        [
+          "david3",
+          "devbridge"
+        ]
+      ],
+      "topics": {
+        "david3|devbridge": "Worldline TIM SDK and the pokladňa integration between devbridge and odoo-erp (odoo-erp#7598); never make the owner relay messages or files"
+      },
+      "streams": {
+        "david3": {
+          "account": "david3",
+          "path": "~/devel/odoo/odoo-erp"
+        }
+      }
     }
   },
   "bridges": {
@@ -284,6 +301,20 @@
           "identity": "~/.ssh/presenter_peer_ed25519",
           "path": "/etc/airuleset/peer",
           "key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGkRnAroNZk+tD6jrYVbJUalRDoBk/pxTiLwB/rUZvfW presenter-peer@dev2"
+        }
+      }
+    },
+    "devbridge": {
+      "account": "devbridge",
+      "home": "dev1",
+      "path": "/home/devbridge/devel/devbridge",
+      "hosts": {
+        "subdev": {
+          "account": "devbridge-peer",
+          "ssh": "devbridge-peer@100.118.174.27",
+          "identity": "~/.ssh/devbridge_peer_ed25519",
+          "path": "/etc/airuleset/peer",
+          "key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIK3cd06TJRat2goxWmnX07cHYHQpKAfCzOKEyGe1IsC8 devbridge-peer@dev1"
         }
       }
     }

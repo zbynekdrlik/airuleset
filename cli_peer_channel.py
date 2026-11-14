@@ -92,11 +92,54 @@ def root_host_names():
     return {h.get("name") for h in airuleset.DISK_GUARD_ROOT_HOSTS}
 
 
-def validate_links(links_doc, registry, root_hosts=None):
+def stream_users(host):
+    """#1320: unix users that may be a ``streams`` member on root host ``host``: its
+    ``REMOTE_HOSTS`` users with a REDUCED authority (an own-uid stream account). A
+    shared or full-authority account (``newlevel``, ``gatekeeper``) would let every
+    project on it speak as the stream (#1266). Paused ones stay valid here and are
+    left out by ``accounts_for_host``, so pausing a stream breaks no host."""
+    import airuleset  # L-E: via the facade
+    ip = {h.get("name"): h.get("host") for h in airuleset.DISK_GUARD_ROOT_HOSTS}.get(host)
+    return {r["user"] for r in airuleset.REMOTE_HOSTS
+            if ip and r.get("host") == ip and isinstance(r.get("user"), str)
+            and airuleset.AUTHORITY_BY_USER.get(r["user"], "full") != "full"}
+
+
+def idle_users():
+    """#1320: fleet users that no unattended job may name (#851 paused, pending)."""
+    import airuleset  # L-E: via the facade
+    return {r.get("user") for r in airuleset.REMOTE_HOSTS if r.get("paused") or r.get("pending")}
+
+
+def _stream_errors(host, entry, registry, links_doc, users):
+    """#1320: a stream is named after its own account, is an active fleet user of
+    the host, lives under its home, and never shadows a registry or bridge name."""
+    raw = entry.get("streams", {})
+    if not isinstance(raw, dict):
+        return ["%s: 'streams' must be an object" % host]
+    taken = set(peer_channel.host_projects(registry, host)) | set(
+        peer_channel.bridge_rows(links_doc, host))
+    errors = []
+    for name, spec in sorted(raw.items()):
+        path = spec.get("path") if isinstance(spec, dict) else None
+        if not (isinstance(spec, dict) and spec.get("account") == name
+                and peer_channel.PROJECT_RE.match(name)):
+            errors.append("%s: stream %r must be {account: %r, path}" % (host, name, name))
+        elif name not in users(host):
+            errors.append("%s: stream %s is not a stream account (reduced-authority fleet user) of %s" % (host, name, host))
+        elif not (isinstance(path, str) and path.startswith("~/") and len(path) > 2
+                  and ".." not in path.split("/")):
+            errors.append("%s: stream %s path %r must be under ~/" % (host, name, path))
+        elif name in taken:
+            errors.append("%s: stream %s collides with a project" % (host, name))
+    return errors
+
+
+def validate_links(links_doc, registry, root_hosts=None, stream_users=stream_users):
     """Every problem in ``links_doc`` as a string (empty = valid): an unknown host
     (not a ``DISK_GUARD_ROOT_HOSTS`` name), a host entry without a ``links`` list, a
-    malformed pair, a self link, or a project that is not a registry project ON
-    THAT HOST."""
+    malformed pair, a self link, a bad #1320 stream, or a project that is not a
+    registry project, bridge far end or stream ON THAT HOST."""
     root_hosts = root_host_names() if root_hosts is None else root_hosts
     errors = []
     hosts = links_doc.get("hosts") if isinstance(links_doc, dict) else None
@@ -110,6 +153,7 @@ def validate_links(links_doc, registry, root_hosts=None):
         if not isinstance(raw, list):
             errors.append("%s: 'links' must be a list" % host)
             continue
+        errors += _stream_errors(host, entry, registry, links_doc, stream_users)
         projects = peer_channel.host_projects(registry, host, links_doc)
         topics = entry.get("topics") if isinstance(entry.get("topics"), dict) else {}
         for pair in raw:
@@ -142,7 +186,13 @@ def _bridge_errors(links_doc, root_hosts=None):
                 and (home in roots or home == CONTROLLER_HOME)):
             errors.append("bridge %s: home %r is not one of %s on the root leg"
                           % (name, home, sorted(HOME_HOSTS)))
+        local = set(peer_channel.linked_to(peer_channel.host_links(links_doc, home), name)
+                    if isinstance(home, str) else ())
         for host, far in spec["hosts"].items():
+            both = local & set(peer_channel.linked_to(peer_channel.host_links(links_doc, host), name))
+            if both and host != home:     # #1320: inbound carries only `from`, so the two are indistinguishable
+                errors.append("bridge %s: %s is linked both on %s and on %s"
+                              % (name, ", ".join(sorted(both)), home, host))
             if host not in links_doc["hosts"]:
                 errors.append("bridge %s: %s is not a links host" % (name, host))
             if not (isinstance(far, dict) and FAR_SSH_RE.match(str(far.get("ssh")))
@@ -169,7 +219,8 @@ def accounts_for_host(host, links_doc=None, registry=None):
         for name in pair:
             if name in projects:
                 accts.add(projects[name]["account"])
-    return sorted(a for a in accts if not bootstrap.is_pending(a))
+    idle = idle_users()
+    return sorted(a for a in accts if not bootstrap.is_pending(a) and a not in idle)
 
 
 def is_bridge_home(user, links_doc=None, host=None):
@@ -355,7 +406,8 @@ def snapshot_registry(registry, links_doc):
     """The registry as the host snapshot holds it: with the bridged projects, because
     a running session reads this file on every use but keeps the code of its start."""
     rows = [dict(row, name=name) for host in links_doc.get("hosts", {})
-            for name, row in peer_channel.bridge_rows(links_doc, host).items()]
+            for fn in (peer_channel.bridge_rows, peer_channel.stream_rows)
+            for name, row in fn(links_doc, host).items()]
     return list(registry) + rows
 
 
