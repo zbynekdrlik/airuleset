@@ -278,9 +278,10 @@ _GOAL_MARK_PARSER_VERSION = 2
 def record_goal_request(session, cwd, text, authority, now=None, path=None,
                         origin=None, moff=None):
     """Record a pending `/goal` arm request for `session`. The one writer is the
-    owner's `goal-arm --self` callback (origin "self-callback", #478). A RETIRED
-    origin (#1324: the watchdog never arms a goal on its own) is REFUSED -- False,
-    nothing written -- so no future caller can resurrect an automatic arm.
+    owner's `goal-arm --self` callback (origin "self-callback", #478). Any other
+    NAMED origin -- a retired one or an unknown one (#1324: the watchdog never arms
+    a goal on its own) -- is REFUSED (False, nothing written): an ALLOWLIST, so no
+    future caller can add an automatic arm. An empty origin is the legacy form.
     Overwrites any earlier pending request for the SAME session.
 
     `ts` is the #400 age-cap anchor: set ONCE on create and preserved on every
@@ -299,9 +300,9 @@ def record_goal_request(session, cwd, text, authority, now=None, path=None,
         return False
     now = time.time() if now is None else now
     new_origin = str(origin or "").strip()
-    if new_origin in _GOAL_RETIRED_ORIGINS:
-        _log_goal_sync("REFUSE record %s-retired sid=%s cwd=%s (#1324: the "
-                       "watchdog never arms a /goal)" % (new_origin, session, cwd))
+    if new_origin and new_origin not in _GOAL_USER_CALLBACK_ORIGINS:
+        _log_goal_sync("REFUSE record origin=%s sid=%s cwd=%s (#1324: only the "
+                       "owner arms a /goal)" % (new_origin, session, cwd))
         return False
     d = load_goal_requests(path)
     prior = d.get(session)
@@ -650,8 +651,8 @@ GOAL_DELIVERY_LIVE_ATTEMPT_CAP = 6
 # zero-keystroke stash-abort sub-tvars whose counting errs toward NOT typing --
 # the #524-sanctioned "count confirmed records, fail SAFE"). NEVER counts
 # `skip:stash-abort-slot-occupied` (owned by #566's own counter + janitor
-# escalation) or any zero-keystroke defer (`undeterminable`/`busy`/`recent-
-# human`/`client-active`/`in-mode`/... -- counting those would starve a
+# escalation) or any zero-keystroke defer (`undeterminable`/`busy`/
+# `busy-transcript`/`in-mode`/... -- counting those would starve a
 # legitimate delivery, #611). A structured return word, never a log-string match.
 _GOAL_KEYSTROKE_SKIPS = frozenset(("skip:verify-failed", "skip:stash-abort"))
 
@@ -1365,6 +1366,7 @@ _GOAL_TERMINAL_WORDS = frozenset((
     "sent", "expired", "drop:cleared-after-request", "drop:already-armed",
     "drop:nudge-off",     # #1181 -- the owner's per-kind switch withholds it
     "drop:owner-stop",    # #1257 -- the owner stopped/paused/left this session
+    "drop:non-owner-origin",   # #1324 -- a named origin that is not the owner's
 )) | frozenset("drop:%s-retired" % _o for _o in _GOAL_RETIRED_ORIGINS)  # #1113/#1260/#1324
 
 
@@ -1430,16 +1432,17 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
                                         request of a RETIRED origin (every
                                         automatic arm); dropped terminally
                                         before any pane work, never typed.
+      "drop:non-owner-origin"       -- #1324: any other NAMED origin that is
+                                        not the owner's (allowlist).
       "skip:<reason>"               -- not safe right now; the caller LEAVES
                                         the request pending for the next sweep
                                         -- BUT #731: a KEYSTROKE-delivering skip
                                         (verify-failed / stash-abort) counts
                                         toward GOAL_DELIVERY_ATTEMPT_CAP, so it
                                         re-types at most that many times before
-                                        goal_sweep drops it; `skip:client-
-                                        active` (an attached human typing NOW)
-                                        is a zero-keystroke defer, never counted.
-      "drop:nudge-off" (#1181): the kind is OFF; nothing typed, one attempt.
+                                        goal_sweep drops it; a zero-keystroke
+                                        defer is never counted.
+      "drop:nudge-off" (#1181): the kind is OFF; nothing typed.
       "skip:busy-transcript"        -- #1110: the session TRANSCRIPT was written
                                         within GOAL_TURN_LIVE_WINDOW_S (the turn
                                         is running), so the render's bare box is
@@ -1467,8 +1470,8 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
     journal-facing observability the flat return word cannot carry -- `out["loc"]`
     (the family-canonical `watchdog._pane_location` = the `montalu1:0.0` key every
     sibling goal-family line uses, set once after pid resolution) and, where a skip
-    has detail beyond its word, `out["detail"]` (currently the recent-human
-    `presence marker Ns old` -- otherwise the word is self-complete). `goal_sweep`
+    has detail beyond its word, `out["detail"]` (the busy-transcript age, a
+    nudge-off note -- otherwise the word is self-complete). `goal_sweep`
     reads these to render a loc-keyed, self-describing decision line; `out=None`
     (the `_goal_sync_attempt` CLI caller) is byte-identical to before. The same
     opt-in-out-dict shape #594 gave `send_verified`."""
@@ -1485,6 +1488,10 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
     if origin in _GOAL_RETIRED_ORIGINS:
         _log_goal_sync("DROP %s-retired sid=%s cwd=%s" % (origin, sid, cwd))
         return "drop:%s-retired" % origin
+    if origin and origin not in _GOAL_USER_CALLBACK_ORIGINS:   # #1324 allowlist
+        _log_goal_sync("DROP non-owner-origin sid=%s cwd=%s origin=%s"
+                       % (sid, cwd, origin))
+        return "drop:non-owner-origin"
     # #1257 -- a session the owner stopped/paused/left is NEVER armed, any origin.
     _ostop = _owner_stop.sid_latch(projects_dir, cwd, sid, state)
     if _ostop:
@@ -1728,7 +1735,7 @@ def _goal_sync_attempt(sid, cwd, text, authority, origin, run=None,
 
 def goal_sweep(now, run=None, dry_run=False, projects_dir=None,
               requests_path=None, state=None, handled=None, send_fn=None,
-              sleep_fn=None, rearm_fn=None):
+              sleep_fn=None):
     """The periodic re-evaluation of every PENDING goal-arm request (job
     9's new body -- replaces the old arm-question viewport scan and virgin-
     candidate heuristic entirely). It never RECORDS a request: the one writer is
@@ -1741,7 +1748,7 @@ def goal_sweep(now, run=None, dry_run=False, projects_dir=None,
     `GOAL_DELIVERY_ATTEMPT_CAP` times is DROPPED terminally BEFORE a further
     keystroke, so a never-arming request can no longer re-type into the prompt
     forever (the montalu4 retype livelock). A zero-keystroke defer
-    (undeterminable / busy / recent-human / client-active / ...) never counts.
+    (undeterminable / busy / busy-transcript / ...) never counts.
 
     `handled` (optional, a `set()`): the SAME per-sweep set job 14/20's
     riders populate -- a sid already sent a keystroke burst THIS sweep is
@@ -1931,8 +1938,8 @@ def goal_sweep(now, run=None, dry_run=False, projects_dir=None,
             aborts.pop(sid, None)
             # #731 -- a keystroke-delivering skip (verify-failed / stash-abort)
             # counts toward the per-request attempt cap; every zero-keystroke
-            # defer (undeterminable / busy / busy-transcript / recent-human /
-            # client-active / ...) does NOT (counting those would starve a
+            # defer (undeterminable / busy / busy-transcript / ...) does NOT
+            # (counting those would starve a
             # legitimate delivery, #611). #1110 -- `skip:verify-failed-live` is a
             # keystroke that DID type but the transcript advanced during the
             # confirm window: NOT in `_GOAL_KEYSTROKE_SKIPS`, so it never counts
@@ -2340,16 +2347,43 @@ def _goal_guard_deliver(sid, pid, captured, cwd, state, now, loc, run,
     return logs
 
 
-def _goal_lost_line(latch, sid, loc, mark_ts, why):
-    """#1324 -- the explicit decision line for a LOST goal, ONCE per episode
-    (`latch[sid] == mark_ts` suppresses a repeat). The watchdog never re-arms
-    (owner 14.11.2026: "no goal visible" = autopilot off)."""
-    if latch.get(sid) == mark_ts and sid in latch:
-        return []
-    latch[sid] = mark_ts
+def _goal_lost_line(sid, loc, mark_ts, why, latch=None):
+    """#1324 -- the explicit decision line for a LOST goal. With a `latch` it is
+    returned ONCE per episode (`latch[sid] == mark_ts` suppresses a repeat). The
+    watchdog never re-arms (owner 14.11.2026: "no goal visible" = autopilot
+    off)."""
+    if latch is not None:
+        if sid in latch and latch.get(sid) == mark_ts:
+            return []
+        latch[sid] = mark_ts
     return ["dark-watch %s sid=%s -> goal-lost:%s NOT re-armed (#1324: the "
             "watchdog never arms a /goal; the owner re-arms with /autopilot)"
             % (loc, sid, why)]
+
+
+def _dark_episode_line(pinged_state, sid, loc, mark_ts, now, word):
+    """#459/#804/#1324 -- the ONE decision line of a dark episode (mark_ts-keyed
+    `pinged_state` latch): `word` (e.g. a fulfilled end) or, when None, the
+    `goal-lost:dark` line. [] when this episode was already journalled."""
+    prec = pinged_state.get(sid)
+    if isinstance(prec, dict) and prec.get("mark_ts") == mark_ts:
+        return []
+    pinged_state[sid] = {"mark_ts": mark_ts, "last": now}
+    if word is None:
+        return _goal_lost_line(sid, loc, mark_ts, "dark")
+    return ["dark-watch %s sid=%s -> %s" % (loc, sid, word)]
+
+
+def _report_dark_goal(send_fn, sid, cwd, pid, run, mark_ts, dry_run):
+    """#403/#459 -- the ONE keystroke-free report of a lost dark goal, with
+    #403's exact dedup_key (goal-dark:sid:mark); notify-suppressed (#704)."""
+    from notify import stream_redirect
+    send_fn("\U0001f480 **%s** — /goal loop zomrelo potichu "
+            "(transkript hovorí armovaný, footer nie). "
+            "Spústi prosím `/autopilot` znova." % watchdog.project_label(cwd),
+            owner=stream_redirect(watchdog.pane_owner(pid, run)) or None,
+            dedup_key="goal-dark:%s:%d" % (sid, int(mark_ts or 0)),
+            dry_run=dry_run)
 
 
 def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
@@ -2382,6 +2416,10 @@ def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
     fail-closed recent-human + a byte-exact-prefix content proof + a bounded
     give-up."""
     logs = []
+    state = state if state is not None else {}
+    if not dry_run:   # #1324 -- drop the retired re-arm machinery's state stores
+        for _key in _GOAL_RETIRED_STATE_KEYS:   # (before the kill switch, like
+            state.pop(_key, None)               # goal_sweep's request purge)
     if watchdog._owner_disabled("goal"):
         logs.append("goal jobs DISABLED by owner flag "
                     "~/.claude/watchdog-disable-goal (rm to re-enable)")
@@ -2389,7 +2427,6 @@ def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
     run = run or watchdog._default_run
     projects_dir = projects_dir or watchdog.PROJECTS_DIR
     time_fn = time_fn or time.monotonic
-    state = state if state is not None else {}
     off_state = state.setdefault("goal_mark", {})
     seen_state = state.setdefault("goal_dark_seen", {})
     pinged_state = state.setdefault("goal_dark_pinged", {})
@@ -2400,9 +2437,6 @@ def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
     confirm_state = state.setdefault("goal_dark_confirm", {})
     # #1324 -- the per-sid lost-goal journal latch {sid: mark_ts} (auth clear).
     lost_state = state.setdefault("goal_lost_seen", {})
-    if not dry_run:   # #1324 -- drop the retired re-arm machinery's state stores
-        for _key in _GOAL_RETIRED_STATE_KEYS:
-            state.pop(_key, None)
     # #1092 (e) / #1113 -- the per-sid stale-drift OBSERVATION latch: once a
     # session's template drift has been LOGGED for a given shipped-template hash,
     # do not re-LOG it until the template changes (originally a re-RECORD dedup;
@@ -2552,8 +2586,8 @@ def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
             # `/goal clear` or a non-auth `error` clear just ends the episode.
             if (mark is not None and mark.get("state") == "cleared"
                     and mark.get("clear_kind") == "auth"):
-                logs += _goal_lost_line(lost_state, sid, loc, mark.get("ts"),
-                                        "auth-clear")
+                logs += _goal_lost_line(sid, loc, mark.get("ts"), "auth-clear",
+                                        latch=lost_state)
             else:
                 lost_state.pop(sid, None)
             seen_state.pop(sid, None)
@@ -2631,6 +2665,14 @@ def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
             seen_state.pop(sid, None)
             pinged_state.pop(sid, None)
             continue
+        # #766/#1324 -- a loop whose last real turn is the `🏁 BACKLOG EMPTY`
+        # proof with no owner act after it FINISHED (CC writes no achieved
+        # marker): journal it once, never report it as lost.
+        if _queue_own.ended_on_flag(tpath):
+            confirm_state.pop(sid, None)
+            logs += _dark_episode_line(pinged_state, sid, loc, mark_ts, now,
+                                       "goal-ended:fulfilled (🏁, not reported)")
+            continue
         prior = seen_state.get(sid)
         if not isinstance(prior, dict) or prior.get("mark_ts") != mark_ts:
             seen_state[sid] = {"mark_ts": mark_ts, "first_seen": now}
@@ -2652,22 +2694,10 @@ def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
             continue
         # #459/#804/#1324 -- a CONFIRMED lost goal: journal + report ONCE per
         # episode (`pinged_state`, mark_ts-keyed); never re-armed.
-        prec = pinged_state.get(sid)
-        if isinstance(prec, dict) and prec.get("mark_ts") == mark_ts:
-            continue                              # already reported this episode
-        pinged_state[sid] = {"mark_ts": mark_ts, "last": now}
-        logs += _goal_lost_line({}, sid, loc, mark_ts, "dark")
-        if send_fn is not None and not dry_run:
-            from notify import stream_redirect
-            proj = watchdog.project_label(cwd)
-            # #403's exact dedup_key (goal-dark:sid:mark), notify-suppressed (#704).
-            send_fn(
-                "\U0001f480 **%s** — /goal loop zomrelo potichu "
-                "(transkript hovorí armovaný, footer nie). "
-                "Spústi prosím `/autopilot` znova." % proj,
-                owner=stream_redirect(watchdog.pane_owner(pid, run)) or None,
-                dedup_key="goal-dark:%s:%d" % (sid, int(mark_ts or 0)),
-                dry_run=dry_run)
+        _lost = _dark_episode_line(pinged_state, sid, loc, mark_ts, now, None)
+        logs += _lost
+        if _lost and send_fn is not None and not dry_run:
+            _report_dark_goal(send_fn, sid, cwd, pid, run, mark_ts, dry_run)
 
     if not dry_run:   # #519 -- prune goal_mark for gone+aged sessions (dry-run: no state mutation)
         _prune_goal_mark_orphans(off_state, visited_sids, now)
@@ -2688,8 +2718,12 @@ def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
         for _gsid in [k for k in list(stale_tmpl_state.keys())
                       if k not in visited_sids]:
             stale_tmpl_state.pop(_gsid, None)
-        for _gsid in [k for k in list(lost_state) if k not in visited_sids]:
-            lost_state.pop(_gsid, None)   # #1324 -- same live-gate reaper
+        # #1324 -- the per-episode latches live as long as the session's
+        # goal_mark (its #519 visited+age rule), so a transient skip (copy-mode,
+        # janitor, sweep budget) never re-opens an episode's journal line.
+        for _latch in (lost_state, pinged_state, seen_state):
+            for _gsid in [k for k in list(_latch) if k not in off_state]:
+                _latch.pop(_gsid, None)
     return logs
 
 

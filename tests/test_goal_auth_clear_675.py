@@ -1,19 +1,14 @@
 """#675 -- CC's transient-auth `Goal cleared after an unrecoverable error
 (authentication failed)` variant must be recognized by the transcript-marker
 parser (so the loop flips armed->false and a fresh /autopilot request is not
-dropped `already-armed`); a grossly-future presence marker must not read as
-recent-human on the delivery path; and a parser bump RESEEDS a stale-offset
-marker. #1324 retired the auth RE-ARM itself (owner 14.11.2026: the watchdog
+dropped `already-armed`), and a parser bump RESEEDS a stale-offset marker. #1324 retired the auth RE-ARM itself (owner 14.11.2026: the watchdog
 never arms a goal) -- an auth clear is only journalled, see
 tests/test_goal_no_auto_arm_1324.py.
 """
 
 import json
-import os
 import time
 import unittest
-import unittest.mock as m
-import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -144,50 +139,6 @@ class AuthClearParser(unittest.TestCase):
         _off, mark = wd.scan_goal_markers(str(p))
         self.assertEqual(mark.get("state"), "cleared")
         self.assertEqual(mark.get("clear_kind"), "auth")
-
-
-class PresenceClockSkew(unittest.TestCase):
-    """Scope 3 + 🟡-5/6 + 🔵-9 -- the narrow future skew is DELIVERY-scoped (a
-    param), the default stays symmetric for every other (incl. destructive) caller."""
-
-    def setUp(self):
-        self.now = 1_000_000.0
-        self.sid = "authclock-" + uuid.uuid4().hex
-        self.marker = "/tmp/claude-user-active-%s" % self.sid
-        Path(self.marker).write_text("")
-        self.addCleanup(lambda: Path(self.marker).unlink(missing_ok=True))
-
-    def _recent(self, future_s, future_skew_s=None):
-        os.utime(self.marker, (self.now + future_s, self.now + future_s))
-        with m.patch.object(wd, "_last_human_prompt_ts", return_value=None):
-            return wd._goal_autoarm_recent_human_activity(
-                self.sid, "/no/such/tpath", self.now, future_skew_s=future_skew_s)
-
-    def test_slightly_future_marker_still_recent(self):
-        recent, reason = self._recent(5, future_skew_s=wd.GOAL_PRESENCE_FUTURE_SKEW_S)
-        self.assertTrue(recent)
-        self.assertIn("future", reason)
-
-    def test_grossly_future_not_recent_under_delivery_skew(self):
-        future = wd.GOAL_PRESENCE_FUTURE_SKEW_S + 200
-        recent, _ = self._recent(future, future_skew_s=wd.GOAL_PRESENCE_FUTURE_SKEW_S)
-        self.assertFalse(recent)
-
-    def test_grossly_future_STILL_recent_under_symmetric_default(self):
-        # The destructive consumers keep the symmetric default -> a future-dated
-        # stamp still VETOES (the fail-safe direction #339 relied on).
-        future = wd.GOAL_PRESENCE_FUTURE_SKEW_S + 200
-        recent, _ = self._recent(future, future_skew_s=None)
-        self.assertTrue(recent)
-
-    def test_grossly_future_transcript_prompt_not_recent_delivery(self):
-        os.utime(self.marker, (self.now - 10_000, self.now - 10_000))  # marker stale
-        future = wd.GOAL_PRESENCE_FUTURE_SKEW_S + 200
-        with m.patch.object(wd, "_last_human_prompt_ts", return_value=self.now + future):
-            recent, _ = wd._goal_autoarm_recent_human_activity(
-                self.sid, "/no/such/tpath", self.now,
-                future_skew_s=wd.GOAL_PRESENCE_FUTURE_SKEW_S)
-        self.assertFalse(recent)
 
 
 class ParserVersionReseed(unittest.TestCase):

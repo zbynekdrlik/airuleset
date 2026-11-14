@@ -102,9 +102,6 @@ class TestSelfCallbackClientVeto752(unittest.TestCase):
                                requests_path=self.reqp,
                                send_fn=lambda msg, **k: None,
                                sleep_fn=lambda *a, **k: None)
-        self.assertFalse(any("drop:stale-rearm" in ln for ln in logs),
-                         "a 959-s self-callback must NOT be dropped by the "
-                         "300-s dark-rearm gate: %s" % logs)
         self.assertTrue(any("OK (goal-sweep)" in ln for ln in logs), logs)
 
 

@@ -308,7 +308,7 @@ _LIVE_BG_TASK_RX = re.compile(r"\b\d+\s+(?:shells?|monitors?)\b", re.I)
 # cross_stream / janitor, hooks, tests) resolves unchanged. `_LIVE_BG_TASK_RX`
 # (bound just above) stays in __init__ and is read by decide.py at its call site
 # via `watchdog._LIVE_BG_TASK_RX` (C4), like pane_text.py's `_QUEUED_COMPACT_RX`.
-from watchdog.thrash import is_autocompact_thrash, hold as _thrash_hold, is_stop as _thrash_stop, held as thrash_held  # noqa: E402,F401 (#1260)
+from watchdog.thrash import is_autocompact_thrash, hold as _thrash_hold, is_stop as _thrash_stop  # noqa: E402,F401 (#1260)
 from watchdog.decide import (  # noqa: E402
     _pane_live_shell_evidence as _pane_live_shell_evidence,
     _pane_live_task_count as _pane_live_task_count,
@@ -1731,25 +1731,12 @@ _GOAL_ARM_PROBE = GOAL_ARM_ACTIVE_PREFIX[:-1].encode()   # quote-free (JSON)
 # CC writes it as `Goal cleared after an unrecoverable error (<reason>): "…". Run
 # /goal again to continue.` (camera-box 90bc51f3, 2026-08-18). The
 # `(authentication failed)` reason is the owner-ruled NORMAL transient
-# (subscription switching, #662/#676) -> `clear_kind="auth"`, auto-rearm eligible;
-# any OTHER reason is recognized as `cleared` (flips armed->false) but tagged
-# `clear_kind="error"` and NEVER auto-rearmed (needs human attention, not a
-# re-type loop). The byte probe widens `_newest_marker`'s pre-filter.
+# (subscription switching, #662/#676) -> `clear_kind="auth"` (journalled as a lost
+# goal, #1324: never re-armed); any OTHER reason is recognized as `cleared` (flips
+# armed->false) and tagged `clear_kind="error"`. The byte probe widens
+# `_newest_marker`'s pre-filter.
 _GOAL_CLEARED_ERROR_PREFIX = "Goal cleared after an unrecoverable error"
 _GOAL_CLEARED_ERROR_PROBE = _GOAL_CLEARED_ERROR_PREFIX.encode()
-
-# #675 -- a presence/human-prompt timestamp slightly in the FUTURE is legitimate
-# mid-sweep drift (`now` is captured once at run_once's top; job 9/20 run at the
-# TAIL, so a human prompt landing after that capture reads a small negative age)
-# and must still count as recent-human. But a GROSSLY future value (a clock
-# desync, a transcript synced off another box) is NOT a live human and must not
-# extend the recency window to a false ~30-min veto. This is the small future
-# tolerance `_goal_autoarm_recent_human_activity`'s clamp uses on BOTH signals in
-# place of the full `GOAL_AUTOARM_RECENT_HUMAN_S` window (refines #339's symmetric
-# bound into the small-future form #339 itself named as the goal). Comfortably
-# covers a delayed/slow sweep (the 120s TimeoutStartSec + contention) while
-# rejecting minutes-to-hours of skew.
-GOAL_PRESENCE_FUTURE_SKEW_S = 300
 
 
 # #433 item G step 14 -- the job-5 pending done-ping backstop (deliver_pending_done
@@ -3171,7 +3158,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
           machine nudge is staged OFF (before #1063 it rode the machine kind
           `goal-sweep` and was silently disabled fleet-wide). A landed disarm
           writes a `goal_disarmed_q` veto that job 20's `goal_dark_watch` honours
-          (no disarm<->re-arm ping-pong) until a genuine human answer lands after
+          (it neither accumulates nor reports that loop) until a genuine human answer lands after
           it. See `goal_question_repoke_watch` in `watchdog/goal.py`.
       (34) (only when `conformance_root` is given) PER-BOX CONFORMANCE CHECK
           (#535) — a DAILY self-check that this box's airuleset config/repo has
@@ -5219,8 +5206,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
     # transcript for N consecutive byte-identical re-pokes and types `/goal clear`
     # (recent-human-gated + 24h/2 capped, the LANE-nudge keystroke discipline),
     # writing a `goal_disarmed_q` veto that `goal_dark_watch` (registered ABOVE,
-    # so the veto it reads is already this sweep's) honours to prevent a
-    # disarm<->re-arm ping-pong. Shares `state` + `tail_deadline` budget with the
+    # so the veto it reads is already this sweep's) honours: it never reports
+    # the loop it cleared as lost. Shares `state` + `tail_deadline` budget with the
     # other goal jobs; never types when goal jobs are disabled.
     def _job_goal_question_repoke_watch():
         from watchdog import goal as _goal_mod

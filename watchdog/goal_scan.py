@@ -104,7 +104,6 @@ def _tmux_client_recent_input(pane_target, run, now, veto_s=None, skew_s=None):
 
 def _goal_autoarm_recent_human_activity(sid, tpath, now, window_s=None,
                                         extra_human_prefixes=(),
-                                        future_skew_s=None,
                                         pane_target=None, run=None):
     """#339 -- job 9's virgin-candidate path (`_goal_autoarm_virgin_candidate`)
     had NO discriminator at all for "is a live human using this pane RIGHT
@@ -133,11 +132,10 @@ def _goal_autoarm_recent_human_activity(sid, tpath, now, window_s=None,
        "Stop hook feedback:" both there) -- the ticket's own named
        job-7 edge case needed no special-casing here at all.
 
-    Both timestamps are clamped `-future_skew_s <= now - ts < window_s`
-    ("recent" bounded on both sides) before counting as recent. `future_skew_s`
-    defaults to `window_s`, i.e. the SYMMETRIC `-window_s <= age < window_s`
-    bound the #339-review below reasoned to (the default every caller EXCEPT the
-    delivery path keeps — see the `future_skew_s` note at the end).
+    Both timestamps are clamped to the SYMMETRIC `-window_s <= now - ts <
+    window_s` ("recent" bounded on both sides) before counting as recent -- the
+    bound the #339-review below reasoned to. (#1324 removed #675's small
+    delivery-only future tolerance with the watchdog re-arm it served.)
 
     #339-review MAJOR (fresh-context adversarial review, live-reproduced
     against the real function): the first shipped clamp was the
@@ -187,20 +185,6 @@ def _goal_autoarm_recent_human_activity(sid, tpath, now, window_s=None,
     Discord-relayed answer to count (`_compact_recent_human_activity`)
     passes its own prefix set.
 
-    `future_skew_s` (#675, optional): the FUTURE side of the clamp. `None`
-    defaults to `window_s` -> the SYMMETRIC bound the #339 paragraph above
-    reasoned to, which EVERY caller keeps EXCEPT `deliver_goal` (arm delivery),
-    which passes the SMALL `GOAL_PRESENCE_FUTURE_SKEW_S` (300 s). WHY only there:
-    for delivery, `recent=True` VETOES the re-arm, so a GROSSLY-future presence
-    marker (a clock / cross-box-sync desync, minutes-to-hours ahead) reading
-    "recent" is a FALSE ~30-min veto that starves the re-arm (the #675 defect);
-    a small future tolerance still absorbs mid-sweep drift but rejects gross
-    skew. The DESTRUCTIVE consumers (the #522 `/goal clear`, the #617 stranded
-    clear, `_recovery_recent_human`) and the sub-window callers (compact,
-    lane-nudge) keep the symmetric default, where a future-dated read reading
-    "recent" only makes them MORE cautious (an extra VETO of a keystroke) --
-    exactly the fail-safe direction #339 relied on, unchanged.
-
     `pane_target`/`run` (#731, optional): when BOTH are threaded, a third
     signal -- an attached tmux client's own recent input activity
     (`_tmux_client_recent_input`, its own 5-min GOAL_CLIENT_INPUT_VETO_S
@@ -209,7 +193,7 @@ def _goal_autoarm_recent_human_activity(sid, tpath, now, window_s=None,
     Omitted (the default None) it is a no-op fail-open, so every existing
     caller that does not pass a pane target is byte-identical."""
     window_s = watchdog.GOAL_AUTOARM_RECENT_HUMAN_S if window_s is None else window_s
-    skew_s = window_s if future_skew_s is None else future_skew_s
+    skew_s = window_s
     try:
         mtime = os.stat("/tmp/claude-user-active-%s" % sid).st_mtime
     except OSError:
@@ -342,12 +326,11 @@ def _parse_goal_marker(content, is_system=False):
     # `clear_kind` keys on the REASON segment ONLY (`… error (<reason>): "…`, never
     # the QUOTED condition, so a non-auth error clearing a goal whose CONDITION
     # mentions authentication stays `error`): an `authentication` reason is the
-    # owner-ruled NORMAL transient (#662/#676) -> `clear_kind="auth"` (auto-rearm
-    # eligible); any other reason -> `cleared` (flips armed->false) but tagged
-    # `error` and NEVER auto-rearmed. The cleared CONDITION is extracted (even
-    # CC-truncated) so the re-arm path can refuse a FOREIGN (hand-armed) goal.
-    # `is_system` gates this whole shape (🔴-1). A deliberate `Goal cleared:`
-    # below is `clear_kind="user"` — the #170 boundary a re-arm must never cross.
+    # owner-ruled NORMAL transient (#662/#676) -> `clear_kind="auth"` (dark-watch
+    # journals it as a lost goal, #1324: never re-armed); any other reason ->
+    # `cleared` (flips armed->false) tagged `error`. The cleared CONDITION is
+    # extracted (even CC-truncated). `is_system` gates this whole shape (🔴-1). A
+    # deliberate `Goal cleared:` below is `clear_kind="user"` (the owner's stop).
     if is_system and s.startswith(watchdog._GOAL_CLEARED_ERROR_PREFIX):
         tail = s[len(watchdog._GOAL_CLEARED_ERROR_PREFIX):]
         reason = tail.split(")", 1)[0] if tail.lstrip().startswith("(") else ""

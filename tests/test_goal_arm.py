@@ -148,18 +148,19 @@ class GoalRequestState(unittest.TestCase):
             age_at_sweep, goal.GOAL_REQUEST_MAX_AGE_S,
             "fresh re-armed request must not be expired inside its own window")
 
-    def test_unknown_origin_re_record_preserves_ts_failsafe(self):
-        # #757 fail-safe lock — the allowlist (not a denylist) direction:
-        # an UNKNOWN novel origin re-recording over a user prior must PRESERVE
-        # the anchor, so a future automatic origin nobody classified can never
-        # silently gain refresh-forever rights and reopen #400.
+    def test_unknown_origin_never_touches_a_user_prior(self):
+        # #757 fail-safe lock, tightened by #1324: an UNKNOWN novel origin is
+        # refused outright (an allowlist), so it can neither gain refresh-forever
+        # rights (#400) nor arm a goal; the owner's pending request stands.
         p = self._p()
         goal.record_goal_request("s", "/x", "/goal a", "full", now=1000,
                                  path=p, origin="self-callback")
-        goal.record_goal_request("s", "/x", "/goal a", "full", now=9000,
-                                 path=p, origin="some-future-origin")
-        self.assertEqual(goal.load_goal_requests(p)["s"]["ts"], 1000,
-                         "unknown origin must fail safe to preserve")
+        self.assertFalse(goal.record_goal_request(
+            "s", "/x", "/goal b", "full", now=9000, path=p,
+            origin="some-future-origin"))
+        e = goal.load_goal_requests(p)["s"]
+        self.assertEqual((e["ts"], e["text"], e["origin"]),
+                         (1000, "/goal a", "self-callback"))
 
     def test_empty_origin_re_record_over_user_prior_preserves_ts(self):
         # #757 — a None/empty new origin (legacy/hand-edited store) is not in
