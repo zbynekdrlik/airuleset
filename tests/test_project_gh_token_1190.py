@@ -403,7 +403,7 @@ class TestMintAccount(_Base):
     def test_mint_all_covers_exactly_the_github_app_accounts(self):
         # #1267: wall-bridge/songplayer are live since 29.10.
         self.assertEqual(pgt.github_app_accounts(),
-                         ["dasio", "dcontroller", "dstack", "dsync", "fohmixer", "iemmixer", "intercom", "mikrotik-pz", "nlch-finances", "obs", "shading", "songplayer", "tuke", "varos", "vstack",
+                         ["dasio", "dcontroller", "devbridge", "dstack", "dsync", "fohmixer", "iemmixer", "intercom", "mikrotik-pz", "nlch-finances", "obs", "shading", "songplayer", "tuke", "varos", "vstack",
                           "wall-bridge"])
         with mock.patch.object(pgt, "mint_account", return_value=0) as m:
             rc = pgt.cmd_project_gh_token(mock.Mock(action="mint", account=None,

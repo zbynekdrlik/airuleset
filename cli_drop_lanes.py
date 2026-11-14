@@ -63,7 +63,7 @@ DROP_HOST_GK = "drop-gk.newlevel.media"  # gatekeeper box (#1111)
 # #1115: the FIXED per-account drop-port allocation for the GENERATED lanes
 # (the 14 fleet accounts with no seed lane). Keyed by the REAL (nodename,
 # username) — controller is keyed `airuleset` per _NODENAME_OVERRIDE. Packed
-# above the 7 hand-authored ports (8870-8876) inside the 8870-8909 range. A lock
+# above the 7 hand-authored ports (8870-8876) inside the 8870-8929 range. A lock
 # test asserts fleet-wide uniqueness; a future account with no entry here (and no
 # `drop` block) auto-allocates the next free in-range port (still deterministic).
 _RESERVED_PORTS = {8898}        # #1272: dantesync binds it as root on dev1
@@ -92,6 +92,7 @@ _GENERATED_DROP_PORTS = {
     ("dev1", "nlch-finances"): 8906,   # #1295
     ("dev1", "tuke"): 8907,   # #1296
     ("dev1", "mikrotik-pz"): 8908,   # #1310
+    ("dev1", "devbridge"): 8909,   # #1320
 }
 
 

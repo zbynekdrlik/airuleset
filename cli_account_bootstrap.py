@@ -395,6 +395,18 @@ SERVICE_ACCOUNTS = {
         "tmux_session": "mikrotik-pz",
         "webterm_sessions": {h: {"preferred": "mikrotik-pz", "start_dir_chain": ["devel/mikrotik-pz"]} for h in ("zbynek", "marek")},
     },
+    # #1320 (owner 13.11.): devbridge (Worldline TIM SDK bridge) leaves `newlevel`
+    # for its own account, so it can get a peer bridge to david3 on subdev.
+    "devbridge": {
+        "host": "dev1",
+        "sudo": False,
+        "repo": "zbynekdrlik/devbridge",
+        "github_app": True, "repo_secrets": [],
+        "secrets": [],
+        "project_dir": "devel/devbridge",
+        "tmux_session": "devbridge",
+        "webterm_sessions": {h: {"preferred": "devbridge", "start_dir_chain": ["devel/devbridge"]} for h in ("zbynek", "marek")},
+    },
     "iemmixer": {
         "host": "dev1",
         "sudo": False,

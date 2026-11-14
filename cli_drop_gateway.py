@@ -56,14 +56,15 @@ REPO_DIR = Path(__file__).resolve().parent
 
 # Per-account loopback/drop port range for the public drop lane (#889). Each
 # account on a shared box gets its own port, so concurrent ephemeral servers
-# (upload, secret show, secret request) never collide. Range 8870-8909 sits
+# (upload, secret show, secret request) never collide. Range 8870-8929 sits
 # above show's 8850-8869 and below no other airuleset range. Distinct from
 # filedrop 8788, upload 8799-8819, secret 8830-8849, show 8850-8869.
 # Grandfathered: spinbike's 8828 predates the per-account range. #1115: MAX
 # raised 8889 -> 8909 to fit the 14 generated fleet lanes (cli_drop_lanes.
 # build_drop_lanes) above the 7 hand-authored 8870-8876 ports, with headroom.
+# #1320: 8909 -> 8929, devbridge took the last fixed port (free on every box).
 DROP_PORT_BASE = 8870
-DROP_PORT_MAX = 8909
+DROP_PORT_MAX = 8929
 
 # Flat single-level drop hostnames. Single-level is LOAD-BEARING: Cloudflare
 # Universal SSL for newlevel.media is `*.newlevel.media` (ONE level), so a

@@ -192,7 +192,7 @@ class TestMinterSkipsPending(unittest.TestCase):
 
     def test_mint_all_skips_pending_accounts_loudly(self):
         self.assertEqual(pgt.github_app_accounts(),
-                         ["dasio", "dcontroller", "dstack", "dsync", "fohmixer", "iemmixer", "intercom", "mikrotik-pz", "nlch-finances", "obs", "shading", "songplayer", "tuke", "varos", "vstack",
+                         ["dasio", "dcontroller", "devbridge", "dstack", "dsync", "fohmixer", "iemmixer", "intercom", "mikrotik-pz", "nlch-finances", "obs", "shading", "songplayer", "tuke", "varos", "vstack",
                           "wall-bridge"])
         with _pending(), \
                 mock.patch.object(ci_sync, "run_after_mint", return_value=0):
@@ -223,7 +223,7 @@ class TestMinterSkipsPending(unittest.TestCase):
                                   side_effect=lambda a: a == "varos"):
             ci_sync.sync_all(run=lambda *a, **k: None)
         self.assertEqual([c.args[0] for c in s.call_args_list],
-                         ["dasio", "dcontroller", "dstack", "dsync", "fohmixer", "iemmixer", "intercom", "mikrotik-pz", "nlch-finances", "obs", "shading", "songplayer", "tuke", "vstack",
+                         ["dasio", "dcontroller", "devbridge", "dstack", "dsync", "fohmixer", "iemmixer", "intercom", "mikrotik-pz", "nlch-finances", "obs", "shading", "songplayer", "tuke", "vstack",
                           "wall-bridge"])
 
 
