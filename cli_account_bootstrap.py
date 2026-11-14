@@ -402,7 +402,7 @@ SERVICE_ACCOUNTS = {
         "sudo": False,
         "repo": "zbynekdrlik/devbridge", "extra_repos": ["zbynekdrlik/devbridge-releases"],  # devbridge#123
         "github_app": True, "repo_secrets": [],
-        "secrets": [],
+        "secrets": [], "tools": ["cargo:cargo-audit@0.23.0", "cargo:cargo-deny@0.20.2", "playwright:1.59.1/chromium"],
         "project_dir": "devel/devbridge",
         "tmux_session": "devbridge",
         "webterm_sessions": {h: {"preferred": "devbridge", "start_dir_chain": ["devel/devbridge"]} for h in ("zbynek", "marek")},

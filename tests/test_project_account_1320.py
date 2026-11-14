@@ -119,6 +119,12 @@ class TestReleasesMirror(unittest.TestCase):
         self.assertEqual(bootstrap.account_spec(ACCT)["extra_repos"],
                          ["zbynekdrlik/devbridge-releases"])
 
+    def test_ci_tools_are_declared_system_wide(self):
+        # devbridge#123 step 5: the ubuntu CI jobs run on dev1-devbridge.
+        self.assertEqual(bootstrap.account_spec(ACCT)["tools"],
+                         ["cargo:cargo-audit@0.23.0", "cargo:cargo-deny@0.20.2",
+                          "playwright:1.59.1/chromium"])
+
 
 if __name__ == "__main__":
     unittest.main()
