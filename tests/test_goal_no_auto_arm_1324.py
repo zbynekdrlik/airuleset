@@ -204,28 +204,51 @@ class DarkWatchJournals(unittest.TestCase):
         self.assertEqual(len(sends), 1, "one goal-dark report per episode")
         self.assertTrue(sends[0][1]["dedup_key"].startswith("goal-dark:"))
 
-    def test_a_loop_that_ended_on_the_flag_is_finished_not_lost(self):
-        # review 🟡: a 🏁 BACKLOG EMPTY completion leaves the mark "set" and the
-        # footer dark; it is journalled once as fulfilled, never reported lost.
-        sid = "sid-fulfilled"
+    def _flag_fixture(self, sid, after=(), flag_ts="1970-01-01T00:10:00.000Z"):
         proj = _tmp(self)
         _write_marker_transcript(proj, CWD, sid)
         _write_goal_marker(proj, CWD, sid, "Goal set: %s" % _COND, ts_epoch=500)
         tp = proj / wd.encode_project_dir(CWD) / (sid + ".jsonl")
+        flag = {"type": "assistant", "timestamp": flag_ts, "message": {
+            "id": "m2", "content": "🏁 BACKLOG EMPTY: 0 open, main green"}}
         with open(tp, "a", encoding="utf-8") as f:
-            f.write(json.dumps({"type": "assistant", "timestamp":
-                                "1970-01-01T00:10:00.000Z", "message": {
-                                    "id": "m2", "content":
-                                    "🏁 BACKLOG EMPTY: 0 open, main green"}})
-                    + "\n")
+            for entry in (flag,) + tuple(after):
+                f.write(json.dumps(entry) + "\n")
         aged = time.time() - 3600
         os.utime(tp, (aged, aged))
+        return proj
+
+    def _assert_fulfilled(self, proj):
         state, sends, lines = {}, [], []
         for i in range(14):
             lines += self._watch(proj, 100000 + 90 * i, state, sends)
         self.assertFalse(any("goal-lost" in ln for ln in lines), lines)
         self.assertEqual(sum("goal-ended:fulfilled" in ln for ln in lines), 1, lines)
         self.assertEqual(sends, [])
+
+    def test_a_loop_that_ended_on_the_flag_is_finished_not_lost(self):
+        # review 🟡: a 🏁 BACKLOG EMPTY completion leaves the mark "set" and the
+        # footer dark; it is journalled once as fulfilled, never reported lost.
+        self._assert_fulfilled(self._flag_fixture("sid-fulfilled"))
+
+    def test_chores_or_owner_chat_after_the_flag_still_read_fulfilled(self):
+        # verification review 🟡 (#767 shape): post-🏁 chore turns or an owner
+        # chat must not shadow the completion proof.
+        chore = {"type": "assistant", "timestamp": "1970-01-01T00:11:00.000Z",
+                 "message": {"id": "m3", "content": "Cleaned up. ✅ DONE"}}
+        owner = {"type": "user", "timestamp": "1970-01-01T00:12:00.000Z",
+                 "message": {"content": "díky, ako to vyzerá?"}}
+        reply = {"type": "assistant", "timestamp": "1970-01-01T00:13:00.000Z",
+                 "message": {"id": "m4", "content": "Všetko hotové."}}
+        self._assert_fulfilled(self._flag_fixture("sid-chore", after=(chore,)))
+        self._assert_fulfilled(self._flag_fixture("sid-chat", after=(owner, reply)))
+
+    def test_a_flag_from_before_the_arm_is_not_proof(self):
+        proj = self._flag_fixture("sid-old-flag", flag_ts="1970-01-01T00:01:00.000Z")
+        state, sends, lines = {}, [], []
+        for i in range(14):
+            lines += self._watch(proj, 100000 + 90 * i, state, sends)
+        self.assertEqual(sum("goal-lost:dark" in ln for ln in lines), 1, lines)
 
     def test_auth_latch_survives_a_transient_skip(self):
         # review 🔵: a pane skipped one sweep (copy-mode) keeps its latch, so the
@@ -249,6 +272,17 @@ class DarkWatchJournals(unittest.TestCase):
 class OwnerOnlyAllowlist(unittest.TestCase):
     def setUp(self):
         _isolate_goal_state(self)
+
+    def test_an_unknown_leftover_is_not_live_and_is_purged(self):
+        self.assertFalse(goal.request_is_live(
+            {"origin": "future-rearm", "text": _TEMPLATE, "cwd": CWD}))
+        goal._save_goal_requests({"sid-u": {
+            "cwd": CWD, "ts": int(time.time()), "origin": "future-rearm",
+            "authority": "full", "text": _TEMPLATE}})
+        with m.patch.object(wd, "_owner_disabled", return_value=True):
+            logs = goal.goal_sweep(time.time(), run=lambda *a, **k: "",
+                                   projects_dir=_tmp(self), state={})
+        self.assertEqual(goal.load_goal_requests(), {}, logs)
 
     def test_an_unknown_named_origin_is_refused_and_dropped(self):
         self.assertFalse(goal.record_goal_request(
