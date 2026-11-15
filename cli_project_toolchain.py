@@ -68,7 +68,7 @@ DEFAULT_TOOLCHAIN = "stable"
 BINARYEN_ROOT = "/opt/binaryen"
 UNIT_DIR = "/etc/systemd/system"
 SBIN_DIR = "/usr/local/sbin"
-RUST_LOCK = "/run/lock/airuleset-opt-rust.lock"
+RUST_LOCK = "/run/airuleset-opt-rust.lock"   # root-only dir, file 0600 (review)
 RUST_UPDATE = "airuleset-rust-stable-update"
 # #1328: one digest per binaryen release and machine, from the release's own
 # published asset digest. A version without a pin here is refused.
@@ -437,6 +437,7 @@ building() {   # prints one pid running a stable-toolchain build tool
     local e t
     for e in "$PROC"/[0-9]*/exe; do
         t=$(readlink "$e" 2>/dev/null) || continue
+        t=${t% (deleted)}
         case "$t" in
             @ROOT@/rustup/toolchains/stable-*/bin/cargo|@ROOT@/rustup/toolchains/stable-*/bin/rustc|\
             @ROOT@/rustup/toolchains/stable-*/bin/rustdoc|@ROOT@/rustup/toolchains/stable-*/bin/clippy-driver)
@@ -445,13 +446,17 @@ building() {   # prints one pid running a stable-toolchain build tool
     done
     return 1
 }
+umask 077                      # the lock is root-only (0600)
 exec 9>"@LOCK@"
+umask 022
 waited=0
 while :; do
     if busy=$(building); then
         why="a stable build is running ($busy)"
     elif flock -n 9; then
-        break
+        busy=$(building) || break          # still idle WITH the lock held
+        flock -u 9
+        why="a stable build started ($busy)"
     else
         why="another /opt/rust writer holds @LOCK@"
     fi
@@ -548,7 +553,7 @@ def render_system_step(spec, *, rust_root=RUST_ROOT, pipx_home=PIPX_HOME,
     pipx = (_PIPX_HEAD.format(pipx_home=shlex.quote(pipx_home),
                               pipx_bin=shlex.quote(pipx_bin))
             + _pipx_lines(p["pipx"]))
-    lock = ('exec 8>%s\nflock -w 1800 8 || { echo "ERROR: %s is held -- the weekly '
+    lock = ('umask 077\nexec 8>%s\numask 022\nflock -w 1800 8 || { echo "ERROR: %s is held -- the weekly '
             'stable update is running (#1328)" >&2; exit 1; }\n'
             % (shlex.quote(rust_lock), rust_lock))
     rust = lock + (_RUST_HEAD.format(rustup_home=shlex.quote(rust_root + "/rustup"),
@@ -564,10 +569,10 @@ def render_system_step(spec, *, rust_root=RUST_ROOT, pipx_home=PIPX_HOME,
             + (_subshell("binaryen wasm-opt (#1328)",
                          _binaryen_lines(p["binaryen"], binaryen_root, pipx_bin))
                if p["binaryen"] else "")
-            + _subshell("weekly /opt/rust stable update (#1328)",
-                        _rust_update_lines(rust_root, rust_lock, unit_dir, sbin_dir))
             + _subshell("shared Playwright browsers",
-                        _playwright_lines(p["playwright"], pw_dir)))
+                        _playwright_lines(p["playwright"], pw_dir))
+            + _subshell("weekly /opt/rust stable update (#1328)",
+                        _rust_update_lines(rust_root, rust_lock, unit_dir, sbin_dir)))
 
 
 # --------------------------------------------------------------------------- #

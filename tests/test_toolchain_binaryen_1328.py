@@ -179,6 +179,37 @@ class RustStableUpdate(unittest.TestCase):
         self.assertIn("holds", r.stdout)
         self.assertIn("SKIPPED", r.stderr)
 
+    def test_the_lock_is_root_only(self):
+        """Review A: /run/lock is world-writable; a user could pre-create the
+        lock or hold flock on a 0644 file and stall every bootstrap."""
+        self.assertFalse(tc.RUST_LOCK.startswith(("/run/lock/", "/tmp/", "/var/tmp/")))
+        self.assertEqual(os.path.dirname(tc.RUST_LOCK), "/run")
+        r = self.run_update()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.lock.stat().st_mode & 0o777, 0o600)
+        step = tc.render_system_step({"tools": []})
+        self.assertIn("umask 077\nexec 8>%s\numask 022\n" % tc.RUST_LOCK, step)
+
+    def test_a_replaced_binary_still_counts_as_a_build(self):
+        """Review B: /proc shows `<path> (deleted)` once rustup replaced it."""
+        self.fake_process(4243, "%s/rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/"
+                          "cargo (deleted)" % self.root)
+        r = self.run_update()
+        self.assertIn("a stable build is running (4243", r.stdout)
+        self.assertIn("SKIPPED", r.stderr)
+
+    def test_the_build_check_is_repeated_under_the_lock(self):
+        script = self.files["script"]
+        locked = script.index("elif flock -n 9; then")
+        self.assertLess(locked, script.index("busy=$(building) || break"))
+        self.assertIn("flock -u 9", script)
+
+    def test_the_timer_part_runs_after_playwright(self):
+        """Review B: a systemctl failure must not cost the browsers part."""
+        step = tc.render_system_step({"tools": []})
+        self.assertLess(step.index("# shared Playwright browsers"),
+                        step.index("# weekly /opt/rust stable update"))
+
     def test_units(self):
         timer, service = self.files["timer"], self.files["service"]
         self.assertIn("OnCalendar=Mon *-*-* 04:30:00", timer)
