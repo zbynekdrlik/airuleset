@@ -288,6 +288,10 @@ R1_NOT_STEPS = (
     "The gate catches lines like 'keď bude niekto pri PC' now.",
     "There is no need to wait until someone is at the box.",
     "Súbor musí fyzicky existovať na disku.",
+    # re-measurement after round 1 (obs, newlevel 14.-15.11.)
+    "`core-quals --waiting` printed nothing, so no ticket is waiting on you.",
+    "**Questions waiting on you (`core-quals --waiting`):** none; the command returned nothing.",
+    "Jano znova žiada variant B. Ak by na ňom trval, rozhodnutie je na tebe.",
 )
 
 
