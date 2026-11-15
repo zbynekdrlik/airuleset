@@ -285,10 +285,7 @@ class TestReviewFixes(_Home):
             self.run_target(cap=1)
         self.assertEqual(len(calls), 5)                # one unit per hold, 5 removed
 
-    def test_too_little_poll_budget_or_an_unwritable_state_walks_nothing(self):
-        with mock.patch.object(tc, "_cargo_targets") as walk:
-            self.assertEqual(tc.enforce(self.home, NOW, cap=1, budget_left=10), ([], []))
-        walk.assert_not_called()
+    def test_an_unwritable_state_measures_nothing(self):
         _old_unit(self.p, "serde", H[0], 10 * DAY)
         with mock.patch.object(tc, "_cargo_targets", return_value=[str(self.t)]), \
                 mock.patch.object(tc, "save_state", side_effect=OSError(28, "full")), \
@@ -332,12 +329,20 @@ class TestReviewRound2(_Home):
         self.assertTrue(a.exists())
         self.assertFalse((self.p / "deps" / ("libserde-%s.rlib" % H[0])).exists())
 
-    def test_the_whole_pass_has_a_deadline_and_a_cut_retries_quietly(self):
+    def test_the_run_has_a_deadline_and_a_cut_retries_quietly(self):
         for i in range(3):
             _old_unit(self.p, "serde", H[i], (10 - i) * DAY)
+        real = tc._check
+        calls = []
+
+        def cut_inside_collect(deadline):      # the deadline passes mid-walk
+            calls.append(1)
+            if len(calls) > 3:
+                raise tc.Cut()
+            return real(deadline)
         with mock.patch.object(tc, "_cargo_targets", return_value=[str(self.t)]), \
-                mock.patch.object(tc, "PASS_MAX_S", -1):
-            rows, lines = tc.enforce(self.home, NOW, cap=1, budget_left=45)
+                mock.patch.object(tc, "_check", side_effect=cut_inside_collect):
+            rows, lines = tc.enforce(self.home, NOW, cap=1, deadline=time.monotonic() + 60)
         self.assertEqual([(r["state"], r["retry"]) for r in rows], [("reducing", True)])
         self.assertEqual(lines, [])
         self.assertEqual(len(list((self.p / "deps").iterdir())), 3)
@@ -351,6 +356,29 @@ class TestReviewRound2(_Home):
         self.run_target(cap=1, rec=rec)
         self.assertIn("CAP-THRASH", [a[0] for a in self.lines])
         self.assertTrue((self.p / "deps" / ("libserde-%s.rlib" % H[0])).exists())
+
+    def test_a_mass_rebuild_is_one_thrash_note_per_target(self):
+        for i in range(4):
+            _old_unit(self.p, "serde", H[i], (10 - i) * DAY)
+        rec = {"removed": {"debug/.fingerprint/serde-" + H[i]: NOW - DAY for i in range(3)}}
+        self.run_target(cap=1, rec=rec)
+        thrash = [a for a in self.lines if a[0] == "CAP-THRASH"]
+        self.assertEqual(len(thrash), 1)
+        self.assertIn("3 unit(s)", thrash[0][3])
+
+    def test_a_unit_whose_fingerprint_went_before_a_failure_is_remembered(self):
+        _old_unit(self.p, "serde", H[0], 10 * DAY)
+        _old_unit(self.p, "serde", H[1], 9 * DAY)
+        real = tc.cs._remove
+
+        def only_fingerprints(path):
+            if "fingerprint" not in path:
+                raise OSError(5, "killed here")
+            return real(path)
+        rec = {}
+        with mock.patch.object(tc.cs, "_remove", side_effect=only_fingerprints):
+            self.run_target(cap=1, rec=rec)
+        self.assertIn("debug/.fingerprint/serde-" + H[0], rec["removed"])
 
     def test_an_unwritable_state_walks_nothing_at_all(self):
         with mock.patch.object(tc, "save_state", side_effect=OSError(28, "full")), \
@@ -439,14 +467,15 @@ class TestNoThrash(_Home):
         self.run_target(cap=1)
         self.assertEqual(len(list((self.p / "deps").iterdir())), 3)
 
-    def test_one_target_is_measured_per_poll_the_most_overdue_first(self):
+    def test_a_run_takes_every_due_target_and_stops_between_them_at_its_deadline(self):
         other = _target(self.home, "other")
         with mock.patch.object(tc, "_cargo_targets", return_value=[str(self.t), str(other)]):
             first, _ = tc.enforce(self.home, NOW, cap=1 << 40)
             second, _ = tc.enforce(self.home, NOW + 60, cap=1 << 40)
-            third, _ = tc.enforce(self.home, NOW + 120, cap=1 << 40)
-        self.assertEqual([len(first), len(second), len(third)], [1, 1, 0])
-        self.assertNotEqual(first[0]["path"], second[0]["path"])
+            third, _ = tc.enforce(self.home, NOW + 3600, cap=1 << 40,
+                                  deadline=time.monotonic() - 1)
+        self.assertEqual([len(first), len(second), len(third)], [2, 0, 0])
+        self.assertTrue(tc.due(self.home, NOW + 3600))     # still due for the next run
 
 
 class TestDeclaration(unittest.TestCase):
@@ -514,33 +543,100 @@ class TestToolchainEnv(unittest.TestCase):
 
 
 class TestPollWiring(unittest.TestCase):
-    def test_the_cap_pass_runs_on_a_poll_with_no_disk_pressure(self):
+    """The poll only decides and launches: a dstack-size pass is longer than a poll
+    (re-review 3, 15.11.), so it runs as a detached user unit."""
+
+    def _poll(self, home, launches, now=NOW, ok=True):
+        def launch(h):
+            launches.append(h)
+            if ok:
+                tc.run_detached(h, now)
+            return (ok, "started" if ok else "systemd-run absent")
+        with mock.patch("watchdog.disk_guard_cargo_sweep._snapshot", return_value=IDLE), \
+                mock.patch.object(tc, "cap_bytes", return_value=1), \
+                mock.patch.object(tc, "_launch", side_effect=launch):
+            return dg.run_disk_guard(
+                now=now, home=home, dry_run=False,
+                statvfs_fn=lambda _m: types.SimpleNamespace(
+                    f_blocks=1000, f_bfree=600, f_bavail=600, f_frsize=4096,
+                    f_files=100000, f_ffree=50000),
+                dev_fn=lambda _p: 1, geteuid_fn=lambda: 1000,
+                box_class_fn=lambda: "workstation",
+                planners_fn=lambda _h, _n: [], top_consumers_fn=lambda *a, **k: [])
+
+    def test_a_poll_with_no_disk_pressure_launches_the_detached_run(self):
         with tempfile.TemporaryDirectory() as home:
             t = _target(home, "dstack")
             for i in range(3):
                 _old_unit(t / "debug", "serde", H[i], (10 - i) * DAY)
-            with mock.patch("watchdog.disk_guard_cargo_sweep._snapshot", return_value=IDLE), \
-                    mock.patch.object(tc, "cap_bytes", return_value=1):
-                logs = dg.run_disk_guard(
-                    now=NOW, home=home, dry_run=False,
-                    statvfs_fn=lambda _m: types.SimpleNamespace(
-                        f_blocks=1000, f_bfree=600, f_bavail=600, f_frsize=4096,
-                        f_files=100000, f_ffree=50000),
-                    dev_fn=lambda _p: 1, geteuid_fn=lambda: 1000,
-                    box_class_fn=lambda: "workstation",
-                    planners_fn=lambda _h, _n: [], top_consumers_fn=lambda *a, **k: [])
+            launches = []
+            logs = self._poll(home, launches)
+            self.assertEqual(launches, [home])
             cache = json.loads((Path(home) / ".claude/disk-guard/status.json").read_text())
             self.assertNotIn("target_caps", cache)         # owner 15.11.: no new surface
             self.assertEqual(len(list((t / "debug" / "deps").iterdir())), 1)
             journal = (Path(home) / ".claude/disk-guard").glob("*.log")
             self.assertIn("CAP-REMOVE", "".join(f.read_text() for f in journal))
-            self.assertTrue(any("target cap removed 2 stale unit" in ln for ln in logs), logs)
+            self.assertFalse(any("target-cap" in ln for ln in logs), logs)
+            self._poll(home, launches, now=NOW + 60)        # nothing due: no launch
+            self.assertEqual(len(launches), 1)
 
-    def test_never_as_root(self):
+    def test_a_failed_launch_is_logged_and_retried_in_ten_minutes(self):
+        with tempfile.TemporaryDirectory() as home:
+            _target(home, "dstack")
+            launches = []
+            logs = self._poll(home, launches, ok=False)
+            self.assertTrue(any("target-cap launch failed" in ln for ln in logs), logs)
+            self._poll(home, launches, now=NOW + 60, ok=False)
+            self._poll(home, launches, now=NOW + tc.RETRY_CUT_S, ok=False)
+            self.assertEqual(len(launches), 2)
+
+    def test_the_poll_itself_never_walks_a_target(self):
         logs = []
-        with mock.patch.object(tc, "enforce") as enf:
+        with tempfile.TemporaryDirectory() as home, \
+                mock.patch.object(tc, "_cargo_targets") as walk, \
+                mock.patch.object(tc, "_launch", return_value=(True, "started")) as launch:
+            tc.run_pass(home, NOW, False, logs, is_root=False)
+        walk.assert_not_called()
+        launch.assert_called_once()
+
+    def test_the_launch_is_a_niced_single_flight_user_unit(self):
+        seen = []
+
+        def run(argv, **kw):
+            seen.append(argv)
+            return types.SimpleNamespace(returncode=0, stderr="")
+        from watchdog import user_unit
+        with mock.patch.object(user_unit, "launch", wraps=user_unit.launch) as lw, \
+                mock.patch("subprocess.run", side_effect=run):
+            self.assertEqual(tc._launch("/home/x"), (True, "started"))
+        argv = seen[0]
+        self.assertEqual(argv[argv.index("--unit") + 1], tc.UNIT_NAME)
+        self.assertIn("Nice=10", argv)
+        self.assertIn("IOSchedulingClass=idle", argv)
+        self.assertEqual(argv[-2:], ["-c", tc.CHILD_CODE])
+        self.assertEqual(lw.call_args.kwargs["env_prefixes"], ())
+
+    def test_one_detached_run_at_a_time_and_main_needs_run(self):
+        import fcntl
+        with tempfile.TemporaryDirectory() as home:
+            d = Path(home) / ".claude" / "disk-guard"
+            d.mkdir(parents=True)
+            fd = os.open(d / tc.LOCK_NAME, os.O_RDWR | os.O_CREAT)
+            self.addCleanup(os.close, fd)
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            with mock.patch.object(tc, "enforce") as enf:
+                self.assertEqual(tc.run_detached(home, NOW), [])
+            enf.assert_not_called()
+        self.assertEqual(tc.main([]), 2)
+
+    def test_never_as_root_and_never_in_a_dry_run(self):
+        logs = []
+        with mock.patch.object(tc, "_launch") as launch:
             tc.run_pass("/root", NOW, False, logs, is_root=True)
-        enf.assert_not_called()
+            with tempfile.TemporaryDirectory() as home:
+                tc.run_pass(home, NOW, True, logs, is_root=False)
+        launch.assert_not_called()
 
     def test_nothing_new_is_surfaced(self):
         """Owner 15.11.: "ja nechcem stale nieco vidiet" — journal only."""
