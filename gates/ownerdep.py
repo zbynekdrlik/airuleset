@@ -180,15 +180,16 @@ def _cancelled(line, start, end=None):
     generic rule ("každé … potrebuje tvoj súhlas"), or a rest of the sentence
     that says the step is done / needs nothing ("— nič netreba", "I did")."""
     window = line[max(0, start - 120):start]
-    if _REPORTED_RX.search(re.split(r"[.!?]\s", window)[-1]):
+    sentence = re.split(r"[.!?]\s", window)[-1]
+    if _REPORTED_RX.search(sentence) or _HYPOTHETICAL_RX.search(sentence):
         return True
     if end is not None and _DONE_AFTER_RX.search(re.split(r"[.!?](?:\s|$)", line[end:end + 160])[0]):
         return True
     prefix = _CLAUSE_CUT_RX.split(window[-80:])[-1]
-    clause = re.findall(r"[\w'’]+", prefix.lower())
+    clause = re.findall(r"[\w'’-]+", prefix.lower())
     words = clause[-4:]
     generic = "no need" in prefix.lower() or any(w in _GENERIC for w in clause)
-    return generic or "no" in words[-2:] or any(
+    return generic or "no" in words or any(
         w in _NEGATIONS or w in _SETTLED or w.endswith(("n't", "n’t")) for w in words)
 
 
@@ -201,7 +202,10 @@ _REPORTED_RX = re.compile(
 _DONE_AFTER_RX = re.compile(
     r"\bni[čc]\s+(?:ne)?treba\b|\bnetreba\s+ni[čc]\b|\bnothing\s+(?:is\s+)?(?:needed|to\s+do)\b|"
     r"\bI\s+(?:did|ran|have\s+done)\b|\bwhich\s+I\s+did\b|\b(?:spravil|urobil)\s+som\b|"
-    r"\bautomatick[yý]\b|\bautomatically\b", re.IGNORECASE)
+    r"\bautomatick[yý]\b|\bautomatically\b|^\W*(?:\([^)]*\)\W*)?(?:none|nothing|žiadn[eyaá])\b",
+    re.IGNORECASE)
+# a hypothetical, not a pending step: "Ak by na ňom trval, rozhodnutie je na tebe."
+_HYPOTHETICAL_RX = re.compile(r"\b(?:ak\s+by|keby|in\s+case)\b", re.IGNORECASE)
 _GENERIC = {"each", "every", "any", "always", "každé", "každý", "každá", "každú", "vždy"}
 
 
