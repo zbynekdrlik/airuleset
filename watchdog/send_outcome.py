@@ -561,7 +561,9 @@ def presend_reclaim(pid, run, cap, sleep_fn, state, now, log_fn):
                 "chars removed) — held" % (status, removed))
     clear_stranded(state, pid)
     note_bare(state, pid)
-    state.get("goal_template_clear", {}).pop(pid, None)   # #1332: a success ends it
+    # #1332: a success ends the #1113 (c) episode for every caller; the lock still
+    # bounds a FAILED clear (checked above before any key), never a converged one.
+    state.get("goal_template_clear", {}).pop(pid, None)
     _log.warning("send-verified: pre-send cleared own stale text pane=%s "
                  "chars=%d", pid, removed)
     return ("pre-send: cleared stale own machine text (%d chars); nothing "

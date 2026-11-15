@@ -1071,11 +1071,13 @@ def _undo_and_release_slot(pid, run, text, parked, log_fn, prefix, sleep_fn=None
                 % prefix)
 
 
-def _stash_refusal(cap):
+def _stash_refusal(cap, pid, run, sleep_fn, state, user_authored):
     """Why `deliver_with_stash` must not start on this capture, or None: the
     single slot is occupied, no free prompt, a live turn, or (#1332) a box that
-    holds only line breaks — CC 2.1.317 ignores Ctrl+S on it (measured), and it
-    is not ours to clear outside a recovery resume."""
+    holds only line breaks — CC 2.1.317 ignores Ctrl+S on it (measured). It is
+    not ours to clear for a machine kind (outside a recovery resume); the
+    OWNER'S own reply (`user_authored`, state threaded) clears it once per
+    episode and is delivered on the next sweep."""
     if cap and STASH_MARKER in cap:
         return "slot occupied"
     if not watchdog._has_free_prompt(cap, bare_only=False):
@@ -1083,6 +1085,10 @@ def _stash_refusal(cap):
     if "esc to interrupt" in (cap or ""):
         return "live turn"
     if not (watchdog._input_line_text(cap) or "x").strip():
+        if user_authored and state is not None:
+            return "box held only line breaks (no words) -> %s; the next sweep " \
+                "delivers" % watchdog.apierr_box.clear_line_breaks_once(
+                    pid, run, sleep_fn, state, time.time())
         return "box holds only line breaks (no words)"
     return None
 
@@ -1156,7 +1162,7 @@ def deliver_with_stash(pid, text, run, captured=None, logs=None, sleep_fn=None,
     run = run or watchdog._default_run
     sleep_fn = sleep_fn or time.sleep
     cap = captured if captured is not None else watchdog.capture_pane(pid, run, lines=30)
-    refusal = _stash_refusal(cap)
+    refusal = _stash_refusal(cap, pid, run, sleep_fn, state, user_authored)
     if refusal:
         _log("stash-abort: " + refusal)
         return False

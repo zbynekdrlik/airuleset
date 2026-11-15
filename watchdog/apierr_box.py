@@ -63,8 +63,9 @@ def book_wedge(state, key, now, idle, grace, project, kind, snippet, logs, send_
     record (`apierr-busypane:<key>`, kept apart from job 4's `busypane:`) logs
     the classified kind + a snippet on every sweep (#176 item 3), pings ONCE
     strictly past 2x grace of its own wall clock (#176 item 2 / F2), and from
-    that point paints the `stuck!` footer on every sweep. `kind == "reclaim-held"`
-    is an IDLE pane holding our own text we could not clear: its ping says so."""
+    that point paints the `stuck!` footer on every sweep. `reclaim-held` /
+    `linebreak-held` are IDLE panes holding our own text / only line breaks we
+    could not clear: their pings say exactly that."""
     bkey = "apierr-busypane:" + key
     b = state.get(bkey) or {"first_seen": int(now - idle), "pinged": False}
     b["last_seen"] = int(now)
@@ -79,8 +80,11 @@ def book_wedge(state, key, now, idle, grace, project, kind, snippet, logs, send_
         b["pinged"] = True
         logs.append("busy-pane-wedged (api-error) %s [%s] idle=%dm — ping only "
                     "(never type)" % (project, key, int(idle // 60)))
-        why = ("v okne ostal náš vlastný text, ktorý sa nedá bezpečne zmazať"
-               if kind == "reclaim-held" else "pane vyzerá zaneprázdnená (%s)" % kind)
+        why = {"reclaim-held": "v okne ostal náš vlastný text, ktorý sa nedá "
+                               "bezpečne zmazať",
+               "linebreak-held": "okno drží len prázdne riadky, ktoré sa nedajú "
+                                 "bezpečne zmazať"}.get(
+            kind, "pane vyzerá zaneprázdnená (%s)" % kind)
         send_fn("\U0001f6d1 **%s** — API chyba drží pane už %d min, no %s — nepíšem "
                 "do nej klávesy, over ju prosím ručne." % (project, int(idle // 60), why),
                 owner=owner, dedup_key="apierr-busypane:%s:%s" % (key, b["first_seen"]),
@@ -131,7 +135,7 @@ def clear_line_breaks_once(pid, run, sleep_fn, state, now):
         return "already tried this episode"
     locks[pid] = now
     status = _clear_line_breaks(pid, run, sleep_fn or time.sleep)
-    if status == "bare":
+    if status in ("bare", "refused"):   # refused: no key went in, not an attempt
         locks.pop(pid, None)
     return status
 
@@ -144,11 +148,14 @@ def reclaim(pid, run, sleep_fn, state, now, dry_run, logs, label):
     when the box is bare now (the next sweep resumes), or "held" when it is ours
     but the clear could not run or converge. A dry run decides on a copy of the
     state and sends no key."""
+    from watchdog import owner_stop as _ostop
     from watchdog import send_outcome as _so
     cap = watchdog.capture_pane(pid, run, lines=40)
     text = watchdog._input_line_text(cap)
     if not text:
         return None
+    if _ostop.pane_latch(pid):          # #1257: a stopped session — no key, no booking
+        return "latched"
     if dry_run:   # the proof reads AND writes state: decide on a copy
         if text.strip() and _so._presend_own(pid, cap, copy.deepcopy(state),
                                              now) is None:
@@ -163,10 +170,27 @@ def reclaim(pid, run, sleep_fn, state, now, dry_run, logs, label):
         return "cleared" if status == "bare" else "held"
     verdict = _so.presend_reclaim(pid, run, cap, sleep_fn or time.sleep, state, now,
                                   logs.append)
-    if not verdict.startswith("pre-send"):
-        return None       # not ours, or held before the proof (strip, busy, slot)
+    if verdict == _so.HELD_DRAFT:
+        return None       # the owner's draft: the caller's draft path decides
+    if not verdict.startswith("pre-send"):     # held before the proof (strip, busy,
+        if _so._presend_own(pid, cap, copy.deepcopy(state), now) is None:   # slot)
+            return None
+        verdict = "own stale text, " + verdict      # ours, but no clear can run now
     logs.append("api-error reclaim %s: %s" % (label, verdict))
     return "cleared" if verdict.startswith("pre-send: cleared") else "held"
+
+
+def sesslimit_reclaim(sess, swallow_fails, pid, run, sleep_fn, state, now, dry_run,
+                      logs, label):
+    """Job 6 (session-limit resume): True when the box is not the owner's draft
+    (our own leftover or only line breaks, never "your draft"). A hold counts
+    toward job 6's bounded give-up (`swallow_fails` + `last_try`), so it can
+    never stay parked in silence; a dry run counts nothing."""
+    text = watchdog._input_line_text(watchdog.capture_pane(pid, run, lines=40))
+    rv = reclaim(pid, run, sleep_fn, state, now, dry_run, logs, label)
+    if rv == "held" and not dry_run:
+        sess["swallow_fails"], sess["last_try"] = swallow_fails + 1, now
+    return rv is not None or not (text or "x").strip()
 
 
 def reclaimed(pid, run, sleep_fn, state, key, now, idle, grace, project, logs,
@@ -179,9 +203,10 @@ def reclaimed(pid, run, sleep_fn, state, key, now, idle, grace, project, logs,
     nothing (`run_once` saves state even then)."""
     verdict = reclaim(pid, run, sleep_fn, state, now, dry_run, logs, project or pid)
     if verdict == "held" and not dry_run:
-        book_wedge(state, key, now, idle, grace, project or pid, "reclaim-held",
-                   watchdog._input_line_text(watchdog.capture_pane(pid, run, lines=40)),
-                   logs, send_fn, owner, dry_run, state_path)
+        text = watchdog._input_line_text(watchdog.capture_pane(pid, run, lines=40))
+        book_wedge(state, key, now, idle, grace, project or pid,
+                   "linebreak-held" if not (text or "x").strip() else "reclaim-held",
+                   text, logs, send_fn, owner, dry_run, state_path)
     return verdict is not None
 
 

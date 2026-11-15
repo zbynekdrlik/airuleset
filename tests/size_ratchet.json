@@ -718,7 +718,7 @@
     "watchdog/resurrect.py": 46,
     "watchdog/roster.py": 150,
     "watchdog/session_status.py": 400,
-    "watchdog/stash.py": 1727,
+    "watchdog/stash.py": 1733,
     "watchdog/subprocess_budget.py": 151,
     "watchdog/sweep_jobs.py": 392,
     "watchdog/tmux_io.py": 1812,
