@@ -86,9 +86,12 @@ def load_registry(path=None):
 
 
 CONTROLLER_HOME = "airuleset"    # the controller's hostname: home of its own bridge (#1293)
-# #1293: boxes whose socket hostname equals their fleet name, so install (hostname)
-# and the root leg (fleet name) agree; subdev's and gk's nodes are named otherwise
-HOME_HOSTS = {"dev1", "dev2", CONTROLLER_HOME}
+# #1293/#1330: a bridge ``home`` is the box's SOCKET HOSTNAME (install and the runtime match
+# it); this one table gives its fleet name for validation and the root leg. gk's node is
+# ``odoo-gatekeeper`` (measured 15.11.2026), its fleet name ``gatekeeper``.
+HOME_FLEET = {"dev1": "dev1", "dev2": "dev2", CONTROLLER_HOME: CONTROLLER_HOME,
+              "odoo-gatekeeper": "gatekeeper"}
+HOME_HOSTS = set(HOME_FLEET)
 
 
 def root_host_names():
@@ -197,16 +200,16 @@ def _bridge_errors(links_doc, root_hosts=None):
             errors.append("bridge %s: needs account, path and hosts" % name)
             continue
         home = spec.get("home")
+        fleet = HOME_FLEET.get(home) if isinstance(home, str) else None
         roots = root_hosts if root_hosts is not None else root_host_names()
-        if not (isinstance(home, str) and home in HOME_HOSTS
-                and (home in roots or home == CONTROLLER_HOME)):
+        if not (fleet and (fleet in roots or home == CONTROLLER_HOME)):
             errors.append("bridge %s: home %r is not one of %s on the root leg"
                           % (name, home, sorted(HOME_HOSTS)))
-        local = set(peer_channel.linked_to(peer_channel.host_links(links_doc, home), name)
-                    if isinstance(home, str) else ())
+        local = set(peer_channel.linked_to(peer_channel.host_links(links_doc, fleet), name)
+                    if fleet else ())
         for host, far in spec["hosts"].items():
             both = local & set(peer_channel.linked_to(peer_channel.host_links(links_doc, host), name))
-            if both and host != home:     # #1320: inbound carries only `from`, so the two are indistinguishable
+            if both and host != fleet:    # #1320: inbound carries only `from`, so the two are indistinguishable
                 errors.append("bridge %s: %s is linked both on %s and on %s"
                               % (name, ", ".join(sorted(both)), home, host))
             if host not in links_doc["hosts"]:
@@ -250,8 +253,8 @@ def is_bridge_home(user, links_doc=None, host=None):
 
 
 def bridge_home_hosts(links_doc):
-    """#1293: the root hosts a bridge declares as its home."""
-    return {s["home"] for s in (links_doc.get("bridges") or {}).values()
+    """#1293: the root hosts (fleet names, #1330 ``HOME_FLEET``) a bridge declares as its home."""
+    return {HOME_FLEET.get(s["home"], s["home"]) for s in (links_doc.get("bridges") or {}).values()
             if isinstance(s, dict) and isinstance(s.get("home"), str) and s["home"]}
 
 
@@ -592,7 +595,8 @@ def apply_home_policy(run=subprocess.run, links_doc=None):
     has no shared dir, because the sockets live on the far end. [] or one failure."""
     links_doc = load_links() if links_doc is None else links_doc
     me = pwd.getpwuid(os.getuid()).pw_name
-    if this_host() in root_host_names() or not is_bridge_home(me, links_doc, this_host()):
+    if (HOME_FLEET.get(this_host(), this_host()) in root_host_names()
+            or not is_bridge_home(me, links_doc, this_host())):
         return []      # a root-host home gets its policy from the root leg (#1293)
     script = render_home_script((), links_doc)    # the controller: peer only (#1266)
     try:
