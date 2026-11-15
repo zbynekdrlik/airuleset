@@ -1385,14 +1385,21 @@ def _is_own_login(login, self_login):
 
     This helper accepts both directions of the ``app/`` prefix mismatch
     (and the exact-match case) while rejecting any truly different login.
+    #1331: the REST comment reader (``_infra_ticket_comments``) renders the
+    same App as ``<slug>[bot]``, so that suffix is stripped too. ``[`` never
+    occurs in a GitHub user login, so ``<slug>[bot]`` is only the App itself.
     """
     if not login or not self_login:
         return False
     if login == self_login:
         return True
-    # #904: strip "app/" and compare bare slugs. If we reach here, the
-    # exact match already failed, so at least one side differs — when
-    # both sides are bare-identical the early return above fires first.
+
+    if login.endswith("[bot]") or self_login.endswith("[bot]"):
+        # #1331 review: `<slug>[bot]` names an App, so it matches only another
+        # App form (`app/<slug>` or `<slug>[bot]`), never a bare (human) login.
+        apps = [s[4:] if s.startswith("app/") else s[:-5] for s in (login, self_login)
+                if s.startswith("app/") or s.endswith("[bot]")]
+        return len(apps) == 2 and bool(apps[0]) and apps[0] == apps[1]
     bare_login = login[4:] if login.startswith("app/") else login
     bare_self = self_login[4:] if self_login.startswith("app/") else self_login
     return bare_login == bare_self

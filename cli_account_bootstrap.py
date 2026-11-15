@@ -399,10 +399,10 @@ SERVICE_ACCOUNTS = {
     # for its own account, so it can get a peer bridge to david3 on subdev.
     "devbridge": {
         "host": "dev1",
-        "sudo": False,
+        **policy.DEVBRIDGE_VIRSH_SUDO,   # #1325: the on-demand Windows CI VM
         "repo": "zbynekdrlik/devbridge", "extra_repos": ["zbynekdrlik/devbridge-releases"],  # devbridge#123
         "github_app": True, "repo_secrets": [],
-        "secrets": [], "tools": ["cargo:cargo-audit@0.23.0", "cargo:cargo-deny@0.20.2", "playwright:1.59.1/chromium"],
+        "secrets": [], "tools": ["cargo:cargo-audit@0.23.0", "cargo:cargo-deny@0.20.2", "playwright:1.59.1/chromium", "cargo:wasm-bindgen-cli@0.2.117", "binaryen:version_131"],  # +#1328 trunk
         "project_dir": "devel/devbridge",
         "tmux_session": "devbridge",
         "webterm_sessions": {h: {"preferred": "devbridge", "start_dir_chain": ["devel/devbridge"]} for h in ("zbynek", "marek")},

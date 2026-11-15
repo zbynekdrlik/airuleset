@@ -175,7 +175,7 @@ class TestBootstrapRender(unittest.TestCase):
         """#1190 lesson: root never runs code from the invoker's cwd."""
         steps = self.script[self.script.index("# 8b."):]
         parts = steps.count("\n(\numask 022\n")
-        self.assertEqual(parts, 4)
+        self.assertEqual(parts, 5)   # #1328: + the weekly stable-update timer part
         self.assertEqual(steps.count("\n(\numask 022\ncd /\n"), parts)
         self.assertIn("python3 -I -c", steps)
         self.assertNotRegex(steps, r"python3 -c")
@@ -250,6 +250,13 @@ for n in chromium-%(b)s chromium_headless_shell-%(b)s; do
 done
 """ % {"b": pw.PLAYWRIGHT_CHROMIUM_BUILD}
 
+# #1328: the weekly /opt/rust stable timer is enabled through systemctl.
+_SYSTEMCTL_STUB = """#!/usr/bin/env bash
+echo "systemctl $*" >> "$LOG"
+[ "$1" = is-enabled ] && echo enabled
+exit 0
+"""
+
 
 class TestSystemStepRuns(unittest.TestCase):
 
@@ -259,7 +266,7 @@ class TestSystemStepRuns(unittest.TestCase):
         self.stub = self.tmp / "bin"
         self.stub.mkdir()
         for name, body in (("pipx", _PIPX_STUB), ("curl", _CURL_STUB),
-                           ("npx", _NPX_STUB)):
+                           ("npx", _NPX_STUB), ("systemctl", _SYSTEMCTL_STUB)):
             (self.stub / name).write_text(body)
             (self.stub / name).chmod(0o755)
         self.log = self.tmp / "log"
@@ -271,7 +278,10 @@ class TestSystemStepRuns(unittest.TestCase):
             rust_root=str(self.root / "opt/rust"),
             pipx_home=str(self.root / "opt/pipx"),
             pipx_bin=str(self.root / "usr/local/bin"),
-            pw_dir=str(self.root / "opt/ms-playwright"))
+            pw_dir=str(self.root / "opt/ms-playwright"),
+            unit_dir=str(self.root / "etc/systemd/system"),     # #1328
+            sbin_dir=str(self.root / "usr/local/sbin"),
+            rust_lock=str(self.tmp / "opt-rust.lock"))
         self.env = {"PATH": "%s:/usr/bin:/bin" % self.stub, "LOG": str(self.log),
                     "STATE": str(self.tmp / "pipx-state"), "HOME": str(self.tmp),
                     "TMPDIR": str(self.scratch)}

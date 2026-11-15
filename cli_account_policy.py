@@ -66,6 +66,17 @@ DSTACK_NMCLI_SUDO = {
     ],
 }
 
+# Owner 15.11.2026 (#1325 ROZHODNUTÉ): devbridge's Windows CI VM on dev1 runs
+# ON DEMAND; devbridge starts it, shuts it down and reads its state. No libvirt
+# group (#1281: root-equivalent). Root's virsh defaults to qemu:///system.
+DEVBRIDGE_VIRSH_SUDO = {
+    "sudo": True,
+    "sudo_reason": "#1325 on dev1: start, shut down and read the state of the "
+                   "on-demand Windows CI VM devbridge-win",
+    "sudo_commands": ["/usr/bin/virsh %s devbridge-win" % verb
+                      for verb in ("start", "shutdown", "domstate")],
+}
+
 
 # --------------------------------------------------------------------------- #
 # sudo

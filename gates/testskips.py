@@ -13,7 +13,7 @@ import subprocess
 import sys
 
 from gates import command_of, emit_block_stderr, read_payload
-from gates import audit, pushscope
+from gates import audit, pushscope, pushtarget
 
 _AUDIT_LOG = "test-skip-bypasses.log"
 
@@ -66,22 +66,22 @@ def _git(args, cwd=None):
         return None
 
 
-def _dest_line_set(tf, dest_ref):
+def _dest_line_set(tf, dest_ref, cwd=None):
     """#1003 -- stripped, non-empty lines present in the DESTINATION version of
     ``tf`` (a line already there rode in via a merge, not this push). Empty set
     when unreadable -> nothing excluded (fail toward flagging)."""
-    r = _git(["show", "%s:%s" % (dest_ref, tf)])
+    r = _git(["show", "%s:%s" % (dest_ref, tf)], cwd)
     if not r or r.returncode != 0:
         return set()
     return set(ln.strip() for ln in r.stdout.splitlines() if ln.strip())
 
 
-def scan_test_file(tf, base_ref, dest_ref):
+def scan_test_file(tf, base_ref, dest_ref, cwd=None, head="HEAD"):
     """Return (violations, excluded_banned) for one test file's added lines."""
     violations = []
     excluded_banned = False
-    dest = _dest_line_set(tf, dest_ref)
-    r = _git(["diff", "-U0", "%s...HEAD" % base_ref, "--", tf])
+    dest = _dest_line_set(tf, dest_ref, cwd)
+    r = _git(["diff", "-U0", "%s...%s" % (base_ref, head), "--", tf], cwd)
     if not r:
         return violations, excluded_banned
     out = r.stdout or ""
@@ -163,6 +163,32 @@ _FAILCLOSED_MSG = (
 )
 
 
+def _target_violations(project, cwd, head, cur):
+    """The violations of ONE pushed ref (#1312); [] when its tip carries the
+    bypass `# airuleset:test-skip-ok <reason>` (logged)."""
+    base_ref, dest_ref, _cur, _default = pushscope.resolve(cwd, apply_branch_override=True, cur=cur)
+    last = _git(["log", "-1", "--pretty=%B", head], cwd)
+    lsha = _git(["log", "-1", "--pretty=%h", head], cwd)
+    reason = _bypass_reason(((last.stdout or "") if last else "").replace("\n", " "))
+    if reason:
+        audit.append_line(_AUDIT_LOG, "%s  project=%s  sha=%s  %s" % (
+            audit.iso_now(), project, ((lsha.stdout or "").strip() if lsha else "") or "unknown",
+            reason))
+        return []
+    violations, excluded_banned = [], False
+    for tf in pushscope.changed_files(base_ref, cwd, head):
+        tf = tf.strip()
+        if tf and _TEST_NAME_RE.search(tf) and _CODE_EXT_RE.search(tf):
+            v, ex = scan_test_file(tf, base_ref, dest_ref, cwd, head)
+            violations.extend(v)
+            excluded_banned = excluded_banned or ex
+    if excluded_banned:
+        audit.append_line(_AUDIT_LOG,
+                          "%s  project=%s  merge-in banned line(s) excluded from scan "
+                          "(already on %s) (#1003)" % (audit.iso_now(), project, dest_ref))
+    return violations
+
+
 def main():
     payload = read_payload()
     cmd = command_of(payload)
@@ -173,23 +199,11 @@ def main():
     # #503 -- the durability BACKUP push triggers no CI; do not gate it.
     if pushscope.is_wip_backup_push(cmd):
         sys.exit(0)
-    if not pushscope.is_inside_work_tree():
+    # #1312: EVERY repo + ref the command pushes, never the session cwd's HEAD.
+    targets = pushtarget.resolved(cmd, _git, pushscope.is_inside_work_tree)
+    if not targets:
         sys.exit(0)
-
     project = audit.project_of()
-    base_ref, dest_ref, _cur, _default = pushscope.resolve(apply_branch_override=True)
-
-    # Bypass: `# airuleset:test-skip-ok <reason>` in the latest commit message.
-    last = _git(["log", "-1", "--pretty=%B"])
-    last_msg = (last.stdout or "") if last else ""
-    lsha = _git(["log", "-1", "--pretty=%h"])
-    last_sha = (lsha.stdout or "").strip() if lsha else "unknown"
-    last_msg_flat = last_msg.replace("\n", " ")
-    reason = _bypass_reason(last_msg_flat)
-    if reason:
-        audit.append_line(_AUDIT_LOG, "%s  project=%s  sha=%s  %s" % (
-            audit.iso_now(), project, last_sha or "unknown", reason))
-        sys.exit(0)
 
     # #909 -- same-call commit+push: the marker in the pending commit is
     # invisible to `git log -1`. Check the -m text of git commit segments.
@@ -201,26 +215,7 @@ def main():
         sys.exit(0)
 
     try:
-        changed = pushscope.changed_files(base_ref)
-        test_files = [f for f in changed
-                      if _TEST_NAME_RE.search(f) and _CODE_EXT_RE.search(f)]
-        if not test_files:
-            sys.exit(0)
-
-        violations = []
-        excluded_banned = False
-        for tf in test_files:
-            tf = tf.strip()
-            if not tf:
-                continue
-            v, ex = scan_test_file(tf, base_ref, dest_ref)
-            violations.extend(v)
-            excluded_banned = excluded_banned or ex
-
-        if excluded_banned:
-            audit.append_line(_AUDIT_LOG,
-                              "%s  project=%s  merge-in banned line(s) excluded from scan "
-                              "(already on %s) (#1003)" % (audit.iso_now(), project, dest_ref))
+        violations = [v for t in targets for v in _target_violations(project, *t)]
     except SystemExit:
         raise
     except Exception as exc:  # noqa: BLE001 -- fail CLOSED, but HONESTLY

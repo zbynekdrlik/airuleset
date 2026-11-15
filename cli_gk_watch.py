@@ -46,6 +46,12 @@ _ADVISORY_COUNTS_RE = re.compile(r"Po[čc]ty\s*\(otvoren", re.IGNORECASE)
 # stream comment quoting "BOUNCE" is never classified as a verdict).
 _BOUNCE_RE = re.compile(r"\bBOUNCE\b")
 _ACCEPT_RE = re.compile(r"\bACCEPT\b")
+# #1331: only a FORMAL ACCEPT supersedes an older BOUNCE -- the machine marker,
+# or the gk verdict template's own heading line (`## Gatekeeper review verdict:
+# ACCEPT`); a word in prose ("I can't ACCEPT this yet") never does.
+_FORMAL_ACCEPT_RE = re.compile(
+    r"gk-state:\s*ACCEPT\b|^[ \t]*(?:#{1,6}[ \t]*|\*\*)Gatekeeper review verdict:"
+    r"[ \t]*ACCEPT(?:\*\*)?[ \t.!]*$", re.IGNORECASE | re.MULTILINE)
 
 # An emoji-prefixed finding row (🔴/🟡/🔵 followed by an id digit) — the
 # ADVISORY signal, alongside the counts header. Deliberately NOT the loose
@@ -140,6 +146,8 @@ def classify_gk_comment(body):
     mm = _GK_STATE_MARKER_RE.search(text)
     if mm:
         verdict = mm.group(1).upper()
+    elif _FORMAL_ACCEPT_RE.search(text):
+        verdict = "ACCEPT"     # #1331: a formal ACCEPT citing an old BOUNCE
     elif _BOUNCE_RE.search(text):
         verdict = "BOUNCE"
     elif _ACCEPT_RE.search(text):
@@ -219,7 +227,8 @@ def watch_issue(issue, *, fetch, gk_login, self_login,
          undispositioned_ids}``
     with ``state`` one of:
       - ``bounce-unanswered`` -- the newest gk comment is a BOUNCE newer than
-        the newest stream RFR (or there is no RFR);
+        the newest stream RFR (or there is no RFR) and newer than every gk
+        ACCEPT (an ACCEPT supersedes the BOUNCEs before it, #1331);
       - ``needs-disposition`` -- finding ids in gk comments newer than the last
         RFR that no LATER stream comment dispositions by exact id;
       - ``rfr-current`` -- the stream has responded (RFR newer than the newest
@@ -278,6 +287,8 @@ def watch_issue(issue, *, fetch, gk_login, self_login,
                 bm = _BRANCH_RE.search(body)
                 gk_comments.append({"ts": ts, "id": cid, "verdict": verdict,
                                     "sha": sha, "ids": ids,
+                                    "formal": verdict == "ACCEPT"
+                                    and bool(_FORMAL_ACCEPT_RE.search(body)),
                                     "branch": bm.group(1) if bm else None})
         if match(login, self_login):
             stream_comments.append({"ts": ts, "body": body})
@@ -307,7 +318,13 @@ def watch_issue(issue, *, fetch, gk_login, self_login,
     # gk comment (a delta advisory) exists — else a follow-up advisory would
     # mask an unanswered BOUNCE from the label gate. gk_latest then reflects
     # that BOUNCE so the gate cites/times the right verdict.
-    bounces = [g for g in gk_comments if g["verdict"] == "BOUNCE"]
+    # #1331: a later FORMAL gk ACCEPT supersedes every older BOUNCE (the ticket was
+    # accepted since), so neither that BOUNCE nor the finding ids of gk
+    # comments before the ACCEPT are current; the ACCEPT's own ids still are.
+    accepts = [g["ts"] for g in gk_comments if g.get("formal")]
+    accept_ts = max(accepts) if accepts else None
+    bounces = [g for g in gk_comments if g["verdict"] == "BOUNCE"
+               and (accept_ts is None or g["ts"] > accept_ts)]
     newest_bounce = max(bounces, key=lambda g: g["ts"]) if bounces else None
     if newest_bounce is not None and newest_bounce["ts"] > rfr_eff:
         base["gk_latest"] = _snapshot(newest_bounce)
@@ -320,7 +337,8 @@ def watch_issue(issue, *, fetch, gk_login, self_login,
 
     # needs-disposition: finding ids raised by gk comments NEWER than the last
     # RFR that no LATER stream comment cites by exact id.
-    newer_gk = [g for g in gk_comments if g["ts"] > rfr_eff]
+    newer_gk = [g for g in gk_comments if g["ts"] > rfr_eff
+                and (accept_ts is None or g["ts"] >= accept_ts)]
     raised = {}                                    # id -> earliest raising gk ts
     for g in newer_gk:
         for fid in g["ids"]:

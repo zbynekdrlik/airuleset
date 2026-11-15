@@ -26,7 +26,7 @@ from gates.shellcmd import strip_quoted
 # A real ``git push`` command (block-test-skips' precise shape): git, optional
 # flags, then ``push`` at a word boundary. Applied to the QUOTE-STRIPPED command
 # so "git push" inside a quoted message/echo/path does not trigger.
-_PUSH_RE = re.compile(r"git(\s+-\S+)*\s+push(\s|$)")
+_PUSH_RE = re.compile(r"git(\s+-[Cc]\s+\S+|\s+-(?![Cc]\s)\S+)*\s+push(\s|$)")  # #1312
 # The looser shape pre-push-test-check historically used (raw, no quote-strip).
 _PUSH_LOOSE_RE = re.compile(r"git\s+push")
 # #503 -- a durability BACKUP push to refs/autopilot-wip/* triggers no CI, so
@@ -89,7 +89,7 @@ def current_branch(cwd=None):
     return "HEAD"
 
 
-def resolve(cwd=None, *, apply_branch_override=False):
+def resolve(cwd=None, *, apply_branch_override=False, cur=None):  # #1312: cur = pushed branch
     """Resolve the diff refs for a push, returning
     ``(base_ref, dest_ref, cur_branch, default_branch)``.
 
@@ -103,7 +103,7 @@ def resolve(cwd=None, *, apply_branch_override=False):
     target (#1162). The whole case-block + #909 fallbacks are the SHARED logic
     the two push hooks used to keep byte-identical."""
     default = default_branch(cwd)
-    cur = current_branch(cwd)
+    cur = cur or current_branch(cwd)
     base_ref = "origin/%s" % default
     case_resolved = False
 
@@ -130,7 +130,7 @@ def resolve(cwd=None, *, apply_branch_override=False):
 
     # #909 -- fallbacks ONLY when the case block found nothing.
     if not case_resolved:
-        tr = _git(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"], cwd=cwd)
+        tr = _git(["rev-parse", "--abbrev-ref", "--symbolic-full-name", ("" if cur == "HEAD" else cur) + "@{upstream}"], cwd=cwd)
         tracking = (tr.stdout or "").strip() if (tr and tr.returncode == 0) else ""
         if tracking and _ref_exists(tracking, cwd):
             base_ref = tracking
@@ -146,13 +146,13 @@ def resolve(cwd=None, *, apply_branch_override=False):
     return base_ref, dest_ref, cur, default
 
 
-def changed_files(base_ref, cwd=None):
+def changed_files(base_ref, cwd=None, head="HEAD"):
     """The list of files changed in ``base_ref...HEAD`` (fallback ``HEAD~1``),
     matching the bash ``git diff --name-only ... || git diff --name-only HEAD~1``.
     Empty list when neither range resolves."""
-    r = _git(["diff", "--name-only", "%s...HEAD" % base_ref], cwd=cwd)
+    r = _git(["diff", "--name-only", "%s...%s" % (base_ref, head)], cwd=cwd)
     if not r or r.returncode != 0:
-        r = _git(["diff", "--name-only", "HEAD~1"], cwd=cwd)
+        r = _git(["diff", "--name-only", "%s~1" % head], cwd=cwd)
     if not r or r.returncode != 0:
         return []
     return [ln for ln in (r.stdout or "").splitlines() if ln]
