@@ -13,7 +13,7 @@ import subprocess
 import sys
 
 from gates import command_of, emit_block_stderr, read_payload
-from gates import audit, pushscope
+from gates import audit, pushscope, pushtarget
 
 _AUDIT_LOG = "test-skip-bypasses.log"
 
@@ -66,22 +66,22 @@ def _git(args, cwd=None):
         return None
 
 
-def _dest_line_set(tf, dest_ref):
+def _dest_line_set(tf, dest_ref, cwd=None):
     """#1003 -- stripped, non-empty lines present in the DESTINATION version of
     ``tf`` (a line already there rode in via a merge, not this push). Empty set
     when unreadable -> nothing excluded (fail toward flagging)."""
-    r = _git(["show", "%s:%s" % (dest_ref, tf)])
+    r = _git(["show", "%s:%s" % (dest_ref, tf)], cwd)
     if not r or r.returncode != 0:
         return set()
     return set(ln.strip() for ln in r.stdout.splitlines() if ln.strip())
 
 
-def scan_test_file(tf, base_ref, dest_ref):
+def scan_test_file(tf, base_ref, dest_ref, cwd=None, head="HEAD"):
     """Return (violations, excluded_banned) for one test file's added lines."""
     violations = []
     excluded_banned = False
-    dest = _dest_line_set(tf, dest_ref)
-    r = _git(["diff", "-U0", "%s...HEAD" % base_ref, "--", tf])
+    dest = _dest_line_set(tf, dest_ref, cwd)
+    r = _git(["diff", "-U0", "%s...%s" % (base_ref, head), "--", tf], cwd)
     if not r:
         return violations, excluded_banned
     out = r.stdout or ""
@@ -173,16 +173,15 @@ def main():
     # #503 -- the durability BACKUP push triggers no CI; do not gate it.
     if pushscope.is_wip_backup_push(cmd):
         sys.exit(0)
-    if not pushscope.is_inside_work_tree():
+    cwd, head, cur, skip = pushtarget.resolved(cmd, _git)  # #1312: the PUSHED repo + ref
+    if skip or not pushscope.is_inside_work_tree(cwd):
         sys.exit(0)
-
     project = audit.project_of()
-    base_ref, dest_ref, _cur, _default = pushscope.resolve(apply_branch_override=True)
-
-    # Bypass: `# airuleset:test-skip-ok <reason>` in the latest commit message.
-    last = _git(["log", "-1", "--pretty=%B"])
+    base_ref, dest_ref, _cur, _default = pushscope.resolve(cwd, apply_branch_override=True, cur=cur)
+    # Bypass: `# airuleset:test-skip-ok <reason>` in the PUSHED tip's message.
+    last = _git(["log", "-1", "--pretty=%B", head], cwd)
     last_msg = (last.stdout or "") if last else ""
-    lsha = _git(["log", "-1", "--pretty=%h"])
+    lsha = _git(["log", "-1", "--pretty=%h", head], cwd)
     last_sha = (lsha.stdout or "").strip() if lsha else "unknown"
     last_msg_flat = last_msg.replace("\n", " ")
     reason = _bypass_reason(last_msg_flat)
@@ -201,7 +200,7 @@ def main():
         sys.exit(0)
 
     try:
-        changed = pushscope.changed_files(base_ref)
+        changed = pushscope.changed_files(base_ref, cwd, head)
         test_files = [f for f in changed
                       if _TEST_NAME_RE.search(f) and _CODE_EXT_RE.search(f)]
         if not test_files:
@@ -213,7 +212,7 @@ def main():
             tf = tf.strip()
             if not tf:
                 continue
-            v, ex = scan_test_file(tf, base_ref, dest_ref)
+            v, ex = scan_test_file(tf, base_ref, dest_ref, cwd, head)
             violations.extend(v)
             excluded_banned = excluded_banned or ex
 
