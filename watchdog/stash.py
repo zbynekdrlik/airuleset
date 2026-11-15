@@ -1086,9 +1086,10 @@ def _stash_refusal(cap, pid, run, sleep_fn, state, user_authored):
         return "live turn"
     if not (watchdog._input_line_text(cap) or "x").strip():
         if user_authored and state is not None:
-            return "box held only line breaks (no words) -> %s; the next sweep " \
-                "delivers" % watchdog.apierr_box.clear_line_breaks_once(
-                    pid, run, sleep_fn, state, time.time())
+            st = watchdog.apierr_box.clear_line_breaks_once(
+                pid, run, sleep_fn, state, time.time(), user_authored=True)
+            return "box held only line breaks (no words) -> %s; %s" % (
+                st, "the next sweep delivers" if st == "bare" else "held")
         return "box holds only line breaks (no words)"
     return None
 

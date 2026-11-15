@@ -95,37 +95,44 @@ LINEBREAK_LOCK = "linebreak_clear"     # pid -> ts of the episode's clear attemp
 LINEBREAK_LOCK_TTL_S = 1800
 
 
-def _clear_line_breaks(pid, run, sleep_fn):
+def _clear_line_breaks(pid, run, sleep_fn, user_authored=False):
     """Backspace a box that holds only line breaks down to bare: one key per
     pass, re-read right before every key, stopped the moment a character
     appears (the owner started typing), the pane turns busy / unreadable or the
-    `keys` primitive refuses (owner-stop latch). Returns the status."""
+    `keys` primitive refuses (owner-stop latch; `user_authored` = the owner's
+    own reply passes it). Returns `(status, keys_sent)`."""
     from watchdog import send_outcome as _so
+    sent = 0
     for _ in range(watchdog.JANITOR_CLEAR_MAX_ITER):
         cap = watchdog.capture_pane(pid, run, lines=40)
         text = watchdog._input_line_text(cap)
         if text == "":
-            return "bare"
+            return "bare", sent
         if text is None or text.strip():
-            return "changed"
+            return "changed", sent
         if (_so._pane_busy(cap) or watchdog.STASH_MARKER in (cap or "")
                 or watchdog._strip_selected(cap)):
-            return "busy"
-        if not watchdog.keys(pid, "BSpace", kind="janitor", run=run):
-            return "refused"
+            return "busy", sent
+        if not watchdog.keys(pid, "BSpace", kind="janitor", run=run,
+                             user_authored=user_authored):
+            return "refused", sent
+        sent += 1
         sleep_fn(watchdog.JANITOR_CLEAR_SETTLE_S)
-    return "not-converged"
+    return "not-converged", sent
 
 
-def clear_line_breaks_once(pid, run, sleep_fn, state, now):
-    """The ONE line-break-only clear, run ONLY by the recovery resume paths
-    (`reclaim`: job 1, credential-dead, job 6) — every other delivery holds on
-    such a box (`send_outcome.LINE_BREAKS_HELD`): it is not our text, and a kind
-    the owner switched off must type nothing. At most one attempt per pane per
-    episode (its own lock,
-    `LINEBREAK_LOCK`, so it never blocks the #1113 template/own-text clears),
-    and the lock is released once the box reads bare — a success ends the
-    episode, a later line break starts a new one. Returns the status."""
+def clear_line_breaks_once(pid, run, sleep_fn, state, now, user_authored=False):
+    """The ONE line-break-only clear. Callers: the recovery resume paths
+    (`reclaim`: job 1, credential-dead, job 6) and an OWNER action delivered by
+    the stash route (`user_authored`: the Discord reply, a ❓ flag / card
+    reopen in a pane the watchdog picked) — every machine delivery holds on such
+    a box (`send_outcome.LINE_BREAKS_HELD`): it is not our text, and a kind the
+    owner switched off must type nothing. At most one attempt per pane per
+    episode (its own lock, `LINEBREAK_LOCK`, so it never blocks the #1113
+    template/own-text clears); the lock is released when the box reads bare (a
+    success ends the episode) or when no key went in at all (busy, refused: not
+    an attempt). The stash route has no sweep clock and stamps wall time; the
+    TTL (30 min) dwarfs the difference. Returns the status."""
     locks = state.setdefault(LINEBREAK_LOCK, {})
     for k in [k for k, v in locks.items() if not isinstance(v, (int, float))
               or not 0 <= now - v < LINEBREAK_LOCK_TTL_S]:
@@ -134,8 +141,8 @@ def clear_line_breaks_once(pid, run, sleep_fn, state, now):
     if isinstance(ts, (int, float)) and 0 <= now - ts < LINEBREAK_LOCK_TTL_S:
         return "already tried this episode"
     locks[pid] = now
-    status = _clear_line_breaks(pid, run, sleep_fn or time.sleep)
-    if status in ("bare", "refused"):   # refused: no key went in, not an attempt
+    status, sent = _clear_line_breaks(pid, run, sleep_fn or time.sleep, user_authored)
+    if status == "bare" or not sent:
         locks.pop(pid, None)
     return status
 
@@ -155,6 +162,7 @@ def reclaim(pid, run, sleep_fn, state, now, dry_run, logs, label):
     if not text:
         return None
     if _ostop.pane_latch(pid):          # #1257: a stopped session — no key, no booking
+        logs.append("api-error reclaim %s: owner-stop latch — held, no key" % label)
         return "latched"
     if dry_run:   # the proof reads AND writes state: decide on a copy
         if text.strip() and _so._presend_own(pid, cap, copy.deepcopy(state),
@@ -175,6 +183,9 @@ def reclaim(pid, run, sleep_fn, state, now, dry_run, logs, label):
     if not verdict.startswith("pre-send"):     # held before the proof (strip, busy,
         if _so._presend_own(pid, cap, copy.deepcopy(state), now) is None:   # slot)
             return None
+        if verdict.startswith(("turn running", "agent strip", "box unreadable")):
+            logs.append("api-error reclaim %s: own stale text, %s" % (label, verdict))
+            return "busy"                       # transient: no wedge, no attempt
         verdict = "own stale text, " + verdict      # ours, but no clear can run now
     logs.append("api-error reclaim %s: %s" % (label, verdict))
     return "cleared" if verdict.startswith("pre-send: cleared") else "held"
@@ -186,11 +197,10 @@ def sesslimit_reclaim(sess, swallow_fails, pid, run, sleep_fn, state, now, dry_r
     (our own leftover or only line breaks, never "your draft"). A hold counts
     toward job 6's bounded give-up (`swallow_fails` + `last_try`), so it can
     never stay parked in silence; a dry run counts nothing."""
-    text = watchdog._input_line_text(watchdog.capture_pane(pid, run, lines=40))
     rv = reclaim(pid, run, sleep_fn, state, now, dry_run, logs, label)
     if rv == "held" and not dry_run:
         sess["swallow_fails"], sess["last_try"] = swallow_fails + 1, now
-    return rv is not None or not (text or "x").strip()
+    return rv is not None
 
 
 def reclaimed(pid, run, sleep_fn, state, key, now, idle, grace, project, logs,
@@ -199,8 +209,8 @@ def reclaimed(pid, run, sleep_fn, state, key, now, idle, grace, project, logs,
     continue), reached only after their own grace / latch / historical checks:
     True when the box held our own leftover or only line breaks (nothing is
     delivered this sweep; a clear that could not run books the wedge, so the
-    owner sees `stuck!`), False when it is the owner's draft. A dry run books
-    nothing (`run_once` saves state even then)."""
+    owner sees `stuck!`), False when it is the owner's draft. A latched,
+    busy (transient) or dry-run verdict books nothing (`run_once` saves state)."""
     verdict = reclaim(pid, run, sleep_fn, state, now, dry_run, logs, project or pid)
     if verdict == "held" and not dry_run:
         text = watchdog._input_line_text(watchdog.capture_pane(pid, run, lines=40))
