@@ -72,12 +72,13 @@ LOCK_NAME = "target-cap.lock"
 # not `-m`: the watchdog package imports this module first, so runpy would load a
 # second copy as __main__ (a RuntimeWarning in the journal, two module states)
 CHILD_CODE = ("import sys; from watchdog.disk_guard_target_cap import main; "
-              "sys.exit(main(['--run']))")
+              "sys.exit(main(['--run'] + sys.argv[1:]))")
+CUTS_NOTE = 3                     # this many cut passes in a row = one daily CAP-SKIP
 _FP_SKIP = {"invoked.timestamp"}
 _FP_PREFIXES = ("dep-", "output-")
 _HEX = frozenset("0123456789abcdef")
 _STAMP_MAPS = ("removed", "protected", "kept")
-_STAMPS = ("measured", "seen", "over_logged", "skip_logged")
+_STAMPS = ("measured", "seen", "over_logged", "skip_logged", "cuts")
 
 
 # --------------------------------------------------------------------------- #
@@ -578,6 +579,13 @@ def _settle(rec, row, target, cap, now, note):
     """Bookkeeping after one target: retry time, the daily notes."""
     if row.get("retry"):
         rec["measured"] = now - MEASURE_INTERVAL_S + RETRY_CUT_S
+        rec["cuts"] = rec.get("cuts", 0) + 1
+        if rec["cuts"] >= CUTS_NOTE:
+            _daily(rec, "skip_logged", now, note, "CAP-SKIP", target, row["bytes"],
+                   "%d passes in a row stopped by the deadline or a build's lock; "
+                   "next note in 24 h" % rec["cuts"])
+    else:
+        rec.pop("cuts", None)
     if row["state"] in ("ok", "reduced"):
         rec.pop("over_logged", None)
         rec.pop("skip_logged", None)
@@ -589,10 +597,12 @@ def _settle(rec, row, target, cap, now, note):
                "%s; next note in 24 h" % row["why"])
 
 
-def enforce(home, now, dry_run=False, cap=None, act_s=CAP_BUDGET_S, deadline=None):
+def enforce(home, now, dry_run=False, cap=None, act_s=CAP_BUDGET_S, deadline=None,
+            flush=None):
     """Every DUE Cargo target under ``home`` (all of them in a dry run), until
     ``deadline``: ``(rows, decision tuples)``. The state is saved before any walk and
-    after every target. Over the cap after a pass = one CAP-OVER a day."""
+    after every target, and ``flush(lines)`` (the journal) is called with that
+    target's decisions right then. Over the cap after a pass = one CAP-OVER a day."""
     lines = []
 
     def note(action, path, nbytes, reason):
@@ -634,6 +644,10 @@ def enforce(home, now, dry_run=False, cap=None, act_s=CAP_BUDGET_S, deadline=Non
             except OSError as e:
                 note("CAP-SKIP", _state_path(home), 0, "state unwritable: %r" % e)
                 return rows, lines
+            finally:
+                if flush is not None:
+                    flush(lines[:])
+                    del lines[:]
     if not dry_run:
         for gone in [t for t, r in tstate.items()
                      if now - r.get("seen", now) > MEMORY_DAYS * DAY]:
@@ -667,35 +681,39 @@ def _launch(home):
         return False, "systemd-run not used under test"
     repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     return user_unit.launch(UNIT_NAME, repo,
-                            [sys.executable, "-c", CHILD_CODE],
+                            [sys.executable, "-c", CHILD_CODE, home],
                             UNIT_MAX_S, env_keys=("PATH", "HOME", "LANG", "LC_ALL"),
                             env_prefixes=(), properties=UNIT_PROPERTIES)
 
 
 def run_pass(home, now, dry_run, logs, is_root, launch_fn=None):
-    """The disk-guard poll hook (every poll, any fs level): never as root, never in
-    a dry run, never raises. It only decides whether a pass is due and starts the
+    """The disk-guard poll hook (every poll, any fs level): never as root, never
+    raises; a dry run only says a pass is due. It only decides whether a pass is due and starts the
     detached run: a dstack-size pass takes longer than a whole poll (the #1318
     re-review measured it), so it never runs inside the poll budget. A launch is
     retried at most every RETRY_CUT_S; only a failed launch reaches the poll log."""
-    if is_root or dry_run:
+    if is_root:
         return
     try:
         if not due(home, now):
+            return
+        if dry_run:
+            logs.append("disk-guard: target-cap pass due (dry run: not launched)")
             return
         stamp = os.path.join(os.path.dirname(_state_path(home)), LAUNCH_NAME)
         try:
             last = os.stat(stamp).st_mtime
         except FileNotFoundError:
             last = 0
-        if now - last < RETRY_CUT_S:
+        if 0 <= now - last < RETRY_CUT_S:     # a future stamp (clock stepped back) never blocks
             return
         os.makedirs(os.path.dirname(stamp), exist_ok=True)
         with open(stamp, "w", encoding="utf-8") as f:
             f.write("%d\n" % now)
         os.utime(stamp, (now, now))
+        from watchdog import user_unit
         ok, why = (launch_fn or _launch)(home)
-        if not ok:
+        if not ok and why != user_unit.TIMEOUT_WHY:     # a timeout may have started it
             logs.append("disk-guard: target-cap launch failed (%s); retry in %d min"
                         % (why, RETRY_CUT_S // 60))
     except Exception as e:      # noqa: BLE001 — one pass must never break the poll
@@ -705,7 +723,8 @@ def run_pass(home, now, dry_run, logs, is_root, launch_fn=None):
 def run_detached(home=None, now=None):
     """The detached run: every due target until CHILD_MAX_S, decisions to the guard
     journal. One run at a time (an flock beside the state, besides the unit name).
-    Returns the journal lines it wrote."""
+    Returns the journal lines it wrote; each target's lines are written as soon as
+    that target is done, so a kill mid-run keeps the record of what was removed."""
     import fcntl
     from watchdog import disk_guard as dg
     home = home or os.path.expanduser("~")
@@ -720,21 +739,30 @@ def run_detached(home=None, now=None):
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
             return []               # another run is at it
-        _rows, lines = enforce(home, now, deadline=time.monotonic() + CHILD_MAX_S)
-        out = [dg._log_line(now, a, p, b, r) for a, p, b, r in lines]
-        if out:
-            dg._append_log(dg._log_path(home), out)
-        return out
+        written = []
+
+        def flush(lines):
+            out = [dg._log_line(now, a, p, b, r) for a, p, b, r in lines]
+            if not out:
+                return
+            try:
+                dg._append_log(dg._log_path(home), out)
+            except OSError as e:
+                cs._warn("journal unwritable", dg._log_path(home), e)
+            written.extend(out)
+        _rows, rest = enforce(home, now, deadline=time.monotonic() + CHILD_MAX_S, flush=flush)
+        flush(rest)
+        return written
     finally:
         os.close(fd)
 
 
 def main(argv=None):
     args = sys.argv[1:] if argv is None else argv
-    if args != ["--run"]:
-        sys.stderr.write("usage: main(['--run'])  (the detached run, see _launch)\n")
+    if not args or args[0] != "--run" or len(args) > 2:
+        sys.stderr.write("usage: main(['--run', <home>])  (the detached run, see _launch)\n")
         return 2
-    out = run_detached()
+    out = run_detached(args[1]) if len(args) == 2 else run_detached()
     removed = sum(1 for ln in out if " CAP-REMOVE " in ln)
     print("target-cap: %d journal line(s), %d unit(s) removed" % (len(out), removed))
     return 0
