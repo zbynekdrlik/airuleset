@@ -69,6 +69,17 @@ NOT_STEPS = (
     "Fyzický papier z USB tlačiarne overiť nevieme.",
     "A physical NIC was replaced last week; nothing is pending.",
     "Gate example: `keď bude niekto pri PC` is the dasio shape.",
+    # measured FP: an audit REPORTING what a ticket line said (dcontroller,
+    # iemmixer, wall-bridge 11.-14.11.)
+    "Audit našiel riadok v #46, ktorý písal, že vytvorenie toku potrebuje tvoj súhlas.",
+    "Hľadal som v nich zápis, že práca čaká na tvoje schválenie, rozhodnutie alebo odpoveď.",
+    "Airuleset požiadal o kontrolu, či v niektorom nestojí, že práca čaká na tvoj súhlas.",
+)
+# measured: another session asks the owner (songplayer, dstack 12.-14.11.)
+ELSEWHERE = (
+    "#314 som zaparkoval (čaká na tvoj súhlas, ktorý pýtala camera-box).",
+    "#240 (VBAN linky) čaká na tvoje odpovede, ktoré zbiera dasio.",
+    "Zvyšok #240 čaká na tvoje odpovede, ktoré zisťuje dasio.",
 )
 
 
@@ -101,6 +112,12 @@ class TestStepText(unittest.TestCase):
     def test_measured_false_positives_never_match(self):
         for text in NOT_STEPS:
             self.assertEqual(_gate().owner_dependency(text), "", text)
+
+    def test_another_session_asking_is_held(self):
+        g = _gate()
+        for text in ELSEWHERE:
+            self.assertTrue(g.owner_dependency(text), text)
+            self.assertTrue(g.held_in_u(text, (set(), 0, "songplayer")), text)
 
     def test_long_line_is_linear(self):
         text = ("keď bude " + "x" * 60_000 + " niekto pri ") * 3
