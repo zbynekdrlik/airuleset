@@ -342,7 +342,8 @@ def render_userns_step(account, spec):
         # 3d-ns. User namespaces for this account only (#1337)
         install -d -o root -g root -m 0755 "{base}"
         install -d -o root -g {account} -m 0750 "{ns_dir}"
-        if ! cmp -s "{src}" "{ns_dir}/unshare"; then
+        if ! cmp -s "{src}" "{ns_dir}/unshare" \
+           || [ "$(stat -c '%U:%G %a' "{ns_dir}/unshare")" != "root:root 755" ]; then
           install -o root -g root -m 0755 "{src}" "{ns_dir}/unshare"
         fi
         printf '%s' {profile} > "{prof}"

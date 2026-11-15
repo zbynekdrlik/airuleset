@@ -108,6 +108,9 @@ class TestRender(unittest.TestCase):
             copy.write_bytes(b"old")
             _run(step, tmp)
             self.assertEqual(copy.read_bytes(), Path("/usr/bin/unshare").read_bytes())
+            copy.chmod(0o777)       # mode drift on an identical copy is repaired too
+            _run(step, tmp)
+            self.assertEqual(copy.stat().st_mode & 0o777, 0o755)
 
     def test_undeclared_run_removes_everything(self):
         on = hardening.render_userns_step("dcontroller", {"userns": True})
@@ -139,8 +142,10 @@ class TestVerify(unittest.TestCase):
         self.assertIn("userns", verify.CHECKS)
 
     def test_declared_needs_a_working_unshare(self):
-        ok = {"userns": {"present": ["yes"], "rc": ["0"]}}
+        ok = {"userns": {"present": ["yes"], "same": ["yes"], "rc": ["0"]}}
         self.assertTrue(verify._check_userns({"userns": True}, ok)[0])
+        stale = {"userns": {"present": ["yes"], "same": ["no"], "rc": ["0"]}}
+        self.assertFalse(verify._check_userns({"userns": True}, stale)[0])
         self.assertFalse(verify._check_userns(
             {"userns": True}, {"userns": {"present": ["yes"], "rc": ["1"]}})[0])
         self.assertFalse(verify._check_userns(

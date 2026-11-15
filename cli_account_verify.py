@@ -164,6 +164,7 @@ echo @@rtprio
 echo "hard=$(ulimit -Hr)"
 echo @@userns
 if [ -e __USERNS__ ]; then echo present=yes; else echo present=no; fi
+if cmp -s /usr/bin/unshare __USERNS__/unshare; then echo same=yes; else echo same=no; fi
 if [ -x __USERNS__/unshare ]; then __USERNS__/unshare --user --map-root-user --net true >/dev/null 2>&1; echo "rc=$?"; else echo rc=none; fi
 echo @@grants
 for d in __DEVICES__; do if [ -w "/dev/$d" ]; then echo "writable=$d"; fi; done
@@ -641,7 +642,10 @@ def _check_userns(spec, s):
     copy; an undeclared one has no copy dir left behind."""
     present, rc = _one(s, "userns", "present"), _one(s, "userns", "rc")
     if spec.get("userns") is True:
-        return rc == "0", "declared, unshare --user --map-root-user --net rc=%s" % (rc or "?")
+        same = _one(s, "userns", "same")
+        stale = "" if same == "yes" else "; the copy differs from /usr/bin/unshare (re-run the bootstrap)"
+        return (rc == "0" and same == "yes"), (
+            "declared, unshare --user --map-root-user --net rc=%s%s" % (rc or "?", stale))
     return present == "no", "none declared, copy dir %s" % (
         "absent" if present == "no" else "present" if present == "yes" else "?")
 
