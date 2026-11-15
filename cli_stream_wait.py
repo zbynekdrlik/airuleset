@@ -183,6 +183,11 @@ def _poll(fetch):
         return None, "%s: %s" % (type(exc).__name__, exc)
 
 
+def _check_bounds(interval, max_s):
+    if interval <= 0 or max_s <= 0:
+        raise ValueError("stream-wait: --interval and --max must be > 0")
+
+
 def wait_for_change(fetch, interval, max_s, now_fn=time.monotonic,
                     sleep_fn=time.sleep, backoff_fn=_default_backoff,
                     baseline=None, record_fn=None):
@@ -192,8 +197,7 @@ def wait_for_change(fetch, interval, max_s, now_fn=time.monotonic,
     `(verdict, lines, stats)`: verdict "changed" (lines = what moved) or
     "heartbeat" (lines = []); stats counts polls / errors / rate holds.
     Never sleeps past the deadline; an error or a rate hold is no change."""
-    if interval <= 0 or max_s <= 0:
-        raise ValueError("stream-wait: --interval and --max must be > 0")
+    _check_bounds(interval, max_s)
     deadline = now_fn() + max_s
     stats = {"polls": 0, "errors": 0, "holds": 0}
     while True:
@@ -246,11 +250,16 @@ def _gate_part(flags, label):
     return lines
 
 
-def idle_gate(root):
+def idle_gate(root, backoff_fn=_default_backoff):
     """(dispatchable lines, unhandled-bounce lines) from the SAME
     `slice-quals --list-dispatchable` / `--bounces --unhandled` derivation the
     IDLE clause names (#1329, never a parallel derivation, #367). The process
-    cwd is the repo the waiter serves, exactly as for `slice-quals` itself."""
+    cwd is the repo the waiter serves, exactly as for `slice-quals` itself.
+    Under a cached gh-rate backoff the gate is skipped (fail open, logged) so
+    a relaunch never spends the shared budget."""
+    if backoff_fn() > 0:
+        sys.stderr.write("stream-wait: gh-rate backoff, idle gate skipped\n")
+        return [], []
     return (_gate_part({"list_dispatchable": True}, "dispatchable"),
             _gate_part({"bounces": True, "unhandled": True}, "bounce"))
 
@@ -258,7 +267,9 @@ def idle_gate(root):
 def _refuse(dispatchable, bounces):
     """#1329: print the waiting work and the refusal; exit code 3."""
     print("stream-wait: REFUSED -- work is waiting, the stream loop is not "
-          "idle. Work it now (priority order sets ORDER, never SCOPE):")
+          "idle; exit 3 is not 'gone', relaunching refuses again until each "
+          "ticket below is worked or parked in W/U. Work it now (a priority "
+          "order sets ORDER, never SCOPE):")
     for ln in dispatchable:
         num, _, title = ln.partition("\t")
         print("  #%s %s" % (num, title))
@@ -276,8 +287,7 @@ def run(args):
     max_s = getattr(args, "max", DEFAULT_MAX_S)
     try:
         root = check_stream_box()
-        if interval <= 0 or max_s <= 0:
-            raise ValueError("stream-wait: --interval and --max must be > 0")
+        _check_bounds(interval, max_s)
         dispatchable, bounces = idle_gate(root)
         if dispatchable or bounces:
             return _refuse(dispatchable, bounces)

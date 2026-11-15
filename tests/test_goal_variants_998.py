@@ -181,10 +181,10 @@ class TestReviewRoleVariant1000(TestCase):
     _GOLDEN = {
         "full/None": "b64c7333d9315915a3a0356f",
         "full/infra": "9c9e1016e1ebecb7a9ec9f8f",
-        "branch-merge/None": "b2f9814b064f8149bf5c2f9d",
-        "branch-merge/infra": "b2ca50e7f61d0d3a2d54837b",
-        "fork-no-merge/None": "5b9be1cc2397095f38392368",
-        "fork-no-merge/infra": "a4a57dea8de831184b619e98",
+        "branch-merge/None": "023ebc1ca08170d59b325e15",
+        "branch-merge/infra": "cd0c712911fc63cfb7cdf0a5",
+        "fork-no-merge/None": "d388b3be6d52d87373fa15d3",
+        "fork-no-merge/infra": "2a8d114451bc6927baabbd53",
     }
 
     def test_nonreview_variants_byte_identical_snapshot(self):

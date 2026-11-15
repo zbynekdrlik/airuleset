@@ -98,8 +98,8 @@ _ORDER_1329 = (
     " `stream-wait` refuses (exit 3) while work is waiting: work the list it "
     "prints. ORDER, NEVER SCOPE (#1329): a priority order or owner line sets "
     "order only — when its head is blocked, start the next workable ticket the "
-    "same turn; a blocker lives on its ticket in W (`ops-wait` + `Waiting-on:` "
-    "+ daily push) or U, never only in a ⏳ line.")
+    "same turn; a blocker lives on its ticket in W (a third party: `ops-wait` + "
+    "`Waiting-on:` + daily push) or U (the owner), never only in a ⏳ line.")
 
 # The ORDERED clause registry. render(profile) walks this list, keeps the
 # clauses that profile carries, and joins their text with a single space.

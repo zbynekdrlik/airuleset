@@ -83,9 +83,15 @@ def _ack_state_path(cwd, home=None):
     return os.path.join(base, ".claude", "bounce-ack", key + ".json")
 
 
+_QUESTION_RE = re.compile(r"❓\s*\**\s*(?:ASKED|NEEDS\s+YOU)\s*\**\s*:",
+                          re.IGNORECASE)
+
+
 def _asks_about(msg, n):
-    """True if a `❓` line in the turn names `#n` (a question to the owner)."""
-    return any("❓" in ln and re.search(r"#%d(?![0-9])" % n, ln)
+    """True if a `❓ ASKED:` / `❓ NEEDS YOU:` line (never the ACK line itself)
+    names `#n` -- a question to the owner about this bounce."""
+    return any(_QUESTION_RE.search(ln) and "BOUNCE-ACK" not in ln
+               and re.search(r"#%d(?![0-9])" % n, ln)
                for ln in (msg or "").splitlines())
 
 
@@ -95,7 +101,11 @@ def _stale_acks(cwd, home, now, acked, live):
     adds nothing (no stream comment since the verdict: no LANE/Anchors/RFR, no
     question; any of those clears the unhandled entry at the next refresh).
     Records the first ACK per `N:verdict_ts`, prunes verdicts no longer
-    unhandled. A state read/write error never blocks (fail-open)."""
+    unhandled. A turn that asks the owner about #N passes for one grace
+    window from its FIRST ask (time for `needs-answer` to land and park the
+    bounce in U at the next refresh), never forever. Sessions sharing a cwd
+    share the clock; a lost concurrent write only resets it (the allow side).
+    A state read/write error never blocks (fail-open)."""
     import json
     path = _ack_state_path(cwd, home)
     try:
@@ -104,10 +114,13 @@ def _stale_acks(cwd, home, now, acked, live):
         state = state if isinstance(state, dict) else {}
     except (OSError, ValueError):
         state = {}
-    state = {k: v for k, v in state.items() if k in live}
+    state = {k: v for k, v in state.items()
+             if k.rpartition("ask:")[2] in live}
     stale = []
-    for n, key in acked:
+    for n, key, asks in acked:
         first = state.setdefault(key, now)
+        if asks:
+            first = state.setdefault("ask:" + key, now)
         if isinstance(first, (int, float)) and now - first > _grace_seconds():
             stale.append(n)
     try:
@@ -150,8 +163,8 @@ def decide(payload, now=None, home=None):
             continue                         # within grace -> not yet blockable
         if not _acked(msg, n):
             overdue.append(n)
-        elif not _asks_about(msg, n):
-            acked.append((n, "%d:%s" % (n, vts)))
+        else:
+            acked.append((n, "%d:%s" % (n, vts), _asks_about(msg, n)))
     repeat = _stale_acks(cwd, home, now, acked, live)
     if repeat and not overdue:
         listed = ", ".join("#%d" % n for n in sorted(repeat))

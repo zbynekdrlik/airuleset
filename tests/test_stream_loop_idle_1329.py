@@ -131,7 +131,7 @@ class TestIdleGateReusesSliceQuals(unittest.TestCase):
         err = io.StringIO()
         with unittest.mock.patch("cli_quals_cmd.cmd_slice_quals",
                                  side_effect=fake), redirect_stderr(err):
-            got = sw.idle_gate("/r")
+            got = sw.idle_gate("/r", backoff_fn=lambda: 0)
         return got, calls, err.getvalue()
 
     def test_flags_are_list_dispatchable_then_bounces_unhandled(self):
@@ -159,6 +159,43 @@ class TestIdleGateReusesSliceQuals(unittest.TestCase):
         (disp, _), _, _ = self._gate({"list": "# legend\n5\tA\n",
                                       "bounces": ""})
         self.assertEqual(disp, ["5\tA"])
+
+
+class TestIdleGateEdges(unittest.TestCase):
+    def test_gh_rate_backoff_skips_the_gate(self):
+        with unittest.mock.patch("cli_quals_cmd.cmd_slice_quals") as q, \
+                redirect_stderr(io.StringIO()):
+            self.assertEqual(sw.idle_gate("/r", backoff_fn=lambda: 60),
+                             ([], []))
+        q.assert_not_called()
+
+    def test_the_real_slice_quals_derivation_answers(self):
+        """Drives the REAL `cmd_slice_quals` through `idle_gate`, so a flag the
+        derivation stops honouring fails here instead of failing open."""
+        import cli_quals_cmd
+        rows = {5: {"number": 5, "title": "Fix invoice",
+                    "createdAt": "2026-11-01T00:00:00Z",
+                    "labels": _lbl("stream:david3")}}
+        with unittest.mock.patch.object(airuleset, "_repo_root",
+                                        return_value="/r"), \
+                unittest.mock.patch.object(airuleset, "resolve_authority",
+                                           return_value="fork-no-merge"), \
+                unittest.mock.patch.object(airuleset, "_current_user",
+                                           return_value="david3"), \
+                unittest.mock.patch.object(airuleset, "_slice_quals",
+                                           return_value=["label:stream:david3"]), \
+                unittest.mock.patch.object(airuleset, "_repo_slug",
+                                           return_value="o/r"), \
+                unittest.mock.patch.object(
+                    airuleset, "_slice_mine_and_handed",
+                    side_effect=lambda q, r, s, extra=None: (
+                        ({} if extra else rows), {}, False)), \
+                unittest.mock.patch.object(cli_quals_cmd, "_dep_wait_map_for",
+                                           return_value=({}, "o/r", True)), \
+                redirect_stderr(io.StringIO()):
+            disp, bounces = sw.idle_gate("/r", backoff_fn=lambda: 0)
+        self.assertEqual(disp, ["5\tFix invoice"])
+        self.assertEqual(bounces, [])
 
 
 class TestParkedBounceIsNotUnhandled(unittest.TestCase):
@@ -241,6 +278,26 @@ class TestLoopQuestionGate(unittest.TestCase):
         log = Path(self.home) / ".claude" / "loop-question-gate.log"
         self.assertIn("unmeasurable", log.read_text())
 
+    def test_carried_forward_cache_allows(self):
+        _cache_file(self.home, self.cwd).write_text(json.dumps(
+            {"open": 28, "ts": time.time(), "stale_since": time.time() - 9}))
+        self.assertFalse(self._decide()[0])
+
+    def test_owed_close_rows_count(self):
+        _cache_file(self.home, self.cwd).write_text(json.dumps(
+            {"open": 0, "done": 2, "ts": time.time()}))
+        self.assertTrue(self._decide()[0])
+
+    def test_declared_dispatchable_zero_allows(self):
+        self._cache(3)
+        msg = NEEDS.replace("\n\n❓", "\nDispatchable: 0 — všetky dep-wait\n\n❓")
+        self.assertFalse(self._decide(msg=msg)[0])
+
+    def test_goal_glyph_in_transcript_text_is_not_armed(self):
+        self._cache(28)
+        cap = "◎ /goal quoted in prose\n" + "line\n" * 10 + "  ctx ███░\n"
+        self.assertFalse(self._decide(capture=cap)[0])
+
     def test_stale_or_missing_cache_allows(self):
         self.assertFalse(self._decide()[0])
         self._cache(28, age=self.g.CACHE_MAX_AGE_S + 60)
@@ -321,6 +378,31 @@ class TestRepeatedBounceAck(unittest.TestCase):
         self._decide("BOUNCE-ACK: #10101", t0)
         self._cache([{"number": 10101, "verdict_ts": self.vts + 100}])
         self.assertFalse(self._decide("BOUNCE-ACK: #10101", t0 + 7200)[0])
+
+    def test_a_question_glyph_on_the_ack_line_is_no_question(self):
+        self._cache([{"number": 10101, "verdict_ts": self.vts}])
+        t0 = time.time()
+        self._decide("BOUNCE-ACK: #10101", t0)
+        self.assertTrue(self._decide("BOUNCE-ACK: #10101 ❓", t0 + 7200)[0])
+
+    def test_asking_again_and_again_is_not_progress(self):
+        self._cache([{"number": 10101, "verdict_ts": self.vts}])
+        t0 = time.time()
+        ask = "BOUNCE-ACK: #10101\n❓ ASKED: ako ďalej s #10101?\n⏳ WORKING: x"
+        self.assertFalse(self._decide(ask, t0)[0])
+        self.assertTrue(
+            self._decide(ask, t0 + cbu.BOUNCE_GRACE_SECONDS + 60)[0])
+
+    def test_a_handled_verdict_is_pruned_from_the_state(self):
+        self._cache([{"number": 10101, "verdict_ts": self.vts}])
+        t0 = time.time()
+        self._decide("BOUNCE-ACK: #10101", t0)
+        path = Path(bgate._ack_state_path(self.cwd, self.home))
+        self.assertEqual(len(json.loads(path.read_text())), 1)
+        self._cache([{"number": 7, "verdict_ts": self.vts}])
+        self._decide("BOUNCE-ACK: #7", t0 + 10)
+        self.assertEqual(list(json.loads(path.read_text())),
+                         ["7:%s" % self.vts])
 
     def test_an_unacked_overdue_bounce_still_blocks(self):
         self._cache([{"number": 10101, "verdict_ts": self.vts}])

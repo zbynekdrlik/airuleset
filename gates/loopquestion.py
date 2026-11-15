@@ -8,26 +8,30 @@ This gate blocks that turn and forces ASK-AND-CONTINUE (`❓ ASKED` + `⏳
 WORKING`, the question carried by `needs-answer` + the footer U).
 
 It blocks only when ALL hold: the last non-blank line is a `❓ NEEDS YOU:`
-marker; a /goal loop is armed for this pane (`◎ /goal` in the pane capture --
-the signal `notify-discord-pending.sh goal_armed` and the watchdog read;
-`ND_FAKE_PANE_CAPTURE` is the shared test seam); the per-cwd footer cache
-(`~/.claude/tickets-status/<cwd-key>.json`, the one the footer renders) is
-fresh and its `open` (the workable `I`) is > 0.
+marker; a /goal loop is armed for this pane (`◎ /goal` in the pane's bottom
+rows, where the footer renders it -- the signal `notify-discord-pending.sh
+goal_armed` and the watchdog read; `ND_FAKE_PANE_CAPTURE` is the shared test
+seam); the per-cwd footer cache (`statusbar.cwd_key`, the file the footer
+renders) is fresh, not carried forward over a failed refresh (`stale_since`),
+and its owed count `open + done` (I + C, `statusbar.obligation_count`) is > 0.
 
 Honest limit: the Stop path has no dispatchable count (`slice-quals
---count-dispatchable` takes ~20 s against the hook's 5 s budget), so `I` --
-a superset that also holds dep-wait rows -- stands in. Over-blocking there is
-benign: the forced form (ASK-AND-CONTINUE) is still correct.
+--count-dispatchable` takes ~20 s against the hook's 5 s budget), so `I` -- a
+superset that also holds dep-wait rows -- stands in. When every I row is
+dep-wait the session declares it with a `Dispatchable: 0 — <why>` line (the
+pasted `--count-dispatchable` result), visible to the /goal evaluator, and the
+gate allows; without it a dep-wait-only box would be pushed to a `⏳ WORKING`
+that the liveness hook refuses.
 
-FAIL-OPEN: no pane / no tmux, a missing, unreadable or stale cache, a null
-`open` (a failed refresh) -> allow, logged to `~/.claude/loop-question-gate.log`
-(never a block on an unreadable count). The hook owns the retry cap.
+FAIL-OPEN: no pane / no tmux, a missing, unreadable, stale or carried-forward
+cache, a null `open` (a failed refresh) -> allow, logged to
+`~/.claude/loop-question-gate.log` (never a block on an unreadable count). The
+hook owns the shared 3-retry cap, so the 4th identical stop still passes: the
+gate is a strong nudge, never a wedge.
 
 Invoked as `python3 -P -m gates.loopquestion` with the Stop payload on stdin;
 exit 2 (reason on STDERR) = block, exit 0 = allow.
 """
-import hashlib
-import json
 import os
 import re
 import subprocess
@@ -37,6 +41,8 @@ import gates
 
 CACHE_MAX_AGE_S = 15 * 60
 _NEEDS_YOU_RE = re.compile(r"❓\s*\**\s*NEEDS\s+YOU\s*\**\s*:", re.IGNORECASE)
+_DISPATCHABLE_0_RE = re.compile(r"(?mi)^[ \t*>-]*Dispatchable:\s*0\b")
+_FOOTER_ROWS = 6   # the footer/statusline rows at the bottom of the pane
 
 
 def _log(home, msg):
@@ -65,21 +71,20 @@ def pane_capture():
 
 
 def _workable(cwd, home, now):
-    """(count, why): the cached `open` when fresh and int, else (None, why)."""
-    key = hashlib.sha1(str(cwd).encode()).hexdigest()[:12]
-    path = os.path.join(home, ".claude", "tickets-status", key + ".json")
-    try:
-        with open(path, encoding="utf-8") as fh:
-            cache = json.load(fh)
-    except (OSError, ValueError):
-        return None, "no footer cache"
+    """(count, why): the cached owed count `open + done` when fresh, not
+    carried forward and readable, else (None, why)."""
+    import statusbar
+    cache = statusbar._load(statusbar.cache_dir(home) /
+                            (statusbar.cwd_key(cwd) + ".json"))
     if not isinstance(cache, dict):
-        return None, "malformed footer cache"
-    ts, n = cache.get("ts"), cache.get("open")
+        return None, "no footer cache"
+    if cache.get("stale_since"):
+        return None, "footer cache carried forward over a failed refresh"
+    n, ts = statusbar.obligation_count(cwd, home)
+    if n is None:
+        return None, "unmeasurable I (open=%r)" % (cache.get("open"),)
     if not isinstance(ts, (int, float)) or not 0 <= now - ts <= CACHE_MAX_AGE_S:
         return None, "stale footer cache"
-    if type(n) is not int:
-        return None, "unmeasurable I (open=%r)" % (n,)
     return n, ""
 
 
@@ -89,9 +94,15 @@ def decide(payload, capture=None, home=None, now=None):
     lines = [ln for ln in msg.splitlines() if ln.strip()]
     if not lines or not _NEEDS_YOU_RE.search(lines[-1]):
         return False, ""
-    if "◎ /goal" not in (pane_capture() if capture is None else capture):
-        return False, ""
     home = home or os.path.expanduser("~")
+    if _DISPATCHABLE_0_RE.search(msg):
+        return False, ""
+    pane = pane_capture() if capture is None else capture
+    if "◎ /goal" not in "\n".join(
+            [ln for ln in pane.splitlines() if ln.strip()][-_FOOTER_ROWS:]):
+        if not pane:
+            _log(home, "allow: no pane capture (no tmux)")
+        return False, ""
     cwd = gates.field_of(payload, "cwd", "") or os.getcwd()
     n, why = _workable(cwd, home, time.time() if now is None else now)
     if n is None:
@@ -106,7 +117,10 @@ def decide(payload, capture=None, home=None, now=None):
         "keď je hlava poradia zablokovaná, začni ďalší workable ticket v tomto "
         "ťahu. Otázku polož ako ASK-AND-CONTINUE: `❓ ASKED: <otázka>` v tele "
         "(celý `**Otázka — projekt …:**` blok), `needs-answer` + komentár na "
-        "tikete, a ťah ukonči `⏳ WORKING: <čo robíš>`. (#1329)" % n)
+        "tikete, a ťah ukonči `⏳ WORKING: <čo robíš>` (spusti ďalší ticket — "
+        "⏳ potrebuje živú prácu). Ak je naozaj každý I ticket dep-wait, napíš "
+        "riadok `Dispatchable: 0 — <prečo>` (výstup `--count-dispatchable`). "
+        "(#1329)" % n)
 
 
 def main():
