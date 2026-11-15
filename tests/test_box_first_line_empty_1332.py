@@ -116,7 +116,7 @@ class _BoxPane:
         return sum(a.count("BSpace") for a in self.sent)
 
 
-class JobOneOnTheObsShape(TestCase):
+class _ObsHarness:
     """Job 1 through the real `run_once` + `send_verified`: only tmux, Discord and
     the clock seams are faked."""
 
@@ -175,6 +175,9 @@ class JobOneOnTheObsShape(TestCase):
         logs = self._sweep(fake, now) + self._sweep(fake, now + 70)
         return fake, logs
 
+
+
+class JobOneOnTheObsShape(_ObsHarness, TestCase):
     def test_oauth_rotation_reclaims_our_pointer_then_resumes(self):
         fake, logs = self._two_sweeps("OAuth token revoked · Please run /login",
                                       "\n" + self._pointer_file())
@@ -263,3 +266,78 @@ class StuckRecoveryIsVisible(TestCase):
         self.assertIn("stuck!", statusbar.recovery_stuck_segment(home=str(tmp), now=now))
         self.assertEqual(statusbar.recovery_stuck_segment(home=str(tmp), now=now + 3600),
                          "", "a wedge the watchdog stopped seeing must not stay painted")
+
+
+class ReviewFindings(TestCase):
+    """Both adversarial reviews (round 1): the new shape must never read as an
+    EMPTY box to a reader that keys on the head row, a dry run must not touch
+    state, and the line-break clear runs once per episode."""
+
+    def _cap(self, box_rows, stashed=False):
+        return "\n".join(["some transcript", "", SEP] + box_rows + [SEP]
+                         + (["  › stashed · ctrl+s to restore"] if stashed else [])
+                         + [FOOT]) + "\n"
+
+    def test_the_head_text_of_an_empty_first_line_is_never_empty(self):
+        self.assertEqual(watchdog._input_box_head_text(PTR_BOX), PTR)
+        self.assertEqual(watchdog._input_box_head_text(LONE_NL), "\n")
+        self.assertEqual(watchdog._input_box_head_text(BARE), "")
+
+    def test_the_janitor_never_presses_ctrl_s_into_the_owners_words(self):
+        from watchdog import janitor
+        cap = self._cap(["❯\xa0", "  my owner words on line two"], stashed=True)
+        sent = []
+        now = time.time()
+        state = {"stash_parks": {"%1": now}}
+        with m.patch.object(watchdog, "keys", lambda pid, *k, **kw: sent.append(k) or True), \
+                m.patch.object(watchdog, "capture_pane", lambda *a, **k: cap), \
+                m.patch.object(watchdog, "_draft_rescue_persist", lambda *a, **k: None):
+            janitor._janitor_recover(lambda *a, **k: "", {}, "%1", "/x", cap, "s:0.0",
+                                     None, False, lambda s: None, state=state, now=now)
+        self.assertEqual(sent, [])
+
+    def test_a_dry_run_reclaim_leaves_state_untouched(self):
+        from watchdog import apierr_box
+        cap = self._cap(["❯\xa0", "  my owner words on line two"])
+        now = time.time()
+        state = {"stranded_own": {"%1": {"ts": now - 60, "typed": "nudge: x — celý text: /n"}},
+                 "janitor_watch": {"%1": now - 60}}
+        before = json.dumps(state, sort_keys=True)
+        with m.patch.object(watchdog, "capture_pane", lambda *a, **k: cap):
+            apierr_box.reclaim("%1", lambda *a, **k: "", lambda s: None, state, now,
+                               True, [], "p")
+        self.assertEqual(json.dumps(state, sort_keys=True), before)
+
+    def test_the_line_break_clear_runs_once_per_episode(self):
+        from watchdog import apierr_box
+        sent = []
+        now = time.time()
+        state = {}
+        with m.patch.object(watchdog, "keys", lambda pid, *k, **kw: sent.append(k) or True), \
+                m.patch.object(watchdog, "capture_pane", lambda *a, **k: LONE_NL):
+            for i in range(3):
+                apierr_box.reclaim("%1", lambda *a, **k: "", lambda s: None, state,
+                                   now + 70 * i, False, [], "p")
+        self.assertLessEqual(len(sent), watchdog.JANITOR_CLEAR_MAX_ITER,
+                             "a box that never converges is tried in ONE episode pass")
+
+
+class ReviewFindingsJobOne(_ObsHarness, TestCase):
+    """Job-1 ordering: no key before grace or into an owner-stopped pane."""
+
+    def test_no_key_reaches_the_pane_inside_the_grace_window(self):
+        now = time.time()
+        fake = self._pane("/devel/obs", "API Error: 529 Overloaded",
+                          "\n" + self._pointer_file(), now)
+        os.utime(fake.tpath, (now - 30, now - 30))       # the stall is 30 s old
+        self._sweep(fake, now)
+        self.assertEqual(fake.sent, [], "a stall younger than grace gets no key")
+
+    def test_no_key_reaches_an_owner_stopped_pane(self):
+        now = time.time()
+        fake = self._pane("/devel/obs", "API Error: 529 Overloaded",
+                          "\n" + self._pointer_file(), now)
+        from watchdog import owner_stop
+        with m.patch.object(owner_stop, "pane_latch", lambda pid: {"ts": now - 5}):
+            self._sweep(fake, now)
+        self.assertEqual(fake.sent, [], "a stopped session gets no key (B9)")
