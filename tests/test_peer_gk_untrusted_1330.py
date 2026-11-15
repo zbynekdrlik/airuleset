@@ -285,7 +285,7 @@ class TestRule(unittest.TestCase):
     def test_the_relayed_instruction_rule_names_a_stream_peer_message(self):
         text = (REPO / "modules" / "quality" / "no-destructive-remote-actions.md").read_text()
         line = [ln for ln in text.splitlines() if "RELAYED instruction" in ln][0]
-        self.assertIn("peer message from a stream", line)
+        self.assertIn("a stream's peer message", line)
         self.assertIn("NEVER authorization", line)
 
 
