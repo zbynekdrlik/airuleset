@@ -381,7 +381,8 @@ class TestReviewRound2(_Home):
         self.assertIn("debug/.fingerprint/serde-" + H[0], rec["removed"])
 
     def test_a_target_cut_three_times_in_a_row_is_noted_once_a_day(self):
-        _old_unit(self.p, "serde", H[0], 10 * DAY)
+        _old_unit(self.p, "serde", H[0], 10 * DAY)      # a candidate: not the newest
+        _old_unit(self.p, "serde", H[1], 3 * DAY)
         lines = []
         with mock.patch.object(tc, "_cargo_targets", return_value=[str(self.t)]):
             for k in range(5):
