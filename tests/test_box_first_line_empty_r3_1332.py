@@ -126,6 +126,9 @@ class JobSixOnTheNewShape(TestCase):
         p = m.patch.dict(os.environ, {"AIRULESET_NUDGE_FILE_DIR": str(nudges)})
         p.start()
         self.addCleanup(p.stop)
+        q = m.patch.object(watchdog, "JANITOR_CLEAR_SETTLE_S", 0)   # a static capture
+        q.start()                                                   # never converges
+        self.addCleanup(q.stop)
         rows = [r.replace("{F}", str(f)) for r in box_rows]
         cap = self.BANNER + "\n".join([SEP] + rows + [SEP, FOOT]) + "\n"
         now = datetime(2026, 7, 1, 18, 15, tzinfo=ZoneInfo("Europe/Bratislava")).timestamp()

@@ -127,7 +127,7 @@ def prompt_wedge_check(now, state, pid, captured, tmtime, owner, project,
         # An unreadable sweep neither ADVANCES an episode nor FORGETS it.
         return []
     head, tail, wrapped = box
-    txt = tail if wrapped else head[1:].strip()
+    txt = (tail if wrapped else head[1:].strip()).strip()   # #1332: "\n" = no words
     attempts_key = "pwedge-submit-attempts:" + pid
     giveup_key = "pwedge-submit-giveup:" + pid
     if not txt:
@@ -144,7 +144,7 @@ def prompt_wedge_check(now, state, pid, captured, tmtime, owner, project,
     # boundary row is its TAIL and can never carry it, so testing `txt` alone
     # mislabels our own stranded nudge a foreign draft and pings instead of
     # submitting it.
-    head_txt = head[1:].strip()
+    head_txt = watchdog._input_box_head_text(captured) or ""   # #1332 first text row
     # #806 -- recognize EVERY registered own-nudge prefix, not only the
     # cross-stream `MACHINE_NUDGE_PREFIX` subset. `MACHINE_NUDGE_PREFIX` covers
     # bounce/gk-request but NOT `lane-check: ` (the empty-lane nudge) -- so a

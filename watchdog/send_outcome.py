@@ -530,6 +530,12 @@ def presend_reclaim(pid, run, cap, sleep_fn, state, now, log_fn):
     if watchdog._strip_selected(cap):          # keys would go to the strip
         return "agent strip selected — held"
     now = time.time() if now is None else now
+    if not watchdog._input_line_text(cap).strip():   # #1332: no words at all
+        from watchdog import apierr_box
+        status = apierr_box.clear_line_breaks_once(pid, run, sleep_fn, state, now)
+        return ("pre-send: %s a box holding only line breaks (no words); nothing "
+                "typed this call" % ("cleared" if status == "bare" else
+                                     "could not clear (%s) —" % status))
     mode = _presend_own(pid, cap, state, now)
     if mode is None:
         return HELD_DRAFT

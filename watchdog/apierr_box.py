@@ -87,6 +87,10 @@ def book_wedge(state, key, now, idle, grace, project, kind, snippet, logs, send_
                 dry_run=dry_run)
 
 
+LINEBREAK_LOCK = "linebreak_clear"     # pid -> ts of the episode's clear attempt
+LINEBREAK_LOCK_TTL_S = 1800
+
+
 def _clear_line_breaks(pid, run, sleep_fn):
     """Backspace a box that holds only line breaks down to bare: one key per
     pass, re-read right before every key, stopped the moment a character
@@ -109,45 +113,66 @@ def _clear_line_breaks(pid, run, sleep_fn):
     return "not-converged"
 
 
+def clear_line_breaks_once(pid, run, sleep_fn, state, now):
+    """The ONE line-break-only clear (`send_outcome.presend_reclaim` routes
+    every caller here): at most one attempt per pane per episode (its own lock,
+    `LINEBREAK_LOCK`, so it never blocks the #1113 template/own-text clears),
+    and the lock is released once the box reads bare — a success ends the
+    episode, a later line break starts a new one. Returns the status."""
+    locks = state.setdefault(LINEBREAK_LOCK, {})
+    ts = locks.get(pid)
+    if isinstance(ts, (int, float)) and 0 <= now - ts < LINEBREAK_LOCK_TTL_S:
+        return "already tried this episode"
+    locks[pid] = now
+    status = _clear_line_breaks(pid, run, sleep_fn or time.sleep)
+    if status == "bare":
+        locks.pop(pid, None)
+    return status
+
+
 def reclaim(pid, run, sleep_fn, state, now, dry_run, logs, label):
-    """Reclaim our own stale text, or a line-break-only box, before a resume.
+    """Reclaim our own stale text, or a line-break-only box, before a resume,
+    through `send_outcome.presend_reclaim` (the one pre-send proof + clear).
     Returns None when the box is not provably ours (an owner draft, or a hold
-    that came before the ownership proof: the caller's draft path decides),
-    "cleared" when the box is bare now (the next sweep resumes), or "held" when
-    it is ours but the clear could not run or converge. One clear per pane per
-    episode (the #1113 (c) lock `presend_reclaim` and the janitor share)."""
-    from watchdog import janitor as _jan
+    that came before the proof: the caller's draft path decides), "cleared"
+    when the box is bare now (the next sweep resumes), or "held" when it is ours
+    but the clear could not run or converge. A dry run decides on a copy of the
+    state and sends no key."""
     from watchdog import send_outcome as _so
     cap = watchdog.capture_pane(pid, run, lines=40)
     text = watchdog._input_line_text(cap)
     if not text:
         return None
-    if text.strip():
-        if dry_run:   # the proof reads AND writes state: decide on a copy
-            if _so._presend_own(pid, cap, copy.deepcopy(state), now) is None:
-                return None
-            logs.append("api-error reclaim %s: would clear own stale text -- dry-run"
-                        % label)
-            return "held"
-        verdict = _so.presend_reclaim(pid, run, cap, sleep_fn or time.sleep, state,
-                                      now, logs.append)
-        if not verdict.startswith("pre-send"):
-            return None   # not ours, or held before the proof (strip, busy, slot)
-        logs.append("api-error reclaim %s: %s" % (label, verdict))
-        return "cleared" if verdict.startswith("pre-send: cleared") else "held"
-    if dry_run:
-        logs.append("api-error reclaim %s: would clear a box holding only line "
-                    "breaks -- dry-run" % label)
+    if dry_run:   # the proof reads AND writes state: decide on a copy
+        if text.strip() and _so._presend_own(pid, cap, copy.deepcopy(state),
+                                             now) is None:
+            return None
+        logs.append("api-error reclaim %s: would clear %s -- dry-run"
+                    % (label, "own stale text" if text.strip() else "line breaks"))
         return "held"
-    if _jan._template_clear_locked(state, pid, now):
-        logs.append("api-error reclaim %s: line-break clear already tried this "
-                    "episode — held" % label)
+    verdict = _so.presend_reclaim(pid, run, cap, sleep_fn or time.sleep, state, now,
+                                  logs.append)
+    if not verdict.startswith("pre-send"):
+        return None       # not ours, or held before the proof (strip, busy, slot)
+    logs.append("api-error reclaim %s: %s" % (label, verdict))
+    if not verdict.startswith("pre-send: cleared"):
         return "held"
-    _jan._mark_template_clear(state, pid, now)
-    status = _clear_line_breaks(pid, run, sleep_fn or time.sleep)
-    logs.append("api-error reclaim %s: box held only line breaks (no words) -> %s"
-                % (label, status))
-    return "cleared" if status == "bare" else "held"
+    state.get("goal_template_clear", {}).pop(pid, None)   # a success ends the episode
+    return "cleared"
+
+
+def stash_line_breaks(pid, run, cap, sleep_fn, state, log_fn):
+    """`deliver_with_stash`'s guard: CC 2.1.317 ignores Ctrl+S on a box holding
+    only line breaks (measured), so the stash route would abort UNRESOLVED on
+    every sweep. Such a box goes through the same `presend_reclaim` clear as
+    the bare-box send; nothing is delivered this call. True when handled."""
+    text = watchdog._input_line_text(cap)
+    if not text or text.strip():
+        return False
+    from watchdog import send_outcome as _so
+    log_fn("stash-abort: " + _so.presend_reclaim(pid, run, cap, sleep_fn, state,
+                                                   None, log_fn))
+    return True
 
 
 def reclaimed(pid, run, sleep_fn, state, key, now, idle, grace, project, logs,
@@ -156,9 +181,10 @@ def reclaimed(pid, run, sleep_fn, state, key, now, idle, grace, project, logs,
     continue), reached only after their own grace / latch / historical checks:
     True when the box held our own leftover or only line breaks (nothing is
     delivered this sweep; a clear that could not run books the wedge, so the
-    owner sees `stuck!`), False when it is the owner's draft."""
+    owner sees `stuck!`), False when it is the owner's draft. A dry run books
+    nothing (`run_once` saves state even then)."""
     verdict = reclaim(pid, run, sleep_fn, state, now, dry_run, logs, project or pid)
-    if verdict == "held":
+    if verdict == "held" and not dry_run:
         book_wedge(state, key, now, idle, grace, project or pid, "reclaim-held",
                    watchdog._input_line_text(watchdog.capture_pane(pid, run, lines=40)),
                    logs, send_fn, owner, dry_run, state_path)

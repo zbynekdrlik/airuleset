@@ -3905,8 +3905,9 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
                         pass                            # #1257: nothing booked
                     else:
                         draft = _input_line_text(captured)
-                        if draft and not draft.strip():   # #1332: line breaks, no words
-                            apierr_box.reclaim(pid, run, sleep_fn, state, now, dry_run, logs, project or pid)
+                        if draft and apierr_box.reclaim(pid, run, sleep_fn, state, now, dry_run,
+                                                        logs, project or pid):
+                            pass          # #1332: our leftover / line breaks, never "your draft"
                         elif draft:
                             # A draft sitting in the input box of a limit-parked session
                             # could go nowhere while limited — it is the user's OWN

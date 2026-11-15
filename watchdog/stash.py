@@ -767,6 +767,8 @@ def _draft_rescue_text(captured):
     if not rows:
         return ""
     head = watchdog._normalize_queued_hint(rows[0])
+    if rows[0] == "❯":       # #1332: an empty first line, words below it
+        return "\n".join(ln for ln in rows[1:] if ln)
     if not watchdog._is_draft_head(head):
         return ""            # bare box ("❯" alone) — nothing to rescue
     first = head[1:].lstrip(" \xa0")
@@ -1147,6 +1149,8 @@ def deliver_with_stash(pid, text, run, captured=None, logs=None, sleep_fn=None,
     if "esc to interrupt" in (cap or ""):
         _log("stash-abort: live turn")
         return False
+    if watchdog.apierr_box.stash_line_breaks(pid, run, cap, sleep_fn, state, _log):
+        return False                  # #1332: CC refuses C-s on a line-break box
     from watchdog import nudge_gate as _ng
     _bnow = time.time()
     _budgeted = state is not None and _ng.pane_budgeted(nudge, user_authored)
@@ -1154,8 +1158,7 @@ def deliver_with_stash(pid, text, run, captured=None, logs=None, sleep_fn=None,
         if _ng.first_pane_hold(state, pid, nudge, _bnow):   # once per episode
             _log("stash-abort: " + _ng.pane_budget_hold_reason(state, pid, _bnow))
         return False
-    # #271: from here on we are genuinely about to act on this box — persist
-    # whatever it currently holds BEFORE the first keystroke of ours lands,
+    # #271: from here on we are genuinely about to act on this box — persist whatever it currently holds BEFORE the first keystroke of ours lands,
     # so a stash whose eventual on-screen restore silently fails still has a
     # recoverable trace. A no-op (returns None, writes nothing) whenever the
     # box is bare, which is the common case. Honesty note (adversarial
@@ -1166,8 +1169,7 @@ def deliver_with_stash(pid, text, run, captured=None, logs=None, sleep_fn=None,
     # near the moment of action, not a byte-exact guarantee of what the box
     # holds at the literal instant `C-s` lands.
     watchdog._draft_rescue_persist(pid, cap, logs=logs)
-    # #1002 -- the #994 kill switch is enforced at the ONE `keys` primitive: the
-    # goal-sweep incident path (`deliver_goal` -> here) fires its FIRST stash
+    # #1002 -- the #994 kill switch is enforced at the ONE `keys` primitive: the goal-sweep incident path (`deliver_goal` -> here) fires its FIRST stash
     # keystroke (the strip-deselect Escape, else the `C-s` stash toggle) with
     # `kind=nudge_kind`, so at OFF `keys` suppresses it (ZERO keystrokes, not a
     # park+undo dance) + journals once, and this helper bails -- the deleted
