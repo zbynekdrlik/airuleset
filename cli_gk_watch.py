@@ -46,6 +46,12 @@ _ADVISORY_COUNTS_RE = re.compile(r"Po[čc]ty\s*\(otvoren", re.IGNORECASE)
 # stream comment quoting "BOUNCE" is never classified as a verdict).
 _BOUNCE_RE = re.compile(r"\bBOUNCE\b")
 _ACCEPT_RE = re.compile(r"\bACCEPT\b")
+# #1331: only a FORMAL ACCEPT supersedes an older BOUNCE -- the machine marker,
+# or the gk verdict template's own heading line (`## Gatekeeper review verdict:
+# ACCEPT`); a word in prose ("I can't ACCEPT this yet") never does.
+_FORMAL_ACCEPT_RE = re.compile(
+    r"gk-state:\s*ACCEPT\b|^#{1,6}[ \t]*Gatekeeper review verdict:[ \t]*ACCEPT\b",
+    re.IGNORECASE | re.MULTILINE)
 
 # An emoji-prefixed finding row (🔴/🟡/🔵 followed by an id digit) — the
 # ADVISORY signal, alongside the counts header. Deliberately NOT the loose
@@ -279,6 +285,8 @@ def watch_issue(issue, *, fetch, gk_login, self_login,
                 bm = _BRANCH_RE.search(body)
                 gk_comments.append({"ts": ts, "id": cid, "verdict": verdict,
                                     "sha": sha, "ids": ids,
+                                    "formal": verdict == "ACCEPT"
+                                    and bool(_FORMAL_ACCEPT_RE.search(body)),
                                     "branch": bm.group(1) if bm else None})
         if match(login, self_login):
             stream_comments.append({"ts": ts, "body": body})
@@ -308,10 +316,10 @@ def watch_issue(issue, *, fetch, gk_login, self_login,
     # gk comment (a delta advisory) exists — else a follow-up advisory would
     # mask an unanswered BOUNCE from the label gate. gk_latest then reflects
     # that BOUNCE so the gate cites/times the right verdict.
-    # #1331: a later gk ACCEPT supersedes every older BOUNCE (the ticket was
+    # #1331: a later FORMAL gk ACCEPT supersedes every older BOUNCE (the ticket was
     # accepted since), so neither that BOUNCE nor the finding ids of gk
     # comments before the ACCEPT are current; the ACCEPT's own ids still are.
-    accepts = [g["ts"] for g in gk_comments if g["verdict"] == "ACCEPT"]
+    accepts = [g["ts"] for g in gk_comments if g.get("formal")]
     accept_ts = max(accepts) if accepts else None
     bounces = [g for g in gk_comments if g["verdict"] == "BOUNCE"
                and (accept_ts is None or g["ts"] > accept_ts)]

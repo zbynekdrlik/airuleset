@@ -93,5 +93,39 @@ class AcceptSupersedesBounce(unittest.TestCase):
         self.assertEqual(st["gk_latest"]["id"], 2)
 
 
+class ReviewFindings1331(unittest.TestCase):
+    """Shapes both fresh-context reviews reproduced against the first cut."""
+
+    def test_a_prose_accept_never_supersedes_a_bounce(self):
+        for note in ("Pre ACCEPT treba ešte opraviť 🟡1 (off-by-one).",
+                     "I can't ACCEPT this until CI is green."):
+            rows = [_row(1, GK, BOUNCE, "2026-11-13T21:21:21Z"),
+                    _row(2, GK, note, "2026-11-13T22:00:00Z")]
+            st = _watch(rows, matcher=None)
+            self.assertEqual(st["state"], "bounce-unanswered", note)
+            self.assertIn("1", st["undispositioned_ids"])
+
+    def test_a_shared_identity_stream_mention_never_supersedes(self):
+        rows = [_row(1, GK, BOUNCE, "2026-11-13T21:21:21Z"),
+                _row(2, GK, "Working on it. Will re-request once gk can ACCEPT.",
+                     "2026-11-13T22:00:00Z")]
+        st = gw.watch_issue(10100, fetch=lambda _i: rows, gk_login=GK,
+                            self_login=GK, now=2e9)
+        self.assertEqual(st["state"], "bounce-unanswered")
+
+    def test_the_live_heading_shape_supersedes(self):
+        """The real odoo-erp verdict carries the heading, not the marker."""
+        rows = [_row(1, GK, BOUNCE, "2026-11-13T21:21:21Z"),
+                _row(2, GK, "## Gatekeeper review verdict: ACCEPT\n\nLGTM",
+                     "2026-11-13T23:37:56Z")]
+        self.assertNotEqual(_watch(rows, matcher=None)["state"], "bounce-unanswered")
+
+    def test_bot_suffix_never_matches_a_bare_login(self):
+        self.assertFalse(_is_own_login("my-app", "my-app[bot]"))
+        self.assertFalse(_is_own_login("my-app[bot]", "my-app"))
+        self.assertFalse(_is_own_login("[bot]", "app/"))
+        self.assertTrue(_is_own_login("my-app[bot]", "my-app[bot]"))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1394,10 +1394,15 @@ def _is_own_login(login, self_login):
     if login == self_login:
         return True
 
-    def _bare(s):
-        s = s[4:] if s.startswith("app/") else s
-        return s[:-5] if s.endswith("[bot]") else s
-    return _bare(login) == _bare(self_login)
+    if login.endswith("[bot]") or self_login.endswith("[bot]"):
+        # #1331 review: `<slug>[bot]` names an App, so it matches only another
+        # App form (`app/<slug>` or `<slug>[bot]`), never a bare (human) login.
+        apps = [s[4:] if s.startswith("app/") else s[:-5] for s in (login, self_login)
+                if s.startswith("app/") or s.endswith("[bot]")]
+        return len(apps) == 2 and bool(apps[0]) and apps[0] == apps[1]
+    bare_login = login[4:] if login.startswith("app/") else login
+    bare_self = self_login[4:] if self_login.startswith("app/") else self_login
+    return bare_login == bare_self
 
 
 def _stream_self_login():
