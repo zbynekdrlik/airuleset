@@ -28,7 +28,9 @@ Failure posture: a gh error, an unresolvable identity or any exception inside
 a poll is NEVER a change -- it is counted and retried next poll; a gh-rate
 backoff (#1040/#1067, read from the CACHED status only, no gh call) skips the
 poll. A full-authority box has no stream slice and is refused (exit 2) before
-any wait starts. A waiter killed from outside (a memory-pressure reap, a
+any wait starts. #1329: so is a stream with work waiting (exit 3, the
+dispatchable tickets and unhandled bounces printed) -- the waiter never idles
+a loop that has work (david3 sat 9 h on it with 28 dispatchable tickets). A waiter killed from outside (a memory-pressure reap, a
 compaction) exits silently -- the loop's own liveness checks relaunch it, not
 this module. Pure stdlib; the wait loop takes injected
 fetch/clock/sleep/backoff/baseline/record seams so tests drive it with fakes.
@@ -218,13 +220,67 @@ def wait_for_change(fetch, interval, max_s, now_fn=time.monotonic,
         sleep_fn(min(interval, remaining))
 
 
+def _gate_part(flags, label):
+    """One `cmd_slice_quals` run with `flags` -> its member lines, or [] when
+    it could not measure (a gh failure exit, an `unmeasurable:` line, any
+    exception) -- logged, never a refusal: the gate fails OPEN, like the IDLE
+    clause's "prints 0 (or errors)"."""
+    import argparse
+    import contextlib
+    import io
+    import cli_quals_cmd
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            cli_quals_cmd.cmd_slice_quals(argparse.Namespace(**flags))
+    except (SystemExit, Exception) as exc:  # noqa: BLE001 -- fail open, logged
+        sys.stderr.write("stream-wait: %s gate unreadable (%s), waiting "
+                         "anyway\n" % (label, type(exc).__name__))
+        return []
+    lines = [ln for ln in buf.getvalue().splitlines()
+             if ln.strip() and not ln.startswith("#")]
+    if any(ln.startswith("unmeasurable") for ln in lines):
+        sys.stderr.write("stream-wait: %s gate %s, waiting anyway\n"
+                         % (label, lines[0]))
+        return []
+    return lines
+
+
+def idle_gate(root):
+    """(dispatchable lines, unhandled-bounce lines) from the SAME
+    `slice-quals --list-dispatchable` / `--bounces --unhandled` derivation the
+    IDLE clause names (#1329, never a parallel derivation, #367). The process
+    cwd is the repo the waiter serves, exactly as for `slice-quals` itself."""
+    return (_gate_part({"list_dispatchable": True}, "dispatchable"),
+            _gate_part({"bounces": True, "unhandled": True}, "bounce"))
+
+
+def _refuse(dispatchable, bounces):
+    """#1329: print the waiting work and the refusal; exit code 3."""
+    print("stream-wait: REFUSED -- work is waiting, the stream loop is not "
+          "idle. Work it now (priority order sets ORDER, never SCOPE):")
+    for ln in dispatchable:
+        num, _, title = ln.partition("\t")
+        print("  #%s %s" % (num, title))
+    for ln in bounces:
+        print("  #%s unhandled gk BOUNCE -- rework it or ask the owner"
+              % ln.partition("\t")[0])
+    return 3
+
+
 def run(args):
     """The `stream-wait` command body -> exit code (0 changed/heartbeat,
-    2 refused: a full-authority box or invalid bounds)."""
+    2 refused: a full-authority box or invalid bounds, 3 refused: work is
+    dispatchable or a bounce is unhandled, #1329)."""
     interval = getattr(args, "interval", DEFAULT_INTERVAL_S)
     max_s = getattr(args, "max", DEFAULT_MAX_S)
     try:
         root = check_stream_box()
+        if interval <= 0 or max_s <= 0:
+            raise ValueError("stream-wait: --interval and --max must be > 0")
+        dispatchable, bounces = idle_gate(root)
+        if dispatchable or bounces:
+            return _refuse(dispatchable, bounces)
         path = state_path(root or os.getcwd())
         verdict, lines, stats = wait_for_change(
             make_fetch(root), interval, max_s, baseline=load_baseline(path),

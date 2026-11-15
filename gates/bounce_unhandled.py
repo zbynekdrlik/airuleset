@@ -77,9 +77,55 @@ def _acked(msg, n):
     return bool(re.search(r"BOUNCE-ACK:\s*#?%d(?![0-9])" % n, msg or ""))
 
 
+def _ack_state_path(cwd, home=None):
+    key = hashlib.sha1(str(cwd).encode()).hexdigest()[:12]
+    base = home or os.path.expanduser("~")
+    return os.path.join(base, ".claude", "bounce-ack", key + ".json")
+
+
+def _asks_about(msg, n):
+    """True if a `❓` line in the turn names `#n` (a question to the owner)."""
+    return any("❓" in ln and re.search(r"#%d(?![0-9])" % n, ln)
+               for ln in (msg or "").splitlines())
+
+
+def _stale_acks(cwd, home, now, acked, live):
+    """#1329: the ACKed bounces whose FIRST ACK for the SAME verdict is older
+    than the grace while the verdict is still unhandled -- a bare re-ACK there
+    adds nothing (no stream comment since the verdict: no LANE/Anchors/RFR, no
+    question; any of those clears the unhandled entry at the next refresh).
+    Records the first ACK per `N:verdict_ts`, prunes verdicts no longer
+    unhandled. A state read/write error never blocks (fail-open)."""
+    import json
+    path = _ack_state_path(cwd, home)
+    try:
+        with open(path, encoding="utf-8") as fh:
+            state = json.load(fh)
+        state = state if isinstance(state, dict) else {}
+    except (OSError, ValueError):
+        state = {}
+    state = {k: v for k, v in state.items() if k in live}
+    stale = []
+    for n, key in acked:
+        first = state.setdefault(key, now)
+        if isinstance(first, (int, float)) and now - first > _grace_seconds():
+            stale.append(n)
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = "%s.%d.tmp" % (path, os.getpid())
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(state, fh)
+        os.replace(tmp, path)
+    except OSError:
+        pass  # airuleset:script-ok an unwritable state only loses the memory
+    return stale
+
+
 def decide(payload, now=None, home=None):
     """Return `(block: bool, reason: str)`. Blocks iff at least one UNHANDLED
-    bounce is older than the grace AND is not ACKed in the turn's message."""
+    bounce is older than the grace AND is not ACKed in the turn's message --
+    or (#1329) is re-ACKed with nothing new more than the grace after its
+    first ACK."""
     msg = gates.field_of(payload, "last_assistant_message", "")
     cwd = gates.field_of(payload, "cwd", "") or os.getcwd()
     if now is None:
@@ -88,7 +134,7 @@ def decide(payload, now=None, home=None):
     if not bu:
         return False, ""                     # no cache / absent / empty -> allow
     grace = _grace_seconds()
-    overdue = []
+    overdue, acked, live = [], [], set()
     for e in bu:
         if not isinstance(e, dict):
             continue
@@ -99,10 +145,23 @@ def decide(payload, now=None, home=None):
         vts = _epoch(e.get("verdict_ts"))
         if vts is None:
             continue                         # unmeasurable age -> allow (skip)
+        live.add("%d:%s" % (n, vts))
         if (now - vts) < grace:
             continue                         # within grace -> not yet blockable
         if not _acked(msg, n):
             overdue.append(n)
+        elif not _asks_about(msg, n):
+            acked.append((n, "%d:%s" % (n, vts)))
+    repeat = _stale_acks(cwd, home, now, acked, live)
+    if repeat and not overdue:
+        listed = ", ".join("#%d" % n for n in sorted(repeat))
+        return True, (
+            "Opakovaný `BOUNCE-ACK` bez pokroku: %s je stále neošetrený a prvý "
+            "ACK k tomuto verdiktu je starší než 30 min — ďalší holý ACK nič "
+            "nepridáva (#1329). Akcia: ZAČNI rework (lane, ktorá na tikete "
+            "napíše `Anchors-confirmed:`/`LANE-*`), alebo polož ownerovi "
+            "otázku (`❓ ASKED` s #N + `needs-answer`), alebo `relay`, ak "
+            "BOUNCE menuje PR iného streamu." % listed)
     if not overdue:
         return False, ""
     listed = ", ".join("#%d" % n for n in sorted(overdue))

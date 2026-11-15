@@ -709,7 +709,9 @@ def _print_bounce_unhandled(quals, root, user):
         print("slice-quals --bounces --unhandled: gh query failed",
               file=sys.stderr)
         sys.exit(1)
-    numbers = sorted(bounce_rows)
+    # #1329: a bounce parked on an owner question is U, not unhandled.
+    numbers = sorted(n for n, r in bounce_rows.items()
+                     if not cli_bounce_unhandled.parked_on_owner(r))
     if not numbers:
         return
     out = cli_bounce_unhandled.derive_numbers(

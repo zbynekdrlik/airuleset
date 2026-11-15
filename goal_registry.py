@@ -93,6 +93,14 @@ REQUIRED_BY_PROFILE = {
     "fork-no-merge": _STREAM_REQUIRED,
 }
 
+# #1329 stream-idle addition; lines armed before it stay recognised (stripped).
+_ORDER_1329 = (
+    " `stream-wait` refuses (exit 3) while work is waiting: work the list it "
+    "prints. ORDER, NEVER SCOPE (#1329): a priority order or owner line sets "
+    "order only — when its head is blocked, start the next workable ticket the "
+    "same turn; a blocker lives on its ticket in W (`ops-wait` + `Waiting-on:` "
+    "+ daily push) or U, never only in a ⏳ line.")
+
 # The ORDERED clause registry. render(profile) walks this list, keeps the
 # clauses that profile carries, and joins their text with a single space.
 CLAUSES = [
@@ -129,7 +137,7 @@ CLAUSES = [
     Clause("stream-note", ("full",),
         "A stream ticket in that set is NOT mine to implement — I ACTION it (review, merge, close, unblock) and never write its code (a bare sub-dev bounce is NOT in this set — `/process-subdev`'s loop holds it)."),
     Clause("stream-idle", ("branch-merge", "fork-no-merge"),
-        "NO BACKLOG-EMPTY END (#1128): this stream loop never ends on an empty slice — gk hand-offs, bounces, client replies and new stream tickets keep arriving; an empty slice is NEVER a stop condition — never judge this goal met on it. IDLE: when no lane is live, `python3 ~/devel/airuleset/airuleset.py slice-quals --count-dispatchable` prints 0 (or errors) and `slice-quals --bounces --unhandled` prints nothing, keep exactly ONE background `python3 ~/devel/airuleset/airuleset.py stream-wait` live (relaunch it if gone) and end ⏳ WORKING; when it exits, read what it printed, re-check `slice-quals` and work whatever arrived. Only the OWNER ends this loop (`/goal clear`)."),
+        "NO BACKLOG-EMPTY END (#1128): this stream loop never ends on an empty slice — gk hand-offs, bounces, client replies and new stream tickets keep arriving; an empty slice is NEVER a stop condition — never judge this goal met on it. IDLE: when no lane is live, `python3 ~/devel/airuleset/airuleset.py slice-quals --count-dispatchable` prints 0 (or errors) and `slice-quals --bounces --unhandled` prints nothing, keep exactly ONE background `python3 ~/devel/airuleset/airuleset.py stream-wait` live (relaunch it if gone) and end ⏳ WORKING; when it exits, read what it printed, re-check `slice-quals` and work whatever arrived." + _ORDER_1329 + " Only the OWNER ends this loop (`/goal clear`)."),
     Clause("authority-ends", ("branch-merge", "fork-no-merge"), {
         "branch-merge": "My authority ENDS at the integration branch: never promote to staging/main, never deploy, never touch other streams'.",
         "fork-no-merge": "My authority ENDS at the hand-off: I push MY fork branches + evidence — NEVER open/merge a PR, never push upstream, never deploy, close only per authority, never touch other streams'.",
@@ -434,7 +442,8 @@ def legacy_goal_line_variants():
     """The pre-#1137 sequential + parallel `/goal` lines (recognition only)."""
     out = []
     for authority, role in variant_specs():
-        line = _pre_1309(render_goal_line(authority, role), role)
+        line = _pre_1309(render_goal_line(authority, role), role).replace(
+            _ORDER_1329, "", 1)
         for i, sat in enumerate(_LEGACY_SATURATION):
             old = line.replace(_BUNDLE, sat + " " + _LEGACY_DELIVERY[authority], 1)
             for new, legacy in _LEGACY_BOUNCE + _LEGACY_POINTER:
@@ -473,6 +482,8 @@ def all_goal_line_variants():
         lines += legacy_goal_line_variants()
     except Exception:  # noqa: BLE001 — never lose the current variants
         pass
+    lines += [ln.replace(_ORDER_1329, "", 1) for ln in lines   # pre-#1329
+              if _ORDER_1329 in ln]
     for line in list(lines):
         for new, legacy in _LEGACY_PROOF:
             line = line.replace(new, legacy, 1)

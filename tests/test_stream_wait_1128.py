@@ -409,6 +409,11 @@ class TestCli(unittest.TestCase):
         patcher = unittest.mock.patch.object(sw, "STATE_DIR", self.state_dir)
         patcher.start()
         self.addCleanup(patcher.stop)
+        # #1329: nothing waiting, so the idle gate lets the wait start.
+        patcher = unittest.mock.patch.object(sw, "idle_gate",
+                                             return_value=([], []))
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def test_run_threads_the_persisted_baseline_and_its_recorder(self):
         self._stream_box()

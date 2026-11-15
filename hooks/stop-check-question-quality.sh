@@ -190,6 +190,16 @@ if grep -qiE "$NEEDS_YOU_RX" <<<"$LAST_LINE" && [ "$RETRIES" -lt "$MAX_RETRIES" 
             exit 2
         fi
     fi
+    # #1329: NEEDS YOU inside an ARMED /goal loop while the footer I > 0 ends
+    # the loop with work left (david3: 28 dispatchable) — gates.loopquestion,
+    # cache + pane read only, fail-open.
+    _LQ_RC=0
+    env PYTHONPATH="$(dirname "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)")${PYTHONPATH:+:$PYTHONPATH}" \
+        python3 -P -m gates.loopquestion <<<"$INPUT" || _LQ_RC=$?
+    if [ "$_LQ_RC" -eq 2 ]; then
+        echo "$((RETRIES+1))" > "$RETRY_FILE"
+        exit 2
+    fi
 fi
 
 # (C) The ❓ marker must NAME the decision — enforced INSIDE the #740 bare
