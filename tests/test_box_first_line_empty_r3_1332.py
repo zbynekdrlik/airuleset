@@ -307,5 +307,66 @@ class RoundFive(TestCase):
         self.assertTrue(any("latch" in ln for ln in logs), logs)
 
 
+class RoundSix(TestCase):
+    """Round 6 (both reviews): every line-break clear outcome maps to the right
+    verdict (a transient hold books nothing, the owner typing hands the box to
+    the draft path), and a selected agent strip is NOT transient: our own text
+    behind it must surface as a wedge, never a silent hold."""
+
+    def _reclaimed(self, cap, **patches):
+        from watchdog import apierr_box
+        state, pings, sess = {}, [], {}
+        with m.patch.object(watchdog, "capture_pane", lambda *a, **k: cap):
+            ctx = [m.patch.object(*p) for p in patches.get("p", [])]
+            for c in ctx:
+                c.start()
+            try:
+                ok = apierr_box.reclaimed("%1", lambda *a, **k: "", lambda s: None, state,
+                                          "sid", time.time(), 10000, 300, "p", [],
+                                          lambda *a, **k: pings.append(a), None, False,
+                                          "/nonexistent/st.json")
+                apierr_box.sesslimit_reclaim(sess, 0, "%1", lambda *a, **k: "",
+                                             lambda s: None, {}, time.time(), False, [], "p")
+            finally:
+                for c in ctx:
+                    c.stop()
+        return ok, state, pings, sess
+
+    def test_a_transient_line_break_hold_books_nothing(self):
+        from watchdog import apierr_box
+        for status in ("busy", "refused"):
+            ok, state, pings, sess = self._reclaimed(
+                LONE_NL, p=[(apierr_box, "_clear_line_breaks", lambda *a, **k: (status, 0))])
+            self.assertTrue(ok, status)
+            self.assertEqual((pings, sess), ([], {}), status)
+            self.assertNotIn("apierr-busypane:sid", state, status)
+
+    def test_the_owner_typing_during_the_clear_hands_the_box_to_the_draft_path(self):
+        from watchdog import apierr_box
+        ok, state, pings, sess = self._reclaimed(
+            LONE_NL, p=[(apierr_box, "_clear_line_breaks", lambda *a, **k: ("changed", 1))])
+        self.assertFalse(ok)
+        self.assertEqual((pings, sess), ([], {}))
+
+    def test_our_text_behind_a_selected_strip_surfaces_as_a_wedge(self):
+        from watchdog import send_outcome
+        ok, state, pings, sess = self._reclaimed(
+            PTR_BOX, p=[(send_outcome, "presend_reclaim",
+                         lambda *a, **k: "agent strip selected — held"),
+                        (send_outcome, "_presend_own", lambda *a, **k: "shape")])
+        self.assertTrue(ok)
+        self.assertEqual(len(pings), 1, "never a silent hold")
+        self.assertEqual(sess.get("swallow_fails"), 1)
+
+    def test_a_human_change_during_the_own_clear_hands_the_box_to_the_draft_path(self):
+        from watchdog import send_outcome
+        verdict = ("pre-send: stopped clearing stale own machine text (changed, pane "
+                   "marked not-own, 5 chars removed) — held")
+        ok, state, pings, sess = self._reclaimed(
+            PTR_BOX, p=[(send_outcome, "presend_reclaim", lambda *a, **k: verdict)])
+        self.assertFalse(ok)
+        self.assertEqual(pings, [])
+
+
 def h_sid():
     return _RunOnceAdoptHarness.SID
