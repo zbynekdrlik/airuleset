@@ -1,0 +1,155 @@
+"""#1332 round-2 review findings: the empty-first-line box beyond job 1.
+
+Both round-2 reviews: a dry run still wrote the wedge episode through
+`reclaimed`, the #271 draft-rescue snapshot was empty for the owner's words
+under an empty first line, a SUCCESSFUL line-break clear kept the episode lock
+for 30 minutes, a line-break box blocked every delivery outside job 1 (the
+bare-box send and the stash route), and job 10 / job 6 read the new shape with
+their own head logic (job 6 would submit our stranded pointer as the owner's
+prompt)."""
+import json
+import os
+import sys
+import time
+from pathlib import Path
+from unittest import TestCase
+from unittest import mock as m
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+import watchdog  # noqa: E402
+from test_box_first_line_empty_1332 import FOOT, LONE_NL, SEP, _BoxPane  # noqa: E402
+from test_send_verified_adoption import (  # noqa: E402
+    _RunOnceAdoptHarness, _assistant_row)
+
+OWNER_CAP = "\n".join(["● ok", "", SEP, "❯\xa0", "  my owner words on line two", SEP,
+                       FOOT]) + "\n"
+
+
+def _pane(box, tmp):
+    tp = Path(tmp) / "s.jsonl"
+    tp.write_text(json.dumps({"type": "user", "message": {"content": "go"}}) + "\n")
+    return _BoxPane("%1\tclaude\t/x\n", box, str(tp))
+
+
+class RoundTwo(TestCase):
+
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.mkdtemp()
+
+    def test_a_dry_run_through_reclaimed_writes_no_state(self):
+        from watchdog import apierr_box
+        state = {}
+        with m.patch.object(watchdog, "capture_pane", lambda *a, **k: LONE_NL):
+            apierr_box.reclaimed("%1", lambda *a, **k: "", lambda s: None, state, "sid",
+                                 time.time(), 10000, 300, "p", [], lambda *a, **k: "sent",
+                                 None, True, str(Path(self.tmp) / "st.json"))
+        self.assertEqual(state, {})
+        self.assertFalse((Path(self.tmp) / "recovery-stuck").exists())
+
+    def test_the_owners_words_under_an_empty_first_line_are_rescued(self):
+        from watchdog import stash
+        self.assertEqual(stash._draft_rescue_text(OWNER_CAP), "my owner words on line two")
+
+    def test_a_successful_line_break_clear_does_not_lock_the_next_episode(self):
+        from watchdog import apierr_box
+        fake = _pane("\n", self.tmp)
+        state, now = {}, time.time()
+        self.assertEqual(apierr_box.reclaim("%1", fake, lambda s: None, state, now,
+                                            False, [], "p"), "cleared")
+        fake.box = "\n"                       # a fresh line break, later
+        self.assertEqual(apierr_box.reclaim("%1", fake, lambda s: None, state, now + 600,
+                                            False, [], "p"), "cleared")
+
+    def test_a_clear_that_never_converges_is_tried_once_per_episode(self):
+        from watchdog import apierr_box
+        sent, verdicts, now, state = [], [], time.time(), {}
+        with m.patch.object(watchdog, "keys", lambda pid, *k, **kw: sent.append(k) or True), \
+                m.patch.object(watchdog, "capture_pane", lambda *a, **k: LONE_NL):
+            for i in range(3):
+                verdicts.append(apierr_box.reclaim("%1", lambda *a, **k: "",
+                                                   lambda s: None, state, now + 70 * i,
+                                                   False, [], "p"))
+        self.assertEqual(verdicts, ["held", "held", "held"])
+        self.assertEqual(len(sent), watchdog.JANITOR_CLEAR_MAX_ITER,
+                         "one full attempt in the first sweep, none after")
+
+    def test_a_bare_box_send_clears_a_line_break_box_then_delivers(self):
+        fake = _pane("\n", self.tmp)
+        state = {}
+        first = watchdog.send_verified("%1", "continue", fake, fake.tpath,
+                                       sleep_fn=lambda s: None, logs=[], nudge="resume",
+                                       state=state)
+        self.assertFalse(first)
+        self.assertEqual(fake.box, "", "the line break is cleared by the pre-send gate")
+        second = watchdog.send_verified("%1", "continue", fake, fake.tpath,
+                                        sleep_fn=lambda s: None, logs=[], nudge="resume",
+                                        state=state)
+        self.assertTrue(second)
+        self.assertEqual(fake.submitted, ["continue"])
+
+    def test_the_stash_route_clears_a_line_break_box_instead_of_a_dead_ctrl_s(self):
+        fake = _pane("\n", self.tmp)
+        logs = []
+        ok = watchdog.deliver_with_stash("%1", "continue", fake, logs=logs,
+                                         sleep_fn=lambda s: None, state={})
+        self.assertFalse(ok)
+        self.assertEqual(fake.box, "", logs)
+        self.assertFalse(any("C-s" in a for a in fake.sent), logs)
+
+    def test_job10_does_not_track_a_line_break_box_as_a_user_draft(self):
+        st, pings = {}, []
+        for i in range(3):
+            watchdog.prompt_wedge_check(1_000_000 + 70 * i, st, "%1", LONE_NL, 0,
+                                        "zbynek", "p", lambda *a, **k: pings.append(a))
+        self.assertEqual(pings, [])
+        self.assertNotIn("pwedge:%1", st)
+
+
+class JobSixOnTheNewShape(TestCase):
+    """Job 6 (session-limit resume) must never submit our stranded pointer as
+    the owner's prompt, nor a box that holds only line breaks."""
+
+    BANNER = ("❯ continue\n  ⎿  You've hit your session limit · resets 6:10pm "
+              "(Europe/Prague)\n     /usage-credits to finish what you're working on.\n\n")
+
+    def _two_sweeps(self, box_rows):
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        import tempfile
+        nudges = Path(tempfile.mkdtemp())
+        f = nudges / "resume-261111183944-c447.md"
+        f.write_text("x", encoding="utf-8")
+        os.chmod(f, 0o600)
+        p = m.patch.dict(os.environ, {"AIRULESET_NUDGE_FILE_DIR": str(nudges)})
+        p.start()
+        self.addCleanup(p.stop)
+        rows = [r.replace("{F}", str(f)) for r in box_rows]
+        cap = self.BANNER + "\n".join([SEP] + rows + [SEP, FOOT]) + "\n"
+        now = datetime(2026, 7, 1, 18, 15, tzinfo=ZoneInfo("Europe/Bratislava")).timestamp()
+        sess = {"resets_at": now - 300, "pinged": True, "continued": False,
+                "first_seen": int(now - 3600), "last_seen": int(now - 60)}
+        h = _RunOnceAdoptHarness(self, [_assistant_row("pracujem…")], mtime_age=60,
+                                 capture=cap, seed_state={"sesslimit:" + h_sid(): sess},
+                                 now=now)
+        out = h.run(sv_result=True)
+        h.now = now + 400
+        out2 = h.run(sv_result=True)
+        return out[0] + out2[0], out[1] + out2[1], out[2] + out2[2]
+
+    def test_our_stranded_pointer_is_never_submitted_as_the_owners_prompt(self):
+        logs, sent, keys = self._two_sweeps(
+            ["❯\xa0", "  nudge: [resume] rotacia — celý text: {F}"])
+        self.assertFalse(any("user draft" in ln for ln in logs), logs)
+        self.assertFalse(any("rozpísaný prompt" in b for b in sent), sent)
+
+    def test_a_line_break_box_is_never_submitted_as_a_draft(self):
+        logs, sent, keys = self._two_sweeps(["❯\xa0", ""])
+        self.assertFalse(any("user draft" in ln for ln in logs), logs)
+        self.assertFalse(any("rozpísaný prompt" in b for b in sent), sent)
+
+
+def h_sid():
+    return _RunOnceAdoptHarness.SID
