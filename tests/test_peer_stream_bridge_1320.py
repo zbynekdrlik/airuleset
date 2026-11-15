@@ -131,7 +131,8 @@ class TestStreamValidation(unittest.TestCase):
         doc, reg = cpc.load_links(), cpc.load_registry()
         with mock.patch.object(airuleset, "REMOTE_HOSTS", hosts):
             self.assertEqual(cpc.validate_links(doc, reg), [])
-            self.assertEqual(cpc.accounts_for_host("subdev", doc, reg), ["devbridge-peer"])
+            self.assertEqual(cpc.accounts_for_host("subdev", doc, reg),
+                             ["codex-bridge-peer", "david4", "devbridge-peer"])   # #1334
 
     def test_a_partner_reached_both_locally_and_over_a_bridge_is_refused(self):
         # review A: inbound carries only `from`, so the two links could not be told apart
@@ -160,13 +161,13 @@ class TestCommittedLink(unittest.TestCase):
     def test_the_committed_config_is_valid(self):
         self.assertEqual(cpc.validate_links(self.doc, self.reg), [])
 
-    def test_subdev_carries_exactly_one_link(self):
+    def test_subdev_carries_the_devbridge_link(self):
+        # #1334 added codex-bridge<->david3 and devbridge<->david4 (its own tests)
         sub = self.doc["hosts"]["subdev"]
-        self.assertEqual(sub["links"], [["david3", "devbridge"]])
-        self.assertEqual(sorted(sub["streams"]), ["david3"])
+        self.assertIn(["david3", "devbridge"], sub["links"])
+        self.assertIn("david3", sub["streams"])
         self.assertIn("Worldline", sub["topics"]["david3|devbridge"])
-        self.assertEqual(cpc.accounts_for_host("subdev", self.doc, self.reg),
-                         ["david3", "devbridge-peer"])
+        self.assertIn("devbridge-peer", cpc.accounts_for_host("subdev", self.doc, self.reg))
 
     def test_the_bridge_goes_from_dev1_out_to_subdev(self):
         spec = self.doc["bridges"]["devbridge"]
@@ -177,17 +178,18 @@ class TestCommittedLink(unittest.TestCase):
         self.assertEqual(far["ssh"], "devbridge-peer@100.118.174.27")
         self.assertEqual(far["identity"], "~/.ssh/devbridge_peer_ed25519")
 
-    def test_the_subdev_root_leg_names_only_the_two_accounts(self):
+    def test_the_subdev_root_leg_names_only_the_linked_accounts(self):
         script = cpc.render_root_script(cpc.accounts_for_host("subdev", self.doc, self.reg),
                                         self.doc, self.reg)
         acl = [ln for ln in script.splitlines() if ln.startswith("a /run/claude-peers")]
         self.assertEqual(acl, ["a /run/claude-peers - - - - u::rwx,g::---,o::---,"
-                               "u:david3:r-x,u:devbridge-peer:r-x,m::r-x"])
+                               "u:codex-bridge-peer:r-x,u:david3:r-x,u:david4:r-x,"
+                               "u:devbridge-peer:r-x,m::r-x"])           # #1334
         far = self.doc["bridges"]["devbridge"]["hosts"]["subdev"]["key"]
         self.assertIn('restrict,command="exec python3 -I /etc/airuleset/peer/peer_channel.py '
                       'bridge --project devbridge" ' + far, script)
         self.assertIn("useradd --system --create-home --home-dir /var/lib/devbridge-peer", script)
-        for other in ("simap1", "montalu", "miva1", "david1", "david2", "david4", "dominika"):
+        for other in ("simap1", "montalu", "miva1", "david1", "david2", "dominika"):
             self.assertNotIn("u:%s" % other, script)
 
     def test_push_gives_subdev_the_full_leg(self):
