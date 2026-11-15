@@ -69,7 +69,9 @@ class TestHomeFleet(unittest.TestCase):
         def run(argv, **kw):
             sent[argv[-2].split("@")[1]] = argv[-1]
             return R()
-        with mock.patch.object(cpc, "stream_users", lambda h: {"s1"}), \
+        real = cpc.validate_links      # its stream_users default is bound at def time
+        with mock.patch.object(cpc, "validate_links", lambda d, r, roots=None: real(
+                d, r, roots, stream_users=lambda h: {"s1"})), \
                 mock.patch.object(cpc, "apply_home_policy", return_value=[]):
             self.assertEqual(cpc.provision_peer_channel_root(hosts=hosts, run=run,
                                                              links_doc=_doc(), registry=REG), [])
