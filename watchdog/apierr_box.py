@@ -110,9 +110,10 @@ def _clear_line_breaks(pid, run, sleep_fn, user_authored=False):
             return "bare", sent
         if text is None or text.strip():
             return "changed", sent
-        if (_so._pane_busy(cap) or watchdog.STASH_MARKER in (cap or "")
-                or watchdog._strip_selected(cap)):
-            return "busy", sent
+        if _so._pane_busy(cap):
+            return "busy", sent                 # a turn / agents: transient
+        if watchdog.STASH_MARKER in (cap or "") or watchdog._strip_selected(cap):
+            return "slot-or-strip", sent        # stays until a key: a real hold
         if not watchdog.keys(pid, "BSpace", kind="janitor", run=run,
                              user_authored=user_authored):
             return "refused", sent
@@ -124,8 +125,8 @@ def _clear_line_breaks(pid, run, sleep_fn, user_authored=False):
 def clear_line_breaks_once(pid, run, sleep_fn, state, now, user_authored=False):
     """The ONE line-break-only clear. Callers: the recovery resume paths
     (`reclaim`: job 1, credential-dead, job 6) and an OWNER action delivered by
-    the stash route (`user_authored`: the Discord reply, a ❓ flag / card
-    reopen in a pane the watchdog picked) — every machine delivery holds on such
+    the stash route (`user_authored` with state: the owner's Discord reply to
+    the asking session, `discord_replies`) — every machine delivery holds on such
     a box (`send_outcome.LINE_BREAKS_HELD`): it is not our text, and a kind the
     owner switched off must type nothing. At most one attempt per pane per
     episode (its own lock, `LINEBREAK_LOCK`, so it never blocks the #1113
@@ -148,13 +149,19 @@ def clear_line_breaks_once(pid, run, sleep_fn, state, now, user_authored=False):
 
 
 def reclaim(pid, run, sleep_fn, state, now, dry_run, logs, label):
-    """Reclaim our own stale text, or a line-break-only box, before a resume,
-    through `send_outcome.presend_reclaim` (the one pre-send proof + clear).
-    Returns None when the box is not provably ours (an owner draft, or a hold
-    that came before the proof: the caller's draft path decides), "cleared"
-    when the box is bare now (the next sweep resumes), or "held" when it is ours
-    but the clear could not run or converge. A dry run decides on a copy of the
-    state and sends no key."""
+    """Reclaim our own stale text (through `send_outcome.presend_reclaim`, the
+    one pre-send proof + clear), or a line-break-only box (`clear_line_breaks_once`),
+    before a resume. Returns:
+      None       the box is the owner's draft (not provably ours, or a human
+                 started typing): the caller's draft path decides;
+      "cleared"  the box is bare now: the next sweep resumes;
+      "latched"  the owner stopped the session (#1257): no key, nothing booked;
+      "busy"     a transient hold (a turn / agents run, box unreadable, a key
+                 refused): nothing booked, nothing counted;
+      "held"     ours, but no clear can run or converge (a selected strip, an
+                 occupied stash slot, the episode lock, not converging): the
+                 caller surfaces it (wedge + `stuck!`, or job 6's give-up).
+    A dry run decides on a copy of the state and sends no key."""
     from watchdog import owner_stop as _ostop
     from watchdog import send_outcome as _so
     cap = watchdog.capture_pane(pid, run, lines=40)
@@ -175,17 +182,18 @@ def reclaim(pid, run, sleep_fn, state, now, dry_run, logs, label):
         status = clear_line_breaks_once(pid, run, sleep_fn, state, now)
         logs.append("api-error reclaim %s: box held only line breaks (no words) -> %s"
                     % (label, status))
-        return "cleared" if status == "bare" else "held"
+        return {"bare": "cleared", "busy": "busy", "refused": "busy",
+                "changed": None}.get(status, "held")   # changed: the owner types
     verdict = _so.presend_reclaim(pid, run, cap, sleep_fn or time.sleep, state, now,
                                   logs.append)
-    if verdict == _so.HELD_DRAFT:
-        return None       # the owner's draft: the caller's draft path decides
+    if verdict == _so.HELD_DRAFT or "not-own" in verdict:
+        return None       # the owner's draft (or a human typing): the draft path
     if not verdict.startswith("pre-send"):     # held before the proof (strip, busy,
         if _so._presend_own(pid, cap, copy.deepcopy(state), now) is None:   # slot)
             return None
-        if verdict.startswith(("turn running", "agent strip", "box unreadable")):
+        if verdict.startswith(("turn running", "box unreadable")):   # not the strip:
             logs.append("api-error reclaim %s: own stale text, %s" % (label, verdict))
-            return "busy"                       # transient: no wedge, no attempt
+            return "busy"         # transient, no wedge; a selected strip stays: held
         verdict = "own stale text, " + verdict      # ours, but no clear can run now
     logs.append("api-error reclaim %s: %s" % (label, verdict))
     return "cleared" if verdict.startswith("pre-send: cleared") else "held"
