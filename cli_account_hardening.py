@@ -74,6 +74,9 @@ SUDO_DENY_BASENAMES = frozenset({
 
 LIMITS_DIR = "/etc/security/limits.d"
 UDEV_RULES_DIR = "/etc/udev/rules.d"
+USERNS_DIR = "/usr/local/lib/airuleset/userns"
+APPARMOR_DIR = "/etc/apparmor.d"
+UNSHARE_SRC = "/usr/bin/unshare"
 NM_DISPATCHER_DIR = "/etc/NetworkManager/dispatcher.d"
 
 
@@ -295,6 +298,60 @@ def render_rtprio_step(account, spec):
         echo "  rtprio: $(cat "{path}")"
     """).format(value="%d" % spec["rtprio"],
                 path="%s/90-%s-rtprio.conf" % (LIMITS_DIR, account))
+
+
+def userns_profile(account):
+    """#1337: the AppArmor profile text, the shape of Ubuntu's own
+    ``/etc/apparmor.d/chrome``: unconfined except that it may create a user
+    namespace. AppArmor attaches by PATH, so the path is the account's copy."""
+    name = "airuleset-userns-%s" % account
+    return textwrap.dedent("""\
+        # Managed by airuleset (#1337): user namespaces for {account} only.
+        abi <abi/4.0>,
+        include <tunables/global>
+
+        profile {name} {path} flags=(unconfined) {{
+          userns,
+
+          include if exists <local/{name}>
+        }}
+    """).format(account=account, name=name, path="%s/%s/unshare" % (USERNS_DIR, account))
+
+
+def render_userns_step(account, spec):
+    """Step 3d-ns (#1337): unprivileged user namespaces for the DECLARED account
+    only, while the host keeps ``kernel.apparmor_restrict_unprivileged_userns=1``.
+    A root-owned copy of ``unshare`` sits in a ``root:<account>`` 0750 dir, so
+    only that account reaches the path the profile attaches to. No ``userns``
+    key (or False) unloads and removes both: a dropped declaration leaves no
+    grant behind. ``account`` is the validated declaration name."""
+    ns_dir = "%s/%s" % (USERNS_DIR, account)
+    prof = "%s/airuleset-userns-%s" % (APPARMOR_DIR, account)
+    if spec.get("userns") is not True:
+        return textwrap.dedent("""\
+
+            # 3d-ns. No declared user namespaces (#1337)
+            if [ -f "{prof}" ]; then
+              apparmor_parser -R "{prof}" || echo "  userns: profile {prof} was not loaded"
+              rm -f "{prof}"
+            fi
+            rm -rf "{ns_dir}"
+        """).format(prof=prof, ns_dir=ns_dir)
+    return textwrap.dedent("""\
+
+        # 3d-ns. User namespaces for this account only (#1337)
+        install -d -o root -g root -m 0755 "{base}"
+        install -d -o root -g {account} -m 0750 "{ns_dir}"
+        if ! cmp -s "{src}" "{ns_dir}/unshare" \
+           || [ "$(stat -c '%U:%G %a' "{ns_dir}/unshare")" != "root:root 755" ]; then
+          install -o root -g root -m 0755 "{src}" "{ns_dir}/unshare"
+        fi
+        printf '%s' {profile} > "{prof}"
+        chmod 0644 "{prof}"
+        apparmor_parser -r "{prof}"
+        echo "  userns: {ns_dir}/unshare under AppArmor profile airuleset-userns-{account}"
+    """).format(base=USERNS_DIR, account=account, ns_dir=ns_dir, src=UNSHARE_SRC,
+                prof=prof, profile=shlex.quote(userns_profile(account)))
 
 
 def render_host_grants_step(account, spec):
