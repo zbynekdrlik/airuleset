@@ -380,6 +380,16 @@ class TestReviewRound2(_Home):
             self.run_target(cap=1, rec=rec)
         self.assertIn("debug/.fingerprint/serde-" + H[0], rec["removed"])
 
+    def test_a_target_cut_three_times_in_a_row_is_noted_once_a_day(self):
+        _old_unit(self.p, "serde", H[0], 10 * DAY)
+        lines = []
+        with mock.patch.object(tc, "_cargo_targets", return_value=[str(self.t)]):
+            for k in range(5):
+                _r, got = tc.enforce(self.home, NOW + k * tc.RETRY_CUT_S, cap=1,
+                                     deadline=time.monotonic() + 60, act_s=-1)
+                lines += got
+        self.assertEqual([a[0] for a in lines if a[0] == "CAP-SKIP"], ["CAP-SKIP"])
+
     def test_an_unwritable_state_walks_nothing_at_all(self):
         with mock.patch.object(tc, "save_state", side_effect=OSError(28, "full")), \
                 mock.patch.object(tc, "_cargo_targets") as walk:
@@ -619,7 +629,7 @@ class TestPollWiring(unittest.TestCase):
         self.assertEqual(argv[argv.index("--unit") + 1], tc.UNIT_NAME)
         self.assertIn("Nice=10", argv)
         self.assertIn("IOSchedulingClass=idle", argv)
-        self.assertEqual(argv[-2:], ["-c", tc.CHILD_CODE])
+        self.assertEqual(argv[-3:], ["-c", tc.CHILD_CODE, "/home/x"])   # the poll's home
         self.assertEqual(lw.call_args.kwargs["env_prefixes"], ())
 
     def test_one_detached_run_at_a_time_and_main_needs_run(self):
@@ -635,13 +645,56 @@ class TestPollWiring(unittest.TestCase):
             enf.assert_not_called()
         self.assertEqual(tc.main([]), 2)
 
-    def test_never_as_root_and_never_in_a_dry_run(self):
+    def test_never_as_root_and_a_dry_run_only_reports(self):
         logs = []
         with mock.patch.object(tc, "_launch") as launch:
             tc.run_pass("/root", NOW, False, logs, is_root=True)
             with tempfile.TemporaryDirectory() as home:
                 tc.run_pass(home, NOW, True, logs, is_root=False)
         launch.assert_not_called()
+        self.assertEqual(logs, ["disk-guard: target-cap pass due (dry run: not launched)"])
+
+    def test_review4_fixes_on_the_launch_path(self):
+        from watchdog import user_unit
+        with tempfile.TemporaryDirectory() as home:
+            stamp = Path(home) / ".claude" / "disk-guard" / tc.LAUNCH_NAME
+            stamp.parent.mkdir(parents=True)
+            stamp.write_text("x")
+            os.utime(stamp, (NOW + 3600, NOW + 3600))     # the clock stepped back
+            logs = []
+            with mock.patch.object(tc, "_launch", return_value=(False, user_unit.TIMEOUT_WHY)) \
+                    as launch:
+                tc.run_pass(home, NOW, False, logs, is_root=False)
+            launch.assert_called_once()
+            self.assertEqual(logs, [])        # a client timeout may have started it: no alarm
+
+    def test_main_runs_on_the_home_it_is_given(self):
+        with mock.patch.object(tc, "run_detached", return_value=[]) as rd:
+            self.assertEqual(tc.main(["--run", "/home/someone"]), 0)
+        rd.assert_called_once_with("/home/someone")
+
+    def test_the_journal_is_written_after_every_target(self):
+        with tempfile.TemporaryDirectory() as home:
+            a = _target(home, "a")
+            b = _target(home, "b")
+            for i in range(2):
+                _old_unit(a / "debug", "serde", H[i], (10 - i) * DAY)
+            real = tc.enforce_target
+            calls = []
+
+            def killed_on_second(target, *args, **kw):
+                calls.append(target)
+                if len(calls) == 2:
+                    raise RuntimeError("killed")
+                return real(target, *args, **kw)
+            with mock.patch("watchdog.disk_guard_cargo_sweep._snapshot", return_value=IDLE), \
+                    mock.patch.object(tc, "cap_bytes", return_value=1), \
+                    mock.patch.object(tc, "_cargo_targets", return_value=[str(a), str(b)]), \
+                    mock.patch.object(tc, "enforce_target", side_effect=killed_on_second):
+                with self.assertRaises(RuntimeError):
+                    tc.run_detached(home, NOW)
+            journal = "".join(f.read_text() for f in (Path(home) / ".claude/disk-guard").glob("*.log"))
+            self.assertIn("CAP-REMOVE", journal)
 
     def test_nothing_new_is_surfaced(self):
         """Owner 15.11.: "ja nechcem stale nieco vidiet" — journal only."""
