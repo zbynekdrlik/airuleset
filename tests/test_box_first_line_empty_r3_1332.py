@@ -236,16 +236,75 @@ class RoundFour(TestCase):
                                  str(Path(self.tmp) / "st.json"))
         self.assertEqual(len(pings), 1)
         self.assertNotIn("vlastný text", pings[0][0])
+        self.assertIn("prázdne riadky", pings[0][0])
 
     def test_the_owners_discord_reply_clears_a_line_break_box(self):
         fake = _pane("\n", self.tmp)
-        logs = []
+        logs, state = [], {}
         ok = watchdog.deliver_with_stash("%1", "moja odpoveď", fake, logs=logs,
-                                         sleep_fn=lambda s: None, state={},
+                                         sleep_fn=lambda s: None, state=state,
                                          user_authored=True)
         self.assertFalse(ok, "nothing is delivered in the clearing call")
         self.assertEqual(fake.box, "", logs)
         self.assertFalse(any("C-s" in a for a in fake.sent), logs)
+        sent = watchdog.send_verified("%1", "moja odpoveď", fake, fake.tpath,
+                                      sleep_fn=lambda s: None, logs=logs,
+                                      user_authored=True, state=state)
+        self.assertTrue(sent, logs)                     # the next sweep delivers it
+        self.assertEqual(fake.submitted, ["moja odpoveď"])
+
+
+class RoundFive(TestCase):
+    """Round 5 (both reviews): a busy hold is no wedge and no give-up attempt,
+    a hold that sent no key never uses up the episode, a latched pane still
+    takes the owner's own reply, and a latch hold is journalled."""
+
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.mkdtemp()
+
+    def test_a_busy_first_pass_does_not_use_up_the_line_break_episode(self):
+        from watchdog import apierr_box
+        fake = _pane("\n", self.tmp)
+        state, now = {}, time.time()
+        with m.patch.object(apierr_box, "_clear_line_breaks",
+                            lambda *a, **k: ("busy", 0)):
+            apierr_box.clear_line_breaks_once("%1", fake, lambda s: None, state, now)
+        self.assertEqual(apierr_box.reclaim("%1", fake, lambda s: None, state, now + 70,
+                                            False, [], "p"), "cleared")
+
+    def test_the_owners_reply_clears_a_line_break_box_on_a_latched_pane(self):
+        from watchdog import owner_stop
+        fake = _pane("\n", self.tmp)
+        with m.patch.object(owner_stop, "pane_latch", lambda pid: {"ts": 1}):
+            watchdog.deliver_with_stash("%1", "moja odpoveď", fake, logs=[],
+                                        sleep_fn=lambda s: None, state={},
+                                        user_authored=True)
+        self.assertEqual(fake.box, "")
+
+    def test_a_busy_pane_holding_our_pointer_books_nothing(self):
+        from watchdog import apierr_box, send_outcome
+        state, pings = {}, []
+        with m.patch.object(watchdog, "capture_pane", lambda *a, **k: PTR_BOX), \
+                m.patch.object(send_outcome, "presend_reclaim",
+                               lambda *a, **k: "turn running under the box — held"), \
+                m.patch.object(send_outcome, "_presend_own", lambda *a, **k: "shape"):
+            ok = apierr_box.reclaimed("%1", lambda *a, **k: "", lambda s: None, state,
+                                      "sid", time.time(), 10000, 300, "p", [],
+                                      lambda *a, **k: pings.append(a), None, False,
+                                      str(Path(self.tmp) / "st.json"))
+        self.assertTrue(ok, "never handed to the draft path")
+        self.assertEqual(pings, [])
+        self.assertNotIn("apierr-busypane:sid", state)
+
+    def test_a_latch_hold_is_journalled(self):
+        from watchdog import apierr_box, owner_stop
+        logs = []
+        with m.patch.object(owner_stop, "pane_latch", lambda pid: {"ts": 1}), \
+                m.patch.object(watchdog, "capture_pane", lambda *a, **k: LONE_NL):
+            apierr_box.reclaim("%1", lambda *a, **k: "", lambda s: None, {}, time.time(),
+                               False, logs, "p")
+        self.assertTrue(any("latch" in ln for ln in logs), logs)
 
 
 def h_sid():
