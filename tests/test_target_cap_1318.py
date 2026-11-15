@@ -24,8 +24,8 @@ H = ["%016x" % (0xa000 + i) for i in range(20)]
 
 def _age(path, seconds):
     t = NOW - seconds
-    for root, _dirs, files in os.walk(path):
-        for name in files:
+    for root, dirs, files in os.walk(path, topdown=False):
+        for name in files + dirs:
             os.utime(os.path.join(root, name), (t, t))
     os.utime(path, (t, t))
 
@@ -117,16 +117,21 @@ class TestCapRule(_Home):
         self.assertFalse((self.p / ".fingerprint" / ("serde-" + H[0])).exists())
         self.assertIn("debug/.fingerprint/serde-" + H[0], rec["removed"])
 
-    def test_the_newest_unit_of_each_group_and_a_unit_used_this_hour_stay(self):
+    def test_the_newest_unit_of_each_group_and_anything_used_today_stay(self):
+        """Owner 15.11.: the cap must never disturb development."""
         _old_unit(self.p, "serde", H[0], 30 * DAY)           # newest of its group: stays
         _old_unit(self.p, "app", H[1], 30 * DAY, kind="test-lib")
         _old_unit(self.p, "app", H[2], 20 * DAY, kind="lib")  # newest lib of app
-        _old_unit(self.p, "tokio", H[3], 600)                # used 10 min ago
+        _old_unit(self.p, "tokio", H[3], 23 * 3600)          # used 23 h ago, not newest
         _old_unit(self.p, "tokio", H[4], 60)
+        _inc(self.p, "tokio", "old1", 20 * 3600)
+        _inc(self.p, "tokio", "new2", 60)
         row, _ = self.run_target(cap=10)
         for h in H[:5]:
             self.assertTrue(any(h in f.name for f in (self.p / "deps").iterdir()), h)
-        self.assertEqual(row["state"], "unreachable")
+        self.assertEqual(len(list((self.p / "incremental").iterdir())), 2)
+        self.assertEqual(row["state"], "over")
+        self.assertIn("used within 24 h", row["why"])
 
     def test_cargo_1100_layout_units_go_whole(self):
         for i in range(4):
@@ -134,7 +139,7 @@ class TestCapRule(_Home):
         row, _ = self.run_target(cap=1)
         left = sorted(x.name for x in (self.p / "build" / "serde").iterdir())
         self.assertEqual(left, [H[3]])
-        self.assertEqual(row["state"], "unreachable")
+        self.assertEqual(row["state"], "over")
 
     def test_incremental_dirs_go_oldest_first_and_the_newest_per_crate_stays(self):
         a = _inc(self.p, "app", "aaaa1", 9 * DAY)
@@ -164,7 +169,7 @@ class TestCapRule(_Home):
         fcntl.flock(fd, fcntl.LOCK_SH)
         row, _ = self.run_target(cap=1)
         self.assertEqual(len(list((self.p / "deps").iterdir())), 3)
-        self.assertIn(row["state"], ("locked", "unreachable"))
+        self.assertEqual(row["state"], "over")
         self.assertTrue(any(a[0] == "CAP-LOCKED" for a in self.lines))
 
     def test_a_unit_used_between_plan_and_act_stays(self):
@@ -205,16 +210,51 @@ class TestNoThrash(_Home):
         self.assertTrue((self.p / "deps" / ("libserde-%s.rlib" % H[0])).exists())
         self.assertNotIn("CAP-THRASH", [a[0] for a in self.lines])
 
-    def test_unreachable_is_logged_once_per_state_change_not_every_poll(self):
+    def _poll(self, now, cap=1):
+        with mock.patch.object(tc, "_cargo_targets", return_value=[str(self.t)]):
+            return tc.enforce(self.home, now, cap=cap)
+
+    def test_over_the_cap_is_noted_once_a_day_and_measured_once_an_hour(self):
         _old_unit(self.p, "serde", H[0], 10 * DAY)
-        lines = []
-        for _ in range(3):
-            with mock.patch.object(tc, "_cargo_targets", return_value=[str(self.t)]):
-                _rows, got = tc.enforce(self.home, NOW, cap=1)
-            lines += got
-        self.assertEqual([a[0] for a in lines].count("CAP-STATE"), 1)
-        state = tc.load_state(self.home)["targets"][str(self.t)]
-        self.assertEqual((state["state"], state["over_streak"]), ("unreachable", 3))
+        rows, lines = self._poll(NOW)
+        self.assertEqual([r["state"] for r in rows], ["over"])
+        self.assertEqual([a[0] for a in lines], ["CAP-OVER"])
+        rows, lines = self._poll(NOW + 60)                 # next poll: not measured again
+        self.assertEqual((rows, lines), ([], []))
+        rows, lines = self._poll(NOW + 2 * 3600)           # measured, still over: quiet
+        self.assertEqual(([r["state"] for r in rows], lines), (["over"], []))
+        _rows, lines = self._poll(NOW + 25 * 3600)         # a day later: one more note
+        self.assertEqual([a[0] for a in lines], ["CAP-OVER"])
+
+    def test_a_pass_the_budget_cuts_short_comes_back_in_ten_minutes_quietly(self):
+        for i in range(4):
+            _old_unit(self.p, "serde", H[i], (10 - i) * DAY)
+        with mock.patch.object(tc, "_cargo_targets", return_value=[str(self.t)]):
+            rows, lines = tc.enforce(self.home, NOW, cap=1, act_s=-1)
+            self.assertEqual([r["state"] for r in rows], ["reducing"])
+            self.assertNotIn("CAP-OVER", [a[0] for a in lines])
+            self.assertEqual(tc.enforce(self.home, NOW + 300, cap=1)[0], [])
+            rows, _ = tc.enforce(self.home, NOW + tc.RETRY_CUT_S, cap=1)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(len(list((self.p / "deps").iterdir())), 1)
+
+    def test_a_profile_without_cargos_lock_file_is_never_touched(self):
+        """dev1 15.11.: intercom's migrated target has no .cargo-lock; with no lock
+        to hold, a starting build could race the delete."""
+        for i in range(3):
+            _old_unit(self.p, "serde", H[i], (10 - i) * DAY)
+        (self.p / ".cargo-lock").unlink()
+        self.run_target(cap=1)
+        self.assertEqual(len(list((self.p / "deps").iterdir())), 3)
+
+    def test_one_target_is_measured_per_poll_the_most_overdue_first(self):
+        other = _target(self.home, "other")
+        with mock.patch.object(tc, "_cargo_targets", return_value=[str(self.t), str(other)]):
+            first, _ = tc.enforce(self.home, NOW, cap=1 << 40)
+            second, _ = tc.enforce(self.home, NOW + 60, cap=1 << 40)
+            third, _ = tc.enforce(self.home, NOW + 120, cap=1 << 40)
+        self.assertEqual([len(first), len(second), len(third)], [1, 1, 0])
+        self.assertNotEqual(first[0]["path"], second[0]["path"])
 
 
 class TestDeclaration(unittest.TestCase):
@@ -241,8 +281,8 @@ class TestDeclaration(unittest.TestCase):
 
 
 class TestToolchainEnv(unittest.TestCase):
-    """Measured 15.11. on dev1 (scratch copies): wall-bridge 26.4 % and shading
-    smaller targets with line-tables-only debug info."""
+    """Measured 15.11. on dev1 (scratch copies, build + test --no-run, both green):
+    wall-bridge 893.0 -> 657.6 MB (-26.4 %), shading 3580.7 -> 2079.5 MB (-41.9 %)."""
 
     def _sourced(self, text):
         import getpass
@@ -281,42 +321,6 @@ class TestToolchainEnv(unittest.TestCase):
         self.assertIn(tch.render_env_file(full_debug=("fohmixer",)), step)
 
 
-class TestVisibility(unittest.TestCase):
-    def setUp(self):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        self.home = tmp.name
-
-    def _cache(self, rows, ts=None):
-        d = Path(self.home) / ".claude" / "disk-guard"
-        d.mkdir(parents=True, exist_ok=True)
-        (d / "status.json").write_text(json.dumps(
-            {"worst_pct": 70, "ts": time.time() if ts is None else ts, "target_caps": rows}))
-
-    def _row(self, state, streak=0):
-        return {"path": "/home/dstack/devel/dstack/target", "bytes": 52 * tc.GIB,
-                "cap": 40 * tc.GIB, "state": state, "over_streak": streak}
-
-    def test_the_footer_shows_only_an_actionable_target(self):
-        import statusbar
-        self._cache([self._row("locked", 3)])
-        self.assertEqual(statusbar.disk_segment(home=self.home), "")
-        self._cache([self._row("unreachable", 1)])
-        self.assertIn("build dstack 52G/40G", statusbar.disk_segment(home=self.home))
-        self._cache([self._row("over", tc.ACTIONABLE_STREAK)])
-        self.assertIn("build dstack 52G/40G", statusbar.disk_segment(home=self.home))
-        self._cache([self._row("unreachable", 1)], ts=time.time() - 3600)
-        self.assertEqual(statusbar.disk_segment(home=self.home), "")
-
-    def test_status_lists_the_targets(self):
-        self._cache([self._row("unreachable", 1)])
-        lines = tc.status_lines(self.home)
-        self.assertIn("dstack 52G/40G unreachable", "\n".join(lines))
-        self.assertIn("ACTION", "\n".join(lines))
-        self._cache([])
-        self.assertIn("none above half the cap", tc.status_lines(self.home)[0])
-
-
 class TestPollWiring(unittest.TestCase):
     def test_the_cap_pass_runs_on_a_poll_with_no_disk_pressure(self):
         with tempfile.TemporaryDirectory() as home:
@@ -334,16 +338,29 @@ class TestPollWiring(unittest.TestCase):
                     box_class_fn=lambda: "workstation",
                     planners_fn=lambda _h, _n: [], top_consumers_fn=lambda *a, **k: [])
             cache = json.loads((Path(home) / ".claude/disk-guard/status.json").read_text())
-            self.assertEqual([r["state"] for r in cache["target_caps"]], ["unreachable"])
+            self.assertNotIn("target_caps", cache)         # owner 15.11.: no new surface
             self.assertEqual(len(list((t / "debug" / "deps").iterdir())), 1)
-            self.assertTrue(any("target cap removed 2 unit" in ln for ln in logs), logs)
+            journal = (Path(home) / ".claude/disk-guard").glob("*.log")
+            self.assertIn("CAP-REMOVE", "".join(f.read_text() for f in journal))
+            self.assertTrue(any("target cap removed 2 stale unit" in ln for ln in logs), logs)
 
     def test_never_as_root(self):
-        status, logs = {}, []
+        logs = []
         with mock.patch.object(tc, "enforce") as enf:
-            tc.run_pass(status, "/root", NOW, False, logs, is_root=True)
+            tc.run_pass("/root", NOW, False, logs, is_root=True)
         enf.assert_not_called()
-        self.assertNotIn("target_caps", status)
+
+    def test_nothing_new_is_surfaced(self):
+        """Owner 15.11.: "ja nechcem stale nieco vidiet" — journal only."""
+        import statusbar
+        with tempfile.TemporaryDirectory() as home:
+            d = Path(home) / ".claude" / "disk-guard"
+            d.mkdir(parents=True)
+            (d / "status.json").write_text(json.dumps({
+                "worst_pct": 70, "ts": time.time(),
+                "target_caps": [{"path": "/x/target", "state": "over"}]}))
+            self.assertEqual(statusbar.disk_segment(home=home), "")
+        self.assertFalse(hasattr(tc, "status_lines"))
 
 
 if __name__ == "__main__":
