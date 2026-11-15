@@ -14,6 +14,13 @@ sys.path.insert(0, str(REPO))
 
 import cli_peer_channel as cpc  # noqa: E402
 
+
+def _with_stdin(argv, kw):
+    """#1334: the root script rides stdin; fold it back into the last argv slot."""
+    if kw.get("input") is None:
+        return argv
+    return list(argv[:-1]) + [argv[-1] + " " + kw["input"]]
+
 FAR = {"account": "p-peer", "ssh": "p-peer@1.2.3.4", "identity": "~/.ssh/k",
        "path": cpc.SNAPSHOT_DIR,
        "key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGkRnAroNZk+tD6jrYVbJUalRDoBk/pxTiLwB/rUZvfW p"}
@@ -41,7 +48,7 @@ class TestRootLeg(unittest.TestCase):
         calls = []
 
         def run(argv, **kw):
-            calls.append(argv)
+            calls.append(_with_stdin(argv, kw))
             return R()
         failed = cpc.provision_peer_channel_root(hosts=self.HOSTS, run=run, links_doc=doc,
                                                  registry=REG)
@@ -80,7 +87,7 @@ class TestLinksHostAlsoHome(TestRootLeg):
         calls = []
 
         def run(argv, **kw):
-            calls.append(argv)
+            calls.append(_with_stdin(argv, kw))
             return R()
         self.assertEqual(cpc.provision_peer_channel_root(
             hosts=self.HOSTS, run=run, links_doc=doc,
@@ -150,7 +157,7 @@ class TestBridgeHomeMatch(unittest.TestCase):
             returncode, stdout, stderr = 0, "", ""
 
         def run(argv, **kw):
-            calls.append(argv)
+            calls.append(_with_stdin(argv, kw))
             return Ok()
         self.assertTrue(cpc.install_step(user="nl", host="dev2", claude_dir=d, run=run,
                                          links_doc=_doc(), registry=REG))
@@ -172,7 +179,7 @@ class TestBridgeHomeMatch(unittest.TestCase):
         calls = []
 
         def run(argv, **kw):
-            calls.append(argv)
+            calls.append(_with_stdin(argv, kw))
             return mock.Mock(returncode=0, stdout="ok", stderr="")
         with mock.patch.object(cpc.pwd, "getpwuid", return_value=mock.Mock(pw_name="nl")), \
                 mock.patch.object(cpc, "this_host", return_value=host):

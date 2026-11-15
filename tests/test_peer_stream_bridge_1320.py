@@ -22,6 +22,13 @@ import peer_channel as pc  # noqa: E402
 from test_host_grants_peer_bridge_1282 import _Child  # noqa: E402
 from test_peer_channel_1266 import HOST, ME, _Env, _Recorder, _scratch  # noqa: E402
 
+
+def _with_stdin(argv, kw):
+    """#1334: the root script rides stdin; fold it back into the last argv slot."""
+    if kw.get("input") is None:
+        return argv
+    return list(argv[:-1]) + [argv[-1] + " " + kw["input"]]
+
 KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGkRnAroNZk+tD6jrYVbJUalRDoBk/pxTiLwB/rUZvfW p"
 REG = [{"name": "a", "host": "h1", "account": "ua", "path": "/a"}]
 
@@ -200,7 +207,7 @@ class TestCommittedLink(unittest.TestCase):
             returncode, stdout, stderr = 0, "ok", ""
 
         def run(argv, **kw):
-            calls.append(argv)
+            calls.append(_with_stdin(argv, kw))
             return R()
         import airuleset
         with mock.patch.object(cpc, "apply_home_policy", return_value=[]):

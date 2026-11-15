@@ -20,6 +20,13 @@ sys.path.insert(0, str(REPO))
 import cli_peer_channel as cpc  # noqa: E402
 import peer_channel as pc  # noqa: E402
 
+
+def _with_stdin(argv, kw):
+    """#1334: the root script rides stdin; fold it back into the last argv slot."""
+    if kw.get("input") is None:
+        return argv
+    return list(argv[:-1]) + [argv[-1] + " " + kw["input"]]
+
 ME = pwd.getpwuid(os.getuid()).pw_name
 OTHER = "root" if ME != "root" else "daemon"
 HOST = "testhost"
@@ -621,7 +628,7 @@ class TestRootScript(unittest.TestCase):
             returncode, stdout, stderr = 0, "peer-channel-root: ok", ""
 
         def run(argv, **kw):
-            calls.append(argv)
+            calls.append(_with_stdin(argv, kw))
             return R()
         doc = {"hosts": {"h1": {"links": [["a", "b"]], "topics": {"a|b": "t"}}}}
         reg = [{"name": "a", "host": "h1", "account": "ua", "path": "/a"},
@@ -630,7 +637,7 @@ class TestRootScript(unittest.TestCase):
                                                  registry=reg)
         self.assertEqual(failed, [("h3", "no-identity")])
         self.assertEqual([c[-2] for c in calls], ["newlevel@1.2.3.4", "root@5.6.7.8"])
-        self.assertTrue(calls[0][-1].startswith("sudo -n bash -c "))
+        self.assertTrue(calls[0][-1].startswith("sudo -n bash -s "))
         self.assertIn("u:ua:r-x,u:ub:r-x", calls[0][-1])
         self.assertIn("nothing to tear down", calls[1][-1])
 
@@ -651,7 +658,7 @@ class TestInstallStep(unittest.TestCase):
         rcs = rcs or {}
 
         def run(argv, **kw):
-            sub = argv[2:]
+            sub = _with_stdin(argv, kw)[2:]
             calls.append(sub)
 
             class R:

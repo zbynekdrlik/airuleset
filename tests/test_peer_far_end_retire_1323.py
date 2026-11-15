@@ -19,6 +19,13 @@ sys.path.insert(0, str(REPO))
 
 import cli_peer_channel as cpc  # noqa: E402
 
+
+def _with_stdin(argv, kw):
+    """#1334: the root script rides stdin; fold it back into the last argv slot."""
+    if kw.get("input") is None:
+        return argv
+    return list(argv[:-1]) + [argv[-1] + " " + kw["input"]]
+
 MARKERS = "/etc/airuleset/peer-far-ends"
 KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGkRnAroNZk+tD6jrYVbJUalRDoBk/pxTiLwB/rUZvfW p"
 STUBS = {
@@ -254,7 +261,7 @@ class TestRetire(_World):
 
         def run(argv, **kw):
             if argv[0] == "ssh":
-                sent[argv[-2].split("@")[1]] = argv[-1]
+                sent[argv[-2].split("@")[1]] = _with_stdin(argv, kw)[-1]
             return R()
         hosts = [dict(h, identity=h.get("identity") or "~/k", host=h.get("host") or h["name"])
                  for h in airuleset.DISK_GUARD_ROOT_HOSTS]
