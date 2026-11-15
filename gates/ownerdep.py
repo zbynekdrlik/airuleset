@@ -155,10 +155,21 @@ def _cancelled(line, start):
     """A negation ("does not need", "no longer needs", "netreba čakať na") or a
     settled marker ("was blocked on", "previously parked on") in the same
     clause just before the match."""
-    prefix = _CLAUSE_CUT_RX.split(line[max(0, start - 80):start])[-1]
+    window = line[max(0, start - 120):start]
+    if _REPORTED_RX.search(re.split(r"[.!?]\s", window)[-1]):
+        return True                       # #1335: an audit REPORTING a line ("písal, že …")
+    prefix = _CLAUSE_CUT_RX.split(window[-80:])[-1]
     words = re.findall(r"[\w'’]+", prefix.lower())[-4:]
     return "no" in words[-2:] or any(
         w in _NEGATIONS or w in _SETTLED or w.endswith(("n't", "n’t")) for w in words)
+
+
+# #1335 measured FP: an audit that QUOTES what a ticket line said ("riadok, ktorý
+# písal, že … potrebuje tvoj súhlas", "zápis, že práca čaká na …", "či nestojí, že").
+_REPORTED_RX = re.compile(
+    r"\b(?:na)?p[íi]sal[ao]?\s*,?\s+[žz]e\b|\bz[áa]pis\w*\s*,?\s+[žz]e\b|"
+    r"\b(?:ne)?(?:stoj[íi]|st[áa]lo)\s*,?\s+[žz]e\b|\b(?:wrote|said|stated)\s+that\b",
+    re.IGNORECASE)
 
 
 def _norm(text):
@@ -194,7 +205,10 @@ _NAMED_ISSUE_RX = re.compile(r"\b([a-z][\w-]*)\s+issue\s+(\d{1,6})\b", re.IGNORE
 _ELSEWHERE_RX = re.compile(
     r"\bv\s+rel[áa]cii\b|\bvo\s+svoj(?:om|ej)\s+(?:okne|rel[áa]cii|session)\b|"
     r"\b(?:sa\s+ťa|ťa\s+sa)\s+(?:na\s+to\s+)?p[ýy]ta\b|\bp[ýy]ta\s+sa\s+ťa\b|"
-    r"\bin\s+(?:its|their)\s+(?:own\s+)?session\b", re.IGNORECASE)
+    r"\bin\s+(?:its|their)\s+(?:own\s+)?session\b|"
+    r"\bktor[ýáéúí]\w*\s+(?:sa\s+ťa\s+)?(?:p[ýy]ta(?:l[aio]?)?|zbiera(?:l[aio]?)?|"
+    r"zis[ťt]uje|zis[ťt]oval[aio]?)\s+[\w-]+",       # a 3rd-person asker, never "zisťujem"
+    re.IGNORECASE)
 
 
 def line_refs(line, repo):
