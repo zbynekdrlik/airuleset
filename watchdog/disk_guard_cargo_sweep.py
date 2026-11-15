@@ -14,26 +14,33 @@ the guard holds Cargo's own build lock while it deletes:
   ``max(atime, mtime)`` of the files in its ``.fingerprint/<name>-<hash>/`` dirs
   (Cargo reads them on every build, relatime bumps the atime daily);
 - a hash is stale when every fingerprint dir with it is older than MAX_AGE_DAYS.
-  Only those hashes go, from ``deps/``, ``build/`` and ``.fingerprint/`` together;
+  A unit goes WHOLE (``deps/``, ``build/`` entries, then its fingerprint dirs);
   a file whose hash has no fingerprint dir is never guessed at.
 
 15.11.: dstack's target always has a running process in it, so a target-level
-liveness veto freed nothing while the disk refilled. Liveness is now per FILE: under
-the held build lock no build runs (one that starts waits), so only an entry a running
-process maps, holds open or sits in (``/proc/*/maps|fd|exe|cwd``, ONE snapshot per
-profile, #1216) stays, and its unit keeps its fingerprint for the next pass.
+liveness veto freed nothing while the disk refilled. Liveness is now per unit, under
+the held build lock (Cargo holds ``.cargo-lock`` at least shared for a whole compile;
+one that starts waits): a unit with ANY entry a running process maps, holds open or
+sits in (``/proc/*/maps|fd|exe|cwd``, ONE snapshot, #1216) is skipped whole. The
+snapshot cannot see another uid's or another mount namespace's process; the age rule
+is the real safety (a file used within the window is never stale).
 
 ``incremental/<crate>-<id>/`` is rustc's own cache, keyed by a stable crate id that is
 not the unit hash, so its age is read off the dir itself: files by ``max(atime,
-mtime)``, dirs by mtime (a listing bumps a dir's atime). A crate dir goes when it is
-older than the window, is not the most recently used dir of its crate name, and no
-rustc session lock inside it is held. Deleting it costs one non-incremental compile.
+mtime)``, dirs by mtime (a listing bumps a dir's atime). That age is "last compiled",
+not "last used": a crate dir goes when older than the window, is not the most recently
+used dir of its crate name, and no rustc session lock inside it is held. Deleting it
+costs one non-incremental compile of that crate, never a broken build.
+
+The age rule needs atime, and the lock needs Cargo to take it: a ``noatime`` mount and
+a network filesystem (Cargo locks nothing there) are refused.
 """
 import fcntl
 import glob
 import os
 import re
 import shutil
+import sys
 import time
 
 from watchdog.disk_guard_stale_build import (_cargo_targets, _hold_build_locks,
@@ -44,7 +51,13 @@ MAX_AGE_DAYS = 2                           # relatime bumps atime once a day: 1 
 SWEEP_BUDGET_S = 30                        # one act stays inside the 45 s poll budget
 _HASH_RX = re.compile(r"-([0-9a-f]{16})$")
 _CRATE_RX = re.compile(r"^(.+)-([0-9a-z]+)$")
-_UNIT_DIRS = ("deps", "build")             # .fingerprint goes last, see sweep_profile
+_UNIT_DIRS = ("deps", "build")
+_NO_LOCK_FS = ("nfs", "cifs", "smb", "fuse")     # Cargo takes no lock on NFS
+
+
+def _warn(what, path, err):
+    """A delete that failed is retried next pass; the journal says why."""
+    sys.stderr.write("disk-guard %s: %s %s: %r\n" % (CLS, what, path, err))
 
 
 def _snapshot():
@@ -57,12 +70,32 @@ def _snapshot():
 def _used(snapshot, path):
     """``path`` is, or contains, a path in the snapshot. Its parent is resolved but
     the entry itself is not: a symlink entry is removed, never followed."""
-    try:
-        real = os.path.join(os.path.realpath(os.path.dirname(path)), os.path.basename(path))
-    except OSError:
-        return True
+    real = os.path.join(os.path.realpath(os.path.dirname(path)), os.path.basename(path))
     exact, ancestors = snapshot
     return real in exact or real in ancestors
+
+
+def mount_refusal(path, mounts="/proc/self/mounts"):
+    """Why the age rule or Cargo's lock cannot be trusted on ``path``'s mount, or None."""
+    try:
+        with open(mounts, encoding="utf-8", errors="replace") as f:
+            rows = [line.split() for line in f]
+    except OSError:
+        return "mount table unreadable"
+    real = os.path.realpath(path)
+    best = None
+    for row in rows:
+        if len(row) < 4:
+            continue
+        point = row[1].replace("\\040", " ")
+        inside = real == point or real.startswith(point.rstrip("/") + "/")
+        if inside and (best is None or len(point) > len(best[0])):
+            best = (point, row[2], row[3].split(","))
+    if best is None:
+        return "mount not found"
+    if best[1].startswith(_NO_LOCK_FS):
+        return "%s mount: Cargo takes no build lock" % best[1]
+    return "noatime mount: last use unknown" if "noatime" in best[2] else None
 
 
 def _hash_of(name):
@@ -88,22 +121,104 @@ def _last_use(path):
     return os.lstat(path).st_mtime if newest is None else newest
 
 
-def _unit_ages(profile):
-    """``{hash: newest last use}`` over every ``.fingerprint/<name>-<hash>`` dir."""
-    ages = {}
-    with os.scandir(os.path.join(profile, ".fingerprint")) as it:
+def _grouped(base, hashes=None):
+    """``{hash: [entry paths]}`` of one dir (names only), never through a symlink."""
+    out = {}
+    if not os.path.isdir(base) or os.path.islink(base):
+        return out
+    with os.scandir(base) as it:
         for e in it:
             h = _hash_of(e.name)
-            if h is None or not e.is_dir(follow_symlinks=False):
-                continue
-            t = _last_use(e.path)
-            ages[h] = max(ages.get(h, t), t)
-    return ages
+            if h is not None and (hashes is None or h in hashes):
+                out.setdefault(h, []).append(e.path)
+    return {h: sorted(paths) for h, paths in out.items()}
 
 
-def stale_hashes(profile, now, max_age_days=MAX_AGE_DAYS):
-    limit = now - max_age_days * 86400
-    return {h for h, t in _unit_ages(profile).items() if t < limit}
+def _fingerprints(profile):
+    """``{hash: [.fingerprint/<name>-<hash> dirs]}``."""
+    fp = os.path.join(profile, ".fingerprint")
+    return {h: [p for p in paths if os.path.isdir(p) and not os.path.islink(p)]
+            for h, paths in _grouped(fp).items()}
+
+
+def _is_stale(dirs, limit):
+    return bool(dirs) and max(_last_use(d) for d in dirs) < limit
+
+
+def _crate_last_use(path):
+    """Newest use of an incremental crate dir: files by ``max(atime, mtime)``,
+    dirs by mtime only (a listing bumps a dir's atime)."""
+    newest = os.lstat(path).st_mtime
+    for dirpath, dirnames, files in os.walk(path):
+        for name in dirnames:
+            newest = max(newest, os.lstat(os.path.join(dirpath, name)).st_mtime)
+        for name in files:
+            st = os.lstat(os.path.join(dirpath, name))
+            newest = max(newest, st.st_atime, st.st_mtime)
+    return newest
+
+
+def stale_incremental(profile, limit):
+    """``incremental/<crate>-<id>`` dirs unused since ``limit``, never the most
+    recently used dir of a crate name."""
+    base = os.path.join(profile, "incremental")
+    if not os.path.isdir(base) or os.path.islink(base):
+        return []
+    by_crate = {}
+    with os.scandir(base) as it:
+        for e in it:
+            m = _CRATE_RX.match(e.name)
+            if m and e.is_dir(follow_symlinks=False):
+                by_crate.setdefault(m.group(1), []).append((_crate_last_use(e.path), e.path))
+    out = []
+    for dirs in by_crate.values():
+        dirs.sort()
+        out += [p for t, p in dirs[:-1] if t < limit]
+    return sorted(out)
+
+
+def _session_locks_free(crate):
+    """No rustc holds a session lock in ``crate`` (rustc uses flock). Under Cargo's
+    lock none can; this guards a rustc run outside Cargo."""
+    for lock in glob.glob(os.path.join(glob.escape(crate), "*.lock")):
+        try:
+            fd = os.open(lock, os.O_RDONLY)
+        except OSError:
+            return False
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return False
+        finally:
+            os.close(fd)
+    return True
+
+
+def plan_profile(profile, now, snapshot):
+    """``(units, crates, kept)``: the stale units ``(hash, entries, fingerprint
+    dirs)`` and incremental crate dirs a sweep may remove, and how many stale ones
+    stay because a process uses them or a rustc session lock is held. The plan row
+    and the act both come from here, so they never disagree."""
+    limit = now - MAX_AGE_DAYS * 86400
+    fps = _fingerprints(profile)
+    stale = {h for h, dirs in fps.items() if _is_stale(dirs, limit)}
+    entries = {}
+    for sub in _UNIT_DIRS:
+        for h, paths in _grouped(os.path.join(profile, sub), stale).items():
+            entries.setdefault(h, []).extend(paths)
+    units, crates, kept = [], [], 0
+    for h in sorted(stale):
+        unit = (h, entries.get(h, []), fps[h])
+        if any(_used(snapshot, p) for p in unit[1] + unit[2]):
+            kept += 1
+        else:
+            units.append(unit)
+    for crate in stale_incremental(profile, limit):
+        if _used(snapshot, crate) or not _session_locks_free(crate):
+            kept += 1
+        else:
+            crates.append(crate)
+    return units, crates, kept
 
 
 def _freeable(path):
@@ -121,85 +236,12 @@ def _freeable(path):
     return total
 
 
-def _entries(profile, stale):
-    """Paths with a stale hash, deps/ and build/ first, .fingerprint/ last."""
-    out = []
-    for sub in _UNIT_DIRS + (".fingerprint",):
-        base = os.path.join(profile, sub)
-        if not os.path.isdir(base) or os.path.islink(base):
-            continue
-        with os.scandir(base) as it:
-            out += sorted(e.path for e in it if _hash_of(e.name) in stale)
-    return out
-
-
-def _crate_last_use(path):
-    """Newest use of an incremental crate dir: files by ``max(atime, mtime)``,
-    dirs by mtime only (a listing bumps a dir's atime)."""
-    newest = os.lstat(path).st_mtime
-    for dirpath, dirnames, files in os.walk(path):
-        for name in dirnames:
-            newest = max(newest, os.lstat(os.path.join(dirpath, name)).st_mtime)
-        for name in files:
-            st = os.lstat(os.path.join(dirpath, name))
-            newest = max(newest, st.st_atime, st.st_mtime)
-    return newest
-
-
-def stale_incremental(profile, now, max_age_days=MAX_AGE_DAYS):
-    """``incremental/<crate>-<id>`` dirs unused for the window, never the most
-    recently used dir of a crate name."""
-    base = os.path.join(profile, "incremental")
-    if not os.path.isdir(base) or os.path.islink(base):
-        return []
-    limit = now - max_age_days * 86400
-    by_crate = {}
-    with os.scandir(base) as it:
-        for e in it:
-            m = _CRATE_RX.match(e.name)
-            if m and e.is_dir(follow_symlinks=False):
-                by_crate.setdefault(m.group(1), []).append((_crate_last_use(e.path), e.path))
-    out = []
-    for dirs in by_crate.values():
-        dirs.sort()
-        out += [p for t, p in dirs[:-1] if t < limit]
-    return sorted(out)
-
-
-def _session_locks_free(crate):
-    """No rustc holds a session lock in ``crate``. Under Cargo's lock none can; this
-    guards a rustc run outside Cargo."""
-    for lock in glob.glob(os.path.join(glob.escape(crate), "*.lock")):
-        try:
-            fd = os.open(lock, os.O_RDONLY)
-        except OSError:
-            return False
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            return False
-        finally:
-            os.close(fd)
-    return True
-
-
 def _measure(profile, now, snapshot):
-    """``(bytes, units, incremental dirs, entries in use)`` a sweep would give now."""
-    size, used = 0, 0
-    stale = stale_hashes(profile, now)
-    for path in _entries(profile, stale):
-        if _used(snapshot, path):
-            used += 1
-        else:
-            size += _freeable(path)
-    incs = 0
-    for crate in stale_incremental(profile, now):
-        if _used(snapshot, crate):
-            used += 1
-        else:
-            size += _freeable(crate)
-            incs += 1
-    return size, len(stale), incs, used
+    """``(bytes, units, incremental dirs, kept)`` a sweep would give now."""
+    units, crates, kept = plan_profile(profile, now, snapshot)
+    size = sum(_freeable(p) for _h, entries, dirs in units for p in entries + dirs)
+    size += sum(_freeable(c) for c in crates)
+    return size, len(units), len(crates), kept
 
 
 _UNSET = object()
@@ -213,17 +255,18 @@ def discover_stale_units(home=None, now=None, snapshot=_UNSET):
     home = home or os.path.expanduser("~")
     rows, candidates = [], []
     for target in _cargo_targets(home):
-        if snapshot is None:
-            rows.append({"cls": CLS, "path": target, "bytes": 0, "reason": "in live use"})
+        refusal = "/proc unusable" if snapshot is None else mount_refusal(target)
+        if refusal:
+            rows.append({"cls": CLS, "path": target, "bytes": 0, "reason": refusal})
             continue
         try:
             for profile in profile_dirs(target):
-                size, units, incs, used = _measure(profile, now, snapshot)
+                size, units, incs, kept = _measure(profile, now, snapshot)
                 if size:
                     candidates.append({
                         "cls": CLS, "path": profile, "bytes": size, "reason": None,
                         "why": "%d unit(s) + %d incremental dir(s) unused %d+ d; %d in use kept"
-                               % (units, incs, MAX_AGE_DAYS, used)})
+                               % (units, incs, MAX_AGE_DAYS, kept)})
         except OSError as e:
             rows.append({"cls": CLS, "path": target, "bytes": 0, "reason": "unreadable: %s" % e})
     return rows + sorted(candidates, key=lambda r: -r["bytes"])
@@ -251,48 +294,84 @@ def _remove(path):
     return freed
 
 
-def _sweep_locked(profile, now, snapshot):
-    """The deletes, under the held build lock. Stops at SWEEP_BUDGET_S; a cut
-    leaves fingerprints the next pass finds."""
-    deadline = time.monotonic() + SWEEP_BUDGET_S
-    freed, started = 0, False
-    keep, failed = set(), set()     # hashes whose fingerprint stays / whose unit stops
-    fp_dir = os.path.join(profile, ".fingerprint")
-    inc_dir = os.path.join(profile, "incremental")
-    units = _entries(profile, stale_hashes(profile, now))
-    for path in units + stale_incremental(profile, now):
-        if started and time.monotonic() > deadline:
-            break
-        parent = os.path.dirname(path)
-        h = None if parent == inc_dir else _hash_of(os.path.basename(path))
-        if h in failed or (parent == fp_dir and h in keep):
-            continue
-        if _used(snapshot, path) or (h is None and not _session_locks_free(path)):
-            keep.add(h)                 # the next pass retries the unit
-            continue
-        started = True
+def _remove_unit(entries, fp_dirs):
+    """A unit's ``deps/`` then ``build/`` entries, then its fingerprint dirs; it
+    stops at the first failure. The fingerprint goes whenever anything of the unit
+    may be gone (a half-removed ``build/<pkg>-<hash>/out`` whose ``output`` file is
+    left reads FRESH to Cargo); it stays only when nothing was removed (a file
+    unlink is all or nothing), so the next pass retries the whole unit."""
+    freed, touched, failed = 0, False, False
+    for path in entries:
         try:
             freed += _remove(path)
-        except OSError:
-            failed.add(h)
-            keep.add(h)
+            touched = True
+        except OSError as e:
+            _warn("cannot remove", path, e)
+            failed = True
+            touched = touched or os.path.isdir(path)
+            break
+    if touched or not failed:
+        for path in fp_dirs:
+            try:
+                freed += _remove(path)
+            except OSError as e:
+                _warn("cannot remove fingerprint", path, e)
+    return freed
+
+
+def _sweep_locked(profile, now, snapshot, units, crates):
+    """The deletes, under the held build lock, whole units only. Each unit and
+    crate dir is re-checked here (age, use, session lock); the work under the lock
+    is bounded by SWEEP_BUDGET_S between units."""
+    deadline = time.monotonic() + SWEEP_BUDGET_S
+    limit = now - MAX_AGE_DAYS * 86400
+    freed, done = 0, 0
+    fps_now = _fingerprints(profile)
+    for h, entries, _dirs in units:
+        if done and time.monotonic() > deadline:
+            return freed
+        done += 1
+        try:
+            dirs = fps_now.get(h, [])
+            current = [p for p in entries if os.path.lexists(p)]
+            if not _is_stale(dirs, limit) or any(_used(snapshot, p) for p in current + dirs):
+                continue
+            freed += _remove_unit(current, dirs)
+        except OSError as e:
+            _warn("cannot re-check unit", h, e)
+    for crate in crates:
+        if done and time.monotonic() > deadline:
+            return freed
+        done += 1
+        try:
+            if (os.path.isdir(crate) and _crate_last_use(crate) < limit
+                    and not _used(snapshot, crate) and _session_locks_free(crate)):
+                freed += _remove(crate)
+        except OSError as e:
+            _warn("cannot remove incremental dir", crate, e)
     return freed
 
 
 def sweep_profile(profile, now):
     """The act: freed bytes, or -1 when a build holds the lock, /proc is unusable,
-    or the profile is reached through a symlink. The snapshot is taken under the
-    lock, so no build can start between it and the deletes."""
+    the mount is refused, or the profile is reached through a symlink. The plan is
+    walked BEFORE the lock (the walk would hold a starting build); the snapshot and
+    a per-unit re-check run under it."""
     target = _owning_target(os.path.join(profile, "deps"))
-    if target is None or os.path.realpath(profile) != os.path.join(
-            os.path.realpath(target), os.path.relpath(profile, target)):
+    if (target is None or os.path.realpath(profile) != os.path.join(
+            os.path.realpath(target), os.path.relpath(profile, target))
+            or mount_refusal(profile)):
         return -1
+    probe = _snapshot()
+    if probe is None:
+        return -1
+    units, crates, _kept = plan_profile(profile, now, probe)
     fds = _hold_build_locks(profile)
     if fds is None:
         return -1
     try:
         snapshot = _snapshot()
-        return -1 if snapshot is None else _sweep_locked(profile, now, snapshot)
+        return -1 if snapshot is None else _sweep_locked(profile, now, snapshot, units, crates)
     finally:
         for fd in fds:
             os.close(fd)
