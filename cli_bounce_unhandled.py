@@ -60,11 +60,26 @@ def _bounce_label():
         return "prio:bounce"
 
 
+def parked_on_owner(row):
+    """#1329: True when the row's labels carry an owner question
+    (`cli_ticket_state.owner_question` -- the predicate that routes a
+    `prio:bounce` + `needs-answer` row to U): the bounce waits on the owner,
+    so it is parked, not unhandled. Unreadable labels -> False (stays
+    unhandled, the never-lose-a-bounce side)."""
+    labels = row.get("labels") if isinstance(row, dict) else None
+    if not isinstance(labels, list):
+        return False
+    from cli_ticket_state import owner_question
+    return bool(owner_question(labels))
+
+
 def _bounce_numbers(*buckets):
     """The set of `prio:bounce` member numbers across the given partition
     buckets (each a `{number: {"labels": [...]}}` dict). A missing/malformed
     labels value counts as no-bounce (the safe direction, mirroring
-    `cli_quals._count_bounce`)."""
+    `cli_quals._count_bounce`). #1329: a bounce whose labels carry an owner
+    question is PARKED in U (`cli_ticket_state.owner_question`, the predicate
+    the partition routes it with), never unhandled."""
     label = _bounce_label()
     nums = set()
     for bucket in buckets:
@@ -72,7 +87,7 @@ def _bounce_numbers(*buckets):
             labels = row.get("labels") if isinstance(row, dict) else None
             names = {(lb or {}).get("name") for lb in (labels or [])
                      if isinstance(lb, dict)}
-            if label in names:
+            if label in names and not parked_on_owner(row):
                 try:
                     nums.add(int(num))
                 except (TypeError, ValueError):

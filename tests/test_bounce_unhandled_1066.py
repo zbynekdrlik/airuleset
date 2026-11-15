@@ -130,8 +130,10 @@ class DeriveUnhandled(unittest.TestCase):
         workable = _rows((7431, "prio:bounce"), (10, "enhancement"))
         waiting = _rows((3, "prio:bounce", "needs-answer"))
         ops_wait = _rows((6413, "prio:bounce", "ops-wait"), (5, "ops-wait"))
+        # #1329 reverses #3: a bounce parked on an owner question
+        # (needs-answer) is U, not unhandled (owner 15.11.2026).
         self.assertEqual(bu._bounce_numbers(workable, waiting, ops_wait),
-                         {7431, 3, 6413})
+                         {7431, 6413})
 
     def test_no_bounce_members_is_empty_list_not_none(self):
         # Truthful 0 (not a read failure): an empty slice → [].

@@ -173,7 +173,7 @@ class TestReviewRoleVariant1000(TestCase):
     # authority) — the review role must NOT alter any of them. 24 hex chars =
     # 96 bits (kept < 32 so the entropy scanner never mistakes it for a
     # secret). Regenerate ONLY on a DELIBERATE clause edit (a shared clause
-    # change moves every hash). History: #1084, #1066 lane B, #1128 and
+    # change moves every hash). History: #1084, #1066 lane B, #1128, #1329 and
     # #1137 (owner ROZHODNUTÉ 2026-09-30) re-goldened the mode-keyed table;
     # #1137 (owner 25.10.2026) removed the mode axis and replaced the mode
     # clauses with the bundling sentence — every variant changed. The #1137
@@ -181,10 +181,10 @@ class TestReviewRoleVariant1000(TestCase):
     _GOLDEN = {
         "full/None": "b64c7333d9315915a3a0356f",
         "full/infra": "9c9e1016e1ebecb7a9ec9f8f",
-        "branch-merge/None": "a00596f8e7f82dff5e746f35",
-        "branch-merge/infra": "757aab945455df84488c5509",
-        "fork-no-merge/None": "232880b1afc95a7ec739ca48",
-        "fork-no-merge/infra": "f3895c2c19171366d27ce959",
+        "branch-merge/None": "023ebc1ca08170d59b325e15",
+        "branch-merge/infra": "cd0c712911fc63cfb7cdf0a5",
+        "fork-no-merge/None": "d388b3be6d52d87373fa15d3",
+        "fork-no-merge/infra": "2a8d114451bc6927baabbd53",
     }
 
     def test_nonreview_variants_byte_identical_snapshot(self):
