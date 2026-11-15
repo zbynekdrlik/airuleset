@@ -119,9 +119,9 @@ class TestCapRule(_Home):
 
     def test_the_newest_unit_of_each_group_and_anything_used_today_stay(self):
         """Owner 15.11.: the cap must never disturb development."""
-        _old_unit(self.p, "serde", H[0], 30 * DAY)           # newest of its group: stays
-        _old_unit(self.p, "app", H[1], 30 * DAY, kind="test-lib")
-        _old_unit(self.p, "app", H[2], 20 * DAY, kind="lib")  # newest lib of app
+        _old_unit(self.p, "serde", H[0], 10 * DAY)           # newest of its group: stays
+        _old_unit(self.p, "app", H[1], 10 * DAY, kind="test-lib")
+        _old_unit(self.p, "app", H[2], 9 * DAY, kind="lib")   # newest lib of app
         _old_unit(self.p, "tokio", H[3], 47 * 3600)          # relatime: 47 h may be 23 h
         _old_unit(self.p, "tokio", H[4], 60)
         _inc(self.p, "tokio", "old1", 40 * 3600)
@@ -273,7 +273,7 @@ class TestReviewFixes(_Home):
 
     def test_the_lock_is_held_in_short_slices(self):
         for i in range(6):
-            _old_unit(self.p, "serde", H[i], (20 - i) * DAY)
+            _old_unit(self.p, "serde", H[i], (10 - i) * DAY)
         calls = []
         real = tc._hold_build_locks
 
@@ -303,6 +303,86 @@ class TestReviewFixes(_Home):
             tc.enforce(self.home, NOW + 60, cap=1 << 40)
             tc.enforce(self.home, NOW + 3600, cap=1 << 40)
         self.assertEqual(walk.call_count, 2)
+
+
+class TestReviewRound2(_Home):
+    """The re-review of 15.11.: no 🔴, five 🟡 and the 🔵 fixed here."""
+
+    def test_a_superseded_versions_last_unit_goes_once_unused_for_two_weeks(self):
+        _old_unit(self.p, "syn", H[0], 20 * DAY, src=1)      # syn 1.x, gone from Cargo.lock
+        _old_unit(self.p, "syn", H[1], 3 * DAY, src=2)
+        row, _ = self.run_target(cap=1)
+        left = sorted(f.name for f in (self.p / "deps").iterdir())
+        self.assertEqual(left, ["libsyn-%s.rlib" % H[1]])
+
+    def test_a_unit_a_build_replaces_under_the_walk_is_skipped_not_fatal(self):
+        for i in range(3):
+            _old_unit(self.p, "serde", H[i], (10 - i) * DAY)
+        a = _inc(self.p, "app", "aaaa1", 9 * DAY)
+        _inc(self.p, "app", "bbbb2", 8 * DAY)
+        real = tc.cs._crate_last_use
+
+        def vanishing(path):
+            if path == str(a):
+                raise FileNotFoundError(2, "rotated by rustc", path)
+            return real(path)
+        with mock.patch.object(tc.cs, "_crate_last_use", side_effect=vanishing):
+            row, _ = self.run_target(cap=1)
+        self.assertNotEqual(row["state"], "refused")
+        self.assertTrue(a.exists())
+        self.assertFalse((self.p / "deps" / ("libserde-%s.rlib" % H[0])).exists())
+
+    def test_the_whole_pass_has_a_deadline_and_a_cut_retries_quietly(self):
+        for i in range(3):
+            _old_unit(self.p, "serde", H[i], (10 - i) * DAY)
+        with mock.patch.object(tc, "_cargo_targets", return_value=[str(self.t)]), \
+                mock.patch.object(tc, "PASS_MAX_S", -1):
+            rows, lines = tc.enforce(self.home, NOW, cap=1, budget_left=45)
+        self.assertEqual([(r["state"], r["retry"]) for r in rows], [("reducing", True)])
+        self.assertEqual(lines, [])
+        self.assertEqual(len(list((self.p / "deps").iterdir())), 3)
+        rec = tc.load_state(self.home)["targets"][str(self.t)]
+        self.assertEqual(rec["measured"], NOW - tc.MEASURE_INTERVAL_S + tc.RETRY_CUT_S)
+
+    def test_a_config_rebuilt_after_weeks_is_still_recognised_as_a_rebuild(self):
+        _old_unit(self.p, "serde", H[0], 10 * DAY)
+        _old_unit(self.p, "serde", H[1], 3 * DAY)
+        rec = {"removed": {"debug/.fingerprint/serde-" + H[0]: NOW - 30 * DAY}}
+        self.run_target(cap=1, rec=rec)
+        self.assertIn("CAP-THRASH", [a[0] for a in self.lines])
+        self.assertTrue((self.p / "deps" / ("libserde-%s.rlib" % H[0])).exists())
+
+    def test_an_unwritable_state_walks_nothing_at_all(self):
+        with mock.patch.object(tc, "save_state", side_effect=OSError(28, "full")), \
+                mock.patch.object(tc, "_cargo_targets") as walk:
+            rows, lines = tc.enforce(self.home, NOW, cap=1)
+        walk.assert_not_called()
+        self.assertEqual((rows, [a[0] for a in lines]), ([], ["CAP-SKIP"]))
+
+    def test_a_fifo_named_like_a_fingerprint_json_never_hangs_the_walk(self):
+        import threading
+        _old_unit(self.p, "serde", H[0], 10 * DAY)
+        os.mkfifo(self.p / ".fingerprint" / ("serde-" + H[0]) / "a-first.json")
+        done = []
+        th = threading.Thread(target=lambda: done.append(tc.collect(str(self.t))), daemon=True)
+        th.start()
+        th.join(10)
+        self.assertEqual(len(done), 1, "collect hung on a FIFO")
+
+    def test_a_unit_gone_before_the_act_is_not_noted_as_kept(self):
+        for i in range(3):
+            _old_unit(self.p, "serde", H[i], (10 - i) * DAY)
+        real = tc._hold_build_locks
+
+        def vanish_then_lock(profile):
+            for f in list((self.p / "deps").glob("*%s*" % H[0])):
+                f.unlink()
+            import shutil
+            shutil.rmtree(self.p / ".fingerprint" / ("serde-" + H[0]), ignore_errors=True)
+            return real(profile)
+        with mock.patch.object(tc, "_hold_build_locks", side_effect=vanish_then_lock):
+            self.run_target(cap=1)
+        self.assertNotIn("CAP-KEEP", [a[0] for a in self.lines])
 
 
 class TestNoThrash(_Home):
