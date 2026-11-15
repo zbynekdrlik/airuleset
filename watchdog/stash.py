@@ -1087,7 +1087,7 @@ def _stash_refusal(cap, pid, run, sleep_fn, state, user_authored):
     if not (watchdog._input_line_text(cap) or "x").strip():
         if user_authored and state is not None:
             st = watchdog.apierr_box.clear_line_breaks_once(
-                pid, run, sleep_fn, state, time.time(), user_authored=True)
+                pid, run, sleep_fn, state, time.time(), user_authored=user_authored)
             return "box held only line breaks (no words) -> %s; %s" % (
                 st, "the next sweep delivers" if st == "bare" else "held")
         return "box holds only line breaks (no words)"
