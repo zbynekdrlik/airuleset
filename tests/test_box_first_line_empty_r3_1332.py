@@ -137,7 +137,7 @@ class JobSixOnTheNewShape(TestCase):
     BANNER = ("❯ continue\n  ⎿  You've hit your session limit · resets 6:10pm "
               "(Europe/Prague)\n     /usage-credits to finish what you're working on.\n\n")
 
-    def _two_sweeps(self, box_rows, **extra):
+    def _two_sweeps(self, box_rows, after=(), **extra):
         from datetime import datetime
         from zoneinfo import ZoneInfo
         import tempfile
@@ -152,7 +152,7 @@ class JobSixOnTheNewShape(TestCase):
         q.start()                                                   # never converges
         self.addCleanup(q.stop)
         rows = [r.replace("{F}", str(f)) for r in box_rows]
-        cap = self.BANNER + "\n".join([SEP] + rows + [SEP, FOOT]) + "\n"
+        cap = self.BANNER + "\n".join([SEP] + rows + [SEP] + list(after) + [FOOT]) + "\n"
         now = datetime(2026, 7, 1, 18, 15, tzinfo=ZoneInfo("Europe/Bratislava")).timestamp()
         sess = {"resets_at": now - 300, "pinged": True, "continued": False,
                 "first_seen": int(now - 3600), "last_seen": int(now - 60)}
@@ -181,6 +181,71 @@ class JobSixOnTheNewShape(TestCase):
             ["❯\xa0", "  nudge: [resume] rotacia — celý text: {F}"],
             swallow_fails=watchdog.SESSLIMIT_MAX_TRIES - 1)
         self.assertTrue(any("nepodarilo obnoviť" in b for b in sent), (sent, logs))
+
+    def test_our_pointer_behind_an_occupied_stash_slot_is_never_your_draft(self):
+        logs, sent, keys = self._two_sweeps(
+            ["❯\xa0", "  nudge: [resume] rotacia — celý text: {F}"],
+            after=["  › stashed · ctrl+s to restore"])
+        self.assertFalse(any("user draft" in ln for ln in logs), logs)
+        self.assertFalse(any("rozpísaný prompt" in b for b in sent), sent)
+
+
+class RoundFour(TestCase):
+    """Round 4 (both reviews): the owner-stop latch must stop the recovery
+    reclaim's BOOKKEEPING too, a refused attempt must not use up the episode,
+    a line-break hold must not claim "our own text", and the owner's own
+    Discord reply must not wait forever on a line-break box."""
+
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.mkdtemp()
+
+    def test_a_latched_pane_books_nothing_on_the_credential_dead_path(self):
+        from watchdog import owner_stop
+        st, pings = {}, []
+        with m.patch.object(owner_stop, "pane_latch", lambda pid: {"ts": 1}), \
+                m.patch.object(watchdog, "capture_pane", lambda *a, **k: LONE_NL), \
+                m.patch.object(watchdog, "keys", lambda *a, **k: False):
+            for i in range(3):
+                watchdog._handle_authdead_episode(
+                    st, "sid", lambda: 2000.0, 3000.0 + 70 * i, 10000, "obs", "%0",
+                    "/devel/obs", "/x.jsonl", LONE_NL, True, lambda *a, **k: "",
+                    lambda *a, **k: pings.append(a), None, lambda s: None, False, [],
+                    str(Path(self.tmp) / "st.json"), 1000.0, 1000.0)
+        self.assertEqual(pings, [])
+        self.assertNotIn("apierr-busypane:sid", st)
+        self.assertFalse(st.get("linebreak_clear"))
+
+    def test_a_refused_attempt_does_not_use_up_the_episode(self):
+        from watchdog import apierr_box
+        fake = _pane("\n", self.tmp)
+        state, now = {}, time.time()
+        with m.patch.object(watchdog, "keys", lambda *a, **k: False):
+            apierr_box.reclaim("%1", fake, lambda s: None, state, now, False, [], "p")
+        self.assertEqual(apierr_box.reclaim("%1", fake, lambda s: None, state, now + 70,
+                                            False, [], "p"), "cleared")
+
+    def test_a_line_break_hold_never_claims_our_own_text(self):
+        from watchdog import apierr_box
+        pings = []
+        with m.patch.object(watchdog, "capture_pane", lambda *a, **k: LONE_NL), \
+                m.patch.object(watchdog, "keys", lambda *a, **k: True):
+            apierr_box.reclaimed("%1", lambda *a, **k: "", lambda s: None, {}, "sid",
+                                 time.time(), 10000, 300, "p", [],
+                                 lambda *a, **k: pings.append(a), None, False,
+                                 str(Path(self.tmp) / "st.json"))
+        self.assertEqual(len(pings), 1)
+        self.assertNotIn("vlastný text", pings[0][0])
+
+    def test_the_owners_discord_reply_clears_a_line_break_box(self):
+        fake = _pane("\n", self.tmp)
+        logs = []
+        ok = watchdog.deliver_with_stash("%1", "moja odpoveď", fake, logs=logs,
+                                         sleep_fn=lambda s: None, state={},
+                                         user_authored=True)
+        self.assertFalse(ok, "nothing is delivered in the clearing call")
+        self.assertEqual(fake.box, "", logs)
+        self.assertFalse(any("C-s" in a for a in fake.sent), logs)
 
 
 def h_sid():
