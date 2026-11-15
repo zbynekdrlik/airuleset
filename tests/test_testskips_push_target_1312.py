@@ -27,7 +27,8 @@ SKIP_LINE = "@pytest.mark." + "skip\n"
 CLEAN_TEST = "def test_ok():\n    assert 1 + 1 == 2\n"
 
 
-class PushTarget1312(unittest.TestCase):
+class _Repo(unittest.TestCase):
+    """Bare origin + main checkout + a linked worktree on `lane`."""
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="testskips1312-")
@@ -80,6 +81,9 @@ class PushTarget1312(unittest.TestCase):
         self.commit(self.main, "tests/test_main_only.py",
                     "import pytest\n\n\n" + SKIP_LINE + CLEAN_TEST, "main-only skip")
 
+
+class PushTarget1312(_Repo):
+
     def test_clean_worktree_push_from_dirty_cwd_is_allowed(self):
         self.dirty_main_checkout()
         self.commit(self.wt, "tests/test_lane.py", CLEAN_TEST, "lane test")
@@ -129,6 +133,58 @@ class PushTarget1312(unittest.TestCase):
         self.commit(self.wt, "tests/test_lane.py",
                     "import pytest\n\n\n" + SKIP_LINE + CLEAN_TEST, "lane skip")
         r = self.run_hook("git -C %s push origin lane" % self.wt, cwd=self.main)
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+
+class ReviewFindings1312(_Repo):
+    """Shapes both fresh-context reviews reproduced against the first cut."""
+
+    def lane_with_skip(self):
+        self.commit(self.wt, "tests/test_lane.py",
+                    "import pytest\n\n\n" + SKIP_LINE + CLEAN_TEST, "lane skip")
+
+    def test_an_earlier_delete_push_never_shadows_a_later_push(self):
+        self.lane_with_skip()
+        for cmd in ("git push origin --delete foo && git push origin lane",
+                    "git push origin :gone; git push origin lane",
+                    "git -C %s push origin main && git push origin lane" % self.main):
+            self.assertEqual(self.run_hook(cmd, cwd=self.wt).returncode, 2, cmd)
+
+    def test_every_refspec_is_judged(self):
+        self.git(self.wt, "branch", "clean", "origin/main")
+        self.lane_with_skip()
+        r = self.run_hook("git push origin clean lane", cwd=self.wt)
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_a_push_on_a_later_line_is_judged(self):
+        self.lane_with_skip()
+        r = self.run_hook("echo start\ngit -C %s push origin lane" % self.wt, cwd=self.main)
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_the_cwd_head_marker_never_bypasses_another_pushed_ref(self):
+        """The checkout sits on X whose tip carries the marker; it pushes Y."""
+        self.lane_with_skip()
+        self.git(self.main, "commit", "-q", "--allow-empty", "-m",
+                 "note # airuleset:test-skip-ok cwd-only marker")
+        r = self.run_hook("git push origin lane", cwd=self.main)
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("tests/test_lane.py", r.stderr)
+
+    def test_the_pushed_ref_marker_still_bypasses(self):
+        self.lane_with_skip()
+        self.git(self.wt, "commit", "-q", "--allow-empty", "-m",
+                 "note # airuleset:test-skip-ok reviewed skip")
+        r = self.run_hook("git push origin lane", cwd=self.main)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_a_delete_push_from_a_dirty_checkout_passes(self):
+        self.dirty_main_checkout()
+        r = self.run_hook("git push origin :lane", cwd=self.main)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_an_unresolvable_cd_falls_back_to_the_cwd(self):
+        self.dirty_main_checkout()
+        r = self.run_hook("cd /nonexistent-1312 && git push", cwd=self.main)
         self.assertEqual(r.returncode, 2, r.stderr)
 
 
