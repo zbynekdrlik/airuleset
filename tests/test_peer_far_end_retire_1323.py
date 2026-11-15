@@ -262,7 +262,8 @@ class TestRetire(_World):
         self.assertEqual([f for f in failed if f[0] != "home"], [])
         by_name = {h["name"]: sent[h["host"]] for h in hosts}
         self.assertIn('case " airuleset-peer presenter-peer " in', by_name["dev1"])
-        self.assertIn('case " codex-bridge-peer devbridge-peer " in', by_name["subdev"])
+        self.assertIn('case " codex-bridge-peer devbridge-peer gatekeeper-peer " in',
+                      by_name["subdev"])
 
     def test_the_home_script_sweeps_too(self):
         self.add_account("old-peer")
@@ -317,7 +318,7 @@ class TestMarker(_World):
         live = sorted(far["account"] for spec in cpc.load_links()["bridges"].values()
                       for far in spec["hosts"].values())
         self.assertEqual(live, ["airuleset-peer", "codex-bridge-peer", "devbridge-peer",
-                                "presenter-peer"])
+                                "gatekeeper-peer", "presenter-peer"])
         for acct in live:
             self.add_account(acct)
         r = self.teardown_with(cpc.load_links())

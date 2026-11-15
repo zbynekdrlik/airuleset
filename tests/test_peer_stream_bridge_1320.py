@@ -132,7 +132,8 @@ class TestStreamValidation(unittest.TestCase):
         with mock.patch.object(airuleset, "REMOTE_HOSTS", hosts):
             self.assertEqual(cpc.validate_links(doc, reg), [])
             self.assertEqual(cpc.accounts_for_host("subdev", doc, reg),
-                             ["codex-bridge-peer", "david4", "devbridge-peer"])   # #1334
+                             ["codex-bridge-peer", "david4", "devbridge-peer",
+                              "gatekeeper-peer"])                    # #1334, #1330
 
     def test_a_partner_reached_both_locally_and_over_a_bridge_is_refused(self):
         # review A: inbound carries only `from`, so the two links could not be told apart
@@ -184,7 +185,7 @@ class TestCommittedLink(unittest.TestCase):
         acl = [ln for ln in script.splitlines() if ln.startswith("a /run/claude-peers")]
         self.assertEqual(acl, ["a /run/claude-peers - - - - u::rwx,g::---,o::---,"
                                "u:codex-bridge-peer:r-x,u:david3:r-x,u:david4:r-x,"
-                               "u:devbridge-peer:r-x,m::r-x"])           # #1334
+                               "u:devbridge-peer:r-x,u:gatekeeper-peer:r-x,m::r-x"])           # #1334
         far = self.doc["bridges"]["devbridge"]["hosts"]["subdev"]["key"]
         self.assertIn('restrict,command="exec python3 -I /etc/airuleset/peer/peer_channel.py '
                       'bridge --project devbridge" ' + far, script)
