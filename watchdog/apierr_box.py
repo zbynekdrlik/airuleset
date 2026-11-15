@@ -108,7 +108,9 @@ def _clear_line_breaks(pid, run, sleep_fn, user_authored=False):
         text = watchdog._input_line_text(cap)
         if text == "":
             return "bare", sent
-        if text is None or text.strip():
+        if text is None:
+            return "busy", sent                 # a turn / dialog took the box
+        if text.strip():
             return "changed", sent
         if _so._pane_busy(cap):
             return "busy", sent                 # a turn / agents: transient
@@ -126,7 +128,8 @@ def clear_line_breaks_once(pid, run, sleep_fn, state, now, user_authored=False):
     """The ONE line-break-only clear. Callers: the recovery resume paths
     (`reclaim`: job 1, credential-dead, job 6) and an OWNER action delivered by
     the stash route (`user_authored` with state: the owner's Discord reply to
-    the asking session, `discord_replies`) — every machine delivery holds on such
+    the asking session, a ❓ flag reply and a card reopen via `card_flags`) —
+    every machine delivery holds on such
     a box (`send_outcome.LINE_BREAKS_HELD`): it is not our text, and a kind the
     owner switched off must type nothing. At most one attempt per pane per
     episode (its own lock, `LINEBREAK_LOCK`, so it never blocks the #1113
@@ -136,11 +139,11 @@ def clear_line_breaks_once(pid, run, sleep_fn, state, now, user_authored=False):
     TTL (30 min) dwarfs the difference. Returns the status."""
     locks = state.setdefault(LINEBREAK_LOCK, {})
     for k in [k for k, v in locks.items() if not isinstance(v, (int, float))
-              or not 0 <= now - v < LINEBREAK_LOCK_TTL_S]:
+              or now - v >= LINEBREAK_LOCK_TTL_S]:
         locks.pop(k, None)                  # pruned: an old or recycled pane id
-    ts = locks.get(pid)
-    if isinstance(ts, (int, float)) and 0 <= now - ts < LINEBREAK_LOCK_TTL_S:
-        return "already tried this episode"
+    ts = locks.get(pid)                     # a stamp a moment ahead (the stash
+    if isinstance(ts, (int, float)) and now - ts < LINEBREAK_LOCK_TTL_S:   # route's
+        return "already tried this episode"                    # wall clock) locks
     locks[pid] = now
     status, sent = _clear_line_breaks(pid, run, sleep_fn or time.sleep, user_authored)
     if status == "bare" or not sent:
@@ -175,6 +178,8 @@ def reclaim(pid, run, sleep_fn, state, now, dry_run, logs, label):
         if text.strip() and _so._presend_own(pid, cap, copy.deepcopy(state),
                                              now) is None:
             return None
+        if _so._pane_busy(cap):
+            return "busy"                   # a real run would hold too
         logs.append("api-error reclaim %s: would clear %s -- dry-run"
                     % (label, "own stale text" if text.strip() else "line breaks"))
         return "held"
@@ -217,9 +222,15 @@ def reclaimed(pid, run, sleep_fn, state, key, now, idle, grace, project, logs,
     continue), reached only after their own grace / latch / historical checks:
     True when the box held our own leftover or only line breaks (nothing is
     delivered this sweep; a clear that could not run books the wedge, so the
-    owner sees `stuck!`), False when it is the owner's draft. A latched,
-    busy (transient) or dry-run verdict books nothing (`run_once` saves state)."""
+    owner sees `stuck!`), False when it is the owner's draft. A busy verdict
+    books the busy-pane episode from its first sighting, so only a pane that
+    STAYS busy surfaces; a latched or dry-run verdict books nothing (`run_once`
+    saves state even then)."""
     verdict = reclaim(pid, run, sleep_fn, state, now, dry_run, logs, project or pid)
+    if verdict == "busy" and not dry_run:   # booked from its FIRST sighting (idle 0):
+        book_wedge(state, key, now, 0, grace, project or pid, "reclaim-busy", None,
+                   logs, send_fn, owner, dry_run, state_path)   # a transient never
+        return True                                             # pings, a stuck one does
     if verdict == "held" and not dry_run:
         text = watchdog._input_line_text(watchdog.capture_pane(pid, run, lines=40))
         book_wedge(state, key, now, idle, grace, project or pid,
