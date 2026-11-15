@@ -347,7 +347,7 @@
           "ssh": "codex-bridge-peer@100.118.174.27",
           "identity": "~/.ssh/codex-bridge_peer_ed25519",
           "path": "/etc/airuleset/peer",
-          "key": "ssh-ed25519 PLACEHOLDER-paste-dev2-newlevel-codex-bridge_peer_ed25519.pub codex-bridge-peer@dev2"
+          "key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBimb2aKKr0bzSQ5XSWDuuHFK4dyUCj/EcU1kEd7/lOj codex-bridge-peer@dev2"
         }
       }
     },
@@ -361,7 +361,7 @@
           "ssh": "gatekeeper-peer@100.118.174.27",
           "identity": "~/.ssh/gatekeeper_peer_ed25519",
           "path": "/etc/airuleset/peer",
-          "key": "ssh-ed25519 PLACEHOLDER-paste-gk-gatekeeper-gatekeeper_peer_ed25519.pub gatekeeper-peer@odoo-gatekeeper"
+          "key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBIwcLshWR26Dp4eDhqx8zqvhJjLx563ak89tqsyDxxl gatekeeper-peer@odoo-gatekeeper"
         }
       }
     }
