@@ -16,14 +16,17 @@ measures one due target per poll, each at most once per MEASURE_INTERVAL_S:
   its last use is the newest ``max(atime, mtime)`` in its fingerprint dir;
 - never a candidate (owner 15.11.: the cap must never disturb development): anything
   used within MIN_IDLE_S (the owner's 24 h, doubled because relatime bumps an atime
-  at most once a day), the newest unit of each group (package + its source id + the
-  unit kinds its fingerprint names, so one clean build stays whole), the newest
+  at most once a day), the newest unit of each group while used within 14 days
+  (package + its source id + the unit kinds its fingerprint names, so one clean
+  build stays whole; a superseded dependency version ages out), the newest
   incremental dir of a crate, a unit found in use at the last act (KEEP_S), and
   (under Cargo's held build lock) any unit with an entry a running process maps,
   holds open or sits in;
 - a target still over the cap after that is noted in the guard journal once a day
   (CAP-OVER) and left alone: no footer, no ping, no harder rule;
-- anti-thrash: every removed key is remembered; a key that comes back was rebuilt by
+- the pass stops at PASS_MAX_S (and leaves DRAIN_RESERVE_S of the poll to the drain);
+  a cut pass, or one a build's lock stopped, comes back in RETRY_CUT_S, quietly;
+- anti-thrash: every removed key is remembered 90 days; a key that comes back was rebuilt by
   a later build, so it is logged once (CAP-THRASH) and protected for as long as it
   exists (plus MEMORY_DAYS): never a delete-rebuild loop.
 
@@ -36,6 +39,7 @@ fresh with ``out/`` gone. State lives in ``~/.claude/disk-guard/target-cap.json`
 import json
 import os
 import pwd
+import stat
 import time
 
 from watchdog import disk_guard_cargo_sweep as cs
@@ -47,7 +51,9 @@ GIB = 1 << 30
 DAY = 86400
 TARGET_FRACTION = 0.8
 MIN_IDLE_S = cs.MAX_AGE_DAYS * DAY   # owner's 24 h; relatime makes 1 day unsafe
-MEMORY_DAYS = 7
+MEMORY_DAYS = 7                   # a protected key gone this long, a target unseen this long
+REMOVED_MEMORY_DAYS = 90          # a weekly config rebuilt after 8 days is still known
+NEWEST_KEEP_S = 14 * DAY          # a group's newest unit is kept only while used this recently
 KEEP_S = DAY                      # a unit found in use is not planned again for a day
 MEASURE_INTERVAL_S = 3600         # a dstack-size walk takes ~20 s: once an hour per target
 OVER_LOG_INTERVAL_S = DAY         # a target left over the cap is noted once a day
@@ -55,6 +61,8 @@ CAP_BUDGET_S = 10                 # the act (after the walk) stops between units
 HOLD_S = 2                        # a starting build waits at most this (+ one snapshot)
 RETRY_CUT_S = 600                 # a cut or lock-blocked pass is due again this soon
 MIN_POLL_BUDGET_S = 40            # the walk + act need this much of the poll left
+PASS_MAX_S = 30                   # the whole pass (walks + act) stops here, retried in 10 min
+DRAIN_RESERVE_S = 15              # poll budget left for the drain after the pass
 STATE_NAME = "target-cap.json"
 _FP_SKIP = {"invoked.timestamp"}
 _FP_PREFIXES = ("dep-", "output-")
@@ -85,11 +93,22 @@ def cap_bytes(user=None, accounts=None):
 # --------------------------------------------------------------------------- #
 # measuring
 # --------------------------------------------------------------------------- #
-def target_size(target):
-    """Apparent bytes of ``target``: every inode once (Cargo hard-links uplifted
-    binaries), never through a symlink. An entry gone mid-walk (a build) is skipped."""
+class Cut(Exception):
+    """The pass reached its deadline: retried in RETRY_CUT_S, nothing decided."""
+
+
+def _check(deadline):
+    if deadline is not None and time.monotonic() > deadline:
+        raise Cut()
+
+
+def target_size(target, deadline=None):
+    """Apparent bytes of ``target`` (``st_size``, as the guard's other rungs count):
+    every inode once (Cargo hard-links uplifted binaries), never through a symlink.
+    An entry gone mid-walk (a build) is skipped."""
     seen, total = set(), 0
     for dirpath, _dirs, files in os.walk(target):
+        _check(deadline)
         for name in files:
             try:
                 st = os.lstat(os.path.join(dirpath, name))
@@ -127,12 +146,16 @@ def _source_id(json_path):
     makes a stale unit look used; None when that is impossible (not the owner)."""
     if json_path is None:
         return None
-    try:
-        fd = os.open(json_path, os.O_RDONLY | getattr(os, "O_NOATIME", 0))
+    try:            # O_NONBLOCK: a FIFO named *.json must never hang the poll
+        fd = os.open(json_path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW
+                     | getattr(os, "O_NOATIME", 0))
     except OSError:
         return None
     try:
-        data = json.loads(os.read(fd, 1 << 16).decode("utf-8", "replace"))
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_size > (1 << 20):
+            return None
+        data = json.loads(os.read(fd, st.st_size + 1).decode("utf-8", "replace"))
         return str(data.get("path")) if isinstance(data, dict) else None
     except (OSError, ValueError):
         return None
@@ -158,8 +181,9 @@ class Unit:
         return self.entries + self.fp_dirs
 
 
-def _old_layout(target, profile):
-    """``<name>-<hash>`` units of the pre-1.100 layout."""
+def _old_layout(target, profile, deadline=None):
+    """``<name>-<hash>`` units of the pre-1.100 layout. A unit that vanishes under
+    the walk (a build is replacing it) is skipped: it is in use, not a candidate."""
     fps = cs._fingerprints(profile)
     entries = {}
     for sub in cs._UNIT_DIRS:
@@ -167,16 +191,20 @@ def _old_layout(target, profile):
             entries.setdefault(h, []).extend(paths)
     units = []
     for h, dirs in fps.items():
+        _check(deadline)
         if not dirs:
             continue
         pkg = os.path.basename(dirs[0])[:-17]
-        units.append(Unit(os.path.relpath(dirs[0], target), _group(profile, pkg, dirs[0]),
-                          max(cs._last_use(d) for d in dirs),
-                          sorted(entries.get(h, [])), dirs, False, profile))
+        try:
+            units.append(Unit(os.path.relpath(dirs[0], target), _group(profile, pkg, dirs[0]),
+                              max(cs._last_use(d) for d in dirs),
+                              sorted(entries.get(h, [])), dirs, False, profile))
+        except FileNotFoundError:
+            continue        # replaced by a running build right now: in use
     return units
 
 
-def _new_layout(target, profile):
+def _new_layout(target, profile, deadline=None):
     """Cargo 1.100's ``build/<pkg>/<hash>/`` units (``fingerprint/``, ``out/``, ``run/``)."""
     base = os.path.join(profile, "build")
     units = []
@@ -186,20 +214,27 @@ def _new_layout(target, profile):
         for pkg in pkgs:
             if not pkg.is_dir(follow_symlinks=False) or cs._hash_of(pkg.name):
                 continue
-            with os.scandir(pkg.path) as hashes:
-                for h in hashes:
-                    fp = os.path.join(h.path, "fingerprint")
-                    if (len(h.name) != 16 or not set(h.name) <= _HEX
-                            or not h.is_dir(follow_symlinks=False)
-                            or not os.path.isdir(fp) or os.path.islink(fp)):
-                        continue
+            try:
+                hashes = list(os.scandir(pkg.path))
+            except FileNotFoundError:
+                continue    # removed under the walk
+            for h in hashes:
+                _check(deadline)
+                fp = os.path.join(h.path, "fingerprint")
+                if (len(h.name) != 16 or not set(h.name) <= _HEX
+                        or not h.is_dir(follow_symlinks=False)
+                        or not os.path.isdir(fp) or os.path.islink(fp)):
+                    continue
+                try:
                     units.append(Unit(os.path.relpath(h.path, target),
                                       _group(profile, pkg.name, fp),
                                       cs._last_use(fp), [h.path], [fp], False, profile))
+                except FileNotFoundError:
+                    continue    # replaced by a running build right now: in use
     return units
 
 
-def _incremental(target, profile):
+def _incremental(target, profile, deadline=None):
     """``incremental/<crate>-<id>`` dirs (rustc's cache; the unit-hash rules do not
     apply, so ``cs.stale_incremental``'s age-only list is not reused)."""
     base = os.path.join(profile, "incremental")
@@ -208,10 +243,15 @@ def _incremental(target, profile):
         return units
     with os.scandir(base) as it:
         for e in it:
+            _check(deadline)
             m = cs._CRATE_RX.match(e.name)
             if m and e.is_dir(follow_symlinks=False):
-                units.append(Unit(os.path.relpath(e.path, target), ("i", profile, m.group(1)),
-                                  cs._crate_last_use(e.path), [e.path], [], True, profile))
+                try:
+                    units.append(Unit(os.path.relpath(e.path, target),
+                                      ("i", profile, m.group(1)), cs._crate_last_use(e.path),
+                                      [e.path], [], True, profile))
+                except FileNotFoundError:
+                    continue    # rustc is rotating this session dir: in use
     return units
 
 
@@ -224,12 +264,12 @@ def profiles(target):
     return sorted(found)
 
 
-def collect(target):
+def collect(target, deadline=None):
     """Every unit and incremental dir of ``target``."""
     out = []
     for profile in profiles(target):
-        out += _old_layout(target, profile) + _new_layout(target, profile)
-        out += _incremental(target, profile)
+        out += _old_layout(target, profile, deadline) + _new_layout(target, profile, deadline)
+        out += _incremental(target, profile, deadline)
     return out
 
 
@@ -249,19 +289,22 @@ def _freeable(unit):
 # --------------------------------------------------------------------------- #
 # planning
 # --------------------------------------------------------------------------- #
-def plan(target, cap, now, exclude=(), size=None):
+def plan(target, cap, now, exclude=(), size=None, deadline=None):
     """``(size, chosen units, projected size)``. Under the cap nothing is chosen.
-    Liveness is NOT asked here: the act asks it under the held lock."""
-    size = target_size(target) if size is None else size
+    Liveness is NOT asked here: the act asks it under the held lock. A group's
+    newest unit is kept only while used within NEWEST_KEEP_S: a superseded
+    dependency version (its own source id, so its own group) must not stay forever."""
+    size = target_size(target, deadline) if size is None else size
     if size <= cap:
         return size, [], size
     by_group = {}
-    for u in collect(target):
+    for u in collect(target, deadline):
         by_group.setdefault(u.group, []).append(u)
     cands = []
     for units in by_group.values():
         units.sort(key=lambda u: u.last)
-        cands += [u for u in units[:-1]
+        keep = 1 if units[-1].last >= now - NEWEST_KEEP_S else 0
+        cands += [u for u in units[:len(units) - keep]
                   if u.last < now - MIN_IDLE_S and u.key not in exclude]
     cands.sort(key=lambda u: u.last)
     goal = cap * TARGET_FRACTION
@@ -269,6 +312,7 @@ def plan(target, cap, now, exclude=(), size=None):
     for u in cands:
         if projected <= goal:
             break
+        _check(deadline)
         freed = _freeable(u)
         if freed:
             chosen.append(u)
@@ -331,7 +375,8 @@ def _recreated(rec, target, now, note):
     """Removed keys that exist again were rebuilt: protected (logged once) for as
     long as they exist and MEMORY_DAYS after. Old memory is dropped."""
     limit = now - MEMORY_DAYS * DAY
-    removed = {k: t for k, t in rec.get("removed", {}).items() if t >= limit}
+    removed = {k: t for k, t in rec.get("removed", {}).items()
+               if t >= now - REMOVED_MEMORY_DAYS * DAY}
     protected = {}
     for key, t in rec.get("protected", {}).items():
         if os.path.lexists(os.path.join(target, key)):
@@ -410,8 +455,9 @@ def _act_profile(target, profile, units, now, deadline, note, removed, kept):
                 i += 1
                 path = os.path.join(target, u.key)
                 if not _still_removable(u, snapshot, now):
-                    kept[u.key] = now
-                    note("CAP-KEEP", path, 0, "used or in use since the plan; kept a day")
+                    if any(os.path.lexists(q) for q in u.paths()):
+                        kept[u.key] = now
+                        note("CAP-KEEP", path, 0, "used or in use since the plan; kept a day")
                     continue
                 try:
                     got = _remove(u)
@@ -445,7 +491,8 @@ def _act(target, chosen, now, deadline, note, removed, kept):
     return freed, locked, cut
 
 
-def enforce_target(target, cap, now, rec, note, dry_run=False, act_s=CAP_BUDGET_S):
+def enforce_target(target, cap, now, rec, note, dry_run=False, act_s=CAP_BUDGET_S,
+                   deadline=None):
     """One target's pass: ``{path, bytes, cap, state, why}``; ``state`` is ``ok``
     (at most the cap), ``reduced`` (now under TARGET_FRACTION of it), ``reducing``
     (budget or a build's lock stopped it with stale units left), ``refused`` (the
@@ -456,7 +503,11 @@ def enforce_target(target, cap, now, rec, note, dry_run=False, act_s=CAP_BUDGET_
     protected = (rec.get("protected", {}) if dry_run
                  else _recreated(rec, target, now, note))
     kept = {k: t for k, t in rec.get("kept", {}).items() if t >= now - KEEP_S}
-    size, chosen, projected = plan(target, cap, now, set(protected) | set(kept))
+    try:
+        size, chosen, projected = plan(target, cap, now, set(protected) | set(kept),
+                                       deadline=deadline)
+    except Cut:
+        return {"path": target, "bytes": 0, "cap": cap, "state": "reducing", "retry": True}
     row = {"path": target, "bytes": size, "cap": cap,
            "plan_bytes": size - projected, "plan_units": len(chosen)}
     if size <= cap:
@@ -466,8 +517,9 @@ def enforce_target(target, cap, now, rec, note, dry_run=False, act_s=CAP_BUDGET_
     if dry_run:
         row["state"] = "reduced" if reachable else "over"
         return row
-    deadline = time.monotonic() + act_s          # the walk above is not charged to it
-    freed, locked, cut = _act(target, chosen, now, deadline, note,
+    act_end = time.monotonic() + act_s           # the walk above is not charged to it
+    act_end = act_end if deadline is None else min(act_end, deadline)
+    freed, locked, cut = _act(target, chosen, now, act_end, note,
                               rec.setdefault("removed", {}), kept)
     rec["kept"] = kept
     row.update(bytes=size - freed, freed=freed, retry=locked or cut)
@@ -510,8 +562,17 @@ def enforce(home, now, dry_run=False, cap=None, act_s=CAP_BUDGET_S, budget_left=
 
     if budget_left is not None and budget_left < MIN_POLL_BUDGET_S:
         return [], lines
+    pass_s = PASS_MAX_S if budget_left is None else min(PASS_MAX_S,
+                                                        budget_left - DRAIN_RESERVE_S)
+    deadline = None if dry_run else time.monotonic() + pass_s
     state = load_state(home)
     tstate = state["targets"]
+    if not dry_run:
+        try:        # before any walk: an unwritable state (disk full) costs no walk
+            save_state(home, state)
+        except OSError as e:
+            note("CAP-SKIP", _state_path(home), 0, "state unwritable, pass skipped: %r" % e)
+            return [], lines
     found = _targets(home, now, state, dry_run)
     due = [t for t in found if dry_run
            or now - tstate.get(t, {}).get("measured", 0) >= MEASURE_INTERVAL_S]
@@ -531,7 +592,10 @@ def enforce(home, now, dry_run=False, cap=None, act_s=CAP_BUDGET_S, budget_left=
                 note("CAP-SKIP", _state_path(home), 0, "state unwritable, pass skipped: %r" % e)
                 return rows, lines
         try:
-            row = enforce_target(target, cap, now, rec, note, dry_run=dry_run, act_s=act_s)
+            row = enforce_target(target, cap, now, rec, note, dry_run=dry_run, act_s=act_s,
+                                 deadline=deadline)
+        except FileNotFoundError:   # a build replaced part of the tree under the walk
+            row = {"path": target, "bytes": 0, "cap": cap, "state": "reducing", "retry": True}
         except OSError as e:
             row = {"path": target, "bytes": 0, "cap": cap, "state": "refused",
                    "why": "unreadable: %s" % e}
