@@ -2,6 +2,7 @@
 deps/, build/ and .fingerprint/ forever. From the 80 % drain level the guard removes the units
 whose fingerprint was not used for 2 days (the cargo-sweep 0.8.0 ``--time`` rule).
 15.11.: dstack's target is live all the time, so liveness is per FILE under Cargo's lock."""
+import ctypes
 import fcntl
 import json
 import mmap
@@ -112,19 +113,33 @@ class TestDiscovery(unittest.TestCase):
 
     def test_a_target_in_use_is_still_a_candidate_without_the_files_in_use(self):
         """15.11.: dstack's target always has a live process, so the target is no veto;
-        only the entries a process uses leave the estimate."""
+        a unit with an entry in use leaves the estimate WHOLE (the act keeps it whole)."""
         d = _target(Path(self.home) / "devel" / "app")
+        _unit(d / "debug", "tokio", TOKIO, 10 * DAY, size=1000)
         rlib = str(d / "debug" / "deps" / ("libserde-%s.rlib" % OLD))
-        free = self.rows()[0]["bytes"]
         rows = self.rows((frozenset({rlib, str(d / "debug" / "app")}), frozenset({str(d)})))
         self.assertEqual([(r["path"], r["reason"]) for r in rows], [(str(d / "debug"), None)])
-        self.assertEqual(rows[0]["bytes"], free - 100)
+        self.assertGreaterEqual(rows[0]["bytes"], 4000)
+        self.assertLess(rows[0]["bytes"], 4100)
+        self.assertIn("1 unit(s)", rows[0]["why"])
         self.assertIn("1 in use", rows[0]["why"])
+
+    def test_a_target_whose_only_stale_unit_is_in_use_gives_no_row(self):
+        """review A: a row the act cannot free would take the lock every poll."""
+        d = _target(Path(self.home) / "devel" / "app")
+        rlib = str(d / "debug" / "deps" / ("libserde-%s.rlib" % OLD))
+        self.assertEqual(self.rows((frozenset({rlib}), frozenset({str(d)}))), [])
 
     def test_no_proc_snapshot_keeps_every_target(self):
         d = _target(Path(self.home) / "devel" / "app")
         self.assertEqual([(r["path"], r["reason"]) for r in self.rows(None)],
-                         [(str(d), "in live use")])
+                         [(str(d), "/proc unusable")])
+
+    def test_a_refused_mount_keeps_the_target(self):
+        d = _target(Path(self.home) / "devel" / "app")
+        with mock.patch.object(cs, "mount_refusal", return_value="noatime mount"):
+            self.assertEqual([(r["path"], r["reason"]) for r in self.rows()],
+                             [(str(d), "noatime mount")])
 
     def test_the_window_is_two_days(self):
         d = _target(Path(self.home) / "devel" / "app")
@@ -168,7 +183,33 @@ class TestSweep(unittest.TestCase):
         freed, use = self.sweep()
         self.assertEqual(_old_entries(self.profile), [])
         self.assertGreaterEqual(freed, 400)
-        use.assert_called_once_with()
+        use.assert_called_with()
+
+    def test_a_unit_used_between_the_plan_and_the_lock_stays(self):
+        """review B: the plan walks before the lock; a build that ran in between
+        refreshed the fingerprint, and the re-check under the lock sees it."""
+        fp = self.profile / ".fingerprint" / ("serde-" + OLD) / "lib-serde"
+        real_hold = cs._hold_build_locks
+
+        def build_then_hold(profile):
+            os.utime(fp, (NOW - 60, NOW - 10 * DAY))
+            return real_hold(profile)
+
+        with mock.patch.object(cs, "_hold_build_locks", side_effect=build_then_hold):
+            self.sweep()
+        self.assertTrue((self.profile / "deps" / ("libserde-%s.rlib" % OLD)).is_file())
+
+    def test_a_unit_half_removed_loses_its_fingerprint(self):
+        """review A: a build-script dir whose out/ is half gone but whose fingerprint
+        stays reads FRESH to Cargo; the fingerprint must go so Cargo rebuilds it."""
+        stuck = self.profile / "build" / ("serde-" + OLD) / "out" / "stuck"
+        stuck.mkdir()
+        (stuck / "x.rs").write_text("x")
+        stuck.chmod(0o555)
+        self.addCleanup(stuck.chmod, 0o755)
+        self.sweep()
+        self.assertFalse((self.profile / "deps" / ("libserde-%s.rlib" % OLD)).exists())
+        self.assertFalse((self.profile / ".fingerprint" / ("serde-" + OLD)).exists())
 
     def test_fresh_units_orphans_and_incremental_stay(self):
         self.sweep()
@@ -247,21 +288,29 @@ class TestSweep(unittest.TestCase):
         self.assertEqual(freed, -1)
         self.assertNotEqual(_old_entries(self.profile), [])
 
-    def test_the_snapshot_is_taken_under_the_lock(self):
+    def test_the_deciding_snapshot_is_taken_under_the_lock(self):
         lock = self.profile / ".cargo-lock"
+        held = []
 
         def snap():
             fd = os.open(lock, os.O_RDONLY)
             try:
-                with self.assertRaises(BlockingIOError):
-                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                held.append(False)
+            except BlockingIOError:
+                held.append(True)
             finally:
                 os.close(fd)
             return IDLE
 
-        with mock.patch.object(cs, "_snapshot", side_effect=snap) as spy:
+        with mock.patch.object(cs, "_snapshot", side_effect=snap):
             cs.sweep_profile(str(self.profile), NOW)
-        spy.assert_called_once_with()
+        self.assertEqual(held[-1], True)
+
+    def test_a_refused_mount_refuses_the_act(self):
+        with mock.patch.object(cs, "mount_refusal", return_value="nfs4 mount"):
+            self.assertEqual(self.sweep()[0], -1)
+        self.assertNotEqual(_old_entries(self.profile), [])
 
     def test_a_build_holding_the_lock_refuses(self):
         fd = os.open(self.profile / ".cargo-lock", os.O_RDONLY)
@@ -344,19 +393,29 @@ class TestLiveFiles(unittest.TestCase):
         self.fp = self.profile / ".fingerprint" / ("serde-" + OLD)
         _unit(self.profile, "tokio", TOKIO, 10 * DAY)
 
-    def test_a_file_held_open_stays_and_keeps_its_fingerprint(self):
+    def test_a_unit_with_a_file_held_open_stays_whole(self):
+        """review A: a unit is skipped WHOLE, never left half removed."""
         with open(self.rlib, "rb"):
             freed = cs.sweep_profile(str(self.profile), NOW)
         self.assertGreater(freed, 0)
         self.assertTrue(self.rlib.is_file())
+        self.assertTrue(self.rmeta.is_file())
         self.assertTrue(self.fp.is_dir())
-        self.assertFalse(self.rmeta.exists())
         self.assertFalse(any(TOKIO in p.name for p in self.profile.rglob("*")))
 
-    def test_a_mapped_file_stays(self):
-        with open(self.rlib, "rb") as f:
-            m = mmap.mmap(f.fileno(), 0, prot=mmap.PROT_READ)
-        self.addCleanup(m.close)
+    def test_a_file_mapped_with_no_fd_left_stays(self):
+        """review A: Python's mmap keeps its own fd; map through libc and close the
+        fd so only /proc/self/maps names the file."""
+        libc = ctypes.CDLL(None, use_errno=True)
+        libc.mmap.restype = ctypes.c_void_p
+        libc.mmap.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int,
+                              ctypes.c_int, ctypes.c_int, ctypes.c_long]
+        libc.munmap.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+        fd = os.open(self.rlib, os.O_RDONLY)
+        addr = libc.mmap(None, 100, mmap.PROT_READ, mmap.MAP_PRIVATE, fd, 0)
+        os.close(fd)
+        self.assertNotIn(addr, (None, ctypes.c_void_p(-1).value))
+        self.addCleanup(libc.munmap, addr, 100)
         cs.sweep_profile(str(self.profile), NOW)
         self.assertTrue(self.rlib.is_file())
         self.assertTrue(self.fp.is_dir())
@@ -370,12 +429,15 @@ class TestLiveFiles(unittest.TestCase):
         self.assertTrue(out.is_dir())
         self.assertTrue(self.fp.is_dir())
 
-    def test_the_wall_budget_stops_the_sweep_and_keeps_the_fingerprints(self):
+    def test_the_wall_budget_stops_between_whole_units(self):
+        """review A: a cut never leaves a half-removed unit: the first unit goes
+        whole, the next one stays whole."""
         with mock.patch.object(cs, "SWEEP_BUDGET_S", 0):
             freed = cs.sweep_profile(str(self.profile), NOW)
         self.assertGreater(freed, 0)
-        self.assertTrue(self.fp.is_dir())
-        self.assertTrue((self.profile / ".fingerprint" / ("tokio-" + TOKIO)).is_dir())
+        self.assertEqual(_old_entries(self.profile), [])
+        tokio = [p.name for p in self.profile.rglob("*") if TOKIO in p.name]
+        self.assertEqual(len(tokio), 5)     # 3 deps files, the build dir, the fingerprint
 
 
 def _inc(profile, name, ident, age_s, size=1000):
@@ -422,6 +484,32 @@ class TestIncremental(unittest.TestCase):
         self.sweep()
         self.assertFalse(self.stale.exists())
 
+    def test_a_fresh_session_dir_mtime_keeps_the_crate_dir(self):
+        """review A: rustc makes a new session dir per compile."""
+        os.utime(self.stale / SESSION, (NOW - 10 * DAY, NOW - 3600))
+        self.sweep()
+        self.assertTrue(self.stale.is_dir())
+
+    def test_a_file_read_recently_keeps_the_crate_dir(self):
+        """review A: a fresh atime on an old file is a use."""
+        os.utime(self.stale / SESSION / "dep-graph.bin", (NOW - 3600, NOW - 10 * DAY))
+        self.sweep()
+        self.assertTrue(self.stale.is_dir())
+
+    def test_one_failed_crate_dir_does_not_stop_the_next(self):
+        """review A: a failed incremental delete must not skip every later one."""
+        other = _inc(self.profile, "dstack", "0a0a0a0a0a0a0", 9 * DAY)
+        stuck = self.stale / SESSION / "stuck"
+        stuck.mkdir()
+        (stuck / "x").write_text("x")
+        _age(stuck / "x", 10 * DAY)
+        _age(stuck, 10 * DAY)
+        _age(self.stale / SESSION, 10 * DAY)
+        stuck.chmod(0o555)
+        self.addCleanup(stuck.chmod, 0o755)
+        self.sweep()
+        self.assertFalse(other.exists())
+
     def test_a_held_session_lock_keeps_the_crate_dir(self):
         fd = os.open(self.stale / "s-ho6tt0p02p-132ndk8.lock", os.O_RDONLY)
         self.addCleanup(os.close, fd)
@@ -451,6 +539,33 @@ class TestMapsSnapshot(unittest.TestCase):
             self.assertEqual(exact, {"/t/debug/deps/libx-%s.so" % OLD})
             self.assertIn("/t/debug", ancestors)
             self.assertEqual(ls.live_links(proc), (frozenset(), frozenset()))
+
+
+class TestMount(unittest.TestCase):
+    """review A+B: the age rule needs atime; Cargo takes no lock on NFS."""
+
+    def refusal(self, line, path="/home/u/devel/app/target"):
+        with tempfile.TemporaryDirectory() as td:
+            mounts = Path(td) / "mounts"
+            mounts.write_text("/dev/sda1 / ext4 rw,relatime 0 0\n" + line)
+            return cs.mount_refusal(path, str(mounts))
+
+    def test_a_relatime_mount_is_fine(self):
+        self.assertIsNone(self.refusal(""))
+
+    def test_a_noatime_home_is_refused(self):
+        self.assertIn("noatime", self.refusal("/dev/sdb1 /home ext4 rw,noatime 0 0\n"))
+
+    def test_an_nfs_home_is_refused(self):
+        self.assertIn("nfs4", self.refusal("srv:/h /home nfs4 rw,relatime 0 0\n"))
+
+    def test_the_longest_mount_point_wins(self):
+        self.assertIsNone(self.refusal("/dev/sdb1 /home ext4 rw,noatime 0 0\n"
+                                       "/dev/sdc1 /home/u ext4 rw,relatime 0 0\n"))
+        self.assertIsNone(self.refusal("/dev/sdb1 /ho ext4 rw,noatime 0 0\n"))
+
+    def test_an_unreadable_mount_table_is_refused(self):
+        self.assertEqual(cs.mount_refusal("/x", "/nonexistent/mounts"), "mount table unreadable")
 
 
 class TestLadder(unittest.TestCase):
