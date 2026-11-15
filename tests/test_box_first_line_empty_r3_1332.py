@@ -294,8 +294,7 @@ class RoundFive(TestCase):
                                       lambda *a, **k: pings.append(a), None, False,
                                       str(Path(self.tmp) / "st.json"))
         self.assertTrue(ok, "never handed to the draft path")
-        self.assertEqual(pings, [])
-        self.assertNotIn("apierr-busypane:sid", state)
+        self.assertEqual(pings, [], "a first busy sighting never pings")
 
     def test_a_latch_hold_is_journalled(self):
         from watchdog import apierr_box, owner_stop
@@ -338,8 +337,7 @@ class RoundSix(TestCase):
             ok, state, pings, sess = self._reclaimed(
                 LONE_NL, p=[(apierr_box, "_clear_line_breaks", lambda *a, **k: (status, 0))])
             self.assertTrue(ok, status)
-            self.assertEqual((pings, sess), ([], {}), status)
-            self.assertNotIn("apierr-busypane:sid", state, status)
+            self.assertEqual((pings, sess), ([], {}), status)   # no ping, no give-up count
 
     def test_the_owner_typing_during_the_clear_hands_the_box_to_the_draft_path(self):
         from watchdog import apierr_box
@@ -366,6 +364,67 @@ class RoundSix(TestCase):
             PTR_BOX, p=[(send_outcome, "presend_reclaim", lambda *a, **k: verdict)])
         self.assertFalse(ok)
         self.assertEqual(pings, [])
+
+
+class RoundSeven(TestCase):
+    """Round 7 (both reviews): a pane that STAYS busy over our text surfaces
+    (round 5/6 locks above were relaxed from "nothing booked" to "no ping on the
+    first sighting": a busy episode is now booked from the first sighting, so a
+    transient never pings and a persistent one does); a line-break box behind
+    an occupied stash slot is a real hold; an unreadable box mid-clear is busy;
+    a lock stamped a moment in the future still locks."""
+
+    def test_a_busy_pane_over_our_text_surfaces_once_it_persists(self):
+        from watchdog import apierr_box, send_outcome
+        state, pings = {}, []
+        t0 = time.time()
+        with m.patch.object(watchdog, "capture_pane", lambda *a, **k: PTR_BOX), \
+                m.patch.object(send_outcome, "presend_reclaim",
+                               lambda *a, **k: "turn running under the box — held"), \
+                m.patch.object(send_outcome, "_presend_own", lambda *a, **k: "shape"):
+            for t in (t0, t0 + 300, t0 + 700):
+                apierr_box.reclaimed("%1", lambda *a, **k: "", lambda s: None, state,
+                                     "sid", t, 10000, 300, "p", [],
+                                     lambda *a, **k: pings.append(a), None, False,
+                                     "/nonexistent/st.json")
+        self.assertEqual(len(pings), 1, "past 2x grace of the busy episode")
+
+    def test_a_line_break_box_behind_an_occupied_slot_is_a_real_hold(self):
+        from watchdog import apierr_box
+        cap = LONE_NL.replace(FOOT, "  › stashed · ctrl+s to restore\n" + FOOT)
+        state, pings, sess = {}, [], {}
+        with m.patch.object(watchdog, "capture_pane", lambda *a, **k: cap):
+            ok = apierr_box.reclaimed("%1", lambda *a, **k: "", lambda s: None, state,
+                                      "sid", time.time(), 10000, 300, "p", [],
+                                      lambda *a, **k: pings.append(a), None, False,
+                                      "/nonexistent/st.json")
+            apierr_box.sesslimit_reclaim(sess, 0, "%1", lambda *a, **k: "",
+                                         lambda s: None, {}, time.time(), False, [], "p")
+        self.assertTrue(ok)
+        self.assertEqual(len(pings), 1)
+        self.assertIn("prázdne riadky", pings[0][0])
+        self.assertEqual(sess.get("swallow_fails"), 1)
+
+    def test_an_unreadable_box_mid_clear_is_busy_not_the_owners_draft(self):
+        from watchdog import apierr_box
+        caps = iter([LONE_NL, LONE_NL, "● running\n✻ Working… (3s · esc to interrupt)\n"])
+        last = {"c": LONE_NL}
+
+        def cap(*a, **k):
+            last["c"] = next(caps, last["c"])
+            return last["c"]
+        with m.patch.object(watchdog, "capture_pane", cap):
+            v = apierr_box.reclaim("%1", lambda *a, **k: "", lambda s: None, {},
+                                   time.time(), False, [], "p")
+        self.assertEqual(v, "busy")
+
+    def test_a_lock_stamped_slightly_in_the_future_still_locks(self):
+        from watchdog import apierr_box
+        now = time.time()
+        state = {"linebreak_clear": {"%1": now + 5}}
+        self.assertEqual(apierr_box.clear_line_breaks_once(
+            "%1", lambda *a, **k: "", lambda s: None, state, now),
+            "already tried this episode")
 
 
 def h_sid():
