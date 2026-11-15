@@ -1071,6 +1071,22 @@ def _undo_and_release_slot(pid, run, text, parked, log_fn, prefix, sleep_fn=None
                 % prefix)
 
 
+def _stash_refusal(cap):
+    """Why `deliver_with_stash` must not start on this capture, or None: the
+    single slot is occupied, no free prompt, a live turn, or (#1332) a box that
+    holds only line breaks — CC 2.1.317 ignores Ctrl+S on it (measured), and it
+    is not ours to clear outside a recovery resume."""
+    if cap and STASH_MARKER in cap:
+        return "slot occupied"
+    if not watchdog._has_free_prompt(cap, bare_only=False):
+        return "no free prompt"
+    if "esc to interrupt" in (cap or ""):
+        return "live turn"
+    if not (watchdog._input_line_text(cap) or "x").strip():
+        return "box holds only line breaks (no words)"
+    return None
+
+
 def deliver_with_stash(pid, text, run, captured=None, logs=None, sleep_fn=None,
                        state=None, user_authored=False, nudge_kind="stash",
                        nudge=None):
@@ -1140,17 +1156,10 @@ def deliver_with_stash(pid, text, run, captured=None, logs=None, sleep_fn=None,
     run = run or watchdog._default_run
     sleep_fn = sleep_fn or time.sleep
     cap = captured if captured is not None else watchdog.capture_pane(pid, run, lines=30)
-    if cap and STASH_MARKER in cap:
-        _log("stash-abort: slot occupied")
+    refusal = _stash_refusal(cap)
+    if refusal:
+        _log("stash-abort: " + refusal)
         return False
-    if not watchdog._has_free_prompt(cap, bare_only=False):
-        _log("stash-abort: no free prompt")
-        return False
-    if "esc to interrupt" in (cap or ""):
-        _log("stash-abort: live turn")
-        return False
-    if watchdog.apierr_box.stash_line_breaks(pid, run, cap, sleep_fn, state, _log):
-        return False                  # #1332: CC refuses C-s on a line-break box
     from watchdog import nudge_gate as _ng
     _bnow = time.time()
     _budgeted = state is not None and _ng.pane_budgeted(nudge, user_authored)
@@ -1158,7 +1167,8 @@ def deliver_with_stash(pid, text, run, captured=None, logs=None, sleep_fn=None,
         if _ng.first_pane_hold(state, pid, nudge, _bnow):   # once per episode
             _log("stash-abort: " + _ng.pane_budget_hold_reason(state, pid, _bnow))
         return False
-    # #271: from here on we are genuinely about to act on this box — persist whatever it currently holds BEFORE the first keystroke of ours lands,
+    # #271: from here on we are genuinely about to act on this box — persist
+    # whatever it currently holds BEFORE the first keystroke of ours lands,
     # so a stash whose eventual on-screen restore silently fails still has a
     # recoverable trace. A no-op (returns None, writes nothing) whenever the
     # box is bare, which is the common case. Honesty note (adversarial
@@ -1169,7 +1179,8 @@ def deliver_with_stash(pid, text, run, captured=None, logs=None, sleep_fn=None,
     # near the moment of action, not a byte-exact guarantee of what the box
     # holds at the literal instant `C-s` lands.
     watchdog._draft_rescue_persist(pid, cap, logs=logs)
-    # #1002 -- the #994 kill switch is enforced at the ONE `keys` primitive: the goal-sweep incident path (`deliver_goal` -> here) fires its FIRST stash
+    # #1002 -- the #994 kill switch is enforced at the ONE `keys` primitive: the
+    # goal-sweep incident path (`deliver_goal` -> here) fires its FIRST stash
     # keystroke (the strip-deselect Escape, else the `C-s` stash toggle) with
     # `kind=nudge_kind`, so at OFF `keys` suppresses it (ZERO keystrokes, not a
     # park+undo dance) + journals once, and this helper bails -- the deleted

@@ -114,12 +114,18 @@ def _clear_line_breaks(pid, run, sleep_fn):
 
 
 def clear_line_breaks_once(pid, run, sleep_fn, state, now):
-    """The ONE line-break-only clear (`send_outcome.presend_reclaim` routes
-    every caller here): at most one attempt per pane per episode (its own lock,
+    """The ONE line-break-only clear, run ONLY by the recovery resume paths
+    (`reclaim`: job 1, credential-dead, job 6) — every other delivery holds on
+    such a box (`send_outcome.LINE_BREAKS_HELD`): it is not our text, and a kind
+    the owner switched off must type nothing. At most one attempt per pane per
+    episode (its own lock,
     `LINEBREAK_LOCK`, so it never blocks the #1113 template/own-text clears),
     and the lock is released once the box reads bare — a success ends the
     episode, a later line break starts a new one. Returns the status."""
     locks = state.setdefault(LINEBREAK_LOCK, {})
+    for k in [k for k, v in locks.items() if not isinstance(v, (int, float))
+              or not 0 <= now - v < LINEBREAK_LOCK_TTL_S]:
+        locks.pop(k, None)                  # pruned: an old or recycled pane id
     ts = locks.get(pid)
     if isinstance(ts, (int, float)) and 0 <= now - ts < LINEBREAK_LOCK_TTL_S:
         return "already tried this episode"
@@ -150,29 +156,17 @@ def reclaim(pid, run, sleep_fn, state, now, dry_run, logs, label):
         logs.append("api-error reclaim %s: would clear %s -- dry-run"
                     % (label, "own stale text" if text.strip() else "line breaks"))
         return "held"
+    if not text.strip():
+        status = clear_line_breaks_once(pid, run, sleep_fn, state, now)
+        logs.append("api-error reclaim %s: box held only line breaks (no words) -> %s"
+                    % (label, status))
+        return "cleared" if status == "bare" else "held"
     verdict = _so.presend_reclaim(pid, run, cap, sleep_fn or time.sleep, state, now,
                                   logs.append)
     if not verdict.startswith("pre-send"):
         return None       # not ours, or held before the proof (strip, busy, slot)
     logs.append("api-error reclaim %s: %s" % (label, verdict))
-    if not verdict.startswith("pre-send: cleared"):
-        return "held"
-    state.get("goal_template_clear", {}).pop(pid, None)   # a success ends the episode
-    return "cleared"
-
-
-def stash_line_breaks(pid, run, cap, sleep_fn, state, log_fn):
-    """`deliver_with_stash`'s guard: CC 2.1.317 ignores Ctrl+S on a box holding
-    only line breaks (measured), so the stash route would abort UNRESOLVED on
-    every sweep. Such a box goes through the same `presend_reclaim` clear as
-    the bare-box send; nothing is delivered this call. True when handled."""
-    text = watchdog._input_line_text(cap)
-    if not text or text.strip():
-        return False
-    from watchdog import send_outcome as _so
-    log_fn("stash-abort: " + _so.presend_reclaim(pid, run, cap, sleep_fn, state,
-                                                   None, log_fn))
-    return True
+    return "cleared" if verdict.startswith("pre-send: cleared") else "held"
 
 
 def reclaimed(pid, run, sleep_fn, state, key, now, idle, grace, project, logs,

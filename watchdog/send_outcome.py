@@ -70,6 +70,8 @@ STRANDED_TTL_S = 24 * 3600      # a record older than a day is dropped unread
 # is dropped the moment the pane's box is seen bare (`note_bare`).
 NOT_OWN_KEY = "box_not_own"
 HELD_DRAFT = "box holds a non-machine draft — held"
+LINE_BREAKS_HELD = ("box holds only line breaks (no words) — held; a recovery "
+                    "resume clears it (#1332)")
 
 
 class SendOutcome:
@@ -530,12 +532,8 @@ def presend_reclaim(pid, run, cap, sleep_fn, state, now, log_fn):
     if watchdog._strip_selected(cap):          # keys would go to the strip
         return "agent strip selected — held"
     now = time.time() if now is None else now
-    if not watchdog._input_line_text(cap).strip():   # #1332: no words at all
-        from watchdog import apierr_box
-        status = apierr_box.clear_line_breaks_once(pid, run, sleep_fn, state, now)
-        return ("pre-send: %s a box holding only line breaks (no words); nothing "
-                "typed this call" % ("cleared" if status == "bare" else
-                                     "could not clear (%s) —" % status))
+    if not watchdog._input_line_text(cap).strip():   # #1332: no words, not ours:
+        return LINE_BREAKS_HELD                     # only a recovery resume clears it
     mode = _presend_own(pid, cap, state, now)
     if mode is None:
         return HELD_DRAFT
@@ -563,6 +561,7 @@ def presend_reclaim(pid, run, cap, sleep_fn, state, now, log_fn):
                 "chars removed) — held" % (status, removed))
     clear_stranded(state, pid)
     note_bare(state, pid)
+    state.get("goal_template_clear", {}).pop(pid, None)   # #1332: a success ends it
     _log.warning("send-verified: pre-send cleared own stale text pane=%s "
                  "chars=%d", pid, removed)
     return ("pre-send: cleared stale own machine text (%d chars); nothing "

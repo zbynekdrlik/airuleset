@@ -3905,9 +3905,11 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
                         pass                            # #1257: nothing booked
                     else:
                         draft = _input_line_text(captured)
-                        if draft and apierr_box.reclaim(pid, run, sleep_fn, state, now, dry_run,
-                                                        logs, project or pid):
-                            pass          # #1332: our leftover / line breaks, never "your draft"
+                        rv = draft and apierr_box.reclaim(pid, run, sleep_fn, state, now, dry_run,
+                                                          logs, project or pid)
+                        if rv:            # #1332: our leftover / line breaks, never "your draft"
+                            if rv == "held" and not dry_run:   # counts toward the give-up
+                                s["swallow_fails"], s["last_try"] = swallow_fails + 1, now
                         elif draft:
                             # A draft sitting in the input box of a limit-parked session
                             # could go nowhere while limited — it is the user's OWN
