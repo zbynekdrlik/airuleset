@@ -431,7 +431,8 @@ class TestIncremental(unittest.TestCase):
 
     def test_a_crate_dir_with_a_file_in_use_stays(self):
         dep = self.stale / SESSION / "dep-graph.bin"
-        self.sweep((frozenset({str(dep)}), frozenset()))
+        # a real live_links snapshot carries every parent of a link in `ancestors`
+        self.sweep((frozenset({str(dep)}), frozenset(str(p) for p in dep.parents)))
         self.assertTrue(dep.is_file())
 
 
