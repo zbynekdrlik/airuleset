@@ -661,12 +661,13 @@ def provision_peer_channel_root(hosts=None, run=None, links_doc=None, registry=N
             script = render_home_script(OFFICIAL_CHANNEL_PLUGINS, links_doc, name)  # #1293: keep the policy
         else:
             script = render_teardown_script(links_doc, name)
-        remote = ("sudo -n " if h.get("sudo") else "") + "bash -c " + shlex.quote(script)
+        # #1334: on stdin, never one argv string (MAX_ARG_STRLEN is 128 KiB).
+        remote = ("sudo -n " if h.get("sudo") else "") + "bash -s"
         argv = ["ssh", "-i", os.path.expanduser(h["identity"]), "-o", "BatchMode=yes",
                 "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=15",
                 "%s@%s" % (h.get("admin_user", "root"), h["host"]), remote]
         try:
-            r = run(argv, capture_output=True, text=True, timeout=120)
+            r = run(argv, input=script, capture_output=True, text=True, timeout=120)
         except Exception as e:  # noqa: BLE001 — best-effort, never break push
             print("  ⚠ PEER-CHANNEL-ROOT FAILED (%s): %r" % (name, e), file=sys.stderr)
             failed.append((name, repr(e)))
