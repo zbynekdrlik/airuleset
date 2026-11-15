@@ -40,12 +40,12 @@ def _target(home, name="app"):
     return d
 
 
-def _old_unit(profile, pkg, h, age_s, size=1000, kind="lib"):
+def _old_unit(profile, pkg, h, age_s, size=1000, kind="lib", src=7):
     """Pre-1.100 layout: .fingerprint/<pkg>-<h>, deps/lib<pkg>-<h>.rlib."""
     fp = profile / ".fingerprint" / ("%s-%s" % (pkg, h))
     fp.mkdir(parents=True)
     (fp / ("%s-%s" % (kind, pkg))).write_text(h)
-    (fp / ("%s-%s.json" % (kind, pkg))).write_text("{}")
+    (fp / ("%s-%s.json" % (kind, pkg))).write_text(json.dumps({"path": src}))
     (fp / ("dep-%s-%s" % (kind, pkg))).write_text("")
     deps = profile / "deps"
     deps.mkdir(exist_ok=True)
@@ -122,16 +122,16 @@ class TestCapRule(_Home):
         _old_unit(self.p, "serde", H[0], 30 * DAY)           # newest of its group: stays
         _old_unit(self.p, "app", H[1], 30 * DAY, kind="test-lib")
         _old_unit(self.p, "app", H[2], 20 * DAY, kind="lib")  # newest lib of app
-        _old_unit(self.p, "tokio", H[3], 23 * 3600)          # used 23 h ago, not newest
+        _old_unit(self.p, "tokio", H[3], 47 * 3600)          # relatime: 47 h may be 23 h
         _old_unit(self.p, "tokio", H[4], 60)
-        _inc(self.p, "tokio", "old1", 20 * 3600)
+        _inc(self.p, "tokio", "old1", 40 * 3600)
         _inc(self.p, "tokio", "new2", 60)
         row, _ = self.run_target(cap=10)
         for h in H[:5]:
             self.assertTrue(any(h in f.name for f in (self.p / "deps").iterdir()), h)
         self.assertEqual(len(list((self.p / "incremental").iterdir())), 2)
         self.assertEqual(row["state"], "over")
-        self.assertIn("used within 24 h", row["why"])
+        self.assertIn("used within 48 h", row["why"])
 
     def test_cargo_1100_layout_units_go_whole(self):
         for i in range(4):
@@ -169,8 +169,8 @@ class TestCapRule(_Home):
         fcntl.flock(fd, fcntl.LOCK_SH)
         row, _ = self.run_target(cap=1)
         self.assertEqual(len(list((self.p / "deps").iterdir())), 3)
-        self.assertEqual(row["state"], "over")
-        self.assertTrue(any(a[0] == "CAP-LOCKED" for a in self.lines))
+        self.assertEqual((row["state"], row["retry"]), ("reducing", True))
+        self.assertEqual(self.lines, [])               # nothing logged for a build in flight
 
     def test_a_unit_used_between_plan_and_act_stays(self):
         for i in range(3):
@@ -191,6 +191,118 @@ class TestCapRule(_Home):
         self.assertEqual(len(list((self.p / "deps").iterdir())), 3)
         self.assertGreater(row["plan_units"], 0)
         self.assertNotIn("removed", rec)
+
+
+class TestReviewFixes(_Home):
+    """The two adversarial reviews of 15.11. (build safety, thrash + cost)."""
+
+    def test_the_fingerprint_goes_first_so_a_cut_never_leaves_a_fresh_unit(self):
+        _old_unit(self.p, "serde", H[0], 10 * DAY)
+        _old_unit(self.p, "serde", H[1], 9 * DAY)
+        _new_unit(self.p, "log", H[2], 10 * DAY)
+        _new_unit(self.p, "log", H[3], 9 * DAY)
+        real = tc.cs._remove
+
+        def only_fingerprints(path):
+            if "fingerprint" not in path:
+                raise OSError(5, "killed here")
+            return real(path)
+        with mock.patch.object(tc.cs, "_remove", side_effect=only_fingerprints):
+            self.run_target(cap=1)
+        self.assertFalse((self.p / ".fingerprint" / ("serde-" + H[0])).exists())
+        self.assertTrue((self.p / "deps" / ("libserde-%s.rlib" % H[0])).exists())
+        self.assertFalse((self.p / "build" / "log" / H[2] / "fingerprint").exists())
+        self.assertTrue((self.p / "build" / "log" / H[2] / "out").exists())
+
+    def test_two_versions_of_one_crate_keep_their_own_newest_unit(self):
+        _old_unit(self.p, "syn", H[0], 10 * DAY, src=1)      # syn 1.x, its only unit
+        _old_unit(self.p, "syn", H[1], 9 * DAY, src=2)       # syn 2.x, older build
+        _old_unit(self.p, "syn", H[2], 8 * DAY, src=2)       # syn 2.x, newest
+        self.run_target(cap=1)
+        left = sorted(f.name for f in (self.p / "deps").iterdir())
+        self.assertEqual(left, ["libsyn-%s.rlib" % H[0], "libsyn-%s.rlib" % H[2]])
+
+    def test_reading_the_source_id_never_bumps_an_atime(self):
+        _old_unit(self.p, "syn", H[0], 10 * DAY)
+        js = self.p / ".fingerprint" / ("syn-" + H[0]) / "lib-syn.json"
+        before = os.stat(js).st_atime
+        tc.collect(str(self.t))
+        self.assertEqual(os.stat(js).st_atime, before)
+
+    def test_a_broken_state_file_heals_instead_of_failing_every_poll(self):
+        _old_unit(self.p, "serde", H[0], 10 * DAY)
+        _old_unit(self.p, "serde", H[1], 9 * DAY)
+        sp = Path(tc._state_path(self.home))
+        sp.parent.mkdir(parents=True, exist_ok=True)
+        for bad in ('{"targets": []}', '{"targets": {"%s": {"removed": {"k": "x"}, '
+                    '"measured": "y"}}}' % self.t, "[]", "{not json"):
+            sp.write_text(bad)
+            with mock.patch.object(tc, "_cargo_targets", return_value=[str(self.t)]):
+                rows, _ = tc.enforce(self.home, NOW, cap=1 << 40)
+            self.assertEqual([r["state"] for r in rows], ["ok"], bad)
+            self.assertIsInstance(json.loads(sp.read_text())["targets"], dict)
+
+    def test_a_refused_mount_is_a_daily_skip_note_never_over_the_cap(self):
+        with mock.patch.object(tc.cs, "mount_refusal", return_value="noatime mount"), \
+                mock.patch.object(tc, "_cargo_targets", return_value=[str(self.t)]):
+            rows, lines = tc.enforce(self.home, NOW, cap=1)
+            _r, again = tc.enforce(self.home, NOW + 2 * 3600, cap=1)
+        self.assertEqual([r["state"] for r in rows], ["refused"])
+        self.assertEqual([a[0] for a in lines], ["CAP-SKIP"])
+        self.assertEqual(again, [])
+
+    def test_a_protected_key_stays_protected_while_it_exists(self):
+        _old_unit(self.p, "serde", H[0], 10 * DAY)
+        _old_unit(self.p, "serde", H[1], 9 * DAY)
+        rec = {"protected": {"debug/.fingerprint/serde-" + H[0]: NOW - 30 * DAY}}
+        self.run_target(cap=1, rec=rec)
+        self.assertTrue((self.p / "deps" / ("libserde-%s.rlib" % H[0])).exists())
+        self.assertEqual(rec["protected"]["debug/.fingerprint/serde-" + H[0]], NOW)
+
+    def test_a_unit_found_in_use_is_kept_a_day_and_noted_once(self):
+        for i in range(3):
+            _old_unit(self.p, "serde", H[i], (10 - i) * DAY)
+        rlib = str(self.p / "deps" / ("libserde-%s.rlib" % H[0]))
+        rec = {}
+        with mock.patch("watchdog.disk_guard_cargo_sweep._snapshot",
+                        return_value=(frozenset({rlib}), frozenset())):
+            self.run_target(cap=1, rec=rec)
+            self.run_target(cap=1, rec=rec)
+        self.assertEqual([a[0] for a in self.lines].count("CAP-KEEP"), 1)
+        self.assertTrue((self.p / "deps" / ("libserde-%s.rlib" % H[0])).exists())
+
+    def test_the_lock_is_held_in_short_slices(self):
+        for i in range(6):
+            _old_unit(self.p, "serde", H[i], (20 - i) * DAY)
+        calls = []
+        real = tc._hold_build_locks
+
+        def counting(profile):
+            calls.append(profile)
+            return real(profile)
+        with mock.patch.object(tc, "HOLD_S", -1), \
+                mock.patch.object(tc, "_hold_build_locks", side_effect=counting):
+            self.run_target(cap=1)
+        self.assertEqual(len(calls), 5)                # one unit per hold, 5 removed
+
+    def test_too_little_poll_budget_or_an_unwritable_state_walks_nothing(self):
+        with mock.patch.object(tc, "_cargo_targets") as walk:
+            self.assertEqual(tc.enforce(self.home, NOW, cap=1, budget_left=10), ([], []))
+        walk.assert_not_called()
+        _old_unit(self.p, "serde", H[0], 10 * DAY)
+        with mock.patch.object(tc, "_cargo_targets", return_value=[str(self.t)]), \
+                mock.patch.object(tc, "save_state", side_effect=OSError(28, "full")), \
+                mock.patch.object(tc, "target_size") as size:
+            rows, lines = tc.enforce(self.home, NOW, cap=1)
+        size.assert_not_called()
+        self.assertEqual(([a[0] for a in lines], rows), (["CAP-SKIP"], []))
+
+    def test_the_home_is_walked_once_an_hour_not_every_poll(self):
+        with mock.patch.object(tc, "_cargo_targets", return_value=[str(self.t)]) as walk:
+            tc.enforce(self.home, NOW, cap=1 << 40)
+            tc.enforce(self.home, NOW + 60, cap=1 << 40)
+            tc.enforce(self.home, NOW + 3600, cap=1 << 40)
+        self.assertEqual(walk.call_count, 2)
 
 
 class TestNoThrash(_Home):
