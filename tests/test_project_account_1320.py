@@ -35,9 +35,12 @@ class TestDevbridgeAccount(unittest.TestCase):
     def setUp(self):
         self.spec = bootstrap.account_spec(ACCT)
 
-    def test_declaration_is_valid_on_dev1_without_sudo(self):
+    def test_declaration_is_valid_on_dev1_with_only_the_vm_sudo(self):
         self.assertEqual(bootstrap.validate_account(ACCT, self.spec), [])
-        self.assertIs(self.spec["sudo"], False)
+        # #1325 (owner 15.11.2026): sudo is exactly the three virsh lines.
+        self.assertIs(self.spec["sudo"], True)
+        self.assertTrue(all(c.startswith("/usr/bin/virsh ") and c.endswith(" devbridge-win")
+                            for c in self.spec["sudo_commands"]))
         self.assertEqual(self.spec["host"], "dev1")
         self.assertEqual(self.spec["repo"], "zbynekdrlik/devbridge")
         self.assertIs(self.spec["github_app"], True)
@@ -123,7 +126,9 @@ class TestReleasesMirror(unittest.TestCase):
         # devbridge#123 step 5: the ubuntu CI jobs run on dev1-devbridge.
         self.assertEqual(bootstrap.account_spec(ACCT)["tools"],
                          ["cargo:cargo-audit@0.23.0", "cargo:cargo-deny@0.20.2",
-                          "playwright:1.59.1/chromium"])
+                          "playwright:1.59.1/chromium",
+                          # #1328: trunk's wasm-bindgen + wasm-opt, system-wide
+                          "cargo:wasm-bindgen-cli@0.2.117", "binaryen:version_131"])
 
 
 if __name__ == "__main__":
