@@ -449,11 +449,9 @@ def _presend_own(pid, cap, state, now):
     if (state or {}).get(NOT_OWN_KEY, {}).get(pid) is not None:
         return None
     head = (watchdog._input_box_head_text(cap) or "").strip()
-    box = watchdog._box_norm_from_capture(cap)
-    if not head:             # #1332: the box's first line is empty; its text
-        head = box           # starts on the next row (whitespace-normalised)
     if not watchdog._looks_like_own_stuck_content(head):
         return None
+    box = watchdog._box_norm_from_capture(cap)
     if nudge_file.LABEL in box:   # slice 3: a pointer is proven EXACTLY or not
         return "shape" if nudge_file.is_pointer_line(box, require_file=True) \
             else None             # (appended words never reach the head rule)

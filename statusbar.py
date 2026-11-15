@@ -673,7 +673,8 @@ def recovery_stuck_segment(home=None, now=None):
         return ""
     if not 0 <= now - ts <= DISK_SEGMENT_STALE_S:
         return ""
-    return "\033[38;5;196mstuck!\033[0m"
+    proj = str(cache.get("project") or "")[:20]     # one file per account: name it
+    return "\033[38;5;196mstuck!%s\033[0m" % ((" " + proj) if proj else "")
 
 
 def release_idle_segment(cwd=None, home=None, now=None):

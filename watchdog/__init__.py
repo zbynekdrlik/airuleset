@@ -544,7 +544,11 @@ def _handle_authdead_episode(state, key, cred_mtime_fn, now, idle, project, pid,
         # verified submit. Re-capture right before the idle check (#1075 review
         # A#7 — the #176 F3 race; the top-of-sweep `captured` can be stale).
         fresh = capture_pane(pid, run) if not dry_run else captured
-        if draft_pending:
+        if draft_pending and apierr_box.reclaimed(
+                pid, run, sleep_fn, state, key, now, idle, GRACE_SECONDS, project,
+                logs, send_fn, owner, dry_run, state_path):
+            pass                # #1332: our own leftover reclaimed / held, logged
+        elif draft_pending:
             logs.append("auth: fresh credentials — pane holds a draft, defer "
                         "continue [%s]" % (project or key))
         elif not pane_at_idle_prompt(fresh):
@@ -3901,7 +3905,9 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
                         pass                            # #1257: nothing booked
                     else:
                         draft = _input_line_text(captured)
-                        if draft:
+                        if draft and not draft.strip():   # #1332: line breaks, no words
+                            apierr_box.reclaim(pid, run, sleep_fn, state, now, dry_run, logs, project or pid)
+                        elif draft:
                             # A draft sitting in the input box of a limit-parked session
                             # could go nowhere while limited — it is the user's OWN
                             # intended prompt, typed here, not stray input. Never type
@@ -4241,6 +4247,9 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
                                 "sweep's own top-of-sweep capture", owner,
                                 dry_run, "skip raced (api-error stash)")
                             continue
+                        if apierr_box.reclaimed(pid, run, sleep_fn, state, key, now, idle, grace, project, logs,
+                                                send_fn, owner, dry_run, state_path):
+                            continue          # #1332: our own leftover; no retry burned
                         _logs_before = len(logs)
                         delivered = True if dry_run else deliver_with_stash(
                             pid, resume_text, run, captured=fresh, logs=logs,
