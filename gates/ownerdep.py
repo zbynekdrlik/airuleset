@@ -91,7 +91,7 @@ _CODE_OR_QUOTE_RX = re.compile(r"`[^`\n]*`|(?<!\w)\"[^\"\n]{1,300}\"(?!\w)|„[^
 _SKIP_LINE_RX = re.compile(r"^\s*>|^\W*ROZHODNUT[ÉE]|^\s*[-*]\s+\[[xX]\]")
 _CLAUSE_CUT_RX = re.compile(r"[;:.,!?()—–]|\s(?:and|but|so|now|then|because|that|which|a|ale|aj|"
                             r"preto|takže|lebo|teraz)\s")
-_NEGATIONS = {"not", "never", "nie", "ani", "netreba", "nikdy", "nemusí", "nemusi"}
+_NEGATIONS = {"not", "never", "nie", "ani", "netreba", "nikdy", "nemusí", "nemusi", "nothing", "nič"}
 _SETTLED = {"was", "were", "had", "previously", "bolo", "bol", "bola", "písal", "písala",
             "písalo", "napísal", "napísala", "stálo"}
 

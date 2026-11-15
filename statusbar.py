@@ -908,7 +908,7 @@ def owner_court(cwd, home=None, now=None, max_age_s=1800):
     pings) and the repo name. None when unknown: no cache, a failed refresh (a
     non-int count, no number list, `stale_since`) or a cache older than `max_age_s`."""
     cache = _load(cache_dir(home) / (cwd_key(cwd) + ".json")) if cwd else None
-    ts, now = cache.get("ts") if isinstance(cache, dict) else None, now or time.time()
+    ts, now = cache.get("ts") if isinstance(cache, dict) else None, time.time() if now is None else now
     if not isinstance(ts, (int, float)) or not 0 <= now - ts <= max_age_s or \
             not isinstance(cache.get("user_waiting"), int) or cache.get("stale_since") or \
             not isinstance(cache.get("user_waiting_numbers"), list):
