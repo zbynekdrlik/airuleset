@@ -80,6 +80,10 @@ ELSEWHERE = (
     "#314 som zaparkoval (čaká na tvoj súhlas, ktorý pýtala camera-box).",
     "#240 (VBAN linky) čaká na tvoje odpovede, ktoré zbiera dasio.",
     "Zvyšok #240 čaká na tvoje odpovede, ktoré zisťuje dasio.",
+    # 80 MB re-measurement (dsync, obs 13.-14.11.)
+    "- Both wait for the owner: which box hosts the gate runner. dstack is asking him.",
+    "- #98 a #136: čakajú na tvoje rozhodnutie. Predloží ti ich dstack.",
+    "- **If loss continues:** the next step needs your consent, and camera-box will ask you.",
 )
 
 
@@ -292,6 +296,7 @@ R1_NOT_STEPS = (
     "`core-quals --waiting` printed nothing, so no ticket is waiting on you.",
     "**Questions waiting on you (`core-quals --waiting`):** none; the command returned nothing.",
     "Jano znova žiada variant B. Ak by na ňom trval, rozhodnutie je na tebe.",
+    "- Ozvem sa, keď bude hotovo, alebo keď narazím na niečo, čo musíš rozhodnúť ty.",
 )
 
 
