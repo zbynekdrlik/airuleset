@@ -901,6 +901,26 @@ def ticketless_question_pings(cwd, home=None, cover=None):
             == question_attribution.TICKETLESS]
 
 
+def owner_court(cwd, home=None, now=None, max_age_s=1800):
+    """#1335 — `(numbers, total, name)` of the owner's court for `cwd`, the SAME
+    derivation `tickets_segment` renders `U N` from: the label-U numbers plus the
+    tickets this cwd's ❓ pings are attributed to, the U total (label-U + ticketless
+    pings) and the repo name. None when unknown: no cache, a failed refresh (a
+    non-int count, no number list, `stale_since`) or a cache older than `max_age_s`."""
+    cache = _load(cache_dir(home) / (cwd_key(cwd) + ".json")) if cwd else None
+    ts, now = cache.get("ts") if isinstance(cache, dict) else None, time.time() if now is None else now
+    if not isinstance(ts, (int, float)) or not 0 <= now - ts <= max_age_s or \
+            not isinstance(cache.get("user_waiting"), int) or cache.get("stale_since") or \
+            not isinstance(cache.get("user_waiting_numbers"), list):
+        return None
+    cover = _cached_cover(cache)
+    nums = set(user_waiting_numbers(cwd, home)[0] or ()) | (
+        question_map_ticket_refs(cwd, home=home, cover=cover) or set())
+    total = cache["user_waiting"] + (question_ping_count(cwd, home=home, cover=cover) or 0)
+    name = str(cache.get("name") or os.path.basename(str(cache.get("root") or cwd)))
+    return nums, total, name.rsplit("/", 1)[-1].lower()
+
+
 def question_ping_count(cwd, home=None, cover=None):
     """The number of ticketless ❓ pings scoped to `cwd` (#512, #1218) — folded
     into the footer's `U N` count. See `ticketless_question_pings`."""
