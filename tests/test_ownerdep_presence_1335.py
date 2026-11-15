@@ -390,5 +390,84 @@ class TestRound1(unittest.TestCase):
         self.assertLess(reason.index("needs-owner-action"), reason.index("❓ NEEDS YOU"))
 
 
+# --- review round 2 (fresh-context re-review) ------------------------------ #
+R2_BLOCK = (   # each must stay a step NOT held in U at U 0 (dasio, no labels)
+    "Hotovo. Zostáva vypnúť Wi-Fi, keď bude niekto pri PC — krok je automaticky zapísaný v #106.",
+    "Zostáva izolácia jadier, keď bude niekto pri PC (automatický restart nestačí).",
+    "Remaining: disable Wi-Fi once someone is at the box; I did not touch the BIOS.",
+    "Remaining: core isolation once someone is at the box; the rest I did remotely.",
+    "Ostáva vypnúť Wi-Fi, keď bude niekto pri PC; spravil som zvyšok.",
+    "The deploy is waiting on you — nothing else blocks it.",
+    "Keď bude niekto pri PC, treba vypnúť Wi-Fi (tracking issue 106).",
+    "Keď bude niekto pri PC, treba vypnúť Wi-Fi (zapísané v tikete 106).",
+    "Windows asks you for the admin password, keď bude niekto pri PC.",
+    "Script, ktorý zisťuje stav, je hotový; zostáva Wi-Fi, keď bude niekto pri PC.",
+    "Zistené v relácii minulý týždeň: keď bude niekto pri PC, treba vypnúť Wi-Fi.",
+    "Every remaining step needs your approval (#106).",
+    "Každý ďalší krok čaká na teba (#106).",
+    "Kód je hotový, no reštart čaká na teba.",
+    "Since there is no SSH route I need you to replug the adapter.",
+    "Ako som ti písal, že čaká na tvoje schválenie, nasadenie stojí (#106).",
+    "Wi-Fi stays on in case we need SSH; core isolation remains until someone is at the box.",
+    "Musí to spraviť niekto fyzicky pri stroji.",
+    "Niekto to musí spraviť na mieste.",
+    "Treba to spraviť fyzicky na stroji.",
+    "Oprava vyžaduje fyzický prístup k boxu.",
+    "Pokračujem, keď prídeš k PC.",
+    "✅ Overené: plan 1/1 · Výstup: zostáva vypnutie Wi-Fi/BT, keď bude niekto pri PC (#106)",
+)
+
+
+class TestRound2(unittest.TestCase):
+    def test_dasio_shape_variants_block_at_u_zero(self):
+        g = _gate()
+        for text in R2_BLOCK:
+            lines = list(g.owner_dependency_lines(text))
+            self.assertTrue(lines, text)
+            self.assertFalse(g.held_in_u(lines[0], (set(), 0, "dasio")), text)
+
+    def test_real_other_session_forms_still_held(self):
+        g = _gate()
+        for text in ("Vrátenie čaká na tvoj súhlas v relácii projektu mikrotik.",
+                     "Čaká na tvoje odpovede, ktoré zbiera dasio.",
+                     "dstack is asking him whether #98 stands; it waits for the owner."):
+            self.assertTrue(g.held_in_u(text, (set(), 0, "dsync")), text)
+
+    def test_court_without_numbers_is_unknown(self):
+        import statusbar
+        home = tempfile.mkdtemp(prefix="od1335n-")
+        self.addCleanup(lambda: __import__("shutil").rmtree(home, True))
+        cwd = os.path.join(home, "dasio")
+        d = statusbar.cache_dir(home)
+        d.mkdir(parents=True)
+        (d / (statusbar.cwd_key(cwd) + ".json")).write_text(
+            json.dumps({"ts": time.time(), "user_waiting": 2}), encoding="utf-8")
+        self.assertIsNone(statusbar.owner_court(cwd, home=home))
+
+    def test_court_walks_only_inside_a_git_checkout(self):
+        home = tempfile.mkdtemp(prefix="od1335w-")
+        self.addCleanup(lambda: __import__("shutil").rmtree(home, True))
+        repo = os.path.join(home, "dasio")
+        sub = os.path.join(repo, "src", "deep")
+        os.makedirs(sub)
+        os.makedirs(os.path.join(repo, ".git"))
+        _cache(home, repo, (106,))
+        self.assertEqual(_gate().owner_court(sub, home)[0], {106})
+        loose = os.path.join(home, "scratch", "x")
+        os.makedirs(loose)
+        _cache(home, home, (106,))            # a cache for a non-repo parent
+        self.assertIsNone(_gate().owner_court(loose, home))
+
+    def test_quotes_and_report_line_are_not_steps(self):
+        g = _gate()
+        for text in ("Brána chytá vety ako ‚keď bude niekto pri PC‘ a «čaká na teba».",
+                     "✅ Overené: plan 3/3 · Výstup: blok „keď bude niekto pri PC“ zachytený"):
+            self.assertEqual(g.owner_dependency(text), "", text)
+
+    def test_hook_prefilter_matches_a_trailing_owner_name(self):
+        r = TestHook._run(self, "Remaining: the BIOS switch, blocked on Zbynek")
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()
