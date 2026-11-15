@@ -297,6 +297,8 @@ R1_NOT_STEPS = (
     "**Questions waiting on you (`core-quals --waiting`):** none; the command returned nothing.",
     "Jano znova žiada variant B. Ak by na ňom trval, rozhodnutie je na tebe.",
     "- Ozvem sa, keď bude hotovo, alebo keď narazím na niečo, čo musíš rozhodnúť ty.",
+    "Nothing is waiting on you; all steps done.",
+    "Hotovo, nič už nečaká na teba.",
 )
 
 
