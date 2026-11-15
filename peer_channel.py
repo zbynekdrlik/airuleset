@@ -277,6 +277,24 @@ def clean_text(text):
     return _CTRL_RE.sub("", text)
 
 
+# #1330 review: the reasons a listener may report; its own words never reach this session
+_REASONS = ("no project", "unsupported request", "unknown uid", "bad sender name", "sender",
+            "wrong target", "no link", "unknown op", "empty text", "text over", "rate limit",
+            "bad request")
+
+
+def remote_reason(err):
+    """A remote listener's error as one fixed reason (a stream controls its own listener)."""
+    return next((r for r in _REASONS if isinstance(err, str) and err.startswith(r)), "refused")
+
+
+def _lstat(path):
+    try:
+        return os.lstat(path)
+    except OSError:
+        return None
+
+
 def _user_uid(user):
     try:
         return pwd.getpwnam(user).pw_uid
@@ -294,15 +312,9 @@ class Peer:
         self.own_dir = os.path.join(sock_dir, user)
         self.log = log or Log(os.path.join(home, ".claude", "logs", "peer-channel.log"))
         self.notify = notify or (lambda text, meta: None)
-        self.clock = clock
-        self.armed = armed
-        self.rate = {}
-        self.rate_lock = threading.Lock()
+        self.clock, self.armed, self.rate, self.rate_lock = clock, armed, {}, threading.Lock()
         self.slots = threading.BoundedSemaphore(MAX_CONNS)
-        self.listener = None
-        self.sock_path = None
-        self.project = None
-        self.problem = None
+        self.listener = self.sock_path = self.project = self.problem = None
         projects = self._projects()
         if project_arg:
             p = projects.get(project_arg)
@@ -375,12 +387,8 @@ class Peer:
         if not linked_to(self._pairs(), self.project):
             self.log("listen-skipped", project=self.project, reason="no link")
             return False
-        try:
-            st = os.lstat(self.own_dir)
-            ok_dir = stat.S_ISDIR(st.st_mode) and st.st_uid == self.uid
-        except OSError:
-            ok_dir = False
-        if not ok_dir:
+        st = _lstat(self.own_dir)
+        if not (st and stat.S_ISDIR(st.st_mode) and st.st_uid == self.uid):
             self.problem = "own dir %s is missing (root leg not applied)" % self.own_dir
             self.log("listen-failed", project=self.project, reason=self.problem)
             return False
@@ -411,12 +419,9 @@ class Peer:
         except OSError as e:
             self.log("sweep-failed", error=str(e))
             return
-        for fname in names:
-            parsed = parse_socket_name(fname)
-            if parsed is None:
-                continue
+        for fname in (f for f in names if parse_socket_name(f)):
             try:
-                os.kill(parsed[1], 0)
+                os.kill(parse_socket_name(fname)[1], 0)
             except ProcessLookupError:
                 self._unlink(os.path.join(self.own_dir, fname), "stale-removed")
             except OSError:
@@ -541,19 +546,8 @@ class Peer:
         except OSError as e:
             self.log("list-failed", dir=tdir, error=str(e))
             return []
-        out = []
-        for fname in names:
-            parsed = parse_socket_name(fname)
-            if not parsed or parsed[0] != project:
-                continue
-            path = os.path.join(tdir, fname)
-            try:
-                st = os.lstat(path)
-            except OSError:
-                continue
-            if stat.S_ISSOCK(st.st_mode) and st.st_uid == want_uid:
-                out.append(path)
-        return out
+        paths = [os.path.join(tdir, f) for f in names if (parse_socket_name(f) or ("",))[0] == project]
+        return [p for p in paths if (st := _lstat(p)) and stat.S_ISSOCK(st.st_mode) and st.st_uid == want_uid]
 
     def _call(self, path, want_uid, req, deadline):
         """One request to one listener; a listener uid other than the target's is refused first."""
@@ -569,7 +563,9 @@ class Peer:
             s.sendall((json.dumps(req) + "\n").encode("utf-8"))
             reply = json.loads(read_line(s, min(deadline, time.monotonic() + IO_TIMEOUT_S))
                                or "{}")
-            return reply if isinstance(reply, dict) else {"ok": False, "error": "bad reply"}
+            if not isinstance(reply, dict):
+                return {"ok": False, "error": "bad reply"}
+            return {"ok": reply.get("ok") is True, "error": remote_reason(reply.get("error"))}
         except (OSError, ValueError, UnicodeDecodeError, RecursionError) as e:
             return {"ok": False, "error": "unreachable (%s)" % e.__class__.__name__}
         finally:
@@ -718,7 +714,8 @@ class BridgeHome:
             topics = self.local._topics()
             lines += ["%s (%s): %s" % (o, self.local.host, topics.get(frozenset((self.project, o)), "-"))
                       for o in linked_to(self.local._pairs(), self.project)]
-        streams = False
+        streams = self.local is not None and bool(set(linked_to(self.local._pairs(), self.project))
+                                                   & set(stream_rows(self.local._links(), self.local.host)))
         for host in sorted(self.hosts):
             topics, others = host_link_topics(links, host), linked_to(host_links(links, host), self.project)
             lines += ["%s (%s): %s" % (o, host, topics.get(frozenset((self.project, o)), "-")) for o in others]

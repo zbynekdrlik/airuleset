@@ -139,6 +139,13 @@ def _stream_errors(host, entry, registry, links_doc, users):
             errors.append("%s: stream %s path %r must be under ~/" % (host, name, path))
         elif name in taken:
             errors.append("%s: stream %s collides with a project" % (host, name))
+    # #1330 review: the receiver marks a stream by NAME, so no other name may use its account
+    stream_accts = users(host)
+    for name, row in sorted(dict(peer_channel.host_projects(registry, host),
+                                 **peer_channel.bridge_rows(links_doc, host)).items()):
+        if row.get("account") in stream_accts:
+            errors.append("%s: %s runs as stream account %s; a stream joins only through "
+                          "streams" % (host, name, row.get("account")))
     return errors
 
 
@@ -211,7 +218,7 @@ def _bridge_errors(links_doc, root_hosts=None):
             both = local & set(peer_channel.linked_to(peer_channel.host_links(links_doc, host), name))
             if both and host != fleet:    # #1320: inbound carries only `from`, so the two are indistinguishable
                 errors.append("bridge %s: %s is linked both on %s and on %s"
-                              % (name, ", ".join(sorted(both)), home, host))
+                              % (name, ", ".join(sorted(both)), fleet, host))
             if host not in links_doc["hosts"]:
                 errors.append("bridge %s: %s is not a links host" % (name, host))
             if not (isinstance(far, dict) and FAR_SSH_RE.match(str(far.get("ssh")))
@@ -249,6 +256,8 @@ def is_bridge_home(user, links_doc=None, host=None):
     links_doc = load_links() if links_doc is None else links_doc
     return any(isinstance(s, dict) and s.get("account") == user
                and isinstance(s.get("home"), str) and s.get("home") == host
+               and all(not isinstance(f, dict) or far_key_ok(f.get("key"))   # #1334: a placeholder
+                       for f in (s.get("hosts") if isinstance(s.get("hosts"), dict) else {}).values())
                for s in (links_doc.get("bridges") or {}).values())
 
 
@@ -783,6 +792,11 @@ def main(argv=None, dirty=uncommitted_config, apply=provision_peer_channel_root)
         print("\n".join(status_lines(a.host)))
         return 0
     if a.action == "render-root":
+        errors = validate_links(load_links(), load_registry())
+        if errors:      # stdout is piped into sudo bash: nothing reaches it (#1330 review)
+            print("render-root refused: peer-links.json invalid: %s" % "; ".join(errors),
+                  file=sys.stderr)
+            return 1
         host = a.host or this_host()
         sys.stdout.write(render_root_script(accounts_for_host(host), host=host))
         return 0
