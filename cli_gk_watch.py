@@ -219,7 +219,8 @@ def watch_issue(issue, *, fetch, gk_login, self_login,
          undispositioned_ids}``
     with ``state`` one of:
       - ``bounce-unanswered`` -- the newest gk comment is a BOUNCE newer than
-        the newest stream RFR (or there is no RFR);
+        the newest stream RFR (or there is no RFR) and newer than every gk
+        ACCEPT (an ACCEPT supersedes the BOUNCEs before it, #1331);
       - ``needs-disposition`` -- finding ids in gk comments newer than the last
         RFR that no LATER stream comment dispositions by exact id;
       - ``rfr-current`` -- the stream has responded (RFR newer than the newest
@@ -307,7 +308,13 @@ def watch_issue(issue, *, fetch, gk_login, self_login,
     # gk comment (a delta advisory) exists — else a follow-up advisory would
     # mask an unanswered BOUNCE from the label gate. gk_latest then reflects
     # that BOUNCE so the gate cites/times the right verdict.
-    bounces = [g for g in gk_comments if g["verdict"] == "BOUNCE"]
+    # #1331: a later gk ACCEPT supersedes every older BOUNCE (the ticket was
+    # accepted since), so neither that BOUNCE nor the finding ids of gk
+    # comments before the ACCEPT are current; the ACCEPT's own ids still are.
+    accepts = [g["ts"] for g in gk_comments if g["verdict"] == "ACCEPT"]
+    accept_ts = max(accepts) if accepts else None
+    bounces = [g for g in gk_comments if g["verdict"] == "BOUNCE"
+               and (accept_ts is None or g["ts"] > accept_ts)]
     newest_bounce = max(bounces, key=lambda g: g["ts"]) if bounces else None
     if newest_bounce is not None and newest_bounce["ts"] > rfr_eff:
         base["gk_latest"] = _snapshot(newest_bounce)
@@ -320,7 +327,8 @@ def watch_issue(issue, *, fetch, gk_login, self_login,
 
     # needs-disposition: finding ids raised by gk comments NEWER than the last
     # RFR that no LATER stream comment cites by exact id.
-    newer_gk = [g for g in gk_comments if g["ts"] > rfr_eff]
+    newer_gk = [g for g in gk_comments if g["ts"] > rfr_eff
+                and (accept_ts is None or g["ts"] >= accept_ts)]
     raised = {}                                    # id -> earliest raising gk ts
     for g in newer_gk:
         for fid in g["ids"]:
