@@ -147,8 +147,12 @@ if [ -z "$N" ]; then
     OD_RETRY="/tmp/airuleset-owner-dep-block-${SID}"
     OD_N=$(cat "$OD_RETRY" 2>/dev/null || echo 0)
     case "$OD_N" in ''|*[!0-9]*) OD_N=0 ;; esac
-    if [ -n "$OD_TP" ] && [ -f "$OD_TP" ] \
-            && LC_ALL=C grep -qiE 'owner|zby(n[^e]|[^n])|zbynek[^d]|your|potrebuj|tvoj|teba|tebe|vlastn|body-file|body=@' <(tail -c 4000000 "$OD_TP" 2>/dev/null); then
+    # #1335: the FINAL message is judged too (an owner / person-at-a-machine
+    # step), so its own words open the gate even when the transcript has none.
+    OD_WORDS='owner|zby(n[^e]|[^n])|zbynek[^d]|your|potrebuj|tvoj|teba|tebe|vlastn|niekto|fyzick|mus|treba|stoj|someone|somebody|person|physical|manual|on.site|hands'
+    if { [ -n "$OD_TP" ] && [ -f "$OD_TP" ] \
+            && LC_ALL=C grep -qiE "$OD_WORDS|body-file|body=@" <(tail -c 4000000 "$OD_TP" 2>/dev/null); } \
+            || LC_ALL=C grep -qiE "$OD_WORDS" <<<"$MSG"; then
         _OD_ROOT="$(dirname "$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)")"
         _OD_RC=0
         env PYTHONPATH="${_OD_ROOT}${PYTHONPATH:+:$PYTHONPATH}" \

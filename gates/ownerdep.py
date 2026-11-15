@@ -91,7 +91,8 @@ _SKIP_LINE_RX = re.compile(r"^\s*>|^\W*ROZHODNUT[ÉE]|^\s*[-*]\s+\[[xX]\]")
 _CLAUSE_CUT_RX = re.compile(r"[;:.,!?()—–]|\s(?:and|but|so|now|then|because|that|which|a|ale|aj|"
                             r"preto|takže|lebo|teraz)\s")
 _NEGATIONS = {"not", "never", "nie", "ani", "netreba", "nikdy", "nemusí", "nemusi"}
-_SETTLED = {"was", "were", "had", "previously", "bolo", "bol", "bola"}
+_SETTLED = {"was", "were", "had", "previously", "bolo", "bol", "bola", "písal", "písala",
+            "písalo", "napísal", "napísala", "stálo"}
 
 # FUTURE / NEEDED forms only; a past or settled form ("owner-approved", "Owner
 # approved", "approved by the owner", ROZHODNUTÉ) has none of these verbs.
@@ -100,7 +101,37 @@ _NOUN = (r"(?:approval|consent|decision|answer|ok|okay|go[- ]ahead|permission|si
          r"confirmation|input|hands|action|reply|response|choice|review)\b")
 _SK_OWN = r"(?:tvoj\w*|ownerov\w*|owner\w*|zby(?:ně|ň|nek(?!drlik))\w*|vlastn[íi]k\w*|teba|tebe)"
 _SK_OWNER_GEN = r"(?:od\s+)?(?:ownera|teba|zby(?:ně|ň|nek(?!drlik))\w*|vlastn[íi]ka)\b"
-_SK_NOUN = r"(?:s[úu]hlas\w*|schv[áa]len\w*|rozhodnut\w*|odpove\w*|povolen\w*|ok)\b"
+_SK_NOUN = (r"(?:s[úu]hlas\w*|schv[áa]len\w*|rozhodnut\w*|odpove\w*|povolen\w*|ok|"
+            r"re[šs]tart\w*|z[áa]sah\w*|prihl[áa]sen\w*|pokyn\w*|[áa]no|vo[ľl]b\w*)\b")
+# #1335: a step that waits on a PERSON AT A MACHINE or on the owner's own hands
+# ("keď bude niekto pri PC", "vie len niekto pri počítači", "treba fyzicky
+# skontrolovať", "musíš to spraviť ty", "once someone is at the box"). Measured
+# on 14 days of dev1 final messages + ticket comments (17 accounts, #1335): a bare
+# "ručne" / "fyzický" / "physical" is mostly description, so each form needs a
+# NEED word (treba / musí / len / needs / must) or a future presence clause.
+_PRESENCE = (
+    r"\b(?:ke[ďd]|k[ýy]m|a[žz])\s+(?:tam\s+|tu\s+)?bud(?:e|e[šs])\s+(?:niekto\s+|technik\s+)?"
+    r"(?:fyzicky\s+)?(?:pri|na\s+mieste)\b",
+    r"\bbude\s+niekto\s+na\s+mieste\b",
+    r"\b(?:len|iba|mus[íi])\s+niekto\s+(?:pri|na\s+mieste)\b",
+    r"\bniekto\s+(?:pri\s+\S+|na\s+mieste)\s+(?:\S+\s+){0,2}(?:mus[íi]|treba|by\s+mal)\b",
+    r"\btreba\s*,?\s*aby\s+(?:niekto|si|ty)\b",
+    r"\b(?:treba|mus[íi]\w*|potrebuj\w*)\s+(?:[^\s.,;:!?]+\s+){0,3}fyzick\w*",
+    r"\bfyzick\w*\s+(?:[^\s.,;:!?]+\s+){0,2}(?:treba|mus[íi]\w*|potrebuj\w*)\b",
+    r"\bmus[íi][šs]\s+(?:[^\s.,;:!?]+\s+){0,3}ty\b",
+    r"\bstoj[íi]\s+(?:to\s+)?na\s+tebe\b",
+    r"\b(?:when|once|until)\s+(?:someone|somebody|a\s+person|the\s+owner|you)\s+(?:is|are|gets?)"
+    r"\s+(?:back\s+)?(?:at|to|in\s+front\s+of|on[- ]site|physically)\b",
+    r"\b(?:someone|somebody|a\s+person)\s+(?:needs?\s+to|has\s+to|must|should)\s+(?:be\s+)?"
+    r"(?:physically|on[- ]site|at\s+the|power|plug|unplug|replug|press|reboot|restart|check|"
+    r"replace|swap|connect)\b",
+    r"\b(?:needs?|requires?|awaiting|pending)\s+(?:a\s+|an\s+)?(?:physical|manual|on[- ]site|"
+    r"hands[- ]on|in[- ]person)\s+(?:step|action|check|visit|access|presence|intervention|"
+    r"restart|reboot|power[- ]cycle|fix)\b",
+    r"\b%s\s+(?:must|needs?\s+to|has\s+to|will\s+have\s+to)\s+(?:physically|manually|plug|"
+    r"unplug|power|reboot|restart|press|replace|connect|install|log\s+in|flip|swap)\b" % _OWN,
+    r"\bonly\s+(?:someone|somebody|a\s+person)\s+(?:at|on[- ]site|physically)\b",
+)
 _DEP_RX = re.compile("|".join((
     r"\b(?:needs?|requires?|awaiting|awaits|pending)\s+(?:%s|your)\s+%s" % (_OWN, _NOUN),
     r"\b(?:needs?|requires?|awaiting|awaits|pending)\s+%s\s+(?:from|of|by)\s+(?:the\s+)?owner\b"
@@ -117,7 +148,7 @@ _DEP_RX = re.compile("|".join((
     r"\b[čc]ak(?:á|a|ám|am|áme|ame|ajú|aju|ať|at)\s+na\s+%s" % _SK_OWN,
     r"\b(?:owner|vlastn[íi]k|zby(?:ně|ň|nek(?!drlik))\w*)\s+mus[íi]\s+(?:schv|rozhod|ods[úu]hlas|potvrd|odpoved)\w*",
     r"\bmus[íi]\s+(?:to\s+)?(?:schv|rozhod|ods[úu]hlas|potvrd)\w*\s+(?:owner|vlastn[íi]k|zby(?:ně|ň|nek(?!drlik))\w*)\b",
-)), re.IGNORECASE)
+) + _PRESENCE), re.IGNORECASE)
 
 
 def _cancelled(line, start):
@@ -134,11 +165,11 @@ def _norm(text):
     return re.sub(r"\\x27|[\s\\'\"’`]+", "", text).lower()
 
 
-def owner_dependency(text, authored=None):
-    """The first line of `text` that states a future/needed owner dependency, or
-    "". Skipped: fenced blocks, inline code and quoted spans, `>` quotes,
-    `ROZHODNUTÉ` records and ticked `- [x]` checklist lines. With `authored` (a
-    `_norm`ed blob), only a dependency whose phrase the turn itself wrote counts."""
+def owner_dependency_lines(text, authored=None):
+    """Every line of `text` that states a future/needed owner dependency (or, #1335,
+    a step waiting on a person at a machine). Skipped: fenced blocks, inline code
+    and quoted spans, `>` quotes, `ROZHODNUTÉ` records and ticked `- [x]` lines.
+    With `authored` (a `_norm`ed blob), only a phrase the turn itself wrote counts."""
     for raw in _FENCE_RE.sub("", text or "").splitlines():
         if _SKIP_LINE_RX.search(raw):
             continue
@@ -146,8 +177,80 @@ def owner_dependency(text, authored=None):
         for m in _DEP_RX.finditer(line):
             if (m.group(0)[:5].lower() == "until" or not _cancelled(line, m.start())) \
                     and (authored is None or _norm(m.group(0)) in authored):
-                return raw.strip()[:200]
-    return ""
+                yield raw.strip()[:200]
+                break
+
+
+def owner_dependency(text, authored=None):
+    """The first `owner_dependency_lines` line of `text`, or ""."""
+    return next(owner_dependency_lines(text, authored), "")
+
+
+# #1335: a line that names another project's ticket or another session's question
+# is THAT project's U (`owner/repo#N`, `repo#N`, `camera-box issue 1482`, "v relácii
+# mikrotik", "sa ťa pýta vo svojom okne"); only this repo's `#N` is judged here.
+_REF_RX = re.compile(r"(?<![\w&])([\w.-]+(?:/[\w.-]+)?)?#(\d{1,6})\b")
+_NAMED_ISSUE_RX = re.compile(r"\b([a-z][\w-]*)\s+issue\s+(\d{1,6})\b", re.IGNORECASE)
+_ELSEWHERE_RX = re.compile(
+    r"\bv\s+rel[áa]cii\b|\bvo\s+svoj(?:om|ej)\s+(?:okne|rel[áa]cii|session)\b|"
+    r"\b(?:sa\s+ťa|ťa\s+sa)\s+(?:na\s+to\s+)?p[ýy]ta\b|\bp[ýy]ta\s+sa\s+ťa\b|"
+    r"\bin\s+(?:its|their)\s+(?:own\s+)?session\b", re.IGNORECASE)
+
+
+def line_refs(line, repo):
+    """`(ours, foreign)`: this repo's issue numbers on `line` (bare `#N` or
+    `<repo>#N`) and whether it names another project's ticket."""
+    ours, foreign = set(), False
+    for qual, num in _REF_RX.findall(line):
+        if not qual or qual.rsplit("/", 1)[-1].lower() == repo:
+            ours.add(int(num))
+        else:
+            foreign = True
+    for name, _num in _NAMED_ISSUE_RX.findall(line):
+        foreign = foreign or name.lower() != repo
+    return ours, foreign
+
+
+def owner_court(cwd, home=None):
+    """`(numbers, total, repo)` of the owner's court for `cwd`, read from the
+    footer cache the U segment renders from (zero gh): the label-U numbers plus
+    the tickets this cwd's delivered ❓ pings are attributed to, the U total
+    (label-U + ticketless pings) and the repo name. The cache of `cwd` or its
+    nearest parent; None when none is readable (the caller fails OPEN)."""
+    try:
+        import statusbar
+        path, cache = os.path.abspath(cwd or "/"), None
+        while True:
+            cache = statusbar._load(statusbar.cache_dir(home) / (statusbar.cwd_key(path) + ".json"))
+            parent = os.path.dirname(path)
+            if isinstance(cache, dict) or parent == path:
+                break
+            path = parent
+        if not isinstance(cache, dict):
+            return None
+        nums, _ts = statusbar.user_waiting_numbers(path, home=home)
+        nums = set(nums or ())
+        cover = statusbar._cached_cover(cache)
+        nums |= statusbar.question_map_ticket_refs(path, home=home, cover=cover) or set()
+        total = cache.get("user_waiting")
+        total = (total if isinstance(total, int) else len(nums)) + \
+            statusbar.question_ping_count(path, home=home, cover=cover)
+        name = str(cache.get("name") or os.path.basename(str(cache.get("root") or path)))
+        return nums, total, name.rsplit("/", 1)[-1].lower()
+    except Exception:  # noqa: BLE001 — an unreadable cache never blocks
+        return None
+
+
+def held_in_u(line, court):
+    """True when the owner's court already holds the step on `line`, or the line
+    belongs to another project / session. `court=None` (no cache) holds all."""
+    if court is None or _ELSEWHERE_RX.search(line):
+        return True
+    nums, total, repo = court
+    ours, foreign = line_refs(line, repo)
+    if ours:
+        return bool(ours & nums)
+    return foreign or total > 0
 
 
 def asked_in(text):
@@ -358,13 +461,8 @@ def bypass_reason(message):
     return m.group(1).strip() if m else None
 
 
-def evaluate(transcript_path, message, cwd):
-    """`("block", reason)` or `("allow", "")` for this turn."""
-    if bypass_reason(message) or asked_in(message):
-        return "allow", ""
-    calls = turn_tool_calls(transcript_path, texts=True)
-    if not calls:
-        return "allow", ""
+def _scan_turn(calls, cwd):
+    """The `_Turn` of this turn's tool calls and texts, in order."""
     turn, last_text = _Turn(cwd), None
     for name, inp, ok, result in calls:
         if name == "Bash":
@@ -389,23 +487,56 @@ def evaluate(transcript_path, message, cwd):
             last_text = None
         if name == "Bash" and _READ_RX.search(str(inp.get("command") or "")):
             turn.seen.append(result)
+    return turn
+
+
+def evaluate(transcript_path, message, cwd, home=None):
+    """`("block", reason)` or `("allow", "")` for this turn. #1307 judges the
+    ticket writes, #1335 also the final message's owner-step lines; a step the
+    owner's court already holds (footer cache, `owner_court`) passes."""
+    if bypass_reason(message) or asked_in(message):
+        return "allow", ""
+    calls = turn_tool_calls(transcript_path, texts=True) if transcript_path else []
+    if calls is None:
+        return "allow", ""                # unreadable transcript: fail OPEN
+    turn = _scan_turn(calls, cwd)
     open_deps = [(t, line) for t, line, asked in turn.deps if not asked
                  and t not in turn.labelled and not (t == "?" and turn.labelled)]
-    if not open_deps:
+    steps = [] if turn.labelled else list(owner_dependency_lines(message))
+    if not (open_deps or steps):
         return "allow", ""
-    listing = "; ".join("#%s: „%s“" % dep for dep in open_deps[:3])
+    court = owner_court(cwd, home)
+    if court is not None:
+        open_deps = [d for d in open_deps if not (d[0].isdigit() and int(d[0]) in court[0])]
+    steps = [line for line in steps if not held_in_u(line, court)]
+    if open_deps:
+        listing = "; ".join("#%s: „%s“" % dep for dep in open_deps[:3])
+        return "block", (
+            "🚫 BLOCKED (#1307) — tento ťah zapísal do tiketu závislosť na ownerovi, "
+            "ale ownerovi si ju nepoložil: %s. Otázka zapísaná len na tikete sa nikam "
+            "nedostane — footer U ju nevidí a na telefón nepríde. Sprav jedno z: "
+            "(1) polož ju TERAZ celým blokom `**Otázka — projekt …:**` + možnosti + "
+            "`❓ NEEDS YOU: <rozhodnutie>` (alebo `❓ ASKED:` + `⏳ WORKING`, ak pracuješ "
+            "ďalej); (2) daj tomu tiketu label `needs-answer` / `needs-decision` / "
+            "`needs-owner-action` (`gh issue edit <N> --add-label …`, aj keď ho už má); "
+            "(3) ak súhlas podľa approval-scope.md netreba (testovanie rigu/zariadenia "
+            "je samotná práca, owner si živý event stráži sám), závislosť z tiketu "
+            "odstráň A ukonči správu vlastným riadkom `airuleset:owner-dep-ok "
+            "<dôvod>` (tá istá výnimka platí zriedka aj inak; je logovaná)." % listing)
+    if not steps:
+        return "allow", ""
     return "block", (
-        "🚫 BLOCKED (#1307) — tento ťah zapísal do tiketu závislosť na ownerovi, "
-        "ale ownerovi si ju nepoložil: %s. Otázka zapísaná len na tikete sa nikam "
-        "nedostane — footer U ju nevidí a na telefón nepríde. Sprav jedno z: "
-        "(1) polož ju TERAZ celým blokom `**Otázka — projekt …:**` + možnosti + "
-        "`❓ NEEDS YOU: <rozhodnutie>` (alebo `❓ ASKED:` + `⏳ WORKING`, ak pracuješ "
-        "ďalej); (2) daj tomu tiketu label `needs-answer` / `needs-decision` / "
-        "`needs-owner-action` (`gh issue edit <N> --add-label …`, aj keď ho už má); "
-        "(3) ak súhlas podľa approval-scope.md netreba (testovanie rigu/zariadenia "
-        "je samotná práca, owner si živý event stráži sám), závislosť z tiketu "
-        "odstráň A ukonči správu vlastným riadkom `airuleset:owner-dep-ok "
-        "<dôvod>` (tá istá výnimka platí zriedka aj inak; je logovaná)." % listing)
+        "🚫 BLOCKED (#1335) — správa opisuje krok, ktorý čaká na teba / na ownera "
+        "alebo na človeka pri stroji, ale v U nie je: %s. Owner číta len footer U a "
+        "telefón; krok spomenutý len v správe sa stratí. Sprav jedno z: (1) polož "
+        "otázku TERAZ: `❓ ASKED: <čo presne má owner urobiť a kedy>` + celý blok "
+        "`**Otázka — projekt …:**` (briefing, možnosti) a pracuj ďalej s `⏳ WORKING`, "
+        "alebo `❓ NEEDS YOU:` ako posledný riadok, ak bez neho nič nejde; (2) daj "
+        "tiketu label `needs-owner-action` s konkrétnou požiadavkou v komentári "
+        "(`gh issue edit <N> --add-label needs-owner-action`; otázka = "
+        "`needs-answer`); (3) ak krok vieš spraviť sám (SSH/MCP, approval-scope.md), "
+        "sprav ho a ukonči správu riadkom `airuleset:owner-dep-ok <dôvod>` "
+        "(logované)." % "; ".join("„%s“" % ln for ln in steps[:3]))
 
 
 def run(payload):

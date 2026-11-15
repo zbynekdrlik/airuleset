@@ -199,18 +199,18 @@ class TestComment(unittest.TestCase):
                                 home=self.home)
 
     def test_presence_comment_unlabelled_blocks(self):
-        self.t.bash("gh issue comment 106 --body %s" % json.dumps(self.body), COMMENTED)
+        self.t.bash("gh issue comment 106 --body %s" % json.dumps(self.body, ensure_ascii=False), COMMENTED)
         verdict, reason = self._eval()
         self.assertEqual(verdict, "block")
         self.assertIn("#106", reason)
 
     def test_same_command_label_settles(self):
         self.t.bash("gh issue comment 106 --body %s && gh issue edit 106 --add-label "
-                    "needs-owner-action" % json.dumps(self.body), COMMENTED)
+                    "needs-owner-action" % json.dumps(self.body, ensure_ascii=False), COMMENTED)
         self.assertEqual(self._eval()[0], "allow")
 
     def test_comment_on_ticket_already_in_u_passes(self):
-        self.t.bash("gh issue comment 106 --body %s" % json.dumps(self.body), COMMENTED)
+        self.t.bash("gh issue comment 106 --body %s" % json.dumps(self.body, ensure_ascii=False), COMMENTED)
         self.assertEqual(self._eval(u_numbers=(106,))[0], "allow")
 
 
