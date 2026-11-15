@@ -2,9 +2,10 @@
 
 Every other build rule judges by AGE, so a project that builds every day with new
 hashes never has anything old enough and grows without limit (dev1, 15.11.: 494.5 G of
-761 G used were ``target/`` dirs, dstack alone 218 G). This pass is called on EVERY
-disk-guard poll, whatever the filesystem level, as the account (never as root), and
-measures one due target per poll, each at most once per MEASURE_INTERVAL_S:
+761 G used were ``target/`` dirs, dstack alone 218 G). The disk guard asks on EVERY
+poll, whatever the filesystem level, as the account (never as root), whether a target
+is due (each at most once per MEASURE_INTERVAL_S); a due pass runs DETACHED as the
+transient user unit UNIT_NAME (niced, idle I/O), never inside the poll budget:
 
 - the cap is ``SERVICE_ACCOUNTS[acct]["target_cap_gb"]`` (validated in
   ``cli_account_policy.validate_build_budget``), default DEFAULT_CAP_GB GiB, sized from
@@ -24,8 +25,8 @@ measures one due target per poll, each at most once per MEASURE_INTERVAL_S:
   holds open or sits in;
 - a target still over the cap after that is noted in the guard journal once a day
   (CAP-OVER) and left alone: no footer, no ping, no harder rule;
-- the pass stops at PASS_MAX_S (and leaves DRAIN_RESERVE_S of the poll to the drain);
-  a cut pass, or one a build's lock stopped, comes back in RETRY_CUT_S, quietly;
+- the detached run stops between targets at CHILD_MAX_S; a target the deadline or a
+  build's lock stopped comes back in RETRY_CUT_S, quietly;
 - anti-thrash: every removed key is remembered 90 days; a key that comes back was rebuilt by
   a later build, so it is logged once (CAP-THRASH) and protected for as long as it
   exists (plus MEMORY_DAYS): never a delete-rebuild loop.
@@ -40,6 +41,7 @@ import json
 import os
 import pwd
 import stat
+import sys
 import time
 
 from watchdog import disk_guard_cargo_sweep as cs
@@ -57,13 +59,20 @@ NEWEST_KEEP_S = 14 * DAY          # a group's newest unit is kept only while use
 KEEP_S = DAY                      # a unit found in use is not planned again for a day
 MEASURE_INTERVAL_S = 3600         # a dstack-size walk takes ~20 s: once an hour per target
 OVER_LOG_INTERVAL_S = DAY         # a target left over the cap is noted once a day
-CAP_BUDGET_S = 10                 # the act (after the walk) stops between units past this
+CAP_BUDGET_S = 120                # one target's act (after its walk) stops between units
 HOLD_S = 2                        # a starting build waits at most this (+ one snapshot)
-RETRY_CUT_S = 600                 # a cut or lock-blocked pass is due again this soon
-MIN_POLL_BUDGET_S = 40            # the walk + act need this much of the poll left
-PASS_MAX_S = 30                   # the whole pass (walks + act) stops here, retried in 10 min
-DRAIN_RESERVE_S = 15              # poll budget left for the drain after the pass
+RETRY_CUT_S = 600                 # a cut or lock-blocked target is due again this soon
+CHILD_MAX_S = 600                 # the detached run stops between targets past this
+UNIT_MAX_S = 900                  # systemd kills a run past this (fingerprint-first = safe)
+UNIT_NAME = "airuleset-target-cap"
+UNIT_PROPERTIES = ("Nice=10", "IOSchedulingClass=idle")
 STATE_NAME = "target-cap.json"
+LAUNCH_NAME = "target-cap.launched"
+LOCK_NAME = "target-cap.lock"
+# not `-m`: the watchdog package imports this module first, so runpy would load a
+# second copy as __main__ (a RuntimeWarning in the journal, two module states)
+CHILD_CODE = ("import sys; from watchdog.disk_guard_target_cap import main; "
+              "sys.exit(main(['--run']))")
 _FP_SKIP = {"invoked.timestamp"}
 _FP_PREFIXES = ("dep-", "output-")
 _HEX = frozenset("0123456789abcdef")
@@ -372,8 +381,9 @@ def save_state(home, state):
 
 
 def _recreated(rec, target, now, note):
-    """Removed keys that exist again were rebuilt: protected (logged once) for as
-    long as they exist and MEMORY_DAYS after. Old memory is dropped."""
+    """Removed keys that exist again were rebuilt: protected for as long as they
+    exist and MEMORY_DAYS after, noted ONCE per pass with a count (a project idle
+    for weeks can bring back thousands at once). Old memory is dropped."""
     limit = now - MEMORY_DAYS * DAY
     removed = {k: t for k, t in rec.get("removed", {}).items()
                if t >= now - REMOVED_MEMORY_DAYS * DAY}
@@ -383,12 +393,13 @@ def _recreated(rec, target, now, note):
             protected[key] = now
         elif t >= limit:
             protected[key] = t
-    for key in sorted(removed):
-        if os.path.lexists(os.path.join(target, key)):
-            protected[key] = now
-            del removed[key]
-            note("CAP-THRASH", os.path.join(target, key), 0,
-                 "rebuilt after the cap removed it; kept while it exists")
+    back = sorted(k for k in removed if os.path.lexists(os.path.join(target, k)))
+    for key in back:
+        protected[key] = now
+        del removed[key]
+    if back:
+        note("CAP-THRASH", target, 0, "%d unit(s) rebuilt after the cap removed them, "
+             "now kept while they exist: %s" % (len(back), ", ".join(back[:3])))
     rec["removed"], rec["protected"] = removed, protected
     return protected
 
@@ -433,6 +444,32 @@ def _remove(unit):
     return freed
 
 
+def _one(u, target, snapshot, now, note, removed, kept):
+    """Re-check and remove one unit under the held lock; returns the bytes freed."""
+    path = os.path.join(target, u.key)
+    try:
+        ok = _still_removable(u, snapshot, now)
+    except FileNotFoundError:
+        return 0            # a build replaced it a moment ago: in use, not "kept"
+    if not ok:
+        if any(os.path.lexists(q) for q in u.paths()):
+            kept[u.key] = now
+            note("CAP-KEEP", path, 0, "used or in use since the plan; kept a day")
+        return 0
+    try:
+        got = _remove(u)
+    except OSError as e:
+        cs._warn("cannot remove", path, e)
+        if u.fp_dirs and not any(os.path.lexists(d) for d in u.fp_dirs):
+            removed[u.key] = now     # its fingerprint is gone: a rebuild is known
+        return 0
+    if not os.path.lexists(path):
+        removed[u.key] = now
+    note("CAP-REMOVE", path, got, "last used %s"
+         % time.strftime("%Y-%m-%d %H:%M", time.localtime(u.last)))
+    return got
+
+
 def _act_profile(target, profile, units, now, deadline, note, removed, kept):
     """One profile's units, the build lock held at most HOLD_S at a time.
     Returns ``(freed, locked, cut)``."""
@@ -451,24 +488,8 @@ def _act_profile(target, profile, units, now, deadline, note, removed, kept):
             hold_end = min(time.monotonic() + HOLD_S, deadline)
             start = i              # at least one unit per hold: a slow snapshot never spins
             while i < len(units) and (i == start or time.monotonic() <= hold_end):
-                u = units[i]
+                freed += _one(units[i], target, snapshot, now, note, removed, kept)
                 i += 1
-                path = os.path.join(target, u.key)
-                if not _still_removable(u, snapshot, now):
-                    if any(os.path.lexists(q) for q in u.paths()):
-                        kept[u.key] = now
-                        note("CAP-KEEP", path, 0, "used or in use since the plan; kept a day")
-                    continue
-                try:
-                    got = _remove(u)
-                except OSError as e:
-                    cs._warn("cannot remove", path, e)
-                    continue
-                freed += got
-                if not os.path.lexists(path):
-                    removed[u.key] = now
-                note("CAP-REMOVE", path, got, "last used %s"
-                     % time.strftime("%Y-%m-%d %H:%M", time.localtime(u.last)))
         finally:
             for fd in fds:
                 os.close(fd)
@@ -477,7 +498,7 @@ def _act_profile(target, profile, units, now, deadline, note, removed, kept):
 
 def _act(target, chosen, now, deadline, note, removed, kept):
     """Remove the chosen units profile by profile. ``(freed, locked, cut)``."""
-    freed, locked, cut = 0, False, False
+    freed, locked = 0, False
     by_profile = {}
     for u in chosen:
         by_profile.setdefault(u.profile, []).append(u)
@@ -488,15 +509,15 @@ def _act(target, chosen, now, deadline, note, removed, kept):
         locked = locked or was_locked
         if was_cut:
             return freed, locked, True
-    return freed, locked, cut
+    return freed, locked, False
 
 
 def enforce_target(target, cap, now, rec, note, dry_run=False, act_s=CAP_BUDGET_S,
                    deadline=None):
     """One target's pass: ``{path, bytes, cap, state, why}``; ``state`` is ``ok``
     (at most the cap), ``reduced`` (now under TARGET_FRACTION of it), ``reducing``
-    (budget or a build's lock stopped it with stale units left), ``refused`` (the
-    mount cannot be trusted) or ``over``."""
+    (the deadline or a build's lock stopped it with stale units left), ``refused``
+    (the mount cannot be trusted) or ``over``."""
     refusal = cs.mount_refusal(target)
     if refusal:
         return {"path": target, "bytes": 0, "cap": cap, "state": "refused", "why": refusal}
@@ -519,9 +540,11 @@ def enforce_target(target, cap, now, rec, note, dry_run=False, act_s=CAP_BUDGET_
         return row
     act_end = time.monotonic() + act_s           # the walk above is not charged to it
     act_end = act_end if deadline is None else min(act_end, deadline)
-    freed, locked, cut = _act(target, chosen, now, act_end, note,
-                              rec.setdefault("removed", {}), kept)
-    rec["kept"] = kept
+    try:
+        freed, locked, cut = _act(target, chosen, now, act_end, note,
+                                  rec.setdefault("removed", {}), kept)
+    finally:
+        rec["kept"] = kept
     row.update(bytes=size - freed, freed=freed, retry=locked or cut)
     if size - freed <= cap * TARGET_FRACTION:
         row["state"] = "reduced"
@@ -551,20 +574,30 @@ def _daily(rec, key, now, note, *args):
         note(*args)
 
 
-def enforce(home, now, dry_run=False, cap=None, act_s=CAP_BUDGET_S, budget_left=None):
-    """One due Cargo target under ``home`` (all of them in a dry run):
-    ``(rows, decision tuples)``. Over the cap after the pass = one CAP-OVER a day,
-    nothing else is surfaced. Too little poll budget left = nothing this poll."""
+def _settle(rec, row, target, cap, now, note):
+    """Bookkeeping after one target: retry time, the daily notes."""
+    if row.get("retry"):
+        rec["measured"] = now - MEASURE_INTERVAL_S + RETRY_CUT_S
+    if row["state"] in ("ok", "reduced"):
+        rec.pop("over_logged", None)
+        rec.pop("skip_logged", None)
+    elif row["state"] == "over":
+        _daily(rec, "over_logged", now, note, "CAP-OVER", target, row["bytes"],
+               "over the %d GiB cap; %s; next note in 24 h" % (cap // GIB, row["why"]))
+    elif row["state"] == "refused":
+        _daily(rec, "skip_logged", now, note, "CAP-SKIP", target, 0,
+               "%s; next note in 24 h" % row["why"])
+
+
+def enforce(home, now, dry_run=False, cap=None, act_s=CAP_BUDGET_S, deadline=None):
+    """Every DUE Cargo target under ``home`` (all of them in a dry run), until
+    ``deadline``: ``(rows, decision tuples)``. The state is saved before any walk and
+    after every target. Over the cap after a pass = one CAP-OVER a day."""
     lines = []
 
     def note(action, path, nbytes, reason):
         lines.append((action, path, nbytes, reason))
 
-    if budget_left is not None and budget_left < MIN_POLL_BUDGET_S:
-        return [], lines
-    pass_s = PASS_MAX_S if budget_left is None else min(PASS_MAX_S,
-                                                        budget_left - DRAIN_RESERVE_S)
-    deadline = None if dry_run else time.monotonic() + pass_s
     state = load_state(home)
     tstate = state["targets"]
     if not dry_run:
@@ -574,23 +607,17 @@ def enforce(home, now, dry_run=False, cap=None, act_s=CAP_BUDGET_S, budget_left=
             note("CAP-SKIP", _state_path(home), 0, "state unwritable, pass skipped: %r" % e)
             return [], lines
     found = _targets(home, now, state, dry_run)
-    due = [t for t in found if dry_run
-           or now - tstate.get(t, {}).get("measured", 0) >= MEASURE_INTERVAL_S]
-    if not dry_run:
-        due = sorted(due, key=lambda t: tstate.get(t, {}).get("measured", 0))[:1]
-    if not due:
-        return [], lines
+    due = sorted((t for t in found if dry_run
+                  or now - tstate.get(t, {}).get("measured", 0) >= MEASURE_INTERVAL_S),
+                 key=lambda t: tstate.get(t, {}).get("measured", 0))
     cap = cap_bytes() if cap is None else cap
     rows = []
     for target in due:
+        if deadline is not None and time.monotonic() > deadline:
+            break                   # the rest stay due for the next run
         rec = tstate.setdefault(target, {})
         if not dry_run:
             rec["measured"] = now
-            try:            # stamp first: an unwritable state must not re-walk every poll
-                save_state(home, state)
-            except OSError as e:
-                note("CAP-SKIP", _state_path(home), 0, "state unwritable, pass skipped: %r" % e)
-                return rows, lines
         try:
             row = enforce_target(target, cap, now, rec, note, dry_run=dry_run, act_s=act_s,
                                  deadline=deadline)
@@ -600,19 +627,13 @@ def enforce(home, now, dry_run=False, cap=None, act_s=CAP_BUDGET_S, budget_left=
             row = {"path": target, "bytes": 0, "cap": cap, "state": "refused",
                    "why": "unreadable: %s" % e}
         rows.append(row)
-        if dry_run:
-            continue
-        if row.get("retry"):
-            rec["measured"] = now - MEASURE_INTERVAL_S + RETRY_CUT_S
-        if row["state"] in ("ok", "reduced"):
-            rec.pop("over_logged", None)
-            rec.pop("skip_logged", None)
-        elif row["state"] == "over":
-            _daily(rec, "over_logged", now, note, "CAP-OVER", target, row["bytes"],
-                   "over the %d GiB cap; %s; next note in 24 h" % (cap // GIB, row["why"]))
-        elif row["state"] == "refused":
-            _daily(rec, "skip_logged", now, note, "CAP-SKIP", target, 0,
-                   "%s; next note in 24 h" % row["why"])
+        if not dry_run:
+            _settle(rec, row, target, cap, now, note)
+            try:
+                save_state(home, state)
+            except OSError as e:
+                note("CAP-SKIP", _state_path(home), 0, "state unwritable: %r" % e)
+                return rows, lines
     if not dry_run:
         for gone in [t for t, r in tstate.items()
                      if now - r.get("seen", now) > MEMORY_DAYS * DAY]:
@@ -624,24 +645,97 @@ def enforce(home, now, dry_run=False, cap=None, act_s=CAP_BUDGET_S, budget_left=
     return rows, lines
 
 
-def run_pass(home, now, dry_run, logs, is_root, budget_left=None):
-    """The disk-guard poll hook (every poll, any level): never as root, never
-    raises. Decisions go to the guard's journal file; the poll log gets a one-line
-    summary only when something was removed (owner 15.11.: no new surface)."""
-    if is_root:
+# --------------------------------------------------------------------------- #
+# the poll hook and the detached run
+# --------------------------------------------------------------------------- #
+def due(home, now):
+    """Read-only: does any target (or the target list) need a pass now?"""
+    state = load_state(home)
+    if state["list"] is None or now - state["listed"] >= MEASURE_INTERVAL_S:
+        return True
+    return any(now - state["targets"].get(t, {}).get("measured", 0) >= MEASURE_INTERVAL_S
+               for t in state["list"])
+
+
+def _launch(home):
+    """Start the pass as the transient ``--user`` unit UNIT_NAME (the ONE launcher,
+    ``watchdog/user_unit.py``): its own cgroup, niced and idle-I/O, killed after
+    UNIT_MAX_S. A fixed unit name is the single-flight."""
+    from watchdog import user_unit
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return user_unit.launch(UNIT_NAME, repo,
+                            [sys.executable, "-c", CHILD_CODE],
+                            UNIT_MAX_S, env_keys=("PATH", "HOME", "LANG", "LC_ALL"),
+                            env_prefixes=(), properties=UNIT_PROPERTIES)
+
+
+def run_pass(home, now, dry_run, logs, is_root, launch_fn=None):
+    """The disk-guard poll hook (every poll, any fs level): never as root, never in
+    a dry run, never raises. It only decides whether a pass is due and starts the
+    detached run: a dstack-size pass takes longer than a whole poll (the #1318
+    re-review measured it), so it never runs inside the poll budget. A launch is
+    retried at most every RETRY_CUT_S; only a failed launch reaches the poll log."""
+    if is_root or dry_run:
         return
     try:
-        from watchdog import disk_guard as dg
-        _rows, lines = enforce(home, now, dry_run=dry_run, budget_left=budget_left)
-        out = [dg._log_line(now, a, p, b, r) for a, p, b, r in lines]
-        removed = [b for a, _p, b, _r in lines if a == "CAP-REMOVE"]
-        if removed:
-            logs.append("disk-guard: target cap removed %d stale unit(s), %s"
-                        % (len(removed), dg._human(sum(removed))))
-        if out and not dry_run:
-            try:
-                dg._append_log(dg._log_path(home), out)
-            except OSError as e:
-                logs.append("disk-guard: target-cap journal unwritable: %r" % e)
+        if not due(home, now):
+            return
+        stamp = os.path.join(os.path.dirname(_state_path(home)), LAUNCH_NAME)
+        try:
+            last = os.stat(stamp).st_mtime
+        except FileNotFoundError:
+            last = 0
+        if now - last < RETRY_CUT_S:
+            return
+        os.makedirs(os.path.dirname(stamp), exist_ok=True)
+        with open(stamp, "w", encoding="utf-8") as f:
+            f.write("%d\n" % now)
+        os.utime(stamp, (now, now))
+        ok, why = (launch_fn or _launch)(home)
+        if not ok:
+            logs.append("disk-guard: target-cap launch failed (%s); retry in %d min"
+                        % (why, RETRY_CUT_S // 60))
     except Exception as e:      # noqa: BLE001 — one pass must never break the poll
         logs.append("disk-guard: target-cap error: %r" % e)
+
+
+def run_detached(home=None, now=None):
+    """The detached run: every due target until CHILD_MAX_S, decisions to the guard
+    journal. One run at a time (an flock beside the state, besides the unit name).
+    Returns the journal lines it wrote."""
+    import fcntl
+    from watchdog import disk_guard as dg
+    home = home or os.path.expanduser("~")
+    now = time.time() if now is None else now
+    if os.geteuid() == 0:
+        return []
+    os.makedirs(os.path.dirname(_state_path(home)), exist_ok=True)
+    fd = os.open(os.path.join(os.path.dirname(_state_path(home)), LOCK_NAME),
+                 os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return []               # another run is at it
+        _rows, lines = enforce(home, now, deadline=time.monotonic() + CHILD_MAX_S)
+        out = [dg._log_line(now, a, p, b, r) for a, p, b, r in lines]
+        if out:
+            dg._append_log(dg._log_path(home), out)
+        return out
+    finally:
+        os.close(fd)
+
+
+def main(argv=None):
+    args = sys.argv[1:] if argv is None else argv
+    if args != ["--run"]:
+        sys.stderr.write("usage: main(['--run'])  (the detached run, see _launch)\n")
+        return 2
+    out = run_detached()
+    removed = sum(1 for ln in out if " CAP-REMOVE " in ln)
+    print("target-cap: %d journal line(s), %d unit(s) removed" % (len(out), removed))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
