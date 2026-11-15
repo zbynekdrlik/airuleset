@@ -257,5 +257,129 @@ class TestHook(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
 
 
+# --- review round 1 (two fresh-context adversarial reviews) ---------------- #
+R1_STEPS = (
+    "Zostáva vypnúť Wi-Fi, keď niekto bude pri PC.",
+    "Zostáva vypnúť Wi-Fi, až budeš pri PC.",
+    "Inštalácia čaká, kým bude technik na mieste.",
+    "Kábel musí pripojiť niekto na mieste.",
+    "Pokračujem, až niekto príde k PC.",
+    "Remaining: disable Wi-Fi when you are at the PC.",
+    "Remaining: disable Wi-Fi when you're at the PC.",
+    "This needs someone at the PC to replug the cable.",
+    "Remaining: someone at the venue has to swap the cable.",
+    "Čaká to na teba: zapojiť kábel.",
+    "Potrebujem od teba heslo k routeru.",
+    "Potrebujem, aby si reštartoval router.",
+    "Toto ostáva na tebe: reštart routera.",
+    "Owner musí reštartovať router v BIOSe.",
+    "Waiting on you to replug the cable.",
+    "I need you to log in on the box.",
+    "You need to power-cycle the switch.",
+)
+R1_NOT_STEPS = (
+    "Keď bude niekto pri PC, Windows Update sa nainštaluje sám — nič netreba.",
+    "Fyzická karta musí mať firmware 2.1, inak bridge nenaštartuje.",
+    "Treba, aby si systém zapamätal stav po reštarte.",
+    "Alert fires so someone should check the dashboard.",
+    "Deploy needs a manual step: I ran it over SSH.",
+    "The deploy requires a manual restart, which I did via systemctl.",
+    "Každé vytvorenie toku na cudzom zariadení potrebuje tvoj súhlas.",
+    "The gate catches lines like 'keď bude niekto pri PC' now.",
+    "There is no need to wait until someone is at the box.",
+    "Súbor musí fyzicky existovať na disku.",
+)
+
+
+class TestRound1(unittest.TestCase):
+    def test_more_step_forms_match(self):
+        for text in R1_STEPS:
+            self.assertTrue(_gate().owner_dependency(text), text)
+
+    def test_more_non_steps_never_match(self):
+        for text in R1_NOT_STEPS:
+            self.assertEqual(_gate().owner_dependency(text), "", text)
+
+    def test_first_person_report_is_not_an_audit_quote(self):
+        for text in ("Do #106 som napísal, že zostáva izolácia, keď bude niekto pri PC.",
+                     "Napísal som, že zostáva izolácia, keď bude niekto pri PC (#106)."):
+            self.assertTrue(_gate().owner_dependency(text), text)
+
+    def test_full_line_keeps_a_late_ref(self):
+        """Review 🔴: lines were cut to 200 chars before the U check."""
+        line = "Stav: " + "meranie beží, " * 20 + DASIO
+        steps = list(_gate().owner_dependency_lines(line))
+        self.assertEqual(_gate().line_refs(steps[0], "dasio")[0], {106})
+
+    def test_issue_word_refs_are_ours(self):
+        g = _gate()
+        for text, ours in (("keď bude niekto pri PC (see issue 106)", {106}),
+                           ("Zapísané do issue 106, keď bude niekto pri PC.", {106}),
+                           ("Work issue 106: keď bude niekto pri PC", {106}),
+                           ("dasio issue 106: keď bude niekto pri PC", {106}),
+                           ("**#87** čaká na teba", {87}),
+                           ("https://github.com/x/dasio/issues/106 čaká na teba", {106})):
+            self.assertEqual(g.line_refs(text, "dasio"), (ours, False), text)
+        self.assertEqual(g.line_refs("camera-box issue 1482", "dasio"), (set(), True))
+        self.assertEqual(g.line_refs("PR #7 a krok #2", "dasio"), (set(), False))
+        self.assertFalse(g.held_in_u("keď bude niekto pri PC (see issue 106)",
+                                     (set(), 0, "dasio")))
+
+    def test_session_word_needs_a_project(self):
+        g = _gate()
+        self.assertTrue(g.held_in_u("Čaká na tvoj súhlas v relácii mikrotik.", (set(), 0, "x")))
+        self.assertFalse(g.held_in_u("Keď bude niekto pri PC (zistené v relácii dnes). #106",
+                                     (set(), 0, "x")))
+
+    def test_ref_regex_is_linear(self):
+        g = _gate()
+        for filler in ("-" * 60_000, "." * 60_000, "a-" * 30_000):
+            t0 = time.monotonic()
+            g.held_in_u("keď bude niekto pri PC " + filler + " #106", (set(), 0, "dasio"))
+            self.assertLess(time.monotonic() - t0, 1.0, filler[:4])
+
+    def test_label_on_another_ticket_does_not_settle(self):
+        g = _gate()
+        self.assertFalse(g.held_in_u(DASIO, (set(), 0, "dasio"), {24}, any_label=True))
+        self.assertTrue(g.held_in_u(DASIO, (set(), 0, "dasio"), {106}, any_label=True))
+        self.assertTrue(g.held_in_u(NO_REF, (set(), 0, "dasio"), {24}, any_label=True))
+
+    def test_unknown_u_fails_open(self):
+        import statusbar
+        home = tempfile.mkdtemp(prefix="od1335u-")
+        self.addCleanup(lambda: __import__("shutil").rmtree(home, True))
+        cwd = os.path.join(home, "dasio")
+        d = statusbar.cache_dir(home)
+        d.mkdir(parents=True)
+        path = d / (statusbar.cwd_key(cwd) + ".json")
+        now = time.time()
+        for body in ({"ts": now, "user_waiting": None, "user_waiting_numbers": None},
+                     {"ts": now - 30 * 86400, "user_waiting": 0, "user_waiting_numbers": []},
+                     {"ts": now, "user_waiting": 0, "user_waiting_numbers": [],
+                      "stale_since": now - 600}):
+            path.write_text(json.dumps(body), encoding="utf-8")
+            self.assertIsNone(statusbar.owner_court(cwd, home=home), body)
+        path.write_text(json.dumps({"ts": now, "user_waiting": 1, "user_waiting_numbers": [5],
+                                    "name": "dasio"}), encoding="utf-8")
+        self.assertEqual(statusbar.owner_court(cwd, home=home), ({5}, 1, "dasio"))
+
+    def test_hook_prefilter_is_a_superset(self):
+        import re
+        src = HOOK.read_text(encoding="utf-8")
+        words = re.search(r"OD_WORDS='([^']+)'", src).group(1)
+        rx = re.compile(words, re.IGNORECASE)
+        for text in STEPS + R1_STEPS:
+            self.assertTrue(rx.search(text), text)
+
+    def test_block_message_puts_the_label_first_for_a_ticket(self):
+        t = _Transcript(self).prompt()
+        home = tempfile.mkdtemp(prefix="od1335m-")
+        self.addCleanup(lambda: __import__("shutil").rmtree(home, True))
+        _cache(home, t.dir)
+        verdict, reason = _gate().evaluate(t.write(), DASIO_MSG, t.dir, home=home)
+        self.assertEqual(verdict, "block")
+        self.assertLess(reason.index("needs-owner-action"), reason.index("❓ NEEDS YOU"))
+
+
 if __name__ == "__main__":
     unittest.main()
