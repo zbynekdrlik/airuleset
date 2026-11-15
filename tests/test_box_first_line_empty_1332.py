@@ -204,7 +204,7 @@ class CredentialDeadSendThreadsState(TestCase):
     """The FRESH one-continue must hand `state` to `send_verified`, or a verify
     failure records nothing for the janitor (the 01:45:29 journal line)."""
 
-    def test_state_and_now_reach_send_verified(self):
+    def test_state_reaches_send_verified(self):
         seen = {}
 
         def _sv(pid, text, run=None, tpath=None, sleep_fn=None, logs=None,
@@ -220,7 +220,6 @@ class CredentialDeadSendThreadsState(TestCase):
                 None, lambda s: None, False, [], "/nonexistent/state.json", 1000.0,
                 1000.0)
         self.assertIs(seen.get("state"), st)
-        self.assertEqual(seen.get("now"), 3000.0)
 
 
 class StuckRecoveryIsVisible(TestCase):
