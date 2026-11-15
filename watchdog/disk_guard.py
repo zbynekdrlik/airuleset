@@ -3743,7 +3743,7 @@ def run_disk_guard(now=None, home=None, dry_run=False, statvfs_fn=None, dev_fn=N
     except Exception as e:
         logs.append("disk-guard: cache write failed: %r" % e)
     with timer.step("target-cap", logs):   # #1318: size cap, every poll, any level
-        _dtc.run_pass(home, now, dry_run, logs, is_root)
+        _dtc.run_pass(home, now, dry_run, logs, is_root, budget_left=timer.budget_s - timer.elapsed())
     # #920: prevention pass at 70-79%
     # #939: on shared-stream boxes, fire at ANY pressure level with target_pct=0
     # (execute_drain's under-target STOP never fires when target=0) so worktree
