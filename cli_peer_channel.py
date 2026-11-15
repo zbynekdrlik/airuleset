@@ -29,6 +29,8 @@ session, self-contained). This leaf owns everything push/install does around it:
 
 ``python3 cli_peer_channel.py status|render-root [--host H]|root-apply [--host H]``.
 """
+import base64
+import binascii
 import json
 import os
 import pwd
@@ -63,6 +65,7 @@ SNAPSHOT_REGISTRY = os.path.join(SNAPSHOT_DIR, peer_channel.REGISTRY_FILE)
 FAR_MARKER_DIR = "/etc/airuleset/peer-far-ends"   # #1323: far-end accounts the root leg made
 FAR_SSH_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}@[0-9.]+$")
 FAR_KEY_RE = re.compile(r"^ssh-ed25519 [A-Za-z0-9+/=]+ [A-Za-z0-9@._-]+$")
+ED25519_BLOB_PREFIX = b"\x00\x00\x00\x0bssh-ed25519\x00\x00\x00\x20"   # RFC 8709 type + key length
 # Anthropic's own channel plugins (claude-plugins-official external_plugins). A
 # managed allowedChannelPlugins REPLACES the default allowlist, so they are kept.
 OFFICIAL_CHANNEL_PLUGINS = ("discord", "fakechat", "imessage", "telegram")
@@ -173,6 +176,18 @@ def validate_links(links_doc, registry, root_hosts=None, stream_users=stream_use
     return errors
 
 
+def far_key_ok(key):
+    """#1334: the far end's ``authorized_keys`` key is a real ed25519 public key, so a
+    placeholder or a truncated paste never validates (the shape regex alone took any word)."""
+    if not (isinstance(key, str) and FAR_KEY_RE.match(key)):
+        return False
+    try:
+        blob = base64.b64decode(key.split()[1], validate=True)
+    except (binascii.Error, ValueError):
+        return False
+    return len(blob) == len(ED25519_BLOB_PREFIX) + 32 and blob.startswith(ED25519_BLOB_PREFIX)
+
+
 def _bridge_errors(links_doc, root_hosts=None):
     """#1266: a bridge with a missing field would kill its thread at session start."""
     errors = []
@@ -198,7 +213,7 @@ def _bridge_errors(links_doc, root_hosts=None):
                 errors.append("bridge %s: %s is not a links host" % (name, host))
             if not (isinstance(far, dict) and FAR_SSH_RE.match(str(far.get("ssh")))
                     and far.get("path") == SNAPSHOT_DIR and far.get("identity")
-                    and FAR_KEY_RE.match(str(far.get("key")))
+                    and far_key_ok(far.get("key"))
                     and far.get("account") == str(far.get("ssh")).split("@")[0]
                     and peer_channel.PROJECT_RE.match(str(far.get("account")))):
                 errors.append("bridge %s/%s: needs ssh, account, identity, key and path %s"
