@@ -50,8 +50,8 @@ _ACCEPT_RE = re.compile(r"\bACCEPT\b")
 # or the gk verdict template's own heading line (`## Gatekeeper review verdict:
 # ACCEPT`); a word in prose ("I can't ACCEPT this yet") never does.
 _FORMAL_ACCEPT_RE = re.compile(
-    r"gk-state:\s*ACCEPT\b|^#{1,6}[ \t]*Gatekeeper review verdict:[ \t]*ACCEPT\b",
-    re.IGNORECASE | re.MULTILINE)
+    r"gk-state:\s*ACCEPT\b|^[ \t]*(?:#{1,6}[ \t]*|\*\*)Gatekeeper review verdict:"
+    r"[ \t]*ACCEPT(?:\*\*)?[ \t.!]*$", re.IGNORECASE | re.MULTILINE)
 
 # An emoji-prefixed finding row (🔴/🟡/🔵 followed by an id digit) — the
 # ADVISORY signal, alongside the counts header. Deliberately NOT the loose
@@ -146,6 +146,8 @@ def classify_gk_comment(body):
     mm = _GK_STATE_MARKER_RE.search(text)
     if mm:
         verdict = mm.group(1).upper()
+    elif _FORMAL_ACCEPT_RE.search(text):
+        verdict = "ACCEPT"     # #1331: a formal ACCEPT citing an old BOUNCE
     elif _BOUNCE_RE.search(text):
         verdict = "BOUNCE"
     elif _ACCEPT_RE.search(text):

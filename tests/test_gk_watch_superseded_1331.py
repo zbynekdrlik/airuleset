@@ -120,6 +120,22 @@ class ReviewFindings1331(unittest.TestCase):
                      "2026-11-13T23:37:56Z")]
         self.assertNotEqual(_watch(rows, matcher=None)["state"], "bounce-unanswered")
 
+    def test_a_formal_accept_citing_the_old_bounce_supersedes(self):
+        """Re-review 🟡: BOUNCE outranked ACCEPT in the word fallback."""
+        for body in ("## Gatekeeper review verdict: ACCEPT\n\nThe round-1 BOUNCE "
+                     "findings are fixed.",
+                     "**Gatekeeper review verdict: ACCEPT**\n\nAfter the BOUNCE, fixed."):
+            self.assertEqual(gw.classify_gk_comment(body)[0], "ACCEPT", body)
+            rows = [_row(1, GK, BOUNCE, "2026-11-13T21:21:21Z"),
+                    _row(2, GK, body, "2026-11-13T23:37:56Z")]
+            self.assertNotEqual(_watch(rows, matcher=None)["state"], "bounce-unanswered")
+
+    def test_a_heading_that_negates_accept_is_not_formal(self):
+        rows = [_row(1, GK, BOUNCE, "2026-11-13T21:21:21Z"),
+                _row(2, GK, "## Gatekeeper review verdict: ACCEPT not possible yet",
+                     "2026-11-13T23:37:56Z")]
+        self.assertEqual(_watch(rows, matcher=None)["state"], "bounce-unanswered")
+
     def test_bot_suffix_never_matches_a_bare_login(self):
         self.assertFalse(_is_own_login("my-app", "my-app[bot]"))
         self.assertFalse(_is_own_login("my-app[bot]", "my-app"))
