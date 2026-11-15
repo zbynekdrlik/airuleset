@@ -607,8 +607,13 @@ class TestPollWiring(unittest.TestCase):
             seen.append(argv)
             return types.SimpleNamespace(returncode=0, stderr="")
         from watchdog import user_unit
+        with mock.patch("subprocess.run", side_effect=run):
+            self.assertEqual(tc._launch("/home/x"), (False, "systemd-run not used under test"))
+        self.assertEqual(seen, [])          # a test never starts a real pass on a real home
         with mock.patch.object(user_unit, "launch", wraps=user_unit.launch) as lw, \
-                mock.patch("subprocess.run", side_effect=run):
+                mock.patch("subprocess.run", side_effect=run), \
+                mock.patch("watchdog.disk_guard_escalation.running_under_pytest",
+                           return_value=False):
             self.assertEqual(tc._launch("/home/x"), (True, "started"))
         argv = seen[0]
         self.assertEqual(argv[argv.index("--unit") + 1], tc.UNIT_NAME)
