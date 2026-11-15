@@ -19,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import watchdog  # noqa: E402
-from test_box_first_line_empty_1332 import FOOT, LONE_NL, SEP, _BoxPane  # noqa: E402
+from test_box_first_line_empty_1332 import FOOT, LONE_NL, PTR_BOX, SEP, _BoxPane  # noqa: E402
 from test_send_verified_adoption import (  # noqa: E402
     _RunOnceAdoptHarness, _assistant_row)
 
@@ -76,28 +76,50 @@ class RoundTwo(TestCase):
         self.assertEqual(len(sent), watchdog.JANITOR_CLEAR_MAX_ITER,
                          "one full attempt in the first sweep, none after")
 
-    def test_a_bare_box_send_clears_a_line_break_box_then_delivers(self):
+    # Round 3 (both reviews) reversed round 2's "every caller clears a line-break
+    # box": that clear typed into a box we did not write for kinds the owner
+    # switched OFF and outside any recovery. Only the recovery resume paths
+    # (job 1, credential-dead, job 6) clear it; every other delivery HOLDS.
+    def test_a_bare_box_send_holds_on_a_line_break_box(self):
         fake = _pane("\n", self.tmp)
-        state = {}
-        first = watchdog.send_verified("%1", "continue", fake, fake.tpath,
-                                       sleep_fn=lambda s: None, logs=[], nudge="resume",
-                                       state=state)
+        logs = []
+        first = watchdog.send_verified("%1", "a machine nudge", fake, fake.tpath,
+                                       sleep_fn=lambda s: None, logs=logs,
+                                       nudge="bounce", state={})
         self.assertFalse(first)
-        self.assertEqual(fake.box, "", "the line break is cleared by the pre-send gate")
-        second = watchdog.send_verified("%1", "continue", fake, fake.tpath,
-                                        sleep_fn=lambda s: None, logs=[], nudge="resume",
-                                        state=state)
-        self.assertTrue(second)
-        self.assertEqual(fake.submitted, ["continue"])
+        self.assertEqual(fake.box, "\n", logs)
+        self.assertEqual(fake.sent, [], "no key into a box we did not type")
 
-    def test_the_stash_route_clears_a_line_break_box_instead_of_a_dead_ctrl_s(self):
+    def test_the_stash_route_holds_on_a_line_break_box_without_a_dead_ctrl_s(self):
         fake = _pane("\n", self.tmp)
         logs = []
         ok = watchdog.deliver_with_stash("%1", "continue", fake, logs=logs,
                                          sleep_fn=lambda s: None, state={})
         self.assertFalse(ok)
-        self.assertEqual(fake.box, "", logs)
-        self.assertFalse(any("C-s" in a for a in fake.sent), logs)
+        self.assertEqual(fake.box, "\n", logs)
+        self.assertEqual(fake.sent, [], logs)
+
+    def test_a_successful_own_text_clear_ends_the_episode_lock(self):
+        from watchdog import send_outcome
+        ptr_file = Path(self.tmp) / "nudges" / "resume-261111183944-c447.md"
+        ptr_file.parent.mkdir()
+        ptr_file.write_text("x", encoding="utf-8")
+        os.chmod(ptr_file, 0o600)
+        ptr = "nudge: [resume] rotacia — celý text: " + str(ptr_file)
+        state, now = {}, time.time()
+        with m.patch.dict(os.environ, {"AIRULESET_NUDGE_FILE_DIR": str(ptr_file.parent)}):
+            for i in range(2):
+                fake = _pane("\n" + ptr, self.tmp)
+                verdict = send_outcome.presend_reclaim(
+                    "%1", fake, fake.render(), lambda s: None, state, now + 600 * i, [].append)
+                self.assertTrue(verdict.startswith("pre-send: cleared"), verdict)
+
+    def test_job10_reads_our_pointer_under_an_empty_first_line_as_ours(self):
+        st, pings = {}, []
+        for i in range(watchdog.PWEDGE_SWEEPS + 2):
+            watchdog.prompt_wedge_check(1_000_000 + 70 * i, st, "%1", PTR_BOX, 0,
+                                        "zbynek", "p", lambda *a, **k: pings.append(a))
+        self.assertFalse(any("NEODOSLAN" in str(p) for p in pings), pings)
 
     def test_job10_does_not_track_a_line_break_box_as_a_user_draft(self):
         st, pings = {}, []
@@ -115,7 +137,7 @@ class JobSixOnTheNewShape(TestCase):
     BANNER = ("❯ continue\n  ⎿  You've hit your session limit · resets 6:10pm "
               "(Europe/Prague)\n     /usage-credits to finish what you're working on.\n\n")
 
-    def _two_sweeps(self, box_rows):
+    def _two_sweeps(self, box_rows, **extra):
         from datetime import datetime
         from zoneinfo import ZoneInfo
         import tempfile
@@ -134,6 +156,7 @@ class JobSixOnTheNewShape(TestCase):
         now = datetime(2026, 7, 1, 18, 15, tzinfo=ZoneInfo("Europe/Bratislava")).timestamp()
         sess = {"resets_at": now - 300, "pinged": True, "continued": False,
                 "first_seen": int(now - 3600), "last_seen": int(now - 60)}
+        sess.update(extra)
         h = _RunOnceAdoptHarness(self, [_assistant_row("pracujem…")], mtime_age=60,
                                  capture=cap, seed_state={"sesslimit:" + h_sid(): sess},
                                  now=now)
@@ -152,6 +175,12 @@ class JobSixOnTheNewShape(TestCase):
         logs, sent, keys = self._two_sweeps(["❯\xa0", ""])
         self.assertFalse(any("user draft" in ln for ln in logs), logs)
         self.assertFalse(any("rozpísaný prompt" in b for b in sent), sent)
+
+    def test_a_reclaim_that_keeps_holding_reaches_the_give_up(self):
+        logs, sent, keys = self._two_sweeps(
+            ["❯\xa0", "  nudge: [resume] rotacia — celý text: {F}"],
+            swallow_fails=watchdog.SESSLIMIT_MAX_TRIES - 1)
+        self.assertTrue(any("nepodarilo obnoviť" in b for b in sent), (sent, logs))
 
 
 def h_sid():
