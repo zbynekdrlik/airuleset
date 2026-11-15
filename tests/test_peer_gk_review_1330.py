@@ -82,6 +82,12 @@ class TestReplyInjection(_StreamEnv):
         self.assertIn("rate limit", text)
         self.assertNotIn("600", text)
 
+    def test_only_a_literal_true_counts_and_extra_fields_are_dropped(self):
+        _fake_listener(self, os.path.join(self.sock, ME, "s1.%d.sock" % os.getpid()),
+                       {"ok": INJECT, "project": INJECT})
+        results = self.peer("alpha")._calls("s1", {"v": 1, "op": "ping"})
+        self.assertEqual(results, [{"ok": False, "error": "refused"}])
+
 
 class TestStreamAccountRows(unittest.TestCase):
     """review B#1 / A F2: the mark follows the NAME, so no other name may use a stream account."""
