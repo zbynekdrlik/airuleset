@@ -26,7 +26,7 @@ from gates.shellcmd import strip_quoted
 # A real ``git push`` command (block-test-skips' precise shape): git, optional
 # flags, then ``push`` at a word boundary. Applied to the QUOTE-STRIPPED command
 # so "git push" inside a quoted message/echo/path does not trigger.
-_PUSH_RE = re.compile(r"git(\s+-[Cc]\s+\S+|\s+-\S+)*\s+push(\s|$)")  # #1312: -C <dir>
+_PUSH_RE = re.compile(r"git(\s+-[Cc]\s+\S+|\s+-(?![Cc]\s)\S+)*\s+push(\s|$)")  # #1312
 # The looser shape pre-push-test-check historically used (raw, no quote-strip).
 _PUSH_LOOSE_RE = re.compile(r"git\s+push")
 # #503 -- a durability BACKUP push to refs/autopilot-wip/* triggers no CI, so

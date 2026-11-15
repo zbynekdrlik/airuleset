@@ -9,13 +9,18 @@ from the command itself, never from the cwd. ``parse`` is a pure parser;
 locally) through injected functions.
 
 ``parse(cmd)`` returns one ``PushTarget(dir, srcs, skip)`` per ``git … push``
-in the command (EVERY one, so an earlier clean or delete push never shadows a
-later one):
+in the command (EVERY one, at any word position, so an earlier clean or delete
+push never shadows a later one and ``sudo``/``time``/``env``/``{ …; }`` wrappers
+are seen). Heredoc bodies are data and are blanked first. When the raw text
+holds more ``git … push`` than were parsed (``bash -c '…'``, a heredoc body),
+the pre-#1312 cwd/HEAD target is added: the parser never judges LESS than the
+old gate did.
 
 * ``dir`` -- the directory git runs in: a ``cd [-L|-P] <dir>`` earlier in the
   same ``&&``/``;``/newline chain, then every global ``-C <dir>`` (relative
-  ones chain, as git does). ``None`` = the process cwd (no cd/-C, or one it
-  cannot follow: ``cd $X``, ``cd -``, after a pipe or a subshell). Never a guess.
+  ones chain, as git does). ``None`` = the process cwd (no cd/-C, or a cd it
+  cannot follow: ``cd $X``, ``cd -``, a cd after a pipe or a subshell, and any
+  relative cd after one of those). Never a guess.
 * ``srcs`` -- every pushed source: each refspec's left side (a leading ``+``
   dropped); ``("HEAD",)`` when there is no refspec, ``HEAD`` for ``HEAD``/``@``.
   A delete refspec (``:dst``) contributes nothing.
@@ -27,6 +32,7 @@ An unparseable command (unbalanced quotes) yields one ``PushTarget(None,
 """
 import collections
 import os
+import re
 import shlex
 
 PushTarget = collections.namedtuple("PushTarget", "dir srcs skip")
@@ -36,6 +42,12 @@ _CHAIN = {"&&", ";", "\n"}                 # a cd before these still applies
 _PUNCT = "();<>|&\n"
 _VALUE_OPTS = {"-o", "--push-option", "--repo", "--receive-pack", "--exec"}
 _GIT_VALUE_GLOBALS = {"-c", "--git-dir", "--work-tree", "--namespace"}
+_UNKNOWN = object()                        # a cd we could not follow
+# Every `git [globals] push` the raw text holds, quoted or wrapped or not (the
+# pushscope detector's shape). More of these than parsed pushes means one hides
+# where the parser cannot see it (`sudo …`, `bash -c '…'`, a heredoc body):
+# that one is judged the pre-#1312 way, in the cwd (re-review 🔴).
+_ANY_PUSH_RE = re.compile(r"\bgit(?:\s+-[Cc]\s+\S+|\s+-(?![Cc]\s)\S+)*\s+push\b")
 
 
 def _tokens(cmd):
@@ -122,40 +134,52 @@ def _refspecs(args):
     return tuple(srcs), not srcs
 
 
+def _target(cd_dir, c_dir, srcs, skip):
+    if cd_dir is _UNKNOWN:
+        if not (c_dir and os.path.isabs(os.path.expanduser(c_dir))):
+            return PushTarget(None, srcs, skip)   # unknown dir: the process cwd, as before
+        cd_dir = None
+    return PushTarget(_join(cd_dir, c_dir) if c_dir else cd_dir, srcs, skip)
+
+
 def parse(cmd):
-    """Every ``PushTarget`` in ``cmd`` (see the module doc)."""
+    """Every ``PushTarget`` in ``cmd`` (see the module doc). Heredoc bodies are
+    data, never commands (a `cd` line in one must not move the gate)."""
+    from gates.selfservice import _capture_heredocs
+    skeleton = _capture_heredocs(cmd or "")[2]
     try:
-        toks = _tokens(cmd)
+        toks = _tokens(skeleton)
     except ValueError:
         return list(_DEFAULT)
     out, cd_dir, start = [], None, True
     for i, tok in enumerate(toks):
         if _is_op(tok):
             if tok not in _CHAIN:
-                cd_dir = None              # `|`, `||`, `&`, a subshell: unknown
+                cd_dir = _UNKNOWN          # `|`, `||`, `&`, a subshell
             start = True
             continue
-        if not start:
-            continue
-        start = False
-        if "=" in tok and not tok.startswith("-") and tok.split("=", 1)[0].isidentifier():
-            start = True                   # `VAR=x cmd`: the command follows
-            continue
-        if tok == "cd":
+        if start and "=" in tok and not tok.startswith("-") \
+                and tok.split("=", 1)[0].isidentifier():
+            continue                       # `VAR=x cmd`: the command follows
+        if start and tok == "cd":
             target = _cd_target(toks, i)
-            cd_dir = _join(cd_dir, target) if target else None
-            continue
+            if not target or (cd_dir is _UNKNOWN and not os.path.isabs(os.path.expanduser(target))):
+                cd_dir = _UNKNOWN
+            else:
+                cd_dir = _join(None if cd_dir is _UNKNOWN else cd_dir, target)
+        start = False
         if tok.rsplit("/", 1)[-1] != "git":
             continue
-        found = _push_args(toks, i)
+        found = _push_args(toks, i)        # at ANY position: `sudo …`, `time …`
         if found is None:
             continue
         c_dir, args = found
         if args is None:                   # an unfollowable -C: the old behaviour
             out.append(_DEFAULT[0])
             continue
-        srcs, skip = _refspecs(args)
-        out.append(PushTarget(_join(cd_dir, c_dir) if c_dir else cd_dir, srcs, skip))
+        out.append(_target(cd_dir, c_dir, *_refspecs(args)))
+    if len(_ANY_PUSH_RE.findall(cmd or "")) > len(out) and _DEFAULT[0] not in out:
+        out.append(_DEFAULT[0])
     return out or list(_DEFAULT)
 
 

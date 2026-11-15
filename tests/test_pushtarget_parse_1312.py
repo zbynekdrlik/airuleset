@@ -70,8 +70,29 @@ class Parse1312(unittest.TestCase):
         self.check("git push origin --delete foo && git push",
                    P(None, (), True), P(None, H, False))
 
+    def test_wrapped_pushes_and_unknown_relative_cd(self):
+        self.check("git push -d o x && sudo -u x git push origin lane",
+                   P(None, (), True), P(None, ("lane",), False))
+        self.check("cd $X && cd ../wt && git push", P(None, H, False))
+        self.check("(cd /w && git push)", P("/w", H, False))
+        self.check("cd $X && git -C /abs push", P("/abs", H, False))
+
+    def test_a_push_the_parser_cannot_see_adds_the_old_target(self):
+        self.check("git -C /a push origin a && bash -c 'git push'",
+                   P("/a", ("a",), False), P(None, H, False))
+
     def test_unbalanced_quote_is_the_old_behaviour(self):
         self.check("git push origin 'lane", P(None, H, False))
+
+    def test_push_regexes_are_linear(self):
+        """`-C <dir>` and `-\\S+` overlapped on a `-C -C -C …` run: exponential."""
+        import time
+        cmd = "gi" + "t " + "-C " * 2000 + "x"
+        t = time.monotonic()
+        pushtarget._ANY_PUSH_RE.findall(cmd)
+        pushscope.is_push_command(cmd)
+        pushtarget.parse(cmd)
+        self.assertLess(time.monotonic() - t, 1.0)
 
     def test_push_regex_accepts_dash_c(self):
         self.assertTrue(pushscope.is_push_command("git -C /tmp/wt push origin x"))

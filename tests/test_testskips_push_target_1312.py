@@ -182,6 +182,24 @@ class ReviewFindings1312(_Repo):
         r = self.run_hook("git push origin :lane", cwd=self.main)
         self.assertEqual(r.returncode, 0, r.stderr)
 
+    def test_a_wrapped_push_after_a_delete_is_still_judged(self):
+        """Re-review 🔴: only command-start pushes were parsed, so a wrapped
+        push after a delete push was never judged."""
+        self.lane_with_skip()
+        for wrapped in ("sudo -u x git push origin lane", "{ git push origin lane; }",
+                        "if true; then git push origin lane; fi", "time git push origin lane",
+                        "command git push", "env X=1 git push", "bash -c 'git push'",
+                        "! git push", "timeout 90 git push origin lane"):
+            cmd = "git push origin --delete foo && " + wrapped
+            self.assertEqual(self.run_hook(cmd, cwd=self.wt).returncode, 2, cmd)
+
+    def test_a_cd_inside_heredoc_text_never_moves_the_gate(self):
+        self.lane_with_skip()
+        for cmd in ("cat > /dev/null <<EOF\ncd %s\nEOF\ngit push" % self.main,
+                    "git commit -q --allow-empty -F - <<'EOF'\nnote\ncd %s\nEOF\n"
+                    "git push origin HEAD" % self.main):
+            self.assertEqual(self.run_hook(cmd, cwd=self.wt).returncode, 2, cmd)
+
     def test_an_unresolvable_cd_falls_back_to_the_cwd(self):
         self.dirty_main_checkout()
         r = self.run_hook("cd /nonexistent-1312 && git push", cwd=self.main)
