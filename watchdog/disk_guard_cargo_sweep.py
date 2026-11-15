@@ -3,7 +3,7 @@
 Every rebuild with a new hash ADDS files to ``<profile>/deps``, ``build/`` and
 ``.fingerprint/``; Cargo never removes the old ones (dev1, 13.11.2026: ~167 GB
 unread for 3+ days). ``stale-build`` needs the whole target idle for 14 days and
-``build-incremental`` takes only ``incremental/``, so neither reaches them.
+``build-incremental`` takes only ``incremental/`` of an idle target, so neither reaches them.
 
 The rule is cargo-sweep 0.8.0's ``--time N`` (src/fingerprint.rs), done in stdlib so
 the guard holds Cargo's own build lock while it deletes:
@@ -15,23 +15,54 @@ the guard holds Cargo's own build lock while it deletes:
   (Cargo reads them on every build, relatime bumps the atime daily);
 - a hash is stale when every fingerprint dir with it is older than MAX_AGE_DAYS.
   Only those hashes go, from ``deps/``, ``build/`` and ``.fingerprint/`` together;
-  a file whose hash has no fingerprint dir is never guessed at, and
-  ``incremental/`` is left to build-incremental.
+  a file whose hash has no fingerprint dir is never guessed at.
 
-One row per profile dir; the act re-checks liveness, holds every ``.cargo*lock`` of
-the profile (a build that starts waits) and recomputes the stale set under the lock.
+15.11.: dstack's target always has a running process in it, so a target-level
+liveness veto freed nothing while the disk refilled. Liveness is now per FILE: under
+the held build lock no build runs (one that starts waits), so only an entry a running
+process maps, holds open or sits in (``/proc/*/maps|fd|exe|cwd``, ONE snapshot per
+profile, #1216) stays, and its unit keeps its fingerprint for the next pass.
+
+``incremental/<crate>-<id>/`` is rustc's own cache, keyed by a stable crate id that is
+not the unit hash, so its age is read off the dir itself: files by ``max(atime,
+mtime)``, dirs by mtime (a listing bumps a dir's atime). A crate dir goes when it is
+older than the window, is not the most recently used dir of its crate name, and no
+rustc session lock inside it is held. Deleting it costs one non-incremental compile.
 """
+import fcntl
+import glob
 import os
 import re
 import shutil
+import time
 
 from watchdog.disk_guard_stale_build import (_cargo_targets, _hold_build_locks,
                                              _owning_target, profile_children)
 
 CLS = "stale-target-artifacts"
-MAX_AGE_DAYS = 3
+MAX_AGE_DAYS = 2                           # relatime bumps atime once a day: 1 is unsafe
+SWEEP_BUDGET_S = 30                        # one act stays inside the 45 s poll budget
 _HASH_RX = re.compile(r"-([0-9a-f]{16})$")
-_UNIT_DIRS = ("deps", "build")             # .fingerprint goes last, see _sweep
+_CRATE_RX = re.compile(r"^(.+)-([0-9a-z]+)$")
+_UNIT_DIRS = ("deps", "build")             # .fingerprint goes last, see sweep_profile
+
+
+def _snapshot():
+    """Every path a running process maps, holds open, runs or sits in: ONE /proc
+    pass. None when /proc is unusable, which keeps everything."""
+    from cli_live_snapshot import live_links
+    return live_links(maps=True)
+
+
+def _used(snapshot, path):
+    """``path`` is, or contains, a path in the snapshot. Its parent is resolved but
+    the entry itself is not: a symlink entry is removed, never followed."""
+    try:
+        real = os.path.join(os.path.realpath(os.path.dirname(path)), os.path.basename(path))
+    except OSError:
+        return True
+    exact, ancestors = snapshot
+    return real in exact or real in ancestors
 
 
 def _hash_of(name):
@@ -102,33 +133,97 @@ def _entries(profile, stale):
     return out
 
 
-def _measure(profile, now):
-    """``(bytes, units)`` a sweep of ``profile`` would free now."""
+def _crate_last_use(path):
+    """Newest use of an incremental crate dir: files by ``max(atime, mtime)``,
+    dirs by mtime only (a listing bumps a dir's atime)."""
+    newest = os.lstat(path).st_mtime
+    for dirpath, dirnames, files in os.walk(path):
+        for name in dirnames:
+            newest = max(newest, os.lstat(os.path.join(dirpath, name)).st_mtime)
+        for name in files:
+            st = os.lstat(os.path.join(dirpath, name))
+            newest = max(newest, st.st_atime, st.st_mtime)
+    return newest
+
+
+def stale_incremental(profile, now, max_age_days=MAX_AGE_DAYS):
+    """``incremental/<crate>-<id>`` dirs unused for the window, never the most
+    recently used dir of a crate name."""
+    base = os.path.join(profile, "incremental")
+    if not os.path.isdir(base) or os.path.islink(base):
+        return []
+    limit = now - max_age_days * 86400
+    by_crate = {}
+    with os.scandir(base) as it:
+        for e in it:
+            m = _CRATE_RX.match(e.name)
+            if m and e.is_dir(follow_symlinks=False):
+                by_crate.setdefault(m.group(1), []).append((_crate_last_use(e.path), e.path))
+    out = []
+    for dirs in by_crate.values():
+        dirs.sort()
+        out += [p for t, p in dirs[:-1] if t < limit]
+    return sorted(out)
+
+
+def _session_locks_free(crate):
+    """No rustc holds a session lock in ``crate``. Under Cargo's lock none can; this
+    guards a rustc run outside Cargo."""
+    for lock in glob.glob(os.path.join(glob.escape(crate), "*.lock")):
+        try:
+            fd = os.open(lock, os.O_RDONLY)
+        except OSError:
+            return False
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return False
+        finally:
+            os.close(fd)
+    return True
+
+
+def _measure(profile, now, snapshot):
+    """``(bytes, units, incremental dirs, entries in use)`` a sweep would give now."""
+    size, used = 0, 0
     stale = stale_hashes(profile, now)
-    if not stale:
-        return 0, 0
-    return sum(_freeable(p) for p in _entries(profile, stale)), len(stale)
+    for path in _entries(profile, stale):
+        if _used(snapshot, path):
+            used += 1
+        else:
+            size += _freeable(path)
+    incs = 0
+    for crate in stale_incremental(profile, now):
+        if _used(snapshot, crate):
+            used += 1
+        else:
+            size += _freeable(crate)
+            incs += 1
+    return size, len(stale), incs, used
 
 
-def discover_stale_units(home=None, now=None, live_fn=None):
+_UNSET = object()
+
+
+def discover_stale_units(home=None, now=None, snapshot=_UNSET):
     """Rows ``{cls, path, bytes, reason, why}``; ``reason`` None means a candidate.
-    A live target gives one kept row and is not walked."""
-    if live_fn is None:
-        from cli_live_snapshot import batch_checker
-        live_fn = batch_checker()
+    Without a usable /proc snapshot every target is kept and not walked."""
+    if snapshot is _UNSET:
+        snapshot = _snapshot()
     home = home or os.path.expanduser("~")
     rows, candidates = [], []
     for target in _cargo_targets(home):
+        if snapshot is None:
+            rows.append({"cls": CLS, "path": target, "bytes": 0, "reason": "in live use"})
+            continue
         try:
-            if live_fn(target):
-                rows.append({"cls": CLS, "path": target, "bytes": 0, "reason": "in live use"})
-                continue
             for profile in profile_dirs(target):
-                size, units = _measure(profile, now)
+                size, units, incs, used = _measure(profile, now, snapshot)
                 if size:
-                    candidates.append({"cls": CLS, "path": profile, "bytes": size,
-                                       "reason": None,
-                                       "why": "%d unit(s) unused %d+ d" % (units, MAX_AGE_DAYS)})
+                    candidates.append({
+                        "cls": CLS, "path": profile, "bytes": size, "reason": None,
+                        "why": "%d unit(s) + %d incremental dir(s) unused %d+ d; %d in use kept"
+                               % (units, incs, MAX_AGE_DAYS, used)})
         except OSError as e:
             rows.append({"cls": CLS, "path": target, "bytes": 0, "reason": "unreadable: %s" % e})
     return rows + sorted(candidates, key=lambda r: -r["bytes"])
@@ -156,30 +251,48 @@ def _remove(path):
     return freed
 
 
+def _sweep_locked(profile, now, snapshot):
+    """The deletes, under the held build lock. Stops at SWEEP_BUDGET_S; a cut
+    leaves fingerprints the next pass finds."""
+    deadline = time.monotonic() + SWEEP_BUDGET_S
+    freed, started = 0, False
+    keep, failed = set(), set()     # hashes whose fingerprint stays / whose unit stops
+    fp_dir = os.path.join(profile, ".fingerprint")
+    inc_dir = os.path.join(profile, "incremental")
+    units = _entries(profile, stale_hashes(profile, now))
+    for path in units + stale_incremental(profile, now):
+        if started and time.monotonic() > deadline:
+            break
+        parent = os.path.dirname(path)
+        h = None if parent == inc_dir else _hash_of(os.path.basename(path))
+        if h in failed or (parent == fp_dir and h in keep):
+            continue
+        if _used(snapshot, path) or (h is None and not _session_locks_free(path)):
+            keep.add(h)                 # the next pass retries the unit
+            continue
+        started = True
+        try:
+            freed += _remove(path)
+        except OSError:
+            failed.add(h)
+            keep.add(h)
+    return freed
+
+
 def sweep_profile(profile, now):
-    """The act: freed bytes, or -1 when a build runs or the target is in use.
-    The liveness read comes before the holds: our own open lock files would read
-    as a live process in the target."""
-    from cli_target_purge import _target_in_live_use
+    """The act: freed bytes, or -1 when a build holds the lock, /proc is unusable,
+    or the profile is reached through a symlink. The snapshot is taken under the
+    lock, so no build can start between it and the deletes."""
     target = _owning_target(os.path.join(profile, "deps"))
-    if (target is None or os.path.realpath(profile) != os.path.join(
-            os.path.realpath(target), os.path.relpath(profile, target))
-            or _target_in_live_use(target)):
+    if target is None or os.path.realpath(profile) != os.path.join(
+            os.path.realpath(target), os.path.relpath(profile, target)):
         return -1
     fds = _hold_build_locks(profile)
     if fds is None:
         return -1
     try:
-        freed, failed = 0, set()
-        for path in _entries(profile, stale_hashes(profile, now)):
-            h = _hash_of(os.path.basename(path))
-            if h in failed:         # keep its fingerprint: the next pass retries the unit
-                continue
-            try:
-                freed += _remove(path)
-            except OSError:
-                failed.add(h)
-        return freed
+        snapshot = _snapshot()
+        return -1 if snapshot is None else _sweep_locked(profile, now, snapshot)
     finally:
         for fd in fds:
             os.close(fd)
