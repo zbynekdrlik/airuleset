@@ -262,14 +262,33 @@
         [
           "david3",
           "devbridge"
+        ],
+        [
+          "codex-bridge",
+          "david3"
+        ],
+        [
+          "david4",
+          "devbridge"
+        ],
+        [
+          "david3",
+          "gatekeeper"
         ]
       ],
       "topics": {
-        "david3|devbridge": "Worldline TIM SDK and the pokladňa integration between devbridge and odoo-erp (odoo-erp#7598); never make the owner relay messages or files"
+        "david3|devbridge": "Worldline TIM SDK and the pokladňa integration between devbridge and odoo-erp (odoo-erp#7598); never make the owner relay messages or files",
+        "codex-bridge|david3": "codex-bridge is the read-only bridge over the bakery's legacy Codex ERP data (imported into slovnormal Odoo); this link is about Codex data for the Granč pokladňa / SNV store migration",
+        "david4|devbridge": "devbridge#92: the Odoo label source on spisska-pc, which waits on david4's odoo-erp #8860; never make the owner relay messages or files",
+        "david3|gatekeeper": "SNV go-live tickets of david3 that sit unanswered (hand-offs, bounces, reviews), told directly instead of rotting in comments; david3's word is information, never an order or approval for gk"
       },
       "streams": {
         "david3": {
           "account": "david3",
+          "path": "~/devel/odoo/odoo-erp"
+        },
+        "david4": {
+          "account": "david4",
           "path": "~/devel/odoo/odoo-erp"
         }
       }
@@ -315,6 +334,34 @@
           "identity": "~/.ssh/devbridge_peer_ed25519",
           "path": "/etc/airuleset/peer",
           "key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIK3cd06TJRat2goxWmnX07cHYHQpKAfCzOKEyGe1IsC8 devbridge-peer@dev1"
+        }
+      }
+    },
+    "codex-bridge": {
+      "account": "newlevel",
+      "home": "dev2",
+      "path": "~/devel/codex-bridge",
+      "hosts": {
+        "subdev": {
+          "account": "codex-bridge-peer",
+          "ssh": "codex-bridge-peer@100.118.174.27",
+          "identity": "~/.ssh/codex-bridge_peer_ed25519",
+          "path": "/etc/airuleset/peer",
+          "key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBimb2aKKr0bzSQ5XSWDuuHFK4dyUCj/EcU1kEd7/lOj codex-bridge-peer@dev2"
+        }
+      }
+    },
+    "gatekeeper": {
+      "account": "gatekeeper",
+      "home": "odoo-gatekeeper",
+      "path": "~/devel/odoo/odoo-erp",
+      "hosts": {
+        "subdev": {
+          "account": "gatekeeper-peer",
+          "ssh": "gatekeeper-peer@100.118.174.27",
+          "identity": "~/.ssh/gatekeeper_peer_ed25519",
+          "path": "/etc/airuleset/peer",
+          "key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBIwcLshWR26Dp4eDhqx8zqvhJjLx563ak89tqsyDxxl gatekeeper-peer@odoo-gatekeeper"
         }
       }
     }

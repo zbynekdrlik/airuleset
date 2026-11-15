@@ -102,7 +102,9 @@ class TestValidation(unittest.TestCase):
         doc = _doc(home="gatekeeper")
         errs = cpc.validate_links(doc, REG, root_hosts={"h1", "gatekeeper"})
         self.assertTrue(any("home 'gatekeeper'" in e for e in errs), errs)
-        self.assertEqual(cpc.HOME_HOSTS, {"dev1", "dev2", cpc.CONTROLLER_HOME})
+        # #1330: gk is a home only under its socket hostname, via HOME_FLEET
+        self.assertEqual(cpc.HOME_HOSTS, {"dev1", "dev2", cpc.CONTROLLER_HOME,
+                                          "odoo-gatekeeper"})
 
     def test_home_must_be_a_root_host(self):
         errs = cpc.validate_links(_doc(home="nope"), REG, root_hosts={"h1", "dev2"})

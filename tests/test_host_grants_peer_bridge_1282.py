@@ -362,7 +362,8 @@ class TestManagedSide(unittest.TestCase):
         self.assertIn(cpc.POLICY_PATH, run.call_args[0][0][-1])
 
     FAR = {"account": "far", "ssh": "far@10.0.0.1", "identity": "~/k",
-           "path": "/etc/airuleset/peer", "key": "ssh-ed25519 AAAA c@h"}
+           "path": "/etc/airuleset/peer", "key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGkRnAroNZk"
+           "+tD6jrYVbJUalRDoBk/pxTiLwB/rUZvfW c@h"}           # #1334: a real ed25519 key
 
     def _errors(self, **far):
         links = {"hosts": {"h": {"links": []}},
@@ -387,7 +388,7 @@ class TestManagedSide(unittest.TestCase):
         doc = {"bridges": {"x": {"hosts": {"h": self.FAR}}}}
         script = cpc._far_end_script(["far"], doc)
         self.assertIn('restrict,command="exec python3 -I /etc/airuleset/peer/peer_channel.py '
-                      'bridge --project x" ssh-ed25519 AAAA c@h', script)
+                      'bridge --project x" ' + self.FAR["key"], script)
         self.assertIn("/var/lib/far/.ssh/authorized_keys", script)
         self.assertEqual(cpc._far_end_script(["other"], doc), "")
 

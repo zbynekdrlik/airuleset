@@ -29,6 +29,8 @@ session, self-contained). This leaf owns everything push/install does around it:
 
 ``python3 cli_peer_channel.py status|render-root [--host H]|root-apply [--host H]``.
 """
+import base64
+import binascii
 import json
 import os
 import pwd
@@ -63,6 +65,7 @@ SNAPSHOT_REGISTRY = os.path.join(SNAPSHOT_DIR, peer_channel.REGISTRY_FILE)
 FAR_MARKER_DIR = "/etc/airuleset/peer-far-ends"   # #1323: far-end accounts the root leg made
 FAR_SSH_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}@[0-9.]+$")
 FAR_KEY_RE = re.compile(r"^ssh-ed25519 [A-Za-z0-9+/=]+ [A-Za-z0-9@._-]+$")
+ED25519_BLOB_PREFIX = b"\x00\x00\x00\x0bssh-ed25519\x00\x00\x00\x20"   # RFC 8709 type + key length
 # Anthropic's own channel plugins (claude-plugins-official external_plugins). A
 # managed allowedChannelPlugins REPLACES the default allowlist, so they are kept.
 OFFICIAL_CHANNEL_PLUGINS = ("discord", "fakechat", "imessage", "telegram")
@@ -83,9 +86,12 @@ def load_registry(path=None):
 
 
 CONTROLLER_HOME = "airuleset"    # the controller's hostname: home of its own bridge (#1293)
-# #1293: boxes whose socket hostname equals their fleet name, so install (hostname)
-# and the root leg (fleet name) agree; subdev's and gk's nodes are named otherwise
-HOME_HOSTS = {"dev1", "dev2", CONTROLLER_HOME}
+# #1293/#1330: a bridge ``home`` is the box's SOCKET HOSTNAME (install and the runtime match
+# it); this one table gives its fleet name for validation and the root leg. gk's node is
+# ``odoo-gatekeeper`` (measured 15.11.2026), its fleet name ``gatekeeper``.
+HOME_FLEET = {"dev1": "dev1", "dev2": "dev2", CONTROLLER_HOME: CONTROLLER_HOME,
+              "odoo-gatekeeper": "gatekeeper"}
+HOME_HOSTS = set(HOME_FLEET)
 
 
 def root_host_names():
@@ -133,6 +139,13 @@ def _stream_errors(host, entry, registry, links_doc, users):
             errors.append("%s: stream %s path %r must be under ~/" % (host, name, path))
         elif name in taken:
             errors.append("%s: stream %s collides with a project" % (host, name))
+    # #1330 review: the receiver marks a stream by NAME, so no other name may use its account
+    stream_accts = users(host)
+    for name, row in sorted(dict(peer_channel.host_projects(registry, host),
+                                 **peer_channel.bridge_rows(links_doc, host)).items()):
+        if row.get("account") in stream_accts:
+            errors.append("%s: %s runs as stream account %s; a stream joins only through "
+                          "streams" % (host, name, row.get("account")))
     return errors
 
 
@@ -173,6 +186,18 @@ def validate_links(links_doc, registry, root_hosts=None, stream_users=stream_use
     return errors
 
 
+def far_key_ok(key):
+    """#1334: the far end's ``authorized_keys`` key is a real ed25519 public key, so a
+    placeholder or a truncated paste never validates (the shape regex alone took any word)."""
+    if not (isinstance(key, str) and FAR_KEY_RE.match(key)):
+        return False
+    try:
+        blob = base64.b64decode(key.split()[1], validate=True)
+    except (binascii.Error, ValueError):
+        return False
+    return len(blob) == len(ED25519_BLOB_PREFIX) + 32 and blob.startswith(ED25519_BLOB_PREFIX)
+
+
 def _bridge_errors(links_doc, root_hosts=None):
     """#1266: a bridge with a missing field would kill its thread at session start."""
     errors = []
@@ -182,23 +207,23 @@ def _bridge_errors(links_doc, root_hosts=None):
             errors.append("bridge %s: needs account, path and hosts" % name)
             continue
         home = spec.get("home")
+        fleet = HOME_FLEET.get(home) if isinstance(home, str) else None
         roots = root_hosts if root_hosts is not None else root_host_names()
-        if not (isinstance(home, str) and home in HOME_HOSTS
-                and (home in roots or home == CONTROLLER_HOME)):
+        if not (fleet and (fleet in roots or home == CONTROLLER_HOME)):
             errors.append("bridge %s: home %r is not one of %s on the root leg"
                           % (name, home, sorted(HOME_HOSTS)))
-        local = set(peer_channel.linked_to(peer_channel.host_links(links_doc, home), name)
-                    if isinstance(home, str) else ())
+        local = set(peer_channel.linked_to(peer_channel.host_links(links_doc, fleet), name)
+                    if fleet else ())
         for host, far in spec["hosts"].items():
             both = local & set(peer_channel.linked_to(peer_channel.host_links(links_doc, host), name))
-            if both and host != home:     # #1320: inbound carries only `from`, so the two are indistinguishable
+            if both and host != fleet:    # #1320: inbound carries only `from`, so the two are indistinguishable
                 errors.append("bridge %s: %s is linked both on %s and on %s"
-                              % (name, ", ".join(sorted(both)), home, host))
+                              % (name, ", ".join(sorted(both)), fleet, host))
             if host not in links_doc["hosts"]:
                 errors.append("bridge %s: %s is not a links host" % (name, host))
             if not (isinstance(far, dict) and FAR_SSH_RE.match(str(far.get("ssh")))
                     and far.get("path") == SNAPSHOT_DIR and far.get("identity")
-                    and FAR_KEY_RE.match(str(far.get("key")))
+                    and far_key_ok(far.get("key"))
                     and far.get("account") == str(far.get("ssh")).split("@")[0]
                     and peer_channel.PROJECT_RE.match(str(far.get("account")))):
                 errors.append("bridge %s/%s: needs ssh, account, identity, key and path %s"
@@ -231,12 +256,14 @@ def is_bridge_home(user, links_doc=None, host=None):
     links_doc = load_links() if links_doc is None else links_doc
     return any(isinstance(s, dict) and s.get("account") == user
                and isinstance(s.get("home"), str) and s.get("home") == host
+               and all(not isinstance(f, dict) or far_key_ok(f.get("key"))   # #1334: a placeholder
+                       for f in (s.get("hosts") if isinstance(s.get("hosts"), dict) else {}).values())
                for s in (links_doc.get("bridges") or {}).values())
 
 
 def bridge_home_hosts(links_doc):
-    """#1293: the root hosts a bridge declares as its home."""
-    return {s["home"] for s in (links_doc.get("bridges") or {}).values()
+    """#1293: the root hosts (fleet names, #1330 ``HOME_FLEET``) a bridge declares as its home."""
+    return {HOME_FLEET.get(s["home"], s["home"]) for s in (links_doc.get("bridges") or {}).values()
             if isinstance(s, dict) and isinstance(s.get("home"), str) and s["home"]}
 
 
@@ -577,7 +604,8 @@ def apply_home_policy(run=subprocess.run, links_doc=None):
     has no shared dir, because the sockets live on the far end. [] or one failure."""
     links_doc = load_links() if links_doc is None else links_doc
     me = pwd.getpwuid(os.getuid()).pw_name
-    if this_host() in root_host_names() or not is_bridge_home(me, links_doc, this_host()):
+    if (HOME_FLEET.get(this_host(), this_host()) in root_host_names()
+            or not is_bridge_home(me, links_doc, this_host())):
         return []      # a root-host home gets its policy from the root leg (#1293)
     script = render_home_script((), links_doc)    # the controller: peer only (#1266)
     try:
@@ -764,6 +792,11 @@ def main(argv=None, dirty=uncommitted_config, apply=provision_peer_channel_root)
         print("\n".join(status_lines(a.host)))
         return 0
     if a.action == "render-root":
+        errors = validate_links(load_links(), load_registry())
+        if errors:      # stdout is piped into sudo bash: nothing reaches it (#1330 review)
+            print("render-root refused: peer-links.json invalid: %s" % "; ".join(errors),
+                  file=sys.stderr)
+            return 1
         host = a.host or this_host()
         sys.stdout.write(render_root_script(accounts_for_host(host), host=host))
         return 0
