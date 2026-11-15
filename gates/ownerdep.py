@@ -205,7 +205,8 @@ _DONE_AFTER_RX = re.compile(
     r"\bautomatick[yý]\b|\bautomatically\b|^\W*(?:\([^)]*\)\W*)?(?:none|nothing|žiadn[eyaá])\b",
     re.IGNORECASE)
 # a hypothetical, not a pending step: "Ak by na ňom trval, rozhodnutie je na tebe."
-_HYPOTHETICAL_RX = re.compile(r"\b(?:ak\s+by|keby|in\s+case)\b", re.IGNORECASE)
+_HYPOTHETICAL_RX = re.compile(r"\b(?:ak\s+by|keby|in\s+case|ke[ďd]\s+naraz[íi]m)\b",
+                              re.IGNORECASE)
 _GENERIC = {"each", "every", "any", "always", "každé", "každý", "každá", "každú", "vždy"}
 
 
@@ -255,7 +256,10 @@ _ELSEWHERE_RX = re.compile(
     r"\b(?:sa\s+ťa|ťa\s+sa)\s+(?:na\s+to\s+)?p[ýy]ta\b|\bp[ýy]ta\s+sa\s+ťa\b|"
     r"\bin\s+(?:its|their)\s+(?:own\s+)?session\b|"
     r"\bktor[ýáéúí]\w*\s+(?:sa\s+ťa\s+)?(?:p[ýy]ta(?:l[aio]?)?|zbiera(?:l[aio]?)?|"
-    r"zis[ťt]uje|zis[ťt]oval[aio]?)\s+[\w-]+",       # a 3rd-person asker, never "zisťujem"
+    r"zis[ťt]uje|zis[ťt]oval[aio]?)\s+[\w-]+|"       # a 3rd-person asker, never "zisťujem"
+    r"\b[\w-]{2,60}\s+(?:is\s+asking|will\s+ask|asks)\s+(?:him|you|the\s+owner)\b|"
+    r"\bpredlož(?:í|ia)\s+ti\s+(?:ich\s+|ho\s+|ju\s+|to\s+)?[\w-]+|"
+    r"\b(?:ti|ťa)\s+(?:to\s+)?(?:predlož(?:í|ia)|polož(?:í|ia))\s+[\w-]+",
     re.IGNORECASE)
 _SESSION_OF_RX = re.compile(r"\bv\s+rel[áa]cii\s+(?:projektu\s+)?([\w-]{2,60})", re.IGNORECASE)
 _NOT_A_SESSION = {"dnes", "ráno", "včera", "teraz", "tejto", "mojej", "našej", "tu", "pred",
