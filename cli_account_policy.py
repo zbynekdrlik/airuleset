@@ -170,6 +170,19 @@ def validate_rtprio(spec):
     return []
 
 
+def validate_build_budget(spec):
+    """#1318: ``target_cap_gb`` caps each Cargo ``target/`` of the account (the
+    disk guard removes stale units past it, default 40); ``cargo_full_debug`` keeps
+    Cargo's full debug info instead of the box-wide ``line-tables-only``."""
+    errs = []
+    cap = spec.get("target_cap_gb")
+    if "target_cap_gb" in spec and not (type(cap) is int and 5 <= cap <= 1000):
+        errs.append("target_cap_gb must be an integer from 5 to 1000 (GiB), got %r" % (cap,))
+    if "cargo_full_debug" in spec and not isinstance(spec["cargo_full_debug"], bool):
+        errs.append("cargo_full_debug must be True or False")
+    return errs
+
+
 def sudo_label(sudo):
     """``no`` / ``yes`` (scoped binaries) / ``commands`` (#1186 scripts)."""
     return sudo if sudo == "commands" else ("yes" if sudo else "no")

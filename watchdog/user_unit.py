@@ -71,13 +71,14 @@ def _client_env():
 
 
 def launch(unit, workdir, child_argv, runtime_max_s, run_fn=None,
-           env_keys=DEFAULT_ENV_KEYS, env_prefixes=DEFAULT_ENV_PREFIXES):
+           env_keys=DEFAULT_ENV_KEYS, env_prefixes=DEFAULT_ENV_PREFIXES, properties=()):
     """Start `child_argv` as the transient `--user` unit `unit` (cwd `workdir`,
     killed by systemd after `runtime_max_s`). Returns `(True, "started")`,
     `(True, "exists")` when a unit of that name is already running (the atomic
     single-flight backstop), or `(False, <why>)` — `systemd-run absent`,
     `systemd-run error: <Exc>`, `systemd-run rc=<n>` — when the caller must
-    fall back. `run_fn` is the test seam (defaults to `subprocess.run`)."""
+    fall back. `run_fn` is the test seam (defaults to `subprocess.run`).
+    `properties` are extra unit properties (`Nice=10`, #1318)."""
     run = run_fn or subprocess.run
     env = _client_env()
     src = env if env is not None else os.environ
@@ -85,6 +86,7 @@ def launch(unit, workdir, child_argv, runtime_max_s, run_fn=None,
             "--unit", unit,
             "--working-directory", workdir,
             "--property", "RuntimeMaxSec=%d" % runtime_max_s,
+            *[a for prop in properties for a in ("--property", prop)],
             *setenv_args(src, env_keys, env_prefixes),
             "--", *child_argv]
     try:

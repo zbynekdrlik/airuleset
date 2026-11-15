@@ -250,14 +250,33 @@ export PATH
 export RUSTUP_HOME={rustup_home}
 export PLAYWRIGHT_BROWSERS_PATH={pw_dir}
 """
+# #1318: full debug info is the largest part of a dev/test build (measured 15.11.
+# on dev1: wall-bridge's target 26.4 % smaller with line-tables-only). The env
+# overrides the manifest's profile, so an account that needs full debug info
+# declares ``cargo_full_debug: True``; the file is shared per box, hence the case.
+_CARGO_DEBUG = ("export CARGO_PROFILE_DEV_DEBUG=line-tables-only "
+                "CARGO_PROFILE_TEST_DEBUG=line-tables-only")
+
+
+def full_debug_accounts(host):
+    """The accounts on ``host`` that keep Cargo's full debug info."""
+    import cli_account_bootstrap
+    return tuple(sorted(a for a, raw in cli_account_bootstrap.SERVICE_ACCOUNTS.items()
+                        if isinstance(raw, dict) and raw.get("cargo_full_debug") is True
+                        and re.fullmatch(r"[a-z_][a-z0-9_-]{1,31}", a)   # a root script
+                        and raw.get("host", "controller") == host))
 
 
 def render_env_file(*, rust_bin=RUST_BIN, rustup_home=RUSTUP_HOME,
-                    pw_dir=PLAYWRIGHT_DIR):
+                    pw_dir=PLAYWRIGHT_DIR, full_debug=()):
     """The root-owned env file every project account sources (POSIX sh:
-    ``~/.profile`` is also read by ``sh``)."""
-    return _ENV_BODY.format(rust_bin=rust_bin, rustup_home=rustup_home,
-                            pw_dir=pw_dir)
+    ``~/.profile`` is also read by ``sh``). ``full_debug`` = accounts that keep
+    Cargo's full debug info (#1318)."""
+    body = _ENV_BODY.format(rust_bin=rust_bin, rustup_home=rustup_home, pw_dir=pw_dir)
+    if not full_debug:
+        return body + _CARGO_DEBUG + "\n"
+    return body + ('case " %s " in *" $(id -un) "*) ;; *) %s ;; esac\n'
+                   % (" ".join(full_debug), _CARGO_DEBUG))
 
 
 def _subshell(label, body):
@@ -398,7 +417,7 @@ def render_account_env_step(spec, *, env_file=ENV_FILE, rust_root=RUST_ROOT,
     then wire the account's shells to it AS the account (root never writes
     through a path the account controls). Runs BEFORE step 10 creates the tmux
     session, so its first pane already starts from this environment."""
-    del spec    # every project account gets the same wiring
+    full_debug = full_debug_accounts(spec.get("host", "controller"))   # #1318
     env_dir = env_file.rsplit("/", 1)[0]
     env = ("install -d -m 0755 %s\n"
            "t=$(mktemp %s)\n"
@@ -407,7 +426,8 @@ def render_account_env_step(spec, *, env_file=ENV_FILE, rust_root=RUST_ROOT,
            "echo \"  toolchain env: $(ls -l %s)\"\n"
            % (shlex.quote(env_dir), shlex.quote(env_dir + "/.project-toolchain.XXXXXX"),
               render_env_file(rust_bin=rust_root + "/cargo/bin",
-                              rustup_home=rust_root + "/rustup", pw_dir=pw_dir),
+                              rustup_home=rust_root + "/rustup", pw_dir=pw_dir,
+                              full_debug=full_debug),
               shlex.quote(env_file), shlex.quote(env_file)))
     return ("\n# 8b. Shell env of the shared toolchain — #1201\n"
             + _subshell("the root-owned env file every project account sources", env)

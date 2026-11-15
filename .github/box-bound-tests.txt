@@ -47,3 +47,6 @@ tests/test_ssh_password_file_1236.py::TestPasswordFile::test_unreadable_file_is_
 tests/test_disk_guard_idle_incremental_1286.py::TestDiscovery::test_a_dir_this_account_cannot_delete_gives_way_to_the_next_target
 tests/test_disk_guard_idle_incremental_1286.py::TestDiscovery::test_an_unreadable_dir_costs_only_its_own_target
 tests/test_trailing_semicolon_1319.py::TestRealTmux::test_chunk_ending_in_semicolon_lands_literally
+#
+# #1318: builds a real crate with Cargo (the python:3.12 container has no cargo)
+tests/test_target_cap_cargo_1318.py
