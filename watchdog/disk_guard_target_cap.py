@@ -662,6 +662,9 @@ def _launch(home):
     ``watchdog/user_unit.py``): its own cgroup, niced and idle-I/O, killed after
     UNIT_MAX_S. A fixed unit name is the single-flight."""
     from watchdog import user_unit
+    from watchdog.disk_guard_escalation import running_under_pytest
+    if running_under_pytest():      # a test must never start a real pass on a real home
+        return False, "systemd-run not used under test"
     repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     return user_unit.launch(UNIT_NAME, repo,
                             [sys.executable, "-c", CHILD_CODE],
