@@ -21,8 +21,24 @@ import os
 from pathlib import Path
 
 
-def _pid_links(pdir):
-    links = []
+def _mapped_paths(pdir):
+    """#1318: the files a pid maps (a running binary, a dlopened proc-macro).
+    A ``(deleted)`` mapping names no file that still exists."""
+    try:
+        with open(pdir / "maps", encoding="utf-8", errors="replace") as f:
+            lines = f.read().splitlines()
+    except OSError:
+        return []
+    out = []
+    for line in lines:
+        parts = line.split(None, 5)
+        if len(parts) == 6 and parts[5].startswith("/") and not parts[5].endswith(" (deleted)"):
+            out.append(parts[5])
+    return out
+
+
+def _pid_links(pdir, maps=False):
+    links = _mapped_paths(pdir) if maps else []
     for name in ("exe", "cwd"):
         try:
             links.append(os.readlink(pdir / name))
@@ -40,9 +56,9 @@ def _pid_links(pdir):
     return links
 
 
-def live_links(proc_dir=None):
-    """Every readable exe/cwd/fd link of every pid, from ONE /proc pass, as
-    `(exact, ancestors)`. `ancestors` holds every `link[:i]` with a separator
+def live_links(proc_dir=None, maps=False):
+    """Every readable exe/cwd/fd link (plus, with ``maps``, every mapped file) of
+    every pid, from ONE /proc pass, as `(exact, ancestors)`. `ancestors` holds every `link[:i]` with a separator
     at `i > 0`, so `t in ancestors` is exactly `link.startswith(t + os.sep)`
     for some link. None when /proc itself is unusable."""
     proc = Path(proc_dir) if proc_dir is not None else Path("/proc")
@@ -54,7 +70,7 @@ def live_links(proc_dir=None):
         return None
     exact, ancestors = set(), set()
     for pid in pids:
-        for link in _pid_links(proc / pid):
+        for link in _pid_links(proc / pid, maps):
             if link in exact:
                 continue
             exact.add(link)
