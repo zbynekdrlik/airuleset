@@ -309,6 +309,7 @@ _LIVE_BG_TASK_RX = re.compile(r"\b\d+\s+(?:shells?|monitors?)\b", re.I)
 # (bound just above) stays in __init__ and is read by decide.py at its call site
 # via `watchdog._LIVE_BG_TASK_RX` (C4), like pane_text.py's `_QUEUED_COMPACT_RX`.
 from watchdog.thrash import is_autocompact_thrash, hold as _thrash_hold, is_stop as _thrash_stop  # noqa: E402,F401 (#1260)
+from watchdog import apierr_box  # noqa: E402 (#1332)
 from watchdog.decide import (  # noqa: E402
     _pane_live_shell_evidence as _pane_live_shell_evidence,
     _pane_live_task_count as _pane_live_task_count,
@@ -554,7 +555,8 @@ def _handle_authdead_episode(state, key, cred_mtime_fn, now, idle, project, pid,
                         "-- dry-run [%s]" % (project or key))
         else:
             ok = send_verified(pid, OAUTH_REVOKED_NUDGE_TEXT, run, tpath,
-                               sleep_fn=sleep_fn, logs=logs, nudge="resume")
+                               sleep_fn=sleep_fn, logs=logs, nudge="resume",
+                               state=state)   # #1332: a strand gets a record
             if ok:
                 ad["continued"] = True
                 ad["continued_ts"] = int(now)
@@ -4039,64 +4041,17 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
                 # all) is genuinely busy and is still NEVER typed into.
                 draft_pending = False
                 if not pane_at_idle_prompt(captured):
-                    boundary_kind, boundary_txt = _classify_boundary(captured)
-                    # `and boundary_txt` is never False here: reaching this line already
-                    # required `not pane_at_idle_prompt(captured)`, and a genuinely bare
-                    # `("input", "")` boundary WOULD have made that gate True — so
-                    # `kind == "input"` at this point always carries a non-empty draft
-                    # (#176 F9, harmless dead conjunction — kept for readability).
-                    if boundary_kind == "input" and boundary_txt:
-                        draft_pending = True
-                    else:
-                        # Genuinely busy (or no boundary at all) → NEVER type. THIS
-                        # BRANCH is bounded to at most one ping (#176 item 2): job
-                        # 4's own escalation shape (a dedicated state record +
-                        # exactly ONE ping per episode, below in this same
-                        # function) fires once the stall runs strictly past 2x
-                        # grace of wall clock. (#176 R1: this comment used to
-                        # over-claim, presenting THIS one branch's own bound as if
-                        # it were a system-wide guarantee — false at the time it
-                        # was written: the separate stash-abort/raced skip further
-                        # below (in this same function) had no bound of its own
-                        # until the reopened pass gave it the identical shape; see
-                        # its own comment for what it covers.) A DEDICATED state prefix
-                        # ("apierr-busypane:", not job 4's own "busypane:") keeps the two
-                        # independent episodes from ever clobbering each other's
-                        # bookkeeping for the same session. Logging the classified kind +
-                        # a snippet of the offending text (item 3) names the shape on
-                        # every occurrence instead of every skip being an indistinguishable
-                        # "busy-pane".
-                        #
-                        # Threshold anchored on THIS EPISODE's own `first_seen` (wall
-                        # clock), NOT on live `idle` (= now - transcript mtime, #176 F2):
-                        # CC's own retries / queue-snapshot writes keep touching the
-                        # transcript while the pane stays genuinely busy, which can hold
-                        # `idle` artificially low for as long as the busy stretch lasts —
-                        # exactly the mtime trap job 1's OWN grace (above) already avoids
-                        # for the other branch. `first_seen` is fixed the moment this
-                        # episode is first observed and only accumulates real wall-clock
-                        # time on every later sweep, so it cannot be reset by an unrelated
-                        # transcript write.
-                        bkey = "apierr-busypane:" + key
-                        b = state.get(bkey) or {"first_seen": int(now - idle), "pinged": False}
-                        b["last_seen"] = int(now)
-                        state[bkey] = b
-                        snippet = (boundary_txt or "")[:40]
-                        logs.append("skip busy-pane (api-error) %s [%s txt=%r]"
-                                    % (project or pid, boundary_kind, snippet))
-                        if not b["pinged"] and (now - b["first_seen"]) > 2 * grace:
-                            b["pinged"] = True
-                            logs.append("busy-pane-wedged (api-error) %s [%s] idle=%dm "
-                                        "— ping only (never type)"
-                                        % (project, key, int(idle // 60)))
-                            send_fn("\U0001f6d1 **%s** — API chyba (529/…) drží pane už "
-                                    "%d min, no pane vyzerá zaneprázdnená (%s) — nepíšem "
-                                    "do nej klávesy, over ju prosím ručne."
-                                    % (project, int(idle // 60), boundary_kind),
-                                    owner=owner,
-                                    dedup_key="apierr-busypane:%s:%s" % (key, b["first_seen"]),
-                                    dry_run=dry_run)
+                    # `_classify_boundary` (#46) tells an idle box holding a draft
+                    # (deliver around it, #176) from a real foreground turn (NEVER
+                    # typed into, one ping past 2x grace + the `stuck!` footer);
+                    # our own stale text or a line-break-only box is reclaimed and
+                    # the next sweep resumes (#1332, `watchdog/apierr_box.py`).
+                    if apierr_box.pane_not_bare(
+                            captured, pid, run, sleep_fn, state, key, now, idle,
+                            grace, project, logs, send_fn, owner, dry_run,
+                            state_path) == apierr_box.SKIP:
                         continue
+                    draft_pending = True
                 # (`stalled.add(key)` now happens above, right after `if err_text:`
                 # — see the #175 F1 comment there. Left uncalled here on purpose.)
                 err_hash = _hash(err_text)

@@ -279,7 +279,9 @@ def _input_box_rows_raw(captured):
     Returns [] when neither strategy locates anything."""
     if not captured:
         return []
-    lines = [ln.strip() for ln in captured.splitlines() if ln.strip()]
+    raw = [ln.strip() for ln in captured.splitlines()]
+    at = [k for k, ln in enumerate(raw) if ln]     # raw position of lines[j]
+    lines = [raw[k] for k in at]
     if not lines:
         return []
 
@@ -327,6 +329,11 @@ def _input_box_rows_raw(captured):
                     and (_is_separator_line(lines[i - 1])
                          or _is_border_rule(lines[i - 1])):
                 content = lines[i:idx_b]
+                if lines[i] == "❯":
+                    # #1332 -- a BARE head keeps the box's blank rows: a box
+                    # holding a line break renders `❯` + an empty row, and
+                    # dropping that row read it as bare (CC 2.1.317, measured).
+                    content = raw[at[i]:at[idx_b]]
                 if content:
                     return content
 
@@ -392,6 +399,12 @@ def _find_input_box_from(rows):
     if len(rows) < 2:
         return None
     head = _normalize_queued_hint(rows[0])
+    if rows[0] == "❯":
+        # #1332 -- a draft whose FIRST line is empty: the text sits on the rows
+        # below a bare glyph row. Its tail is the last text row, or a line break
+        # when the box holds nothing else (never "", which reads as bare).
+        text = [r for r in rows[1:] if r]
+        return (head, text[-1] if text else "\n", True)
     if not _is_draft_head(head):
         return None
     return (head, rows[-1], True)
@@ -433,9 +446,9 @@ def _has_free_prompt(captured, bare_only=False):
     box = _find_input_box(captured)
     if box is None:
         return False
-    head, _tail, _wrapped = box
+    head, _tail, wrapped = box
     if head == "❯":
-        return True
+        return not (bare_only and wrapped)     # #1332: an empty first line
     return bool(not bare_only and _is_draft_head(head))
 
 

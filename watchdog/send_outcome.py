@@ -449,9 +449,11 @@ def _presend_own(pid, cap, state, now):
     if (state or {}).get(NOT_OWN_KEY, {}).get(pid) is not None:
         return None
     head = (watchdog._input_box_head_text(cap) or "").strip()
+    box = watchdog._box_norm_from_capture(cap)
+    if not head:             # #1332: the box's first line is empty; its text
+        head = box           # starts on the next row (whitespace-normalised)
     if not watchdog._looks_like_own_stuck_content(head):
         return None
-    box = watchdog._box_norm_from_capture(cap)
     if nudge_file.LABEL in box:   # slice 3: a pointer is proven EXACTLY or not
         return "shape" if nudge_file.is_pointer_line(box, require_file=True) \
             else None             # (appended words never reach the head rule)
@@ -491,7 +493,9 @@ def _clear_proven_own(pid, run, proven_ns, sleep_fn):
         visible = _ns(cap)
         if not proven_ns.startswith(visible):
             return "changed", removed
-        batch = min(len(visible), watchdog.JANITOR_CLEAR_BATCH_MAX)
+        # #1332: no character left but not bare = only line breaks remain (the
+        # one before our text on an empty first line): one key per pass.
+        batch = min(len(visible), watchdog.JANITOR_CLEAR_BATCH_MAX) or 1
         watchdog.keys(pid, *(["BSpace"] * batch), kind="janitor", run=run)
         removed += batch
         sleep_fn(watchdog.JANITOR_CLEAR_SETTLE_S)
