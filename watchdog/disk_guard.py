@@ -69,7 +69,7 @@ import time
 from pathlib import Path
 
 from watchdog import disk_guard_post as _dgp
-from watchdog import disk_guard_cargo_sweep as _dcs
+from watchdog import disk_guard_cargo_sweep as _dcs, disk_guard_target_cap as _dtc
 from watchdog import disk_guard_stale_build as _dsb
 from watchdog import disk_guard_timing as _dgt
 
@@ -3689,9 +3689,7 @@ def run_disk_guard(now=None, home=None, dry_run=False, statvfs_fn=None, dev_fn=N
                     _append_log(_log_path(home), [line])
         except Exception as e:
             logs.append("disk-guard: largest-live-scratch error: %r" % e)
-    # #892: carry forward top_consumers from the prior cache on non-drain polls
-    # (the every-poll status write would erase it otherwise). A drain poll writes
-    # fresh top_consumers AFTER the drain (below).
+    # #892: carry top_consumers forward on non-drain polls (a drain poll writes them after it)
     if not will_drain:
         with timer.step("quota-drift", logs):                      # never before a drain
             _dgq.maybe_update_quota_drift(status, home, now, q, du_fn, logs)
@@ -3744,6 +3742,8 @@ def run_disk_guard(now=None, home=None, dry_run=False, statvfs_fn=None, dev_fn=N
         write_status_cache(status, home=home)
     except Exception as e:
         logs.append("disk-guard: cache write failed: %r" % e)
+    with timer.step("target-cap", logs):   # #1318: size cap, every poll, any level
+        _dtc.run_pass(home, now, dry_run, logs, is_root)
     # #920: prevention pass at 70-79%
     # #939: on shared-stream boxes, fire at ANY pressure level with target_pct=0
     # (execute_drain's under-target STOP never fires when target=0) so worktree

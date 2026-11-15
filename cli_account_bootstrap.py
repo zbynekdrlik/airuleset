@@ -72,7 +72,7 @@ _NEVER_PROJECT_ACCOUNTS = frozenset({"newlevel", "root", "airuleset",
 _ALLOWED_KEYS = frozenset({
     "host", "sudo", "sudo_reason", "sudo_commands",
     "secrets", "webterm_sessions", "system_packages", "repo",
-    "project_dir", "tmux_session", "github_app", "repo_secrets", "tools", "code_only", "handover", "statuses_write", "extra_repos", "rtprio", "devices", "nic_noqueue",
+    "project_dir", "tmux_session", "github_app", "repo_secrets", "tools", "code_only", "handover", "statuses_write", "extra_repos", "rtprio", "devices", "nic_noqueue", "target_cap_gb", "cargo_full_debug",
 })
 
 # The defaults every declaration inherits. They are the SAFE direction: no
@@ -238,7 +238,7 @@ SERVICE_ACCOUNTS = {
         "host": "dev1",
         "rtprio": 49, "devices": ["cpu_dma_latency"], "nic_noqueue": "dante-vlan", **policy.DSTACK_NMCLI_SUDO,   # #1281 + #1282 + dstack #155
         "repo": "zbynekdrlik/dstack",   # public: iemmixer's CI fetches it keyless
-        "github_app": True, "repo_secrets": [],
+        "github_app": True, "repo_secrets": [], "target_cap_gb": 60,   # #1318: 43 G stays after a 40 G pass (32 G used in 24 h, dev1 15.11.)
         "tools": ["rust-toolchain:1.98.1", "pipx:netaudio", "cargo:cargo-mutants@27.1.0", "cargo:cargo-nextest@0.9.150", "rust-target:x86_64-pc-windows-gnu"],
         "system_packages": ["tshark", "gcc-mingw-w64-x86-64"],
         "project_dir": "devel/dstack",
@@ -557,7 +557,7 @@ def validate_account(account, raw):
     if spec["host"] not in boxes:
         errs.append("host %r is not a fleet box (known: %s)"
                     % (spec["host"], ", ".join(sorted(boxes))))
-    errs += policy.validate_sudo(spec, account, declared=SERVICE_ACCOUNTS) + policy.validate_rtprio(spec) + policy.validate_host_grants(spec)
+    errs += policy.validate_sudo(spec, account, declared=SERVICE_ACCOUNTS) + policy.validate_rtprio(spec) + policy.validate_host_grants(spec) + policy.validate_build_budget(spec)
     secrets = spec["secrets"]
     if not isinstance(secrets, (list, tuple)):
         errs.append("secrets must be a list")
