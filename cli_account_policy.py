@@ -181,6 +181,14 @@ def validate_rtprio(spec):
     return []
 
 
+def validate_userns(spec):
+    """#1337: ``userns`` grants this ONE account unprivileged user namespaces
+    (an AppArmor profile on a group-gated ``unshare`` copy). Only a bool."""
+    if "userns" in spec and not isinstance(spec["userns"], bool):
+        return ["userns must be True or False, got %r" % (spec["userns"],)]
+    return []
+
+
 def validate_build_budget(spec):
     """#1318: ``target_cap_gb`` caps each Cargo ``target/`` of the account (the
     disk guard removes stale units past it, default 40); ``cargo_full_debug`` keeps

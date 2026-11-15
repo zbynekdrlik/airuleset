@@ -72,7 +72,7 @@ _NEVER_PROJECT_ACCOUNTS = frozenset({"newlevel", "root", "airuleset",
 _ALLOWED_KEYS = frozenset({
     "host", "sudo", "sudo_reason", "sudo_commands",
     "secrets", "webterm_sessions", "system_packages", "repo",
-    "project_dir", "tmux_session", "github_app", "repo_secrets", "tools", "code_only", "handover", "statuses_write", "extra_repos", "rtprio", "devices", "nic_noqueue", "target_cap_gb", "cargo_full_debug",
+    "project_dir", "tmux_session", "github_app", "repo_secrets", "tools", "code_only", "handover", "statuses_write", "extra_repos", "rtprio", "devices", "nic_noqueue", "target_cap_gb", "cargo_full_debug", "userns",
 })
 
 # The defaults every declaration inherits. They are the SAFE direction: no
@@ -271,8 +271,8 @@ SERVICE_ACCOUNTS = {
         "github_app": True, "repo_secrets": [],
         "tools": ["rust-toolchain:1.98.1", "rust-target:wasm32-unknown-unknown", "cargo:trunk",
                   "playwright:1.64.1/chromium"], "secrets": ["cloudflared-dcontroller-token"],
-        "project_dir": "devel/dcontroller",
-        "tmux_session": "dcontroller",
+        "project_dir": "devel/dcontroller", "tmux_session": "dcontroller",
+        "userns": True,   # #1337: E2E inside a private user+net namespace (dcontroller #95); dev1's sysctl stays 1
         "handover": "docs/HANDOVER.md",
         "webterm_sessions": {
             human: {"preferred": "dcontroller", "start_dir_chain": ["devel/dcontroller"]}
@@ -557,7 +557,7 @@ def validate_account(account, raw):
     if spec["host"] not in boxes:
         errs.append("host %r is not a fleet box (known: %s)"
                     % (spec["host"], ", ".join(sorted(boxes))))
-    errs += policy.validate_sudo(spec, account, declared=SERVICE_ACCOUNTS) + policy.validate_rtprio(spec) + policy.validate_host_grants(spec) + policy.validate_build_budget(spec)
+    errs += policy.validate_sudo(spec, account, declared=SERVICE_ACCOUNTS) + policy.validate_rtprio(spec) + policy.validate_host_grants(spec) + policy.validate_build_budget(spec) + policy.validate_userns(spec)
     secrets = spec["secrets"]
     if not isinstance(secrets, (list, tuple)):
         errs.append("secrets must be a list")
@@ -834,7 +834,7 @@ def render_root_bootstrap(account):
     script += hardening.render_sudo_step(account, spec)
     script += hardening.render_reach_teardown_step(account)
     script += hardening.render_lockout_step()
-    script += hardening.render_isolation_check_step() + hardening.render_rtprio_step(account, spec) + hardening.render_host_grants_step(account, spec)
+    script += hardening.render_isolation_check_step() + hardening.render_rtprio_step(account, spec) + hardening.render_userns_step(account, spec) + hardening.render_host_grants_step(account, spec)
     # 4-7: keys + dirs (4 space-indented template → dedent)
     script += "\n" + textwrap.dedent(_KEYS_TEMPLATE).format(ak_content=ak_content)
     # 8. System packages — only when the account declares them (#973)

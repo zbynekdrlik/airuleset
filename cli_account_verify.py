@@ -57,7 +57,7 @@ import sys
 
 CHECKS = ("tmux", "gh-token", "secret-sync", "ruff", "rust", "playwright",
           "home-duplicates", "git-identity", "webterm", "session", "drop",
-          "login", "handover", "rtprio", "host-grants", "old-checkout")
+          "login", "handover", "rtprio", "host-grants", "userns", "old-checkout")
 CLAUDY_CONFIG_DIR = "/home/claudy/.config/claudy"
 NOREPLY_SUFFIX = "@users.noreply.github.com"
 PROBE_TIMEOUT_S = 180
@@ -162,6 +162,9 @@ except Exception:
     pass' 2>/dev/null)"
 echo @@rtprio
 echo "hard=$(ulimit -Hr)"
+echo @@userns
+if [ -e __USERNS__ ]; then echo present=yes; else echo present=no; fi
+if [ -x __USERNS__/unshare ]; then __USERNS__/unshare --user --map-root-user --net true >/dev/null 2>&1; echo "rc=$?"; else echo rc=none; fi
 echo @@grants
 for d in __DEVICES__; do if [ -w "/dev/$d" ]; then echo "writable=$d"; fi; done
 nq=$(nmcli -g GENERAL.DEVICES connection show __NOQUEUE__ 2>/dev/null)
@@ -197,6 +200,7 @@ def render_probe(account, spec):
     from cli_bashrc_appliers import LAUNCHER_SINCE_NAME, ULTRACODE_BASHRC_BLOCK
     from cli_account_policy import GRANTABLE_DEVICES
     from cli_playwright_mcp import PLAYWRIGHT_CHROMIUM_BUILD
+    from cli_account_hardening import USERNS_DIR
     project = spec.get("project_dir") or "."
     pins = declared_pins(spec)[1]
     subs = {
@@ -215,6 +219,7 @@ def render_probe(account, spec):
             ln for ln in ULTRACODE_BASHRC_BLOCK.splitlines()
             if ln.startswith("claude() "))),     # tests pin it to the block
         "__SINCE__": shlex.quote(LAUNCHER_SINCE_NAME),
+        "__USERNS__": shlex.quote("%s/%s" % (USERNS_DIR, account)),
     }
     out = _PROBE
     for k, v in subs.items():
@@ -631,6 +636,16 @@ def _check_rtprio(spec, s):
     return got == str(want), "declared %s, login has %s" % (want, got or "?")
 
 
+def _check_userns(spec, s):
+    """#1337: a declared account can enter a user+net namespace through its
+    copy; an undeclared one has no copy dir left behind."""
+    present, rc = _one(s, "userns", "present"), _one(s, "userns", "rc")
+    if spec.get("userns") is True:
+        return rc == "0", "declared, unshare --user --map-root-user --net rc=%s" % (rc or "?")
+    return present == "no", "none declared, copy dir %s" % (
+        "absent" if present == "no" else "present" if present == "yes" else "?")
+
+
 def _check_host_grants(spec, s):
     """#1282: the running account can use exactly what it declares."""
     want = spec.get("devices", [])
@@ -692,6 +707,7 @@ def evaluate(account, spec, sections, *, gh_rc, no_transfer=False,
         "handover": _check_handover(spec, s),
         "rtprio": _check_rtprio(spec, s),
         "host-grants": _check_host_grants(spec, s),
+        "userns": _check_userns(spec, s),
         "old-checkout": old_checkout,
     }
     return [(name,) + tuple(results[name]) for name in CHECKS]
@@ -770,7 +786,7 @@ def verify_account(account, *, run=None, gh_verify=None, no_transfer=False,
     results = evaluate(account, spec, sections, gh_rc=gh_rc, no_transfer=no_transfer,
                        claudy_read=claudy_read, old_checkout=old)
     remote = {"tmux", "ruff", "rust", "playwright", "home-duplicates",
-              "git-identity", "webterm", "session", "drop", "login", "handover", "rtprio", "host-grants"}
+              "git-identity", "webterm", "session", "drop", "login", "handover", "rtprio", "host-grants", "userns"}
     failed = 0
     for name, ok, detail in results:
         if err and name in remote:
