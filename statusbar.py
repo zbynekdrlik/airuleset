@@ -658,6 +658,25 @@ def auth_segment(home=None, now=None):
     return "\033[38;5;196mauth!\033[0m"
 
 
+def recovery_stuck_segment(home=None, now=None):
+    """#1332: the `stuck!` footer badge (RED) — the watchdog cannot resume a
+    session stalled on an API error (a pane it must not type into, or our own
+    leftover it proved but could not clear) for more than 2x grace. Job 1
+    rewrites `recovery-stuck/status.json` every sweep while that holds; the
+    badge hides once the cache is older than DISK_SEGMENT_STALE_S, so a resumed
+    pane or a dead watchdog stops painting it. Renders nothing on any error."""
+    import time as _time
+    now = _time.time() if now is None else now
+    cache = _load(_claude_dir(home) / "recovery-stuck" / "status.json")
+    ts = cache.get("ts") if isinstance(cache, dict) else None
+    if not isinstance(ts, (int, float)) or isinstance(ts, bool):
+        return ""
+    if not 0 <= now - ts <= DISK_SEGMENT_STALE_S:
+        return ""
+    proj = str(cache.get("project") or "")[:20]     # one file per account: name it
+    return "\033[38;5;196mstuck!%s\033[0m" % ((" " + proj) if proj else "")
+
+
 def release_idle_segment(cwd=None, home=None, now=None):
     """The `rel <Nh>` footer segment (#846): shown ONLY when the last PROD deploy
     is >= RELEASE_IDLE_BREACH_H hours old (RED), hidden otherwise. Also hidden

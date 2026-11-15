@@ -335,6 +335,10 @@ try:
     au = statusbar.auth_segment()
     if au:
         segs.append(au)
+    # #1332: `stuck!` — job 1 cannot resume an api-error pane past 2x grace.
+    stk = statusbar.recovery_stuck_segment()
+    if stk:
+        segs.append(stk)
     rel = statusbar.release_idle_segment(cwd=cwd)
     if rel:
         segs.append(rel)

@@ -70,6 +70,8 @@ STRANDED_TTL_S = 24 * 3600      # a record older than a day is dropped unread
 # is dropped the moment the pane's box is seen bare (`note_bare`).
 NOT_OWN_KEY = "box_not_own"
 HELD_DRAFT = "box holds a non-machine draft — held"
+LINE_BREAKS_HELD = ("box holds only line breaks (no words) — held; a recovery "
+                    "resume clears it (#1332)")
 
 
 class SendOutcome:
@@ -491,7 +493,9 @@ def _clear_proven_own(pid, run, proven_ns, sleep_fn):
         visible = _ns(cap)
         if not proven_ns.startswith(visible):
             return "changed", removed
-        batch = min(len(visible), watchdog.JANITOR_CLEAR_BATCH_MAX)
+        # #1332: no character left but not bare = only line breaks remain (the
+        # one before our text on an empty first line): one key per pass.
+        batch = min(len(visible), watchdog.JANITOR_CLEAR_BATCH_MAX) or 1
         watchdog.keys(pid, *(["BSpace"] * batch), kind="janitor", run=run)
         removed += batch
         sleep_fn(watchdog.JANITOR_CLEAR_SETTLE_S)
@@ -528,6 +532,8 @@ def presend_reclaim(pid, run, cap, sleep_fn, state, now, log_fn):
     if watchdog._strip_selected(cap):          # keys would go to the strip
         return "agent strip selected — held"
     now = time.time() if now is None else now
+    if not watchdog._input_line_text(cap).strip():   # #1332: no words, not ours:
+        return LINE_BREAKS_HELD                     # only a recovery resume clears it
     mode = _presend_own(pid, cap, state, now)
     if mode is None:
         return HELD_DRAFT
@@ -555,6 +561,9 @@ def presend_reclaim(pid, run, cap, sleep_fn, state, now, log_fn):
                 "chars removed) — held" % (status, removed))
     clear_stranded(state, pid)
     note_bare(state, pid)
+    # #1332: a success ends the #1113 (c) episode for every caller; the lock still
+    # bounds a FAILED clear (checked above before any key), never a converged one.
+    state.get("goal_template_clear", {}).pop(pid, None)
     _log.warning("send-verified: pre-send cleared own stale text pane=%s "
                  "chars=%d", pid, removed)
     return ("pre-send: cleared stale own machine text (%d chars); nothing "

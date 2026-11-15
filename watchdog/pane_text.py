@@ -82,8 +82,9 @@ def _input_line_text(captured):
     required the BOUNDARY row to start with `❯`, which only a one-row box
     ever does, so a wrapped draft returned None — indistinguishable from a
     running turn. The box is now located by its HEAD row and the tail is
-    returned as documented. `''` still means exactly "bare box": blank rows
-    are filtered out upstream, so a wrapped box can never return it."""
+    returned as documented. `''` still means exactly "bare box": a wrapped
+    box returns its last TEXT row, or a line break when its rows hold nothing
+    else (#1332: blank rows count only under a bare head)."""
     box = watchdog._find_input_box(captured)
     if box is None:
         return None
@@ -104,11 +105,17 @@ def _input_box_head_text(captured):
     against exactly the wrapped drafts the #501 incident is about. The head
     row is also the draft's own leading substring, so it doubles as a
     wrap-safe, far-more-specific transcript verification token than the bare
-    prefix (`submit_own_draft_verified`)."""
+    prefix (`submit_own_draft_verified`). #1332: a box whose FIRST line is
+    empty returns its first TEXT row (where our prefix then sits), or a line
+    break when it holds nothing else -- never `''`, which every caller reads as
+    a bare box (the janitor would pop the stash slot into the owner's words)."""
     box = watchdog._find_input_box(captured)
     if box is None:
         return None
     head, tail, wrapped = box
+    if head == "❯" and wrapped:
+        text = [r for r in watchdog._input_box_rows_raw(captured)[1:] if r]
+        return text[0] if text else "\n"
     return head[1:].strip()
 
 

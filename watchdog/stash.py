@@ -767,6 +767,8 @@ def _draft_rescue_text(captured):
     if not rows:
         return ""
     head = watchdog._normalize_queued_hint(rows[0])
+    if rows[0] == "❯":       # #1332: an empty first line, words below it
+        return "\n".join(ln for ln in rows[1:] if ln)
     if not watchdog._is_draft_head(head):
         return ""            # bare box ("❯" alone) — nothing to rescue
     first = head[1:].lstrip(" \xa0")
@@ -1069,6 +1071,29 @@ def _undo_and_release_slot(pid, run, text, parked, log_fn, prefix, sleep_fn=None
                 % prefix)
 
 
+def _stash_refusal(cap, pid, run, sleep_fn, state, user_authored):
+    """Why `deliver_with_stash` must not start on this capture, or None: the
+    single slot is occupied, no free prompt, a live turn, or (#1332) a box that
+    holds only line breaks — CC 2.1.317 ignores Ctrl+S on it (measured). It is
+    not ours to clear for a machine kind (outside a recovery resume); the
+    OWNER'S own reply (`user_authored`, state threaded) clears it once per
+    episode and is delivered on the next sweep."""
+    if cap and STASH_MARKER in cap:
+        return "slot occupied"
+    if not watchdog._has_free_prompt(cap, bare_only=False):
+        return "no free prompt"
+    if "esc to interrupt" in (cap or ""):
+        return "live turn"
+    if not (watchdog._input_line_text(cap) or "x").strip():
+        if user_authored and state is not None:
+            st = watchdog.apierr_box.clear_line_breaks_once(
+                pid, run, sleep_fn, state, time.time(), user_authored=user_authored)
+            return "box held only line breaks (no words) -> %s; %s" % (
+                st, "the next sweep delivers" if st == "bare" else "held")
+        return "box holds only line breaks (no words)"
+    return None
+
+
 def deliver_with_stash(pid, text, run, captured=None, logs=None, sleep_fn=None,
                        state=None, user_authored=False, nudge_kind="stash",
                        nudge=None):
@@ -1138,14 +1163,9 @@ def deliver_with_stash(pid, text, run, captured=None, logs=None, sleep_fn=None,
     run = run or watchdog._default_run
     sleep_fn = sleep_fn or time.sleep
     cap = captured if captured is not None else watchdog.capture_pane(pid, run, lines=30)
-    if cap and STASH_MARKER in cap:
-        _log("stash-abort: slot occupied")
-        return False
-    if not watchdog._has_free_prompt(cap, bare_only=False):
-        _log("stash-abort: no free prompt")
-        return False
-    if "esc to interrupt" in (cap or ""):
-        _log("stash-abort: live turn")
+    refusal = _stash_refusal(cap, pid, run, sleep_fn, state, user_authored)
+    if refusal:
+        _log("stash-abort: " + refusal)
         return False
     from watchdog import nudge_gate as _ng
     _bnow = time.time()
