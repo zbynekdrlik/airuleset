@@ -4691,7 +4691,7 @@ HANDOFF_GATE_LOG = ".claude/handoff-gate.log"
 # count line are EXCLUDED positionally; no two `[ \t]*` touch (linear time).
 _GK_FINDING_ID_RE = re.compile(
     r'^[ \t]*(?:[-*•][ \t]*)?(?:\*+[ \t]*)?(?:🔴|🟡|🔵)[ \t]*(?:\*+[ \t]*)?(\d+)|^[ \t]*'
-    r'(?:(?:[-*•#|]|\d{1,3}[.)])[ \t]*)*(?:\[[ xX]\][ \t]*)?(?:\*+[ \t]*)?'
+    r'(?:(?:[-•#|]|\*(?=[ \t])|\d{1,3}[.)])[ \t]*)*(?:\[[ xX]\][ \t]*)?(?:\*+[ \t]*)?'
     r'(?:(?:🔴|🟡|🔵)[ \t]*(?:\*+[ \t]*)?)?F(\d+)\b', re.MULTILINE | re.UNICODE)
 
 
@@ -5080,7 +5080,7 @@ def _handoff_gk_preflight(issue, repo, body, *, branch=None, cwd=None,
                          "budget) — pre-flight skipped (fail-open)\n")
         return None
     # The readiness lane's own open BOUNCE first (#1288), else the newest gk one.
-    gl = cli_gk_watch.pick_bounce(st, branch) or st.get("gk_latest") or {}
+    gl = cli_gk_watch.pick_bounce(st, branch, body) or st.get("gk_latest") or {}
     # (1) #1070 item 6 -- bounce-unanswered with no new commit since the verdict,
     # lane-scoped, unparseable-head-advisory, git-log-since-counted, journaled.
     if state == "bounce-unanswered":

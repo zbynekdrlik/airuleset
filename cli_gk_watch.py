@@ -123,12 +123,16 @@ def bounce_answered(bounce, rfrs):
         for r in rfrs)
 
 
-def pick_bounce(st, branch):
+def pick_bounce(st, branch, body=None):
     """The open BOUNCE a hand-off on lane `branch` must answer, from a
-    `watch_issue` result: its own lane's newest open bounce, else the newest
-    open bounce of UNKNOWN lane (it may be this lane's), else None (#1288)."""
+    `watch_issue` result: the one whose id the RFR `body` names (a re-cut
+    lane), else its own lane's newest open bounce, else the newest open bounce
+    of UNKNOWN lane (it may be this lane's), else None (#1288)."""
     mine = norm_branch(branch)
     open_b = (st or {}).get("open_bounces") or []
+    for b in open_b:
+        if _names_id(b.get("id"), body):
+            return b
     for want in (mine, None):
         for b in open_b:
             if mine and _lane_of(b) == want:
