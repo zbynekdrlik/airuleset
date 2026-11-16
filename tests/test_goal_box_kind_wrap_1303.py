@@ -189,6 +189,18 @@ class _StrandFake:
         return ""
 
 
+# a short own template with the long token early, so the truncated box stays
+# within what one janitor clear removes in a 40-col pane.
+_STRAND_TEXT = ("/goal STOP CONDITIONS the loop is DONE the moment EITHER holds: "
+                "(A) BLOCKED ON MY ANSWER, the latest assistant message ends with a "
+                "line starting NEEDS YOU, there is no user message after it and "
+                "the question is tracked on its ticket, parked as " + _TOKEN + " with a "
+                "comment; (B) SLICE EMPTY proven in this turn with the pasted "
+                "output of python3 ~/devel/airuleset/airuleset.py slice-quals "
+                "--count printing exactly 0, never claimed from memory.")
+_STRAND_AT = _STRAND_TEXT.index(_TOKEN) + len(_TOKEN) + 30
+
+
 class StrandedTruncatedHardWrap(unittest.TestCase):
     """#617's stranded-TRUNCATED own /goal clear (dark watch) had the same
     clean-whitespace prefix test: a truncated own type spanning the
@@ -211,11 +223,11 @@ class StrandedTruncatedHardWrap(unittest.TestCase):
         logs, cleared = goal._clear_stranded_truncated_goal(
             "sess-1303-trunc", "/home/x/devel/y", fake.render(), self.tpath,
             "%7", fake, {}, 1000.0, lambda *_a: None, False,
-            lambda _cwd: (_TEXT, "full"), "x:0.0")
+            lambda _cwd: (_STRAND_TEXT, "full"), "x:0.0")
         return fake, logs, cleared
 
     def test_truncated_own_goal_across_hard_break_is_cleared(self):
-        trunc = _TEXT[:_AT + len(_TOKEN) + 40]
+        trunc = _STRAND_TEXT[:_STRAND_AT]
         # fixture sanity: the token is in the box but no row holds it whole.
         self.assertIn(_TOKEN, trunc)
         self.assertNotIn(_TOKEN, _capture(_cc_rows(trunc, 40)))
@@ -224,7 +236,7 @@ class StrandedTruncatedHardWrap(unittest.TestCase):
         self.assertEqual(fake.box, "")
 
     def test_edited_truncated_paste_is_never_cleared(self):
-        trunc = _TEXT[:_AT + len(_TOKEN) + 40].replace("STOP", "STAHP", 1)
+        trunc = _STRAND_TEXT[:_STRAND_AT].replace("BLOCKED", "BLOKED", 1)
         fake, logs, cleared = self._call(trunc)
         self.assertFalse(cleared, logs)
         self.assertEqual(fake.sent, [])
