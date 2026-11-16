@@ -390,14 +390,10 @@ def scan_goal_markers(path, off=None, tail_bytes=GOAL_MARK_TAIL_BYTES):
         # bootstrap mid-file: the first line is probably truncated
         nl = body.find(b"\n")
         body = body[nl + 1:] if nl >= 0 else b""
-    # #403 -- this used to ALSO track `arm_after` (did an "arm question" line
-    # follow the newest marker), fed by `_entry_asks_to_arm`/`_GOAL_ASK_PROBE`
-    # -- both existed ONLY to support the old `goal_autoarm`'s viewport-scan
-    # arming, which is deleted. `arm_after` had no other reader anywhere in
-    # the codebase (confirmed by grep before removing it) -- arming is now
-    # driven entirely by an EXPLICIT `goal-arm --self` callback, never by
-    # scanning the transcript for a printed question, so this function's
-    # only remaining job is finding the newest marker itself.
+    # #403 -- this used to ALSO track `arm_after` (an "arm question" line after
+    # the newest marker) for the deleted `goal_autoarm` viewport-scan arming; it
+    # had no other reader. Arming is an EXPLICIT `goal-arm --self` callback, so
+    # this function's only job is finding the newest marker itself.
     return (new_off, _newest_marker(body))
 
 
@@ -406,25 +402,27 @@ def _newest_marker(body):
     Shared by `scan_goal_markers` (tail/incremental) and `seed_goal_marker`
     (#517 reverse-scan) so the parse is ONE implementation."""
     from datetime import datetime
+    from watchdog import goal_status_mark as _gsm   # #1309 leaf (ratchet cap)
     best = None
     for ln in body.splitlines():
-        # cheap pre-filter over the raw bytes — one of the THREE shapes CC
-        # writes (the `/goal` command's own stdout, the arm instruction it
-        # injects — the only record a QUEUED arm leaves at all, #64 — or the
-        # #675 transient-failure clear, which carries NEITHER of the other two).
+        # cheap pre-filter over the raw bytes — one of the FOUR shapes CC
+        # writes (the `/goal` stdout, the arm instruction — the only record a
+        # QUEUED arm leaves, #64 — the #675 transient-failure clear, or the #1309
+        # `goal_status` attachment that ENDS a met/failed goal).
         if (watchdog._GOAL_LCS_OPEN.encode() not in ln
                 and watchdog._GOAL_ARM_PROBE not in ln
-                and watchdog._GOAL_CLEARED_ERROR_PROBE not in ln):
+                and watchdog._GOAL_CLEARED_ERROR_PROBE not in ln
+                and _gsm.GOAL_STATUS_PROBE not in ln):
             continue
         try:
             entry = json.loads(ln)
         except Exception:
             continue
         # #675 -- the error-clear shape is honoured ONLY from a `system` entry
-        # (CC never writes it as `user`); a `user` paste that merely begins with
-        # the clear sentence is forgeable content, not state.
+        # (a `user` paste beginning with the clear sentence is content).
         is_system = isinstance(entry, dict) and entry.get("type") == "system"
-        mark = _parse_goal_marker(_goal_marker_content(entry), is_system=is_system)
+        mark = (_gsm.goal_status_end_marker(entry)
+                or _parse_goal_marker(_goal_marker_content(entry), is_system=is_system))
         if mark is None:
             continue
         ts = None
