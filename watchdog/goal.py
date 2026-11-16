@@ -279,7 +279,7 @@ _GOAL_USER_CALLBACK_ORIGINS = (_GOAL_SELF_CALLBACK_ORIGIN,)
 # sight reverse-scan) on the next dark_watch sweep, so a marker the old parser
 # skipped-past (its incremental offset already advanced beyond it) is re-read by
 # the new recognizer instead of the stale value persisting forever (#618 class).
-_GOAL_MARK_PARSER_VERSION = 2
+_GOAL_MARK_PARSER_VERSION = 3   # 3: #1309 goal_status end record
 
 
 def record_goal_request(session, cwd, text, authority, now=None, path=None,
