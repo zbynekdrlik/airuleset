@@ -41,6 +41,14 @@ CONTROLLER_SERVICE_ROUTES = (
      "name": "Vaultwarden restore copy",
      "allowed_emails": ["drlik.zbynek@gmail.com"],
      "session_duration": DROP_ACCESS_SESSION},
+    # Browser console of the devbridge-win CI VM (#1325), TEMPORARY: the owner
+    # types his own Windows key. noVNC/websockify on dev1 binds 127.0.0.1:6080
+    # and a transient controller ssh forward reaches it. Remove after the key.
+    {"hostname": "vm-devbridge.newlevel.media",
+     "origin": "http://127.0.0.1:6080",
+     "name": "devbridge-win console (temporary)",
+     "allowed_emails": ["drlik.zbynek@gmail.com"],
+     "session_duration": DROP_ACCESS_SESSION},
 )
 
 _SERVICE_ROUTE_KEYS = ("hostname", "origin", "name", "allowed_emails",
