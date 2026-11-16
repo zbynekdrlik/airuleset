@@ -594,7 +594,7 @@ REMOTE_HOSTS += [
         ("tuke", "dev1", "100.104.8.125", False),           # #1296
         ("mikrotik-pz", "dev1", "100.104.8.125", False),    # #1310
         ("devbridge", "dev1", "100.104.8.125", False),     # #1320, live 14.11.
-        ("fleet-backup", "dev1", "100.104.8.125", True),   # #1339, pending root bootstrap
+        ("fleet-backup", "dev1", "100.104.8.125", False),  # #1339, live 16.11.
     )
 ]
 

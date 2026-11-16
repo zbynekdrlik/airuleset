@@ -1,9 +1,10 @@
 """#1339 (owner 16.11.2026): the fleet backup manager (restic + Hetzner Storage Box)
 leaves the shared `newlevel` account for its own project account on dev1, so only
-that account reads the Storage Box keys and host credentials. Declared PENDING until
-its root bootstrap ran (#1267): no tab yet, and the project has no registry row
-(it ran unregistered as newlevel), so the registry row and its airuleset peer link
-land at the cutover, never as a newlevel row (LEGACY_CEILING only goes down)."""
+that account reads the Storage Box keys and host credentials. Declared pending, then
+flipped live once the root bootstrap ran on dev1 (16.11.) with the owner + marek tab
+(#1267). The project has no registry row (it ran unregistered as newlevel), so the
+registry row and its airuleset peer link land at the cutover, never as a newlevel
+row (LEGACY_CEILING only goes down)."""
 import io
 import json
 import unittest
@@ -22,6 +23,14 @@ import cli_webterm_profiles as profiles
 
 ROOT = Path(__file__).resolve().parent.parent
 ACCT = "fleet-backup"
+
+
+def _pending():
+    """REMOTE_HOSTS with fleet-backup marked pending again (the state before its
+    root bootstrap), so the skip paths keep their coverage."""
+    return mock.patch.object(cli_fleet, "REMOTE_HOSTS", [
+        dict(h, pending=True) if h.get("user") == ACCT else h
+        for h in cli_fleet.REMOTE_HOSTS])
 
 
 class TestFleetBackupAccount(unittest.TestCase):
@@ -44,33 +53,59 @@ class TestFleetBackupAccount(unittest.TestCase):
         self.assertEqual(self.spec["tools"], ["pipx:uv==0.9.18"])
         self.assertIn("pipx:uv==0.9.18", bootstrap.account_spec("nlch-finances")["tools"])
 
-    def test_pending_full_authority_fleet_entry_on_dev1(self):
+    def test_live_full_authority_fleet_entry_on_dev1(self):
         (entry,) = [h for h in cli_fleet.REMOTE_HOSTS if h.get("user") == ACCT]
         self.assertEqual(entry["name"], "fleet-backup@dev1")
-        self.assertIs(entry["pending"], True)
-        self.assertTrue(bootstrap.is_pending(ACCT))
+        self.assertIs(entry["pending"], False)
+        self.assertFalse(bootstrap.is_pending(ACCT))
         self.assertIn(ACCT, cli_fleet.FULL_AUTHORITY_USERS)
 
-    def test_unattended_paths_skip_it_while_pending(self):
-        # #1267: mint --all skips loudly at rc 0, and the peer root leg leaves it out.
+    def _mint_all(self):
         out = io.StringIO()
         with mock.patch.object(pgt, "mint_account", return_value=0) as m, \
                 mock.patch.object(ci_sync, "run_after_mint", return_value=0), \
                 redirect_stdout(out):
             rc = pgt.cmd_project_gh_token(mock.Mock(
                 action="mint", account=None, all=True, dry_run=False, key=None))
+        return rc, [c.args[0] for c in m.call_args_list], out.getvalue()
+
+    def test_mint_all_mints_it_once_live(self):
+        rc, minted, out = self._mint_all()
+        self.assertEqual(rc, 0)
+        self.assertIn(ACCT, minted)
+        self.assertNotIn("%s: SKIPPED" % ACCT, out)
+
+    def test_unattended_paths_skip_it_while_pending(self):
+        # #1267: mint --all skips loudly at rc 0, and the CI secret sync skips it.
+        with _pending():
+            self.assertTrue(bootstrap.is_pending(ACCT))
+            rc, minted, out = self._mint_all()
+            with mock.patch.object(ci_sync, "sync_account", return_value=0) as s:
+                ci_sync.sync_all(run=lambda *a, **k: None)
         self.assertEqual(rc, 0)
         self.assertIn(ACCT, pgt.github_app_accounts())
-        self.assertNotIn(ACCT, [c.args[0] for c in m.call_args_list])
-        self.assertIn("project-gh-token: %s: SKIPPED — pending" % ACCT, out.getvalue())
+        self.assertNotIn(ACCT, minted)
+        self.assertIn("project-gh-token: %s: SKIPPED — pending" % ACCT, out)
+        self.assertNotIn(ACCT, [c.args[0] for c in s.call_args_list])
+
+    def test_no_peer_socket_before_the_cutover(self):
+        # No registry row yet, so the peer root leg has no fleet-backup socket
+        # dir until the cutover adds the row on the fleet-backup account.
         self.assertNotIn(ACCT, cpc.accounts_for_host("dev1"))
 
-    def test_no_dashboard_tab_while_pending(self):
-        # #1267: the tab rides the pending->live flip commit.
-        for human, tabs in w.WEBTERM_DASHBOARD_TABS.items():
-            self.assertNotIn(ACCT, tabs, human)
+    def test_the_tab_opens_the_project_chat_for_marek_and_owner_only(self):
+        self.assertEqual(set(self.spec["webterm_sessions"]), {"zbynek", "marek"})
+        for human in ("zbynek", "marek"):
+            sess = self.spec["webterm_sessions"][human]
+            self.assertEqual(sess["start_dir_chain"], ["devel/fleet-backup"])
+            self.assertIn(ACCT, w.WEBTERM_DASHBOARD_TABS[human])
+            tabs = w.WEBTERM_DASHBOARD_TABS[human]
+            self.assertEqual(tabs.index(ACCT), tabs.index("devbridge") + 1)
+        for human in ("david", "dominika", "timo"):
+            self.assertNotIn(ACCT, w.WEBTERM_DASHBOARD_TABS[human])
         for inv in (profiles.marek_inventory(), profiles.zbynek_inventory()):
-            self.assertEqual([e for e in inv if e["id"] == ACCT], [])
+            (entry,) = [e for e in inv if e["id"] == ACCT]
+            self.assertEqual(entry["user"], ACCT)
 
     def test_drop_port_is_the_next_free_in_range(self):
         self.assertEqual(drop._GENERATED_DROP_PORTS[("dev1", ACCT)], 8910)
