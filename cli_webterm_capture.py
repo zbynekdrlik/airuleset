@@ -19,13 +19,14 @@ WEBTERM_HISTORY_FIRST_BYTES = 2000000   # a first read takes this much of the tr
 # The read branch of the forced attach body (cli_webterm._ATTACH_BODY), run after
 # `$T` is resolved and before the mouse option, the attach and the create fallback.
 # Only these exact shapes; the offset must be digits. No session: no output, rc 1.
+# `-e` keeps the SGR escapes: the page draws the pane's colours (#1287 round 2).
 # Claude runs fullscreen (alternate screen), so its pane has no tmux history; the
 # history is the newest transcript in the pane's project dir (Claude's own key:
 # every non-alphanumeric char of the cwd becomes `-`). First line: name size start.
 WEBTERM_READ_SH = (
     'case "${SSH_ORIGINAL_COMMAND:-}" in '
     + WEBTERM_CAPTURE_VERB + ') [ -n "$T" ] || exit 1; '
-    'exec tmux capture-pane -p -J -S -' + str(WEBTERM_CAPTURE_LINES) + ' -t "=$T:";; '
+    'exec tmux capture-pane -p -e -J -S -' + str(WEBTERM_CAPTURE_LINES) + ' -t "=$T:";; '
     '"' + WEBTERM_HISTORY_VERB + ' "*) o=${SSH_ORIGINAL_COMMAND#* }; '
     'case "$o" in ""|*[!0-9]*) exit 2;; esac; [ -n "$T" ] || exit 1; '
     'd=$(tmux display -p -t "=$T:" "#{pane_current_path}" | sed "s/[^A-Za-z0-9]/-/g"); '
@@ -189,7 +190,17 @@ class PhoneReader:
             sys.stderr.write("webterm-gateway: phone read %s rc=%s: %s\n"
                              % (sid, proc.returncode, err[-200:].decode("utf-8", "replace")))
             return None
-        return out if extra else out[-PHONE_READ_MAX_BYTES:]
+        return out if extra else tail_whole_lines(out, PHONE_READ_MAX_BYTES)
+
+
+def tail_whole_lines(out, cap):
+    """The last `cap` bytes of a capture, from a line start: a cut inside an SGR
+    escape or a UTF-8 char would otherwise show as junk text (#1287 round 2)."""
+    if len(out) <= cap:
+        return out
+    tail = out[-cap:]
+    nl = tail.find(b"\n")
+    return tail[nl + 1:] if nl >= 0 else tail
 
 
 def message_of(entry):
