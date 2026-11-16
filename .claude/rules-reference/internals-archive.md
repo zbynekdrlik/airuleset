@@ -2772,3 +2772,29 @@ The goal re-arm machinery these lessons describe (stream-migrate, the answered-(
 
 - **Migration step: carry the Claude session (#1190).** The checkout, services and secrets moving to the project account do not move the conversation. At cutover, once no claude runs in the old checkout, run `airuleset.py accounts transfer-session <acct> --from-dir <old checkout>` on the host. It is a dry run by default and lists the sessions, `memory/`, the excluded worktree-lane keys and the target. Then run it again with `--render | sudo bash` (or `sudo … --apply`). It copies `<uuid>.jsonl`, `<uuid>/` and `memory/` into `/home/<acct>/.claude/projects/<new key>`, with modes 0600/0700 and the file mtimes kept. Root never reads file content from, or writes into, a path an account controls. `runuser -u <old owner> -- tar -c`, with the owner fixed at render time and root refused, pipes into `runuser -u <acct> -- tar -x`. That lands in a private temp dir inside the target, and each item is then placed with `mv -n -T`. The script `cd /`s first: a `sudo bash` run from the 0700 old home would otherwise break `find`. Stdout carries ONLY a rendered script, and the dry run and every refusal go to stderr, so nothing else can ever reach `sudo bash`. It refuses a live claude under the old dir and any session or memory file the target already has. The owner then resumes with the printed `claude --resume <uuid>` and pastes the path-move note as the first prompt.
 - **The jsonl `cwd` field needs no rewrite.** Measured on 2.1.284 under a scratch HOME: both `--resume <uuid>` and the picker find a session by its projects DIRECTORY, even when every line still names the old, unreadable path. The key encodes EVERY non-alphanumeric char as `-`; `cli_account_session.project_key` is the encoder, and a bare `/`→`-` replace is wrong for `.` and `_`. Re-measure it (a throwaway `claude -p --session-id` run under `HOME=<scratch>` plus a private `tmux -L` for the picker) before trusting it on a new major version.
+
+- **#691 REWORK (owner rejected v0.1.55 active-tab, 2026-08-25) — a KEEP-the-data-channel /
+  MOVE-the-render pattern + three sub-lessons.** The owner rejected the visual (top inset blue
+  stripe touched the label; the separate red `.udot` was the loudest element) and set a binding
+  hierarchy NAME > SELECTED > U. Fix WITHOUT touching the U data channel: the U-state moved from
+  a dedicated `<span class="udot">` to a colour-swap of the EXISTING left `▸ .ico` arrow
+  (`.tab.has-u .ico { color: #E74856 }`) — `applyUStatus`'s `.has-u` toggle + the whole
+  `_box_u_count`/`_U_READER_SNIPPET` collector stayed byte-untouched (only the RENDER changed);
+  the selected cue moved from a top `inset 0 2px` stripe to a BOTTOM `inset 0 -2px #3B78FF`
+  underline (a "selected tab" convention that never touches the label) + `.tab` top/bottom
+  padding 6→9px for vertical breathing. Reuse this shape for any "owner rejected the look, keep
+  the behaviour": re-express the SAME state on an existing element, retire the dedicated one.
+  (1) **RETIRING a UI element = grep the element's OLD NAME across the WHOLE file, JS COMMENTS
+  included — not just its CSS rule + markup.** The one review 🔵 was a stale JS comment above
+  `applyUStatus` still saying "the per-tab U dot" / "leaves the current dots untouched", 15
+  lines from the CSS comment that correctly called `.udot` retired. `grep -rn '<old-name>'
+  <file>` after any retirement; every hit is updated or a deliberate historical note. (2)
+  **`.tab.has-u .ico` (0,3,0) beats `.tab .ico` (0,2,0) by specificity — state-agnostic vs
+  `.active`**, so it reddens the arrow on an active+U tab regardless of source order (verified
+  live: active+U → `#E74856` on the `#333333` body). `assertNotIn("inset 0 2px 0 0")` is a sound
+  "top stripe retired" check precisely because the new value is `inset 0 -2px 0 0` — the `-`
+  breaks substring contiguity. (3) **A prior ticket's test that hardcoded a FULL multi-value CSS
+  string breaks when a later ticket legitimately changes ONE of those values** — the #661
+  left-padding lock asserted the whole `padding: 6px 12px 6px 16px`; #691's vertical-padding
+  change (6→9) broke it. Decouple such a lock to the asymmetry it actually owns (parse the
+  4-value shorthand, assert left=16 > right=12), never the values a later ticket owns.

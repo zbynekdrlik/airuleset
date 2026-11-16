@@ -178,31 +178,7 @@ Non-obvious decisions #867 settled, reusable for the next lane:
 - **[Moved to `.claude/rules-reference/internals-archive.md` at the #1256 51200-byte cap, 2026-10-19 — grep "#686 webterm U-dot" there]** the per-box U-dot freshness filter (`_U_FRESH_MAX_AGE_S`, both readers).
 
 - **[Moved to `.claude/rules-reference/internals-archive.md` at the #1189 51200-byte cap, 2026-09-29 — grep "#691 (2026-08-25) — two process gotchas" there]** hex colours in commit messages + the dashboard visual-verify recipe.
-- **#691 REWORK (owner rejected v0.1.55 active-tab, 2026-08-25) — a KEEP-the-data-channel /
-  MOVE-the-render pattern + three sub-lessons.** The owner rejected the visual (top inset blue
-  stripe touched the label; the separate red `.udot` was the loudest element) and set a binding
-  hierarchy NAME > SELECTED > U. Fix WITHOUT touching the U data channel: the U-state moved from
-  a dedicated `<span class="udot">` to a colour-swap of the EXISTING left `▸ .ico` arrow
-  (`.tab.has-u .ico { color: #E74856 }`) — `applyUStatus`'s `.has-u` toggle + the whole
-  `_box_u_count`/`_U_READER_SNIPPET` collector stayed byte-untouched (only the RENDER changed);
-  the selected cue moved from a top `inset 0 2px` stripe to a BOTTOM `inset 0 -2px #3B78FF`
-  underline (a "selected tab" convention that never touches the label) + `.tab` top/bottom
-  padding 6→9px for vertical breathing. Reuse this shape for any "owner rejected the look, keep
-  the behaviour": re-express the SAME state on an existing element, retire the dedicated one.
-  (1) **RETIRING a UI element = grep the element's OLD NAME across the WHOLE file, JS COMMENTS
-  included — not just its CSS rule + markup.** The one review 🔵 was a stale JS comment above
-  `applyUStatus` still saying "the per-tab U dot" / "leaves the current dots untouched", 15
-  lines from the CSS comment that correctly called `.udot` retired. `grep -rn '<old-name>'
-  <file>` after any retirement; every hit is updated or a deliberate historical note. (2)
-  **`.tab.has-u .ico` (0,3,0) beats `.tab .ico` (0,2,0) by specificity — state-agnostic vs
-  `.active`**, so it reddens the arrow on an active+U tab regardless of source order (verified
-  live: active+U → `#E74856` on the `#333333` body). `assertNotIn("inset 0 2px 0 0")` is a sound
-  "top stripe retired" check precisely because the new value is `inset 0 -2px 0 0` — the `-`
-  breaks substring contiguity. (3) **A prior ticket's test that hardcoded a FULL multi-value CSS
-  string breaks when a later ticket legitimately changes ONE of those values** — the #661
-  left-padding lock asserted the whole `padding: 6px 12px 6px 16px`; #691's vertical-padding
-  change (6→9) broke it. Decouple such a lock to the asymmetry it actually owns (parse the
-  4-value shorthand, assert left=16 > right=12), never the values a later ticket owns.
+- **[Moved to `.claude/rules-reference/internals-archive.md` at the #1341 cap, 2026-11-16 — grep "#691 REWORK (owner rejected" there]** keep-the-data-channel / move-the-render + retiring a UI element.
 
 - **[Moved to `.claude/rules-reference/internals-archive.md` at the #1287 cap, 2026-11-03 — grep "#685 tmux — a CONF-ONLY geometry pin" there]** live tmux window-size convergence (`converge_tmux_window_geometry`).
 - **#661 go-live (supervisor, 2026-08-25):** authorized_keys forced-command tvar je `restrict,pty,command="…"` — samotné `restrict` vypína aj PTY a interaktívny tmux attach by zlyhal; `pty` ho musí explicitne vrátiť. Overenie živosti restrict línie bez interakcie: BatchMode probe (`ssh -T … true`) — forced command IGNORUJE `true` a padne na `open terminal failed: not a terminal` = auth OK + forced command beží. Presný remote command renderuj z `cli_webterm._remote_command(preferred)` (escape `\` a `"` pre authorized_keys), nikdy ručne prepísaný.
