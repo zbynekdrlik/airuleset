@@ -42,36 +42,27 @@ import time
 import watchdog
 
 
+JANITOR_CLEAR_MAX_CHARS = 8000   # #1340 backspaces, >= 2x the largest own payload
+JANITOR_CLEAR_MAX_PASSES = 120   # degenerate 1-key passes (#1332 line breaks)
+
+
 def _janitor_clear_box(pid, run, sleep_fn, log_fn):
     """#372 — clear the pane's CURRENT input-box content down to bare.
 
-    ONE Escape first — a short slash command (`/compact`) can leave Claude
-    Code's own command-palette MENU overlay open after typing (the THIRD
-    #372 incident, forensically confirmed: the box held `/compact` with an
-    open menu, which confused the ordinary verify read enough that neither
-    tail-match nor the placeholder regex recognized the landed type) — a
-    single Escape closes any such overlay before the clear loop begins.
-    NEVER a second Escape (issue #35: a rapid double-Escape into a pane
-    holding a draft PERMANENTLY DELETES it — the exact data loss this
-    whole mechanism exists to prevent).
+    ONE Escape first: a typed slash command (`/compact`) can leave CC's
+    command-palette MENU open (the third #372 incident), which hid the landed
+    type from the verify read. NEVER a second Escape (#35: a rapid
+    double-Escape into a pane holding a draft PERMANENTLY DELETES it).
 
-    Then an ITERATIVE, OBSERVED-STATE-DRIVEN backspace loop: each batch is
-    sized to the length ACTUALLY SEEN this iteration (re-captured every
-    time), never assumed from a remembered/source length — the #372 root
-    cause was `len(payload)` (~3800) backspaces against a box that really
-    held a ~26-char placeholder. Converges correctly regardless of whether
-    Claude Code clears a collapsed placeholder atomically (bare after the
-    first small batch) or character-by-character (several batches).
-
-    #1340 -- a batch is the WHOLE visible box's non-space count, not the tail
-    row's: CC drops a word-wrap break's space and draws a scrolled box's last
-    rows only, so the buffer behind what is on screen holds at least that many
-    characters and a pass never reaches past it. The loop stops on bare, on an
-    unreadable box, on NO PROGRESS (the box rows unchanged after a pass: the
-    keys do not land), or at `JANITOR_CLEAR_MAX_CHARS` backspaces /
-    `JANITOR_CLEAR_MAX_PASSES` passes -- never a fixed 25 tail-row passes,
-    which cleared ~950 chars of a ~3.6k own /goal at 40 cols. Returns True
-    only once a fresh capture confirms bare."""
+    Then an OBSERVED-STATE backspace loop, re-captured every pass and never
+    sized from a remembered length (the #372 root cause: `len(payload)` ~3800
+    backspaces into a ~26-char placeholder). #1340: a pass removes the WHOLE
+    visible box's non-space count (CC drops a wrap break's space and draws a
+    scrolled box's last rows only, so the buffer holds at least that many),
+    not the tail row's: 25 tail-row passes cleared ~950 chars of a ~3.6k own
+    /goal at 40 cols. Stops on bare (True), an unreadable box, NO PROGRESS
+    (box rows unchanged after a pass: the keys do not land) or the
+    `JANITOR_CLEAR_MAX_CHARS` / `_PASSES` volume bound (False)."""
     sleep_fn = sleep_fn or time.sleep
     # #1002 -- janitor cleanup is RECOVERY (kind="janitor", ungated): it CLEANS UP
     # a stranded machine nudge / closes a menu overlay, so it must run regardless
@@ -79,33 +70,25 @@ def _janitor_clear_box(pid, run, sleep_fn, log_fn):
     # still be reclaimed). Routed through the ONE `keys` primitive like every key.
     watchdog.keys(pid, "Escape", kind="janitor", run=run)
     sent, prev_rows = 0, None
-    for _ in range(watchdog.JANITOR_CLEAR_MAX_PASSES):
+    for _ in range(JANITOR_CLEAR_MAX_PASSES):
         cap = watchdog.capture_pane(pid, run, lines=30)
         cur = watchdog._input_line_text(cap)
         if cur == "":
             return True
         if cur is None:
-            # #372 adversarial-review MAJOR-1 — `_input_line_text` returns
-            # `None` (never `""`) for a box that cannot currently be read
-            # at all (a dialog opened mid-clear, a spinner, a transient
-            # capture failure) — `cur == ""` above does not catch this, and
-            # a naive `len(cur)` crashed with `TypeError`, which propagated
-            # through this job's OWN top-level exception guard and aborted
-            # the rest of the sweep for EVERY OTHER pane. An unreadable box
-            # is the same "never guess" case every other keystroke helper
-            # in this file already refuses on — abort this recovery
-            # attempt cleanly; the janitor tries again next sweep.
+            # #372 review MAJOR-1: None = a box that cannot be read now (a
+            # dialog, a spinner, a capture failure). Never guess (a `len(None)`
+            # once aborted the sweep for every pane): the next sweep retries.
             log_fn("janitor: box unreadable mid-clear")
             return False
         rows = tuple(watchdog._input_box_rows_raw(cap))
         if rows == prev_rows:
             log_fn("janitor: clear made no progress after %d backspaces" % sent)
             return False
-        if sent >= watchdog.JANITOR_CLEAR_MAX_CHARS:
+        if sent >= JANITOR_CLEAR_MAX_CHARS:
             break
         visible = len("".join(watchdog._box_norm_from_capture(cap).split()))
-        # #1332: a line-break-only box shows no character: one key per pass.
-        batch = min(visible, watchdog.JANITOR_CLEAR_BATCH_MAX) or 1
+        batch = min(visible, watchdog.JANITOR_CLEAR_BATCH_MAX) or 1  # #1332 "\n"
         watchdog.keys(pid, *(["BSpace"] * batch), kind="janitor", run=run)
         sent, prev_rows = sent + batch, rows
         sleep_fn(watchdog.JANITOR_CLEAR_SETTLE_S)

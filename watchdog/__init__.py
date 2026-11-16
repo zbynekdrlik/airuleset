@@ -1084,8 +1084,6 @@ from watchdog.stash import (  # noqa: E402
     JANITOR_CLEAR_MAX_ITER as JANITOR_CLEAR_MAX_ITER,
     JANITOR_CLEAR_BATCH_MAX as JANITOR_CLEAR_BATCH_MAX,
     JANITOR_CLEAR_SETTLE_S as JANITOR_CLEAR_SETTLE_S,
-    JANITOR_CLEAR_MAX_CHARS as JANITOR_CLEAR_MAX_CHARS,
-    JANITOR_CLEAR_MAX_PASSES as JANITOR_CLEAR_MAX_PASSES,
     JANITOR_WATCH_MAX_AGE_S as JANITOR_WATCH_MAX_AGE_S,
     _looks_like_own_payload as _looks_like_own_payload,
     _looks_like_own_stuck_content as _looks_like_own_stuck_content,
