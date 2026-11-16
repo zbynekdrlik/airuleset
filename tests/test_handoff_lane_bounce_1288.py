@@ -182,11 +182,61 @@ class TestReviewFixes(unittest.TestCase):
     def test_legacy_f_ids_in_list_table_heading_and_emoji_forms(self):
         for line, fid in (("- 🔴 F1: x", "F1"), ("**🟡 F6** y", "F6"),
                           ("1. F2 broken", "F2"), ("| F3 | bad |", "F3"),
-                          ("### F4 heading", "F4"), ("> F5 quoted", "F5"),
-                          ("- [ ] F8 todo", "F8")):
+                          ("### F4 heading", "F4"), ("- [ ] F8 todo", "F8")):
             self.assertEqual(airuleset._parse_gk_findings(line), [fid], line)
         self.assertEqual(airuleset._parse_gk_findings("x (#5244 F1) y"), [])
         self.assertEqual(airuleset._parse_gk_findings("| lens | F1 |"), [])
+
+
+class TestReviewRound2(unittest.TestCase):
+    """Review round 2: one meaning of "answered", re-cut lanes, regex edges."""
+
+    def _recut(self, cite):
+        body = "READY-FOR-REVIEW\nBranch: david3:%s\nHEAD: 1cb428522cbb\n" % U18
+        if cite:
+            body += "Root-cause-of-previous-bounce: answers bounce 3\n"
+        return [_rfr(1, "2026-11-03T10:00:00Z", U16, "43e3af87d6aa"),
+                _bounce(3, "2026-11-03T12:00:00Z", "43e3af87d6"),
+                {"id": 4, "login": "stream", "created_at": "2026-11-03T13:00:00Z",
+                 "body": body}]
+
+    def test_recut_lane_rfr_naming_the_bounce_answers_it(self):
+        self.assertNotEqual(_state(self._recut(True))["state"],
+                            "bounce-unanswered")
+        self.assertEqual(_state(self._recut(False))["state"], "bounce-unanswered")
+
+    def test_recut_rfr_naming_the_bounce_must_disposition_its_findings(self):
+        st = _state(self._recut(False)[:2])
+        body = "READY-FOR-REVIEW\nanswers bounce 3\n"
+        blk = airuleset._handoff_gk_preflight(
+            9258, "o/r", body, branch=U18, watch_result=st,
+            commits_since=lambda b, ts, cwd: 2, journal=lambda **kw: None)
+        self.assertIsNotNone(blk)
+        self.assertIn("needs-disposition F1", blk)
+
+    def test_unknown_lane_open_bounce_is_checked_for_any_lane(self):
+        rows = [_rfr(1, "2026-11-03T10:00:00Z", U16, "aaaaaaa1111"),
+                _rfr(2, "2026-11-03T10:30:00Z", U18, "ccccccc3333"),
+                _bounce(3, "2026-11-03T12:00:00Z", "9999999abcd"),
+                _bounce(5, "2026-11-03T13:00:00Z", "ccccccc3333")]
+        st = _state(rows)
+        self.assertEqual([b["id"] for b in st["open_bounces"]], [5, 3])
+        blk = _pf(st, U16)
+        self.assertIsNotNone(blk)
+        self.assertIn("BOUNCE 3 ", blk)
+
+    def test_regex_round2_edges(self):
+        p = airuleset._parse_gk_findings
+        self.assertEqual(p("> F2 fixed"), [])
+        self.assertEqual(p("2026. F12 was the year"), [])
+        self.assertEqual(p("- 🔴 **3** bad"), ["3"])
+        self.assertEqual(p("12. F2 broken"), ["F2"])
+
+    def test_regex_is_linear_on_long_blank_runs(self):
+        import time
+        t0 = time.monotonic()
+        airuleset._parse_gk_findings(" " * 20000 + "x\n" + "\t" * 20000 + "y")
+        self.assertLess(time.monotonic() - t0, 1.0)
 
 
 if __name__ == "__main__":
