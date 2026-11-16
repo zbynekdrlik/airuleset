@@ -46,13 +46,26 @@ def _status(ts, **fields):
     return {"type": "attachment", "timestamp": ts, "attachment": att}
 
 
+# The LIVE record (dasio 11.11.2026 23:15:58Z, CC 2.1.322), byte shape as CC
+# writes it (compact JSON, `attachment` before `type`); condition and reason
+# shortened, every other field verbatim.
+LIVE_MET = (
+    '{"parentUuid":"d4e72ecc-f47b-409e-a7d8-701ba4f3f837","isSidechain":false,'
+    '"attachment":{"type":"goal_status","met":true,"condition":"STOP CONDITIONS '
+    '— the loop is DONE the moment EITHER holds, ","reason":"Condition (A) is '
+    'satisfied. The last assistant message ends ","iterations":8,"durationMs":'
+    '8768212,"tokens":104857},"type":"attachment","uuid":"43e0b210-eaac-4b01-'
+    '8fef-7b472b6d7818","timestamp":"2026-11-11T23:15:58.209Z","userType":'
+    '"external","entrypoint":"cli","version":"2.1.322","gitBranch":"dev"}')
+
+
 class GoalStatusEndMarker(unittest.TestCase):
     def _transcript(self, entries):
         d = tempfile.mkdtemp()
         p = os.path.join(d, "s.jsonl")
         with open(p, "w", encoding="utf-8") as f:
             for e in entries:
-                f.write(json.dumps(e) + "\n")
+                f.write((e if isinstance(e, str) else json.dumps(e)) + "\n")
         self.addCleanup(lambda: (os.remove(p), os.rmdir(d)))
         return p
 
@@ -72,6 +85,10 @@ class GoalStatusEndMarker(unittest.TestCase):
         self.assertEqual(mark["clear_kind"], "met")
         self.assertEqual(mark["payload"], COND)
         self.assertIsNotNone(mark["ts"])
+
+    def test_live_record_shape_ends_the_goal(self):
+        mark = self._mark([_arm("2026-11-11T20:49:49.000Z"), LIVE_MET])
+        self.assertEqual((mark["state"], mark["clear_kind"]), ("cleared", "met"))
 
     def test_failed_status_ends_the_goal(self):
         mark = self._mark([_arm("2026-11-11T20:49:49.000Z"),
@@ -162,6 +179,32 @@ class DarkWatchQuietOnMet(unittest.TestCase):
             self.assertEqual(tmux.sent, [])
         self.assertEqual(state["goal_mark"][sid]["mark"]["clear_kind"], "met")
         self.assertFalse(any("goal-lost" in ln for ln in lines), lines)
+        # review 1: a finished loop is journalled once, never silent (#486)
+        self.assertEqual(sum("goal-ended:met" in ln for ln in lines), 1, lines)
+        self.assertEqual(sends, [])
+
+    def test_failed_goal_is_journalled_lost_once(self):
+        sid = "sid-goal-failed-1309"
+        _write_marker_transcript(self.proj, self.CWD, sid)
+        _write_goal_marker(self.proj, self.CWD, sid, "Goal set: %s" % COND,
+                           ts_epoch=500)
+        tp = self.proj / wd.encode_project_dir(self.CWD) / (sid + ".jsonl")
+        with open(tp, "a", encoding="utf-8") as f:
+            f.write(json.dumps(_status("1970-01-01T00:10:00.000Z", met=False,
+                                       failed=True)) + "\n")
+        state, sends, lines = {}, [], []
+        for i in range(3):
+            tmux = DeliverGoalFakeTmux([("%9", "claude", self.CWD, "111")],
+                                       GOAL_IDLE_CAP)
+            lines += goal.goal_dark_watch(
+                100000 + 90 * i, run=tmux, state=state, projects_dir=self.proj,
+                send_fn=lambda msg, **k: sends.append((msg, k)),
+                sleep_fn=lambda s: None,
+                rearm_fn=lambda cwd: ("/goal " + COND, "full"))
+            self.assertEqual(tmux.sent, [])
+        lost = [ln for ln in lines if "goal-lost:failed" in ln]
+        self.assertEqual(len(lost), 1, lines)
+        self.assertIn("NOT re-armed", lost[0])
         self.assertEqual(sends, [])
 
     def test_stale_pre_fix_entry_is_reseeded(self):
