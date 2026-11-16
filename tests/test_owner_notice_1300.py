@@ -56,6 +56,15 @@ class OwnerNoticeCli(unittest.TestCase):
             return {}
         return json.loads(path.read_text(encoding="utf-8"))
 
+    def notice(self, slug, proj=None):
+        """The map entry of notice `slug` for `proj` (key shape agnostic)."""
+        proj = str(proj or self.proj)
+        hits = [v for v in self.qmap().values()
+                if str(v.get("session", "")).startswith("notice:")
+                and str(v.get("session")).endswith(":" + slug)
+                and v.get("cwd") == proj]
+        return hits[0] if len(hits) == 1 else None
+
     def count(self, cwd):
         return statusbar.question_ping_count(str(cwd), home=str(self.home))
 
@@ -71,13 +80,14 @@ class OwnerNoticeCli(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("suppressed", r.stdout)
         self.assertEqual(self.count(self.proj), 1)
-        entry = self.qmap()["suppressed:notice:restart-needed"]
+        entry = self.notice("restart-needed")
         self.assertIn("Reštartuj Claude na dev2", entry["block"])
         self.assertEqual(entry["cwd"], str(self.proj))
         self.assertEqual(entry["channel"], "")
 
     def test_notice_is_scoped_to_its_project(self):
         self.send("Box dev2 je za stabilnou verziou.")
+        self.assertEqual(self.count(self.proj), 1)
         self.assertEqual(self.count(self.other), 0)
 
     def test_subdir_cwd_resolves_to_git_root(self):
@@ -85,15 +95,13 @@ class OwnerNoticeCli(unittest.TestCase):
                             "zbynek", "--owner-notice", "no-admin", "--cwd",
                             str(self.proj / "src"))
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(self.qmap()["suppressed:notice:no-admin"]["cwd"],
-                         str(self.proj))
+        self.assertIsNotNone(self.notice("no-admin"))
 
     def test_same_slug_overwrites_one_item(self):
         self.send("prvý text")
         self.send("novší text")
         self.assertEqual(self.count(self.proj), 1)
-        self.assertIn("novší text",
-                      self.qmap()["suppressed:notice:restart-needed"]["block"])
+        self.assertIn("novší text", self.notice("restart-needed")["block"])
 
     def test_clear_removes_the_notice(self):
         self.send("Reštartuj Claude.")
@@ -101,7 +109,7 @@ class OwnerNoticeCli(unittest.TestCase):
                             "--cwd", str(self.proj))
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(self.count(self.proj), 0)
-        self.assertNotIn("suppressed:notice:restart-needed", self.qmap())
+        self.assertIsNone(self.notice("restart-needed"))
 
     def test_clear_of_another_projects_slug_keeps_it(self):
         self.send("Reštartuj Claude.")
@@ -153,6 +161,69 @@ class OwnerNoticeCli(unittest.TestCase):
                            capture_output=True, text=True, timeout=60)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(self.count(self.proj), 1)
+
+
+    # --- review round 1 (#1300) ------------------------------------------
+
+    def test_ticket_ref_in_body_still_counts(self):
+        for slug, body in (("ref", "Pozri remoteos-mcp #12, treba reštart."),
+                           ("tracked", "Reštart. Sledované na #12")):
+            self.send(body, slug)
+        self.assertEqual(self.count(self.proj), 2)
+        cover = statusbar.question_attribution.QuestionCover({12}, rows={12})
+        self.assertEqual(statusbar.question_ping_count(
+            str(self.proj), home=str(self.home), cover=cover), 2)
+
+    def test_symlinked_cwd_matches_the_session_path(self):
+        real = Path(self._tmp.name) / "real"
+        (real / "lnproj" / ".git").mkdir(parents=True)
+        link = self.home / "work"
+        link.symlink_to(real)
+        r = self.run_notify("--body", "x", "--owner-name", "zbynek",
+                            "--owner-notice", "n1", "--cwd",
+                            str(link / "lnproj"))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.count(link / "lnproj"), 1)
+
+    def test_question_block_never_returns_a_notice(self):
+        import cli_question_block
+        self.send("Reštartuj Claude.")
+        self.assertIsNone(cli_question_block.newest(self.qmap(), str(self.proj)))
+        mine = {"session": "s-1", "cwd": str(self.proj), "asked": 1, "ts": 1,
+                "block": "moja otázka"}
+        entries = dict(self.qmap(), **{"1": mine})
+        self.assertIs(cli_question_block.newest(entries, str(self.proj)), mine)
+
+    def test_same_slug_in_two_projects_keeps_both(self):
+        self.send("A potrebuje reštart.")
+        r = self.run_notify("--body", "B potrebuje reštart.", "--owner-name",
+                            "zbynek", "--owner-notice=restart-needed",
+                            "--cwd", str(self.other))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.count(self.proj), 1)
+        self.assertEqual(self.count(self.other), 1)
+        self.assertIn("A potrebuje", self.notice("restart-needed")["block"])
+
+    def test_dry_run_clear_keeps_the_notice(self):
+        self.send("Reštartuj Claude.")
+        r = self.run_notify("--clear-owner-notice", "restart-needed",
+                            "--cwd", str(self.proj), "--dry-run")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.count(self.proj), 1)
+
+    def test_failed_record_exits_nonzero(self):
+        (self.home / ".claude" / "discord-questions.json").mkdir(parents=True)
+        r = self.send("Reštartuj Claude.")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("NOT recorded", r.stderr)
+
+    def test_record_and_clear_leave_a_delivery_log_line(self):
+        self.send("Reštartuj Claude.")
+        self.run_notify("--clear-owner-notice", "restart-needed",
+                        "--cwd", str(self.proj))
+        log = (self.home / ".claude" / "notify-delivery.log").read_text()
+        self.assertIn("owner-notice-recorded", log)
+        self.assertIn("owner-notice-cleared", log)
 
 
 if __name__ == "__main__":
