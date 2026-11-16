@@ -3292,19 +3292,13 @@ def cmd_notify(args):
         print(send(body, dedup_key=dedup, dry_run=args.dry_run, project=project))
         return
 
-    if args.body is not None:
-        # #334: --body is the general-purpose EXTERNAL send primitive (no
-        # caller inside this repo itself uses it — only foreign scripts like
-        # codex-bridge shell out to it). With no explicit owner it falls
-        # entirely through to resolve_owner()'s tmux auto-detect, which is
-        # correct for a caller genuinely tied to the current pane (the
-        # ❓/✅ idle pings, autopilot cards) but WRONG for a headless/
-        # detached caller whose ancestor process merely inherited an
-        # unrelated pane's $TMUX — the claude-david misroute regression.
-        # --owner-name (normalized the same way provision_question_thread
-        # already normalizes it) lets such a caller pin the real owner
-        # explicitly, bypassing tmux detection entirely. Omitting it keeps
-        # today's exact behavior — send(owner=None) resolves internally.
+    if args.body is not None or getattr(args, "clear_owner_notice", None):
+        # #334: --body is the EXTERNAL send primitive (foreign scripts only).
+        # With no owner it falls to resolve_owner()'s tmux auto-detect, WRONG
+        # for a headless caller that inherited an unrelated pane's $TMUX (the
+        # claude-david misroute); --owner-name pins the owner explicitly.
+        # #1300: --owner-notice puts a policy-suppressed notice into the U.
+        root = cli_owner_notice.preflight(args)
         owner_name = getattr(args, "owner_name", None)
         owner = None
         if owner_name:
@@ -3322,8 +3316,10 @@ def cmd_notify(args):
                      "falling back to no-owner routing" % owner_name,
                      file=sys.stderr)
                 sys.exit(1)
-        print(send(args.body, owner=owner, dedup_key=args.dedup_key,
-                   dry_run=args.dry_run))
+        status = "clear-owner-notice" if args.body is None else send(
+            args.body, owner=owner, dedup_key=args.dedup_key, dry_run=args.dry_run)
+        print(status)
+        cli_owner_notice.after_send(args, status, root)
         return
 
     print("notify: nothing to send (use --autopilot-done, --run-card, --body, "
@@ -9330,6 +9326,7 @@ from cli_project_gh_token import (  # noqa: E402, F401
     register_parser as _register_project_gh_token_parser,
 )
 # --- #1224: print the last delivered ❓ block (never read the own transcript) ---
+import cli_owner_notice  # noqa: E402 - #1300 owner notice -> footer U
 from cli_question_block import (  # noqa: E402, F401
     cmd_question_block as cmd_question_block,
     register_parser as _register_question_block_parser,
@@ -9731,6 +9728,7 @@ def main():
     p_notify.add_argument("--goal", help="Plain-language ticket goal (card 'Cieľ') — "
                                          "simple/understandable, NOT the technical issue title")
     p_notify.add_argument("--body", help="Arbitrary markdown body to send")
+    cli_owner_notice.add_notify_args(p_notify)
     p_notify.add_argument("--repo", help="owner/name (autopilot card)")
     p_notify.add_argument("--pr", help="PR URL → clickable 'kód (PR)' link on the card")
     p_notify.add_argument("--url", action="append",
