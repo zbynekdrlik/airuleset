@@ -114,28 +114,33 @@ def bounce_lane(bounce, rfrs):
 
 
 def bounce_answered(bounce, rfrs):
-    """True when an RFR LATER than `bounce` answers it (#1288 review): one of
-    the bounced lane, or any later RFR when the lane is unknown or the RFR
-    carries no `Branch:` line (it cannot be told apart, so it counts)."""
-    lane = bounce_lane(bounce, rfrs)
-    return any(r["ts"] > bounce["ts"]
-               and (lane is None or not r.get("branch") or r["branch"] == lane)
-               for r in rfrs)
+    """True when a LATER RFR answers gk record `bounce` (#1288 review), by the
+    ONE predicate `rfr_answers_bounce`, where an unknown lane (and a branch-less
+    RFR) keeps the ticket-level rule: any later RFR answers."""
+    snap = {"id": bounce.get("id"), "lane_branch": bounce_lane(bounce, rfrs)}
+    return any(r["ts"] > bounce["ts"] and rfr_answers_bounce(
+        snap, r.get("branch"), r.get("body"), unknown_lane_answers=True)
+        for r in rfrs)
 
 
 def pick_bounce(st, branch):
-    """The open BOUNCE snapshot of the readiness lane `branch` from a
-    `watch_issue` result (several lanes may hold open bounces), else None."""
+    """The open BOUNCE a hand-off on lane `branch` must answer, from a
+    `watch_issue` result: its own lane's newest open bounce, else the newest
+    open bounce of UNKNOWN lane (it may be this lane's), else None (#1288)."""
     mine = norm_branch(branch)
-    for b in (st or {}).get("open_bounces") or []:
-        if mine and _lane_of(b) == mine:
-            return b
+    open_b = (st or {}).get("open_bounces") or []
+    for want in (mine, None):
+        for b in open_b:
+            if mine and _lane_of(b) == want:
+                return b
     return None
 
 
 def rfr_clears_all(st, branch, body):
     """True when this RFR answers EVERY open BOUNCE of the ticket (#1291): only
-    then may the composer drop the ticket-level `prio:bounce` label."""
+    then may the composer drop the ticket-level `prio:bounce` label. An
+    unknown-lane bounce needs its id named (the safe direction: a lingering
+    label falls to the labeler workflow / the gk)."""
     st = st or {}
     open_b = st.get("open_bounces") or [st.get("gk_latest")]
     return all(rfr_answers_bounce(b, branch, body) for b in open_b)
@@ -148,28 +153,38 @@ def _lane_of(gk_latest):
     return gl.get("lane_branch") or norm_branch(gl.get("branch"))
 
 
-def bounce_other_lane(gk_latest, branch):
+def _names_id(gid, body):
+    """True when `body` names gk comment id `gid` as a standalone token."""
+    return gid is not None and bool(body) and bool(re.search(
+        r"(?<![0-9A-Za-z])%s(?![0-9A-Za-z])" % re.escape(str(gid)), body))
+
+
+def bounce_other_lane(gk_latest, branch, body=None):
     """The bounced lane when it is KNOWN and differs from the readiness `branch`
-    (#1288: another lane's BOUNCE is advisory for this hand-off), else None."""
-    lane = _lane_of(gk_latest)
-    mine = norm_branch(branch)
-    return lane if lane and mine and lane != mine else None
-
-
-def rfr_answers_bounce(gk_latest, branch, body):
-    """True when this RFR answers the newest open BOUNCE (#1291): the bounced
-    lane is the readiness `branch`, or the RFR `body` names the BOUNCE comment
-    id as a standalone token. Unknown lane and no id = False, so the composer
-    leaves `prio:bounce` to the gk verdict flow."""
+    (#1288: another lane's BOUNCE is advisory for this hand-off), else None. An
+    RFR whose `body` names the bounce id claims to answer it (a re-cut lane), so
+    it is never advisory: its findings must be dispositioned."""
     gl = gk_latest or {}
     lane = _lane_of(gl)
-    if lane and norm_branch(branch) == lane:
+    mine = norm_branch(branch)
+    if not (lane and mine and lane != mine) or _names_id(gl.get("id"), body):
+        return None
+    return lane
+
+
+def rfr_answers_bounce(gk_latest, branch, body, unknown_lane_answers=False):
+    """The ONE "does this RFR answer that BOUNCE" predicate (#1288/#1291): the
+    RFR `body` names the bounce comment id; or the bounced lane is known and the
+    RFR is on it (a branch-less RFR counts, it cannot be told apart); or the
+    lane is unknown and `unknown_lane_answers`."""
+    gl = gk_latest or {}
+    if _names_id(gl.get("id"), body):
         return True
-    gid = gl.get("id")
-    if gid is None or not body:
-        return False
-    return bool(re.search(r"(?<![0-9A-Za-z])%s(?![0-9A-Za-z])"
-                          % re.escape(str(gid)), body))
+    lane = _lane_of(gl)
+    if lane is None:
+        return unknown_lane_answers
+    mine = norm_branch(branch)
+    return mine is None or mine == lane
 
 
 def _parse_iso(s):
@@ -396,6 +411,7 @@ def watch_issue(issue, *, fetch, gk_login, self_login,
             if is_rfr and ts is not None:
                 bm, hm = _BRANCH_RE.search(body), _HEAD_RE.search(body)
                 rfrs.append({"ts": ts, "head": hm.group(1) if hm else None,
+                             "body": body,
                              "branch": norm_branch(bm.group(1) if bm else None)})
             if is_rfr and ts is not None and (rfr_ts is None or ts > rfr_ts):
                 rfr_ts, rfr_id = ts, cid

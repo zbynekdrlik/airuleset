@@ -4685,14 +4685,14 @@ HANDOFF_GATE_DIR = ".claude/handoff-gate"
 HANDOFF_GATE_LOG = ".claude/handoff-gate.log"
 
 # Finding id shape (#1081): ids come ONLY from a line-start marker: a bullet-
-# anchored emoji + number (group 1), or the legacy `F<n>` (group 2) after any
-# list/table/heading/quote/checkbox prefix and an optional emoji. A bare
-# `[A-Z]\d+`, a mid-sentence emoji or `F<n>` (a lens citation, #1219) and the
-# count line (`0 🔴 · 2 🟡`) are EXCLUDED positionally (main, #1081).
+# anchored emoji + number (group 1), or the legacy `F<n>` (group 2) after a
+# list/table/heading/checkbox prefix and an optional emoji. A bare `[A-Z]\d+`, a
+# mid-sentence emoji or `F<n>` (a lens citation, #1219), a `>` quote and the
+# count line are EXCLUDED positionally; no two `[ \t]*` touch (linear time).
 _GK_FINDING_ID_RE = re.compile(
-    r'^[ \t]*(?:[-*•][ \t]*)?\**[ \t]*(?:🔴|🟡|🔵)[ \t]*(\d+)|^[ \t]*(?:(?:[-*•>#|]'
-    r'|\d+[.)])[ \t]*)*(?:\[[ xX]\][ \t]*)?\**[ \t]*(?:(?:🔴|🟡|🔵)[ \t]*\**[ \t]*)?'
-    r'F(\d+)\b', re.MULTILINE | re.UNICODE)
+    r'^[ \t]*(?:[-*•][ \t]*)?(?:\*+[ \t]*)?(?:🔴|🟡|🔵)[ \t]*(?:\*+[ \t]*)?(\d+)|^[ \t]*'
+    r'(?:(?:[-*•#|]|\d{1,3}[.)])[ \t]*)*(?:\[[ xX]\][ \t]*)?(?:\*+[ \t]*)?'
+    r'(?:(?:🔴|🟡|🔵)[ \t]*(?:\*+[ \t]*)?)?F(\d+)\b', re.MULTILINE | re.UNICODE)
 
 
 def _parse_gk_findings(comment_body):
@@ -5090,7 +5090,7 @@ def _handoff_gk_preflight(issue, repo, body, *, branch=None, cwd=None,
         # (a) a BOUNCE for a DIFFERENT lane (its Branch: line, else the RFR it
         # reviewed, #1288) is advisory, never a block (the #1071 FP); its
         # finding ids belong to that lane, so skip the disposition check too.
-        verdict_branch = cli_gk_watch.bounce_other_lane(gl, branch)
+        verdict_branch = cli_gk_watch.bounce_other_lane(gl, branch, body)
         if verdict_branch:
             _pf_journal(repo, issue, gl,
                         "advisory: BOUNCE for branch %r != readiness %r"
@@ -5140,8 +5140,8 @@ def _handoff_gk_preflight(issue, repo, body, *, branch=None, cwd=None,
     # since the BOUNCE" alone (and `head_ts` is the PR head's `author.date`,
     # which a rebase can backdate). That is the inherent floor of a finding-id
     # contract; a marker-less advisory simply cannot be disposition-checked.
-    undis = (gl.get("ids") if gl is not st.get("gk_latest")  # #1288 own lane
-             else st.get("undispositioned_ids")) or []
+    _own = gl.get("id") != (st.get("gk_latest") or {}).get("id")  # #1288 lane
+    undis = (gl.get("ids") if _own else st.get("undispositioned_ids")) or []
     missing = cli_gk_watch.missing_dispositions(body, undis)
     if missing:
         return ("handoff BLOCK: needs-disposition %s — the RFR body must "
