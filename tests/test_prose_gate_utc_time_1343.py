@@ -225,5 +225,38 @@ class TestReviewFindings(TestCase):
         self.assertLess(time.monotonic() - t, 8.0)
         self.assertFalse(_utc_blocked(p))
 
+
+class TestConfirmationRound(TestCase):
+    """#1343 confirmation review (N1, N3, N4, N5)."""
+
+    def test_n1_no_break_space_before_utc(self):
+        for sp in ("\u00a0", "\u202f"):
+            p = _run("Hotovo 20:45%sUTC." % sp)
+            self.assertTrue(_utc_blocked(p), "NBSP form slipped: %r" % sp)
+
+    def test_n3_placeholder_is_not_a_reason(self):
+        p = _run("Hotovo 20:45 UTC.\nairuleset:utc-time-ok <reason>")
+        self.assertTrue(_utc_blocked(p))
+
+    def test_n4_colon_glued_label(self):
+        p = _run("Deploy:2026-11-16T20:45:07Z hotový.")
+        self.assertTrue(_utc_blocked(p))
+
+    def test_n5_deleted_cwd_still_logs_the_bypass(self):
+        import io
+        from contextlib import redirect_stdout
+        from unittest import mock
+        from gates import utctime
+        msg = "Hotovo 20:45 UTC.\nairuleset:utc-time-ok citujem log"
+        with mock.patch.object(utctime.os, "getcwd",
+                               side_effect=FileNotFoundError()), \
+                mock.patch.object(utctime.sys, "stdin", io.StringIO(msg)), \
+                mock.patch("gates.audit.append_line") as app, \
+                redirect_stdout(io.StringIO()):
+            rc = utctime.main()
+        self.assertEqual(rc, 0)
+        self.assertEqual(app.call_count, 1)
+        self.assertIn("citujem log", app.call_args[0][1])
+
 if __name__ == "__main__":
     main()
