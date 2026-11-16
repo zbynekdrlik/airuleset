@@ -653,18 +653,16 @@ def _short_alias(entry):
 
 
 def _tab_order_key(alias):
-    """Stable tab order (#579 owner spec): dev1, dev2, gk, m1.., miva, d1..,
-    then everything else alphabetically. Uniform 3-tuples so no cross-group
-    comparison ever puts a str next to an int."""
+    """Stable tab order (#579 owner spec): dev1, dev2, gk, miva, d1.., then
+    everything else alphabetically (the montalu m1.. rank left with its
+    accounts, #1306). Uniform 3-tuples so no cross-group comparison ever puts
+    a str next to an int."""
     if alias == "dev1":
         return (0, 0, "")
     if alias == "dev2":
         return (1, 0, "")
     if alias == "gk":
         return (2, 0, "")
-    mo = re.match(r"^m(\d+)$", alias)
-    if mo:
-        return (3, int(mo.group(1)), "")
     if alias == "miva":
         return (4, 0, "")
     mo = re.match(r"^d(\d+)$", alias)
