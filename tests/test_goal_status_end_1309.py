@@ -164,6 +164,28 @@ class DarkWatchQuietOnMet(unittest.TestCase):
         self.assertFalse(any("goal-lost" in ln for ln in lines), lines)
         self.assertEqual(sends, [])
 
+    def test_stale_pre_fix_entry_is_reseeded(self):
+        # A live box's persisted entry (parser v2) already advanced its offset
+        # PAST the met record and keeps a stale "set": the parser bump must force
+        # a reseed so the new recognizer re-reads the tail (#675 class).
+        sid = "sid-goal-met-reseed-1309"
+        _write_marker_transcript(self.proj, self.CWD, sid)
+        _write_goal_marker(self.proj, self.CWD, sid, "Goal set: %s" % COND,
+                           ts_epoch=500)
+        tp = self.proj / wd.encode_project_dir(self.CWD) / (sid + ".jsonl")
+        with open(tp, "a", encoding="utf-8") as f:
+            f.write(json.dumps(_status("1970-01-01T00:10:00.000Z", met=True)) + "\n")
+        state = {"goal_mark": {sid: {
+            "off": tp.stat().st_size, "tmtime": 0, "pv": 2,
+            "mark": {"state": "set", "payload": COND, "ts": 500}}}}
+        tmux = DeliverGoalFakeTmux([("%9", "claude", self.CWD, "111")], GOAL_IDLE_CAP)
+        goal.goal_dark_watch(100000, run=tmux, state=state, projects_dir=self.proj,
+                             send_fn=lambda msg, **k: None, sleep_fn=lambda s: None,
+                             rearm_fn=lambda cwd: ("/goal " + COND, "full"))
+        rec = state["goal_mark"][sid]
+        self.assertEqual(rec["mark"]["state"], "cleared")
+        self.assertEqual(rec["pv"], goal._GOAL_MARK_PARSER_VERSION)
+
 
 if __name__ == "__main__":
     unittest.main()
