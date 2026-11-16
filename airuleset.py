@@ -4859,13 +4859,13 @@ def _pf_journal(repo, issue, gl, decision, journal=None):
 
 def _handoff_changed_paths(cwd=None, run=None):
     """#1073 — the RFR diff as a name-only path list: HEAD vs the repo's
-    integration base (`origin/develop`, else the `origin/HEAD` target, else
-    `origin/main`/`master`, first that resolves). develop goes first (#1210):
+    integration base (`upstream/develop` — a fork's origin/develop goes stale,
+    #1254 — else `origin/develop`, the `origin/HEAD` target, `origin/main`/
+    `master`, first that resolves). develop goes before HEAD's target (#1210):
     odoo-erp's origin/HEAD is main while stream branches target develop.
     `origin/dev` is never a base (on a 2-branch repo HEAD is dev itself). None
-    when undeterminable (no base, git error) so the caller FAILS OPEN.
-    `run(argv)->CompletedProcess` injected in tests; production shells `git`
-    in `cwd`."""
+    when undeterminable so the caller FAILS OPEN. `run(argv)` injected in
+    tests; production shells `git` in `cwd`."""
     import subprocess as _sp
     if run is None:
         def run(argv):
@@ -4874,7 +4874,7 @@ def _handoff_changed_paths(cwd=None, run=None):
                                timeout=15, cwd=cwd or None)
             except Exception as e:
                 return _sp.CompletedProcess(argv, 1, "", str(e))
-    bases = ["origin/develop"]
+    bases = ["upstream/develop", "origin/develop"]
     hr = run(["git", "symbolic-ref", "--quiet", "--short",
               "refs/remotes/origin/HEAD"])
     if getattr(hr, "returncode", 1) == 0 and (hr.stdout or "").strip():
