@@ -1082,36 +1082,31 @@ def _goal_box_kind(captured, text):
       "ours"   -- the occupied #35 stash slot, OR own-shaped box content
                   (`_looks_like_own_stuck_content`: our `/goal `/`/compact` prefix
                   or the collapsed-paste placeholder a multi-KB own type renders),
-                  OR a whitespace-normalized #617 whole-box match of the request's
-                  OWN frozen `text` (>= GOAL_STRANDED_MIN_MATCH; exact or a prefix
-                  of a truncated type).
+                  OR the shared `_box_is_own_leftover` proof: a >= 80-char
+                  contiguous run of the request's OWN frozen `text`, or a
+                  whitespace-stripped run of a shipped template variant (#1303).
       "other"  -- non-empty box content that is none of the above: a FOREIGN
                   draft, left completely untouched.
     Ownership is UNION-of-proofs so BOTH render shapes are recognised (the literal
     `/goal ...` a short text renders AND the placeholder a large one collapses to);
-    the frozen-text match is the tighter #617 proof against a human paste."""
+    the frozen-text match is the proof against a human paste."""
     occupied = watchdog.STASH_MARKER in (captured or "")
     head = watchdog._input_box_head_text(captured)
     if not head and not occupied:
         return "empty"
     if occupied or watchdog._looks_like_own_stuck_content(head):
         return "ours"
-    box_norm = watchdog._box_norm_from_capture(captured)
-    text_norm = " ".join((text or "").split())
-    if box_norm and text_norm:
-        if (len(box_norm) >= GOAL_STRANDED_MIN_MATCH
-                and (box_norm == text_norm or text_norm.startswith(box_norm))):
-            return "ours"
-        # #737 -- a SCROLLED long /goal renders only its TAIL rows, so the
-        # reconstructed whole-box content is a contiguous SUBSTRING of the
-        # payload (not a prefix -- the head with the `/goal ` marker scrolled
-        # off). >= GOAL_ARM_LEFTOVER_MIN_SUBSTR contiguous normalized chars of
-        # the request's OWN frozen `text` is the missing proof; a short human
-        # draft (below the floor) or a foreign draft (never a substring of the
-        # template) can never false-positive.
-        if (len(box_norm) >= watchdog.GOAL_ARM_LEFTOVER_MIN_SUBSTR
-                and box_norm in text_norm):
-            return "ours"
+    # #737/#1303 -- the frozen-text proof is the ONE shared
+    # `_box_is_own_leftover` (the arm-confirm cleanup and the janitor use it
+    # too): a >= GOAL_ARM_LEFTOVER_MIN_SUBSTR contiguous run of `text` (exact,
+    # prefix, or a SCROLLED mid-payload window), or a whitespace-stripped run of
+    # a shipped template variant -- the only proof that survives CC
+    # hard-breaking a token longer than a row (a pane under ~67 cols, the
+    # 13.11. gk `box=other`). A short or foreign draft never matches.
+    if watchdog._box_is_own_leftover(captured, text,
+                                     watchdog.GOAL_ARM_LEFTOVER_MIN_SUBSTR,
+                                     match_templates=True):
+        return "ours"
     return "other"
 
 
