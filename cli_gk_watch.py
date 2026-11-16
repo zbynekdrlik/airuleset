@@ -32,6 +32,15 @@ _GK_STATE_MARKER_RE = re.compile(
 # markdown tolerant, first value token.
 _BRANCH_RE = re.compile(r"(?im)^[ \t>*#-]*\**[ \t]*Branch\**[ \t]*:[ \t]*\**[ \t]*(\S+)")
 
+# #1288 -- the `HEAD:` line the composer stamps on every RFR
+# (cli_handoff_template), read to tell which lane's RFR a BOUNCE reviewed.
+_HEAD_RE = re.compile(
+    r"(?im)^[ \t>*#-]*\**[ \t]*HEAD\**[ \t]*:[ \t]*[`*]*([0-9a-f]{7,40})")
+
+# #1288 -- a GitHub comment id a gk verdict cites (`RFR: issuecomment-<id>` or a
+# bare id): 8-12 digits standing alone, matched against the RFR comment ids.
+_COMMENT_ID_RE = re.compile(r"(?<![0-9A-Za-z])(\d{8,12})(?![0-9A-Za-z])")
+
 # A git sha attached with `@` (7-40 hex chars), allowing the optional space the
 # gk `**Počty (otvorené @ <sha>)**` header uses as well as the marker's
 # space-less `@<sha>`. The literal `@ sha` placeholder in an unfilled template
@@ -71,6 +80,125 @@ _DISPOSITION_CONTEXT_RE = re.compile(
 # `airuleset._READINESS_LINE_RE` / `subdev-handoff-match.sh` enforce (optional
 # markdown emphasis/header/list prefix, then READY-FOR-REVIEW at line start).
 _RFR_RE = re.compile(r"^\s*([#*_-]+\s*)?READY-FOR-REVIEW", re.MULTILINE)
+
+
+def norm_branch(b):
+    """A branch name comparable across forms (#1288): strips backticks/bold/
+    quotes, `refs/heads/` and the `<owner>:` fork shorthand the composer stamps
+    (#969; git forbids `:` in a ref name). None for an empty value."""
+    b = (b or "").strip().strip("`*'\"")
+    if b.startswith("refs/heads/"):
+        b = b[len("refs/heads/"):]
+    if ":" in b:
+        b = b.split(":", 1)[1]
+    return b or None
+
+
+def bounce_lane(bounce, rfrs):
+    """The lane (normalised branch) a gk BOUNCE belongs to, or None (#1288).
+
+    `bounce` is a gk comment record (`ts`, `sha`, `branch`, `refs`); `rfrs` are
+    the stream's RFR records (`id`, `ts`, `branch`, `head`). Precedence: the
+    bounce's own `Branch:` line; else the one lane of the earlier RFRs whose
+    comment id the bounce cites (`RFR: issuecomment-<id>`, the gk verdict
+    template); else the RFR before it whose `HEAD:` matches the bounce `@sha`
+    (the hand-off it reviewed); else, when every earlier RFR is the SAME lane,
+    that lane. Otherwise unknown, so the caller keeps the ticket-level
+    behaviour (never a guessed lane)."""
+    own = norm_branch(bounce.get("branch"))
+    if own:
+        return own
+    prior = [r for r in rfrs if r.get("branch") and r["ts"] < bounce["ts"]]
+    cited = {r["branch"] for r in prior
+             if str(r.get("id")) in (bounce.get("refs") or ())}
+    if len(cited) == 1:
+        return cited.pop()
+    sha = (bounce.get("sha") or "").lower()
+    if sha:
+        for r in sorted(prior, key=lambda r: r["ts"], reverse=True):
+            head = (r.get("head") or "").lower()
+            if head and (head.startswith(sha) or sha.startswith(head)):
+                return r["branch"]
+    lanes = {r["branch"] for r in prior}
+    return lanes.pop() if len(lanes) == 1 else None
+
+
+def bounce_answered(bounce, rfrs):
+    """True when a LATER RFR answers gk record `bounce` (#1288 review), by the
+    ONE predicate `rfr_answers_bounce`, where an unknown lane (and a branch-less
+    RFR) keeps the ticket-level rule: any later RFR answers."""
+    snap = {"id": bounce.get("id"), "lane_branch": bounce_lane(bounce, rfrs)}
+    return any(r["ts"] > bounce["ts"] and rfr_answers_bounce(
+        snap, r.get("branch"), r.get("body"), unknown_lane_answers=True)
+        for r in rfrs)
+
+
+def pick_bounce(st, branch, body=None):
+    """The open BOUNCE a hand-off on lane `branch` must answer, from a
+    `watch_issue` result: the one whose id the RFR `body` names (a re-cut
+    lane), else its own lane's newest open bounce, else the newest open bounce
+    of UNKNOWN lane (it may be this lane's), else None (#1288)."""
+    mine = norm_branch(branch)
+    open_b = (st or {}).get("open_bounces") or []
+    for b in open_b:
+        if _names_id(b.get("id"), body):
+            return b
+    for want in (mine, None):
+        for b in open_b:
+            if mine and _lane_of(b) == want:
+                return b
+    return None
+
+
+def rfr_clears_all(st, branch, body):
+    """True when this RFR answers EVERY open BOUNCE of the ticket (#1291): only
+    then may the composer drop the ticket-level `prio:bounce` label. An
+    unknown-lane bounce needs its id named (the safe direction: a lingering
+    label falls to the labeler workflow / the gk)."""
+    st = st or {}
+    open_b = st.get("open_bounces") or [st.get("gk_latest")]
+    return all(rfr_answers_bounce(b, branch, body) for b in open_b)
+
+
+def _lane_of(gk_latest):
+    """The bounced lane from a `gk_latest` snapshot: `lane_branch`, else its raw
+    `branch` (a snapshot built without lane inference) -- normalised."""
+    gl = gk_latest or {}
+    return gl.get("lane_branch") or norm_branch(gl.get("branch"))
+
+
+def _names_id(gid, body):
+    """True when `body` names gk comment id `gid` as a standalone token."""
+    return gid is not None and bool(body) and bool(re.search(
+        r"(?<![0-9A-Za-z])%s(?![0-9A-Za-z])" % re.escape(str(gid)), body))
+
+
+def bounce_other_lane(gk_latest, branch, body=None):
+    """The bounced lane when it is KNOWN and differs from the readiness `branch`
+    (#1288: another lane's BOUNCE is advisory for this hand-off), else None. An
+    RFR whose `body` names the bounce id claims to answer it (a re-cut lane), so
+    it is never advisory: its findings must be dispositioned."""
+    gl = gk_latest or {}
+    lane = _lane_of(gl)
+    mine = norm_branch(branch)
+    if not (lane and mine and lane != mine) or _names_id(gl.get("id"), body):
+        return None
+    return lane
+
+
+def rfr_answers_bounce(gk_latest, branch, body, unknown_lane_answers=False):
+    """The ONE "does this RFR answer that BOUNCE" predicate (#1288/#1291): the
+    RFR `body` names the bounce comment id; or the bounced lane is known and the
+    RFR is on it (a branch-less RFR counts, it cannot be told apart); or the
+    lane is unknown and `unknown_lane_answers`."""
+    gl = gk_latest or {}
+    if _names_id(gl.get("id"), body):
+        return True
+    lane = _lane_of(gl)
+    if lane is None:
+        return unknown_lane_answers
+    mine = norm_branch(branch)
+    return mine is None or mine == lane
 
 
 def _parse_iso(s):
@@ -260,10 +388,12 @@ def watch_issue(issue, *, fetch, gk_login, self_login,
         base["state"] = "unknown"
         return base
 
+    rfrs = []                 # {ts, branch, head} -- #1288 lane inference
+
     def _snapshot(g):
         return {"id": g["id"], "verdict": g["verdict"], "created_at": g["ts"],
                 "sha": g["sha"], "ids": list(g["ids"]),
-                "branch": g.get("branch")}
+                "branch": g.get("branch"), "lane_branch": bounce_lane(g, rfrs)}
 
     gk_comments = []          # {ts, id, verdict, sha, ids}
     stream_comments = []      # {ts, body}
@@ -289,9 +419,15 @@ def watch_issue(issue, *, fetch, gk_login, self_login,
                                     "sha": sha, "ids": ids,
                                     "formal": verdict == "ACCEPT"
                                     and bool(_FORMAL_ACCEPT_RE.search(body)),
-                                    "branch": bm.group(1) if bm else None})
+                                    "branch": bm.group(1) if bm else None,
+                                    "refs": set(_COMMENT_ID_RE.findall(body))})
         if match(login, self_login):
             stream_comments.append({"ts": ts, "body": body})
+            if is_rfr and ts is not None:
+                bm, hm = _BRANCH_RE.search(body), _HEAD_RE.search(body)
+                rfrs.append({"ts": ts, "head": hm.group(1) if hm else None,
+                             "body": body, "id": cid,
+                             "branch": norm_branch(bm.group(1) if bm else None)})
             if is_rfr and ts is not None and (rfr_ts is None or ts > rfr_ts):
                 rfr_ts, rfr_id = ts, cid
 
@@ -325,9 +461,15 @@ def watch_issue(issue, *, fetch, gk_login, self_login,
     accept_ts = max(accepts) if accepts else None
     bounces = [g for g in gk_comments if g["verdict"] == "BOUNCE"
                and (accept_ts is None or g["ts"] > accept_ts)]
-    newest_bounce = max(bounces, key=lambda g: g["ts"]) if bounces else None
-    if newest_bounce is not None and newest_bounce["ts"] > rfr_eff:
-        base["gk_latest"] = _snapshot(newest_bounce)
+    # #1288 review: a BOUNCE is answered by a LATER RFR of ITS lane (a branch-
+    # less RFR or an unknown lane = any later RFR), so lane B's hand-off never
+    # hides lane A's open bounce; every open bounce is kept, newest first.
+    open_b = sorted((g for g in bounces if not bounce_answered(g, rfrs)),
+                    key=lambda g: g["ts"], reverse=True)
+    newest_bounce = open_b[0] if open_b else None
+    if newest_bounce is not None:
+        base["open_bounces"] = [_snapshot(g) for g in open_b]
+        base["gk_latest"] = base["open_bounces"][0]
         base["state"] = "bounce-unanswered"
         base["age_seconds"] = max(0.0, now - newest_bounce["ts"])
         base["undispositioned_ids"] = list(newest_bounce["ids"])

@@ -4684,14 +4684,15 @@ HANDOFF_GATE_DIR = ".claude/handoff-gate"
 # Decision log path.
 HANDOFF_GATE_LOG = ".claude/handoff-gate.log"
 
-# Finding id shape (#1081): ids come ONLY from a bullet-anchored emoji marker
-# (line start + optional indent/bullet/bold; group 1 = number) or the legacy
-# `F<n>` at a line/bullet boundary (group 2). A bare `[A-Z]\d+` prose token, a
-# mid-sentence emoji mention, and the count line (`0 🔴 · 2 🟡`, number BEFORE the
-# emoji) are all EXCLUDED positionally — no count-line cross-check (main, #1081).
+# Finding id shape (#1081): ids come ONLY from a line-start marker: a bullet-
+# anchored emoji + number (group 1), or the legacy `F<n>` (group 2) after a
+# list/table/heading/checkbox prefix and an optional emoji. A bare `[A-Z]\d+`, a
+# mid-sentence emoji or `F<n>` (a lens citation, #1219), a `>` quote and the
+# count line are EXCLUDED positionally; no two `[ \t]*` touch (linear time).
 _GK_FINDING_ID_RE = re.compile(
-    r'^[ \t]*(?:[-*•][ \t]*)?\**[ \t]*(?:🔴|🟡|🔵)[ \t]*(\d+)'
-    r'|(?:^|[\s(\[-])F(\d+)\b', re.MULTILINE | re.UNICODE)
+    r'^[ \t]*(?:[-*•][ \t]*)?(?:\*+[ \t]*)?(?:🔴|🟡|🔵)[ \t]*(?:\*+[ \t]*)?(\d+)|^[ \t]*'
+    r'(?:(?:[-•#|]|\*(?=[ \t])|\d{1,3}[.)])[ \t]*)*(?:\[[ xX]\][ \t]*)?(?:\*+[ \t]*)?'
+    r'(?:(?:🔴|🟡|🔵)[ \t]*(?:\*+[ \t]*)?)?F(\d+)\b', re.MULTILINE | re.UNICODE)
 
 
 def _parse_gk_findings(comment_body):
@@ -4859,13 +4860,13 @@ def _pf_journal(repo, issue, gl, decision, journal=None):
 
 def _handoff_changed_paths(cwd=None, run=None):
     """#1073 — the RFR diff as a name-only path list: HEAD vs the repo's
-    integration base (`origin/develop`, else the `origin/HEAD` target, else
-    `origin/main`/`master`, first that resolves). develop goes first (#1210):
+    integration base (`upstream/develop` — a fork's origin/develop goes stale,
+    #1254 — else `origin/develop`, the `origin/HEAD` target, `origin/main`/
+    `master`, first that resolves). develop goes before HEAD's target (#1210):
     odoo-erp's origin/HEAD is main while stream branches target develop.
     `origin/dev` is never a base (on a 2-branch repo HEAD is dev itself). None
-    when undeterminable (no base, git error) so the caller FAILS OPEN.
-    `run(argv)->CompletedProcess` injected in tests; production shells `git`
-    in `cwd`."""
+    when undeterminable so the caller FAILS OPEN. `run(argv)` injected in
+    tests; production shells `git` in `cwd`."""
     import subprocess as _sp
     if run is None:
         def run(argv):
@@ -4874,7 +4875,7 @@ def _handoff_changed_paths(cwd=None, run=None):
                                timeout=15, cwd=cwd or None)
             except Exception as e:
                 return _sp.CompletedProcess(argv, 1, "", str(e))
-    bases = ["origin/develop"]
+    bases = ["upstream/develop", "origin/develop"]
     hr = run(["git", "symbolic-ref", "--quiet", "--short",
               "refs/remotes/origin/HEAD"])
     if getattr(hr, "returncode", 1) == 0 and (hr.stdout or "").strip():
@@ -5078,18 +5079,19 @@ def _handoff_gk_preflight(issue, repo, body, *, branch=None, cwd=None,
         sys.stderr.write("handoff: gk-watch state unknown (gh read failed / low "
                          "budget) — pre-flight skipped (fail-open)\n")
         return None
-    gl = st.get("gk_latest") or {}
+    # The readiness lane's own open BOUNCE first (#1288), else the newest gk one.
+    gl = cli_gk_watch.pick_bounce(st, branch, body) or st.get("gk_latest") or {}
     # (1) #1070 item 6 -- bounce-unanswered with no new commit since the verdict,
-    # branch-scoped, unparseable-head-advisory, git-log-since-counted, journaled.
+    # lane-scoped, unparseable-head-advisory, git-log-since-counted, journaled.
     if state == "bounce-unanswered":
         gk_ts = gl.get("created_at")
         gk_id = gl.get("id")
         gk_sha = gl.get("sha")
-        verdict_branch = gl.get("branch")
-        # (a) a BOUNCE for a DIFFERENT branch/phase is not this readiness's --
-        # advisory, never a block (the #1071 other-phase FP); its finding ids
-        # belong to that phase, so skip the disposition check too.
-        if branch and verdict_branch and verdict_branch != branch:
+        # (a) a BOUNCE for a DIFFERENT lane (its Branch: line, else the RFR it
+        # reviewed, #1288) is advisory, never a block (the #1071 FP); its
+        # finding ids belong to that lane, so skip the disposition check too.
+        verdict_branch = cli_gk_watch.bounce_other_lane(gl, branch, body)
+        if verdict_branch:
             _pf_journal(repo, issue, gl,
                         "advisory: BOUNCE for branch %r != readiness %r"
                         % (verdict_branch, branch), journal=journal)
@@ -5138,7 +5140,8 @@ def _handoff_gk_preflight(issue, repo, body, *, branch=None, cwd=None,
     # since the BOUNCE" alone (and `head_ts` is the PR head's `author.date`,
     # which a rebase can backdate). That is the inherent floor of a finding-id
     # contract; a marker-less advisory simply cannot be disposition-checked.
-    undis = st.get("undispositioned_ids") or []
+    _own = gl.get("id") != (st.get("gk_latest") or {}).get("id")  # #1288 lane
+    undis = (gl.get("ids") if _own else st.get("undispositioned_ids")) or []
     missing = cli_gk_watch.missing_dispositions(body, undis)
     if missing:
         return ("handoff BLOCK: needs-disposition %s — the RFR body must "
@@ -5149,23 +5152,20 @@ def _handoff_gk_preflight(issue, repo, body, *, branch=None, cwd=None,
     return None
 
 
-def _handoff_clear_bounce(repo, issue, gk_state):
+def _handoff_clear_bounce(repo, issue, gk_state, branch=None, body=None):
     """Clear `prio:bounce` after a SUCCESSFUL RFR post — the ONE sanctioned
     composer clear (#1056 L2 (f)).
 
     #1056 L2 review-A 🟡: clear ONLY when the pre-flight resolved state
-    `bounce-unanswered` — the case where a standing gk BOUNCE was VERIFIABLY
-    answered by THIS hand-off (the pre-flight already confirmed a commit landed
-    since the verdict AND every finding id is dispositioned, else it would have
-    BLOCKED). In EVERY other state the composer does NOT clear:
-      * `unknown` (gh error / low budget — the pre-flight failed OPEN): clearing
-        here would strip `prio:bounce` with NO commit-since-bounce check, the
-        exact blind re-flag this lane fixes, AND the freshly-posted RFR flips
-        gk-watch to `rfr-current` so the gk-side revert automat (Job 50) never
-        fires either — both guards bypassed;
-      * `rfr-current` / `needs-disposition` / `no-gk-comment`: no standing
-        unanswered bounce THIS hand-off resolves — a lingering `prio:bounce` is
-        left to the guarded labeler workflow (its own gh reads) / the gk.
+    `bounce-unanswered` (a commit landed since the verdict AND every finding id
+    is dispositioned, else it would have BLOCKED) AND THIS RFR answers that
+    BOUNCE — same lane (`branch`) or the `body` names its comment id (#1291:
+    another lane's open bounce on the same ticket keeps the label). Every other
+    state never clears: `unknown` (pre-flight failed OPEN — a clear would skip
+    the commit-since-bounce check, and the new RFR flips gk-watch to
+    `rfr-current` so Job 50's revert never fires); `rfr-current` /
+    `needs-disposition` / `no-gk-comment` leave a lingering label to the
+    guarded labeler workflow / the gk.
 
     Best-effort: a read-role collaborator's 403 (david) or any gh hiccup is
     swallowed (the labeler workflow is the fallback clear for a fork stream).
@@ -5173,13 +5173,13 @@ def _handoff_clear_bounce(repo, issue, gk_state):
     `block-blind-label-flip.sh` Bash hook (which pre-filters the top-level
     command for `issue`+`edit`) — the sanctioned clear needs no bypass. Returns
     True iff the label was removed."""
+    import cli_gk_watch
     if not repo:
         return False
     state = gk_state.get("state") if isinstance(gk_state, dict) else None
-    if state != "bounce-unanswered":
-        # No verified standing-bounce answer → leave the label to the guarded
-        # labeler / the gk (never a blind clear on a fail-open or stale state).
-        return False
+    if state != "bounce-unanswered" or not cli_gk_watch.rfr_clears_all(
+            gk_state, branch, body):
+        return False   # no verified answer to THIS bounce → label stays
     import subprocess
     try:
         r = subprocess.run(
@@ -5355,7 +5355,7 @@ def _cmd_handoff_post_body_file(repo, issue, branch, body_file):
     # successful RFR post (the worker doctrine forbids workers touching it),
     # and (review-A 🟡) only when the pre-flight VERIFIED a standing bounce was
     # answered (state bounce-unanswered), never on a fail-open/stale state.
-    if _handoff_clear_bounce(repo, issue, _gk_state):
+    if _handoff_clear_bounce(repo, issue, _gk_state, branch, body):
         print("handoff: prio:bounce cleared on #%s" % issue)
     print("handoff: READY-FOR-REVIEW posted verbatim on #%s (round %d, "
           "HEAD %s)" % (issue, rnd, body_head[:12]))
@@ -5706,7 +5706,7 @@ def cmd_handoff(args):
     # successful RFR post, and only when the pre-flight VERIFIED a standing
     # bounce was answered (state bounce-unanswered), never a fail-open/stale
     # clear (review-A 🟡).
-    if _handoff_clear_bounce(repo, issue, _gk_state):
+    if _handoff_clear_bounce(repo, issue, _gk_state, branch, body):
         print("handoff: prio:bounce cleared on #%s" % issue)
     print("handoff: READY-FOR-REVIEW posted on #%s (round %d, HEAD %s)"
           % (issue, rnd, head_sha[:12]))
