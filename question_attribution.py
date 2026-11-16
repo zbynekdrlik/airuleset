@@ -36,6 +36,14 @@ import re
 TRACKED, COVERED, SOLE, TICKETLESS = "tracked", "covered", "sole", "ticketless"
 
 TICKET_REF_RE = re.compile(r"#(\d+)")
+# #1300: an owner notice from an unattended tool (`cli_owner_notice`) is its
+# OWN U item; a `#N` in its text is context, never the ticket it counts for.
+NOTICE_SESSION_PREFIX = "notice:"
+
+
+def is_notice(entry):
+    return isinstance(entry, dict) and str(entry.get("session") or "").startswith(
+        NOTICE_SESSION_PREFIX)
 TRACKING_RE = re.compile(
     r"(?<!\w)(?:sledovan\w*\s+na|tracked\s+on|tracking)\s*#(\d+)", re.IGNORECASE)
 
@@ -66,6 +74,8 @@ def entry_tracked(entry, text=None):
     """The tracked ticket of a map `entry`: its stored `tracked` field (taken
     from the untruncated question), else a marker in `text` (default: its
     stored texts), else None."""
+    if is_notice(entry):
+        return None
     stored = entry.get("tracked") if isinstance(entry, dict) else None
     if isinstance(stored, int) and not isinstance(stored, bool):
         return stored
@@ -78,7 +88,9 @@ def attribute(entry, cover=None):
     `(SOLE, {N})` or `(TICKETLESS, ∅)` — the order in the module docstring.
     `tickets` is a frozenset of ints; a COVERED entry names every label-U
     ticket it mentions (one family acceptance draft delivers each member,
-    #755)."""
+    #755). An owner notice (#1300) is always TICKETLESS."""
+    if is_notice(entry):
+        return TICKETLESS, frozenset()
     text = _text(entry)
     tracked = entry_tracked(entry, text)
     if tracked is not None:

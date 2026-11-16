@@ -12,6 +12,8 @@ import argparse
 import os
 import sys
 
+from question_attribution import is_notice
+
 
 def _num(value):
     try:
@@ -36,6 +38,8 @@ def newest(entries, cwd=None, session=None):
         if cwd and not _same_dir(rec.get("cwd"), cwd):
             continue
         if session and rec.get("session") != session:
+            continue
+        if is_notice(rec):          # #1300: a tool's owner notice, not a ❓
             continue
         key = (_num(rec.get("asked") or rec.get("ts")), _num(rec.get("ts")))
         if best is None or key > best[0]:
