@@ -88,10 +88,10 @@ class TestFleetBackupAccount(unittest.TestCase):
         self.assertIn("project-gh-token: %s: SKIPPED — pending" % ACCT, out)
         self.assertNotIn(ACCT, [c.args[0] for c in s.call_args_list])
 
-    def test_no_peer_socket_before_the_cutover(self):
-        # No registry row yet, so the peer root leg has no fleet-backup socket
-        # dir until the cutover adds the row on the fleet-backup account.
-        self.assertNotIn(ACCT, cpc.accounts_for_host("dev1"))
+    def test_peer_socket_after_the_cutover(self):
+        # The cutover added the registry row on the fleet-backup account, so the
+        # peer root leg now makes its socket dir.
+        self.assertIn(ACCT, cpc.accounts_for_host("dev1"))
 
     def test_the_tab_opens_the_project_chat_for_marek_and_owner_only(self):
         self.assertEqual(set(self.spec["webterm_sessions"]), {"zbynek", "marek"})
@@ -113,14 +113,17 @@ class TestFleetBackupAccount(unittest.TestCase):
         self.assertEqual(ports.count(8910), 1)
         self.assertNotIn(8910, drop._RESERVED_PORTS)
 
-    def test_no_registry_row_or_peer_link_before_cutover(self):
-        # A peer link needs a registry project on the host (cli_peer_channel
-        # validation), and a newlevel row would raise LEGACY_CEILING: both land
-        # together at the cutover, on the fleet-backup account.
+    def test_registry_row_and_peer_link_at_cutover(self):
+        # The cutover lands the row on the fleet-backup account (never newlevel,
+        # so LEGACY_CEILING is untouched) and the one airuleset link, with a topic.
         reg = json.loads((ROOT / "projects-registry.json").read_text(encoding="utf-8"))
-        self.assertEqual([r for r in reg if r["name"] == ACCT], [])
-        hosts = json.loads((ROOT / "peer-links.json").read_text(encoding="utf-8"))["hosts"]
-        self.assertEqual([p for p in hosts["dev1"]["links"] if ACCT in p], [])
+        (row,) = [r for r in reg if r["name"] == ACCT]
+        self.assertEqual((row["account"], row["path"], row["host"]),
+                         (ACCT, "/home/fleet-backup/devel/fleet-backup", "dev1"))
+        dev1 = json.loads((ROOT / "peer-links.json").read_text(encoding="utf-8"))["hosts"]["dev1"]
+        self.assertEqual([p for p in dev1["links"] if ACCT in p], [["airuleset", ACCT]])
+        self.assertIn("airuleset|" + ACCT, dev1["topics"])
+        self.assertEqual(cpc.validate_links(cpc.load_links(), cpc.load_registry()), [])
 
 
 if __name__ == "__main__":
