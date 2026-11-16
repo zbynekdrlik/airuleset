@@ -239,5 +239,29 @@ class TestReviewRound2(unittest.TestCase):
         self.assertLess(time.monotonic() - t0, 1.0)
 
 
+class TestReviewRound3(unittest.TestCase):
+
+    def test_named_bounce_of_a_third_lane_is_the_one_checked(self):
+        u20 = "david3/9258-u20-other"
+        rows = [_rfr(1, "2026-11-03T10:00:00Z", U16, "aaaaaaa1111"),
+                _rfr(2, "2026-11-03T10:30:00Z", u20, "ccccccc3333"),
+                _bounce(3, "2026-11-03T12:00:00Z", "aaaaaaa1111"),
+                _bounce(5, "2026-11-03T13:00:00Z", "ccccccc3333")]
+        body = "READY-FOR-REVIEW\nre-cut, answers bounce 3\n"
+        blk = airuleset._handoff_gk_preflight(
+            9258, "o/r", body, branch=U18, watch_result=_state(rows),
+            commits_since=lambda b, ts, cwd: 2, journal=lambda **kw: None)
+        self.assertIsNotNone(blk)
+        self.assertIn("needs-disposition F1", blk)
+        self.assertIn(" 3 ", blk)
+
+    def test_regex_is_linear_on_long_star_runs(self):
+        import time
+        t0 = time.monotonic()
+        airuleset._parse_gk_findings("*" * 20000 + "x")
+        self.assertLess(time.monotonic() - t0, 1.0)
+        self.assertEqual(airuleset._parse_gk_findings("* F9 bullet"), ["F9"])
+
+
 if __name__ == "__main__":
     unittest.main()
