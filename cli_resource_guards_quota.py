@@ -18,6 +18,9 @@ the files through its ``guard_files()`` + atomic ``_install``, and embeds
   oneshot re-runs ONLY the limits block (no quotaoff / quotacheck / quotaon)
   under the same lock, and the hard limit is capped at ``used + 50 %`` of the
   filesystem's free space so one account is never granted the whole disk.
+* #1315: that cap was per user, so N accounts were promised N x half the free
+  space (subdev at 95 %, no account at its quota). The 50 % is now split in
+  EQUAL shares over the shared-stream homes: all ceilings together fit the disk.
 """
 
 # #950: per-user disk quota on shared-stream boxes.  ext4 usrquota via legacy
@@ -55,7 +58,8 @@ QUOTA_CEILING_SERVICE_PATH = "/etc/systemd/system/airuleset-quota-ceiling.servic
 QUOTA_CEILING_TIMER_PATH = "/etc/systemd/system/airuleset-quota-ceiling.timer"
 # #1140 D: hard <= used + this share of the filesystem's available space, so a
 # fast-growing account can never be granted the whole disk (the box-level
-# disk guard stays the backstop).
+# disk guard stays the backstop). #1315: the share is split equally over the
+# shared-stream homes, so it bounds the SUM of all accounts' headroom.
 QUOTA_FS_AVAIL_BOUND_PCT = 50
 
 
@@ -321,7 +325,8 @@ def _render_quota_limits_block() -> str:
     For each shared-stream user, reads current usage from repquota and
     computes hard=max(QUOTA_HARD_KIB, ceil(used*1.2)),
     soft=max(QUOTA_SOFT_KIB, ceil(used*1.1)).  #1140 D: hard is then capped
-    at ``used + QUOTA_FS_AVAIL_BOUND_PCT %`` of the free space on / (one ``df``
+    at ``used + QUOTA_FS_AVAIL_BOUND_PCT %`` of the free space on /, split in
+    equal shares over the N shared-stream homes (#1315) (one ``df``
     per run, hoisted like repquota; an unreadable df is LOUD + ``qfail`` and
     the unbounded ceiling still applies) and soft never exceeds hard. The ONE
     renderer shared by the push apply, the daily refresh and the hourly
@@ -340,7 +345,7 @@ def _render_quota_limits_block() -> str:
         '# Y5: hoist repquota above the loop (one call for all users)\n'
         '# Y6: capture rc without letting the assignment itself trip -e\n'
         'rq_out=$(repquota -u / 2>&1) && rq_rc=0 || rq_rc=$?\n'
-        '# #1140 D: fs bound — hard <= used + %d%% of the free space on /.\n'
+        '# #1140 D / #1315: fs bound — hard <= used + an equal share of %d%% of the free space on /.\n'
         '# Unreadable -> LOUD + qfail, and the unbounded ceiling still applies\n'
         '# (a stale, lower ceiling IS the EDQUOT incident).\n'
         '# stdout ONLY is parsed (a harmless stderr warning must not void it)\n'
@@ -349,7 +354,15 @@ def _render_quota_limits_block() -> str:
         'fs_bound_kib=""\n'
         'if [ "$df_rc" -eq 0 ] && [ -n "$fs_avail_kib" ] && [ -z "${fs_avail_kib//[0-9]/}" ]; then\n'
         '    fs_avail_kib=$(( 10#$fs_avail_kib ))\n'
-        '    fs_bound_kib=$(( fs_avail_kib * %d / 100 ))\n'
+        '    # #1315: an EQUAL share per shared-stream home, so the headroom of\n'
+        '    # ALL accounts together is at most %d%% of the free space\n'
+        '    fs_share_n=0\n'
+        '    for home in /home/*; do\n'
+        '        if grep -q "shared-stream" "$home/.claude/airuleset-box-class" 2>/dev/null;'
+        ' then fs_share_n=$(( fs_share_n + 1 )); fi\n'
+        '    done\n'
+        '    [ "$fs_share_n" -ge 1 ] || fs_share_n=1\n'
+        '    fs_bound_kib=$(( fs_avail_kib * %d / 100 / fs_share_n ))\n'
         'else\n'
         '    df_err=$(df --output=avail -k / 2>&1 >/dev/null || true)\n'
         '    echo "  ⚠ quota: df gave no free space for / (rc=$df_rc out=$df_out'
@@ -407,7 +420,8 @@ def _render_quota_limits_block() -> str:
         '        [ "$fs_cap_kib" -ge 1 ] || fs_cap_kib=1\n'
         '        if [ "$hard_kib" -gt "$fs_cap_kib" ]; then\n'
         '            echo "  ⚠ quota: $u ceiling capped by free disk space'
-        ' (hard $hard_kib -> $fs_cap_kib KiB = used + %d%% of ${fs_avail_kib} KiB free)" >&2\n'
+        ' (hard $hard_kib -> $fs_cap_kib KiB = used + %d%% of ${fs_avail_kib} KiB free'
+        ' / $fs_share_n accounts)" >&2\n'
         '            hard_kib=$fs_cap_kib\n'
         '        fi\n'
         '    fi\n'
@@ -456,6 +470,7 @@ def _render_quota_limits_block() -> str:
         'fi'
         % (QUOTA_GRACE_S, QUOTA_GRACE_S,
            QUOTA_FS_AVAIL_BOUND_PCT, QUOTA_FS_AVAIL_BOUND_PCT,
+           QUOTA_FS_AVAIL_BOUND_PCT,
            QUOTA_SOFT_KIB, QUOTA_HARD_KIB,
            QUOTA_FS_AVAIL_BOUND_PCT,
            QUOTA_GRACE_S)
