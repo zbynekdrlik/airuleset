@@ -1966,8 +1966,9 @@ def goal_sweep(now, run=None, dry_run=False, projects_dir=None,
 # --------------------------------------------------------------------------- #
 # DARK-WATCH -- job 20's new body. Cross-checks each session's transcript
 # marker (INTENT) against CC's own footer indicator (REALITY). A goal that is
-# LOST -- an auth clear, or a dark footer CONFIRMED by the #524 run -- is only
-# JOURNALLED, once per episode (`goal-lost:<why> ... NOT re-armed`), plus ONE
+# LOST -- an auth clear, a CC `failed` end, or a dark footer CONFIRMED by the #524
+# run -- is only JOURNALLED, once per episode (`goal-lost:<why> ... NOT re-armed`;
+# a CC `met` end logs `goal-ended:met`, #1309), plus ONE
 # keystroke-free #459 report for the dark case. #1324 (owner 14.11.2026): the
 # watchdog NEVER re-arms a goal; "no goal visible" = autopilot off, and the
 # owner re-arms with `/autopilot`. Also runs the shared janitor recovery (#372)

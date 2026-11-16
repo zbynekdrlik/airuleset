@@ -141,9 +141,10 @@ class GoalStatusEndMarker(unittest.TestCase):
         self.assertEqual(mark["clear_kind"], "met")
 
 
-class DarkWatchQuietOnMet(unittest.TestCase):
-    """A met goal is a normal end: no goal-lost journal line, no report, no
-    arm request, no keystroke (#1324 stands: the watchdog never re-arms)."""
+class DarkWatchOnCCEnd(unittest.TestCase):
+    """A goal CC ended itself is journalled once per episode (met:
+    `goal-ended:met`, failed: `goal-lost:failed`), with no report, no arm
+    request and no keystroke (#1324 stands: the watchdog never re-arms)."""
 
     CWD = "/home/newlevel/devel/goalmet1309"
 
@@ -157,7 +158,7 @@ class DarkWatchQuietOnMet(unittest.TestCase):
         self.addCleanup(d.cleanup)
         self.proj = Path(d.name)
 
-    def test_met_goal_ends_quietly(self):
+    def test_met_goal_is_journalled_once_never_lost(self):
         sid = "sid-goal-met-1309"
         _write_marker_transcript(self.proj, self.CWD, sid)
         _write_goal_marker(self.proj, self.CWD, sid, "Goal set: %s" % COND,
@@ -206,6 +207,56 @@ class DarkWatchQuietOnMet(unittest.TestCase):
         self.assertEqual(len(lost), 1, lines)
         self.assertIn("NOT re-armed", lost[0])
         self.assertEqual(sends, [])
+
+    def _sweeps(self, n, state, start=100000):
+        lines = []
+        for i in range(n):
+            tmux = DeliverGoalFakeTmux([("%9", "claude", self.CWD, "111")],
+                                       GOAL_IDLE_CAP)
+            lines += goal.goal_dark_watch(
+                start + 90 * i, run=tmux, state=state, projects_dir=self.proj,
+                send_fn=lambda msg, **k: None, sleep_fn=lambda s: None,
+                rearm_fn=lambda cwd: ("/goal " + COND, "full"))
+            self.assertEqual(tmux.sent, [])
+        return lines
+
+    def _append(self, tp, entry):
+        with open(tp, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry) + "\n")
+
+    def test_a_second_episode_is_journalled_again(self):
+        # review 2: the latch is keyed by the end's ts, so re-arm + a new end
+        # in the same session logs again (a sid-only latch would go silent).
+        sid = "sid-goal-met-twice-1309"
+        _write_marker_transcript(self.proj, self.CWD, sid)
+        _write_goal_marker(self.proj, self.CWD, sid, "Goal set: %s" % COND,
+                           ts_epoch=500)
+        tp = self.proj / wd.encode_project_dir(self.CWD) / (sid + ".jsonl")
+        self._append(tp, _status("1970-01-01T00:10:00.000Z", met=True))
+        state = {}
+        lines = self._sweeps(3, state)
+        self._append(tp, _arm("1970-01-01T00:20:00.000Z"))
+        self._append(tp, _status("1970-01-01T00:30:00.000Z", met=True))
+        lines += self._sweeps(3, state, start=101000)
+        self.assertEqual(sum("goal-ended:met" in ln for ln in lines), 2, lines)
+
+    def test_a_user_clear_ends_the_latch_episode(self):
+        # review 2: a `/goal clear` (clear_kind user) is no CC end, so the
+        # caller's `lost_state.pop` must still run.
+        sid = "sid-goal-user-clear-1309"
+        _write_marker_transcript(self.proj, self.CWD, sid)
+        _write_goal_marker(self.proj, self.CWD, sid, "Goal set: %s" % COND,
+                           ts_epoch=500)
+        tp = self.proj / wd.encode_project_dir(self.CWD) / (sid + ".jsonl")
+        self._append(tp, _status("1970-01-01T00:10:00.000Z", met=True))
+        state = {}
+        self._sweeps(1, state)
+        self.assertIn(sid, state["goal_lost_seen"])
+        _write_goal_marker(self.proj, self.CWD, sid, "Goal cleared: %s" % COND,
+                           ts_epoch=1300)
+        self._sweeps(1, state, start=101000)
+        self.assertEqual(state["goal_mark"][sid]["mark"]["clear_kind"], "user")
+        self.assertNotIn(sid, state["goal_lost_seen"])
 
     def test_stale_pre_fix_entry_is_reseeded(self):
         # A live box's persisted entry (parser v2) already advanced its offset
