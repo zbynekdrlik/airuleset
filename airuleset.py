@@ -4684,14 +4684,15 @@ HANDOFF_GATE_DIR = ".claude/handoff-gate"
 # Decision log path.
 HANDOFF_GATE_LOG = ".claude/handoff-gate.log"
 
-# Finding id shape (#1081): ids come ONLY from a bullet-anchored marker (line
-# start + optional indent/bullet/bold): an emoji (group 1 = number) or the
-# legacy `F<n>` (group 2). A bare `[A-Z]\d+` prose token, a mid-sentence emoji or
-# `F<n>` (a lens citation `(#5244 F1)`, #1219) and the count line (`0 🔴 · 2 🟡`)
-# are all EXCLUDED positionally — no count-line cross-check (main, #1081).
+# Finding id shape (#1081): ids come ONLY from a line-start marker: a bullet-
+# anchored emoji + number (group 1), or the legacy `F<n>` (group 2) after any
+# list/table/heading/quote/checkbox prefix and an optional emoji. A bare
+# `[A-Z]\d+`, a mid-sentence emoji or `F<n>` (a lens citation, #1219) and the
+# count line (`0 🔴 · 2 🟡`) are EXCLUDED positionally (main, #1081).
 _GK_FINDING_ID_RE = re.compile(
-    r'^[ \t]*(?:[-*•][ \t]*)?\**[ \t]*(?:(?:🔴|🟡|🔵)[ \t]*(\d+)|F(\d+)\b)',
-    re.MULTILINE | re.UNICODE)
+    r'^[ \t]*(?:[-*•][ \t]*)?\**[ \t]*(?:🔴|🟡|🔵)[ \t]*(\d+)|^[ \t]*(?:(?:[-*•>#|]'
+    r'|\d+[.)])[ \t]*)*(?:\[[ xX]\][ \t]*)?\**[ \t]*(?:(?:🔴|🟡|🔵)[ \t]*\**[ \t]*)?'
+    r'F(\d+)\b', re.MULTILINE | re.UNICODE)
 
 
 def _parse_gk_findings(comment_body):
@@ -5078,9 +5079,10 @@ def _handoff_gk_preflight(issue, repo, body, *, branch=None, cwd=None,
         sys.stderr.write("handoff: gk-watch state unknown (gh read failed / low "
                          "budget) — pre-flight skipped (fail-open)\n")
         return None
-    gl = st.get("gk_latest") or {}
+    # The readiness lane's own open BOUNCE first (#1288), else the newest gk one.
+    gl = cli_gk_watch.pick_bounce(st, branch) or st.get("gk_latest") or {}
     # (1) #1070 item 6 -- bounce-unanswered with no new commit since the verdict,
-    # branch-scoped, unparseable-head-advisory, git-log-since-counted, journaled.
+    # lane-scoped, unparseable-head-advisory, git-log-since-counted, journaled.
     if state == "bounce-unanswered":
         gk_ts = gl.get("created_at")
         gk_id = gl.get("id")
@@ -5138,7 +5140,8 @@ def _handoff_gk_preflight(issue, repo, body, *, branch=None, cwd=None,
     # since the BOUNCE" alone (and `head_ts` is the PR head's `author.date`,
     # which a rebase can backdate). That is the inherent floor of a finding-id
     # contract; a marker-less advisory simply cannot be disposition-checked.
-    undis = st.get("undispositioned_ids") or []
+    undis = (gl.get("ids") if gl is not st.get("gk_latest")  # #1288 own lane
+             else st.get("undispositioned_ids")) or []
     missing = cli_gk_watch.missing_dispositions(body, undis)
     if missing:
         return ("handoff BLOCK: needs-disposition %s — the RFR body must "
@@ -5174,8 +5177,8 @@ def _handoff_clear_bounce(repo, issue, gk_state, branch=None, body=None):
     if not repo:
         return False
     state = gk_state.get("state") if isinstance(gk_state, dict) else None
-    if state != "bounce-unanswered" or not cli_gk_watch.rfr_answers_bounce(
-            gk_state.get("gk_latest"), branch, body):
+    if state != "bounce-unanswered" or not cli_gk_watch.rfr_clears_all(
+            gk_state, branch, body):
         return False   # no verified answer to THIS bounce → label stays
     import subprocess
     try:

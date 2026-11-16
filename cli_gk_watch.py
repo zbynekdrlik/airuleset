@@ -103,14 +103,42 @@ def bounce_lane(bounce, rfrs):
     if own:
         return own
     prior = [r for r in rfrs if r.get("branch") and r["ts"] < bounce["ts"]]
-    sha = bounce.get("sha")
+    sha = (bounce.get("sha") or "").lower()
     if sha:
         for r in sorted(prior, key=lambda r: r["ts"], reverse=True):
-            head = r.get("head")
+            head = (r.get("head") or "").lower()
             if head and (head.startswith(sha) or sha.startswith(head)):
                 return r["branch"]
     lanes = {r["branch"] for r in prior}
     return lanes.pop() if len(lanes) == 1 else None
+
+
+def bounce_answered(bounce, rfrs):
+    """True when an RFR LATER than `bounce` answers it (#1288 review): one of
+    the bounced lane, or any later RFR when the lane is unknown or the RFR
+    carries no `Branch:` line (it cannot be told apart, so it counts)."""
+    lane = bounce_lane(bounce, rfrs)
+    return any(r["ts"] > bounce["ts"]
+               and (lane is None or not r.get("branch") or r["branch"] == lane)
+               for r in rfrs)
+
+
+def pick_bounce(st, branch):
+    """The open BOUNCE snapshot of the readiness lane `branch` from a
+    `watch_issue` result (several lanes may hold open bounces), else None."""
+    mine = norm_branch(branch)
+    for b in (st or {}).get("open_bounces") or []:
+        if mine and _lane_of(b) == mine:
+            return b
+    return None
+
+
+def rfr_clears_all(st, branch, body):
+    """True when this RFR answers EVERY open BOUNCE of the ticket (#1291): only
+    then may the composer drop the ticket-level `prio:bounce` label."""
+    st = st or {}
+    open_b = st.get("open_bounces") or [st.get("gk_latest")]
+    return all(rfr_answers_bounce(b, branch, body) for b in open_b)
 
 
 def _lane_of(gk_latest):
@@ -402,9 +430,15 @@ def watch_issue(issue, *, fetch, gk_login, self_login,
     accept_ts = max(accepts) if accepts else None
     bounces = [g for g in gk_comments if g["verdict"] == "BOUNCE"
                and (accept_ts is None or g["ts"] > accept_ts)]
-    newest_bounce = max(bounces, key=lambda g: g["ts"]) if bounces else None
-    if newest_bounce is not None and newest_bounce["ts"] > rfr_eff:
-        base["gk_latest"] = _snapshot(newest_bounce)
+    # #1288 review: a BOUNCE is answered by a LATER RFR of ITS lane (a branch-
+    # less RFR or an unknown lane = any later RFR), so lane B's hand-off never
+    # hides lane A's open bounce; every open bounce is kept, newest first.
+    open_b = sorted((g for g in bounces if not bounce_answered(g, rfrs)),
+                    key=lambda g: g["ts"], reverse=True)
+    newest_bounce = open_b[0] if open_b else None
+    if newest_bounce is not None:
+        base["open_bounces"] = [_snapshot(g) for g in open_b]
+        base["gk_latest"] = base["open_bounces"][0]
         base["state"] = "bounce-unanswered"
         base["age_seconds"] = max(0.0, now - newest_bounce["ts"])
         base["undispositioned_ids"] = list(newest_bounce["ids"])
