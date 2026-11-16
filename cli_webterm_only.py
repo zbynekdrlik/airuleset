@@ -99,13 +99,16 @@ WEBTERM_CONTROLLER_LANE_PUBKEYS = {
 
 # #870 incident 2 fix: which webterm-only user accounts each human's
 # controller connects to.  Derived from WEBTERM_DASHBOARD_TABS — zbynek's
-# dashboard has david1-4 tabs (#934); david's has david1-4; marek and
-# dominika have no webterm-only targets.  Test-locked against
+# dashboard has david1-8 tabs (#934, #1341); david's has david1-8; marek
+# has david3 + david5-8 (owner 11.11. / 16.11.2026); dominika has none.  Test-locked against
 # WEBTERM_DASHBOARD_TABS drift.
 _CONTROLLER_LANE_WEBTERM_ONLY_TARGETS = {
-    "zbynek": frozenset({"david1", "david2", "david3", "david4"}),
-    "david": frozenset({"david1", "david2", "david3", "david4"}),
-    "marek": frozenset({"david3"}),  # owner 11.11.2026
+    "zbynek": frozenset({"david1", "david2", "david3", "david4",
+                         "david5", "david6", "david7", "david8"}),  # #1341
+    "david": frozenset({"david1", "david2", "david3", "david4",
+                        "david5", "david6", "david7", "david8"}),  # #1341
+    # david3: owner 11.11.2026; david5-8: owner 16.11.2026 (#1341)
+    "marek": frozenset({"david3", "david5", "david6", "david7", "david8"}),
     "dominika": frozenset(),
 }
 
@@ -225,7 +228,7 @@ def desired_keys_for_user(user):
     keys = list(FLEET_PUSH_PUBKEYS)
     keys.extend(OWNER_PUBKEYS)
 
-    # david1-4 get the subdev lane key
+    # david1-8 get the subdev lane key
     if user.startswith("david") and user[5:].isdigit():
         keys.append(WEBTERM_DAVID_LANE_PUBKEY)
 
@@ -603,6 +606,10 @@ SUBDEV_ACCOUNTS_FALLBACK = {
     "david2": "gatekeeper_access_ed25519",
     "david3": "gatekeeper_access_ed25519",
     "david4": "gatekeeper_access_ed25519",
+    "david5": "gatekeeper_access_ed25519",
+    "david6": "gatekeeper_access_ed25519",
+    "david7": "gatekeeper_access_ed25519",
+    "david8": "gatekeeper_access_ed25519",
     "dominika": "gatekeeper_access_ed25519",
     "simap1": "gatekeeper_access_ed25519",
     "miva1": "gatekeeper_access_ed25519",

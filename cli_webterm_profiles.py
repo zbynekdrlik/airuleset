@@ -187,7 +187,10 @@ def _subdev_target_host(human):
     if LANE_HOST.get(human) == "controller":
         return SUBDEV_TAILSCALE_HOST
     return SUBDEV_LOCAL
-DAVID_ACCOUNTS = ("david1", "david2", "david3", "david4")
+# #1341 (owner 16.11.2026): the four streams added after david4 — tabs on the
+# david, zbynek and marek dashboards.
+NEW_DAVID_STREAMS_1341 = ("david5", "david6", "david7", "david8")
+DAVID_ACCOUNTS = ("david1", "david2", "david3", "david4") + NEW_DAVID_STREAMS_1341
 
 # codex-bridge tab — David's dev2 ssh tab. Connects as newlevel@dev2 via the
 # dedicated david webterm key (WEBTERM_DAVID_IDENTITY), the existing `david`
@@ -204,7 +207,7 @@ CODEX_PREFERRED = "david"             # the existing dev2 tmux group
 
 def david_inventory():
     """David's SCOPED session set as webterm inventory entries (the exact shape
-    ``cli_webterm.build_connect_argv`` consumes): david1..4 over loopback with
+    ``cli_webterm.build_connect_argv`` consumes): david1..8 over loopback with
     the dedicated identity, then codex-bridge mirroring the existing dev2
     access. This — and ONLY this — is what david's ttyd is launched against, so
     it is his full connect allowlist."""
@@ -337,7 +340,7 @@ def marek_inventory():
 
     This — and ONLY this — is what marek's ttyd is launched against, so it is
     his full connect allowlist: no other stream's id, no david id except david3 (owner
-    11.11.2026), and no other person's account can ever be present. Every ssh entry carries
+    11.11.2026) and david5-8 (owner 16.11.2026, #1341), and no other person's account can ever be present. Every ssh entry carries
     WEBTERM_MAREK_IDENTITY explicitly, so the connect child never takes the
     sshpass shared-password branch and never touches the gatekeeper key."""
     subdev_host = _subdev_target_host("marek")
@@ -372,6 +375,18 @@ def marek_inventory():
             "identity": WEBTERM_MAREK_IDENTITY,
             "preferred": "david3",
         },
+        # owner 16.11.2026 (#1341): OBSERVE tabs on david5-david8, the david3
+        # shape (no u_tenant, marek lane key via _CONTROLLER_LANE_WEBTERM_ONLY_TARGETS).
+        *({
+            "id": "%s-subdev" % u,
+            "label": "%s@subdev" % u,
+            "kind": "stream",
+            "local": False,
+            "host": subdev_host,
+            "user": u,
+            "identity": WEBTERM_MAREK_IDENTITY,
+            "preferred": u,
+        } for u in NEW_DAVID_STREAMS_1341),
         {
             # owner request 2026-09-29 ("pridaj ar marekovi do webtermu"): marek's
             # gateway runs AS airuleset on the controller, so `ar` is a LOCAL
@@ -783,6 +798,19 @@ def zbynek_inventory():
             "u_tenant": True,
             "collect_identity": ZBYNEK_COLLECT_IDENTITY,
         },
+        # david5-david8 (#1341, owner 16.11.2026): the same shape as david4.
+        *({
+            "id": "%s-subdev" % u,
+            "label": "%s@subdev" % u,
+            "kind": "stream",
+            "local": False,
+            "host": subdev_host,
+            "user": u,
+            "identity": WEBTERM_ZBYNEK_IDENTITY,
+            "preferred": u,
+            "u_tenant": True,
+            "collect_identity": ZBYNEK_COLLECT_IDENTITY,
+        } for u in NEW_DAVID_STREAMS_1341),
         {
             "id": "miva1-subdev",
             "label": "miva1@subdev",
