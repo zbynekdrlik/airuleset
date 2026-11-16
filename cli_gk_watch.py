@@ -37,6 +37,10 @@ _BRANCH_RE = re.compile(r"(?im)^[ \t>*#-]*\**[ \t]*Branch\**[ \t]*:[ \t]*\**[ \t
 _HEAD_RE = re.compile(
     r"(?im)^[ \t>*#-]*\**[ \t]*HEAD\**[ \t]*:[ \t]*[`*]*([0-9a-f]{7,40})")
 
+# #1288 -- a GitHub comment id a gk verdict cites (`RFR: issuecomment-<id>` or a
+# bare id): 8-12 digits standing alone, matched against the RFR comment ids.
+_COMMENT_ID_RE = re.compile(r"(?<![0-9A-Za-z])(\d{8,12})(?![0-9A-Za-z])")
+
 # A git sha attached with `@` (7-40 hex chars), allowing the optional space the
 # gk `**Počty (otvorené @ <sha>)**` header uses as well as the marker's
 # space-less `@<sha>`. The literal `@ sha` placeholder in an unfilled template
@@ -93,16 +97,22 @@ def norm_branch(b):
 def bounce_lane(bounce, rfrs):
     """The lane (normalised branch) a gk BOUNCE belongs to, or None (#1288).
 
-    `bounce` is a gk comment record (`ts`, `sha`, `branch`); `rfrs` are the
-    stream's RFR records (`ts`, `branch`, `head`). Precedence: the bounce's own
-    `Branch:` line; else the branch of the RFR before it whose `HEAD:` matches
-    the bounce `@sha` (the hand-off it reviewed); else, when every earlier RFR
-    is the SAME lane, that lane. Several lanes and no sha match = unknown, so
-    the caller keeps the ticket-level behaviour (never a guessed lane)."""
+    `bounce` is a gk comment record (`ts`, `sha`, `branch`, `refs`); `rfrs` are
+    the stream's RFR records (`id`, `ts`, `branch`, `head`). Precedence: the
+    bounce's own `Branch:` line; else the one lane of the earlier RFRs whose
+    comment id the bounce cites (`RFR: issuecomment-<id>`, the gk verdict
+    template); else the RFR before it whose `HEAD:` matches the bounce `@sha`
+    (the hand-off it reviewed); else, when every earlier RFR is the SAME lane,
+    that lane. Otherwise unknown, so the caller keeps the ticket-level
+    behaviour (never a guessed lane)."""
     own = norm_branch(bounce.get("branch"))
     if own:
         return own
     prior = [r for r in rfrs if r.get("branch") and r["ts"] < bounce["ts"]]
+    cited = {r["branch"] for r in prior
+             if str(r.get("id")) in (bounce.get("refs") or ())}
+    if len(cited) == 1:
+        return cited.pop()
     sha = (bounce.get("sha") or "").lower()
     if sha:
         for r in sorted(prior, key=lambda r: r["ts"], reverse=True):
@@ -409,13 +419,14 @@ def watch_issue(issue, *, fetch, gk_login, self_login,
                                     "sha": sha, "ids": ids,
                                     "formal": verdict == "ACCEPT"
                                     and bool(_FORMAL_ACCEPT_RE.search(body)),
-                                    "branch": bm.group(1) if bm else None})
+                                    "branch": bm.group(1) if bm else None,
+                                    "refs": set(_COMMENT_ID_RE.findall(body))})
         if match(login, self_login):
             stream_comments.append({"ts": ts, "body": body})
             if is_rfr and ts is not None:
                 bm, hm = _BRANCH_RE.search(body), _HEAD_RE.search(body)
                 rfrs.append({"ts": ts, "head": hm.group(1) if hm else None,
-                             "body": body,
+                             "body": body, "id": cid,
                              "branch": norm_branch(bm.group(1) if bm else None)})
             if is_rfr and ts is not None and (rfr_ts is None or ts > rfr_ts):
                 rfr_ts, rfr_id = ts, cid
