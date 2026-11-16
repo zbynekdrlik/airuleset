@@ -39,13 +39,13 @@ TICKET_REF_RE = re.compile(r"#(\d+)")
 # #1300: an owner notice from an unattended tool (`cli_owner_notice`) is its
 # OWN U item; a `#N` in its text is context, never the ticket it counts for.
 NOTICE_SESSION_PREFIX = "notice:"
+TRACKING_RE = re.compile(
+    r"(?<!\w)(?:sledovan\w*\s+na|tracked\s+on|tracking)\s*#(\d+)", re.IGNORECASE)
 
 
 def is_notice(entry):
     return isinstance(entry, dict) and str(entry.get("session") or "").startswith(
         NOTICE_SESSION_PREFIX)
-TRACKING_RE = re.compile(
-    r"(?<!\w)(?:sledovan\w*\s+na|tracked\s+on|tracking)\s*#(\d+)", re.IGNORECASE)
 
 
 class QuestionCover(frozenset):

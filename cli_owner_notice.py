@@ -38,10 +38,16 @@ def add_notify_args(p_notify):
         "--owner-notice", dest="owner_notice", metavar="SLUG",
         help="with --body: when the owner policy suppresses the send, put the "
              "notice into the footer U of the --cwd project (#1300); the same "
-             "SLUG again replaces it, it stays until --clear-owner-notice")
+             "SLUG again replaces it; it stays until --clear-owner-notice (or "
+             "the question map's 200-entry cap evicts it as the oldest)")
     p_notify.add_argument(
         "--clear-owner-notice", dest="clear_owner_notice", metavar="SLUG",
         help="drop the --owner-notice SLUG of the --cwd project (#1300)")
+
+
+def requested(args):
+    """True when either owner-notice option is set (the cmd_notify gate)."""
+    return any(_opt(args, n) is not None for n in ("owner_notice", "clear_owner_notice"))
 
 
 def _opt(args, name):
@@ -71,8 +77,10 @@ def project_root(cwd, home=None):
 
 
 def session(slug, root):
-    """`notice:<project id>:<slug>` — one item per project AND slug."""
-    pid = hashlib.sha1(root.encode("utf-8")).hexdigest()[:10]
+    """`notice:<project id>:<slug>` — one item per project AND slug. The id
+    hashes the REALPATH, so a symlinked, real or relative spelling of the same
+    project records and clears the same item."""
+    pid = hashlib.sha1(os.path.realpath(root).encode("utf-8")).hexdigest()[:10]
     return "%s%s:%s" % (SESSION_PREFIX, pid, slug)
 
 
@@ -83,7 +91,7 @@ def key(slug, root):
 def _log(status, slug, root, reason=""):
     from notify import log_delivery
     log_delivery(status, kind="owner-notice", key=session(slug, root),
-                 reason=reason or root)
+                 reason=reason or "%s %s" % (os.path.basename(root), root))
 
 
 def record(slug, root, body, path=None):
@@ -127,7 +135,10 @@ def after_send(args, status, root):
     `status`. A dry run touches nothing. A record that fails exits 1 (the
     caller is unattended: a notice missing from U must not read as done)."""
     slug, clear_slug = _opt(args, "owner_notice"), _opt(args, "clear_owner_notice")
-    if root is None or getattr(args, "dry_run", False) is True:
+    if root is None:
+        return
+    if getattr(args, "dry_run", False) is True:
+        print("owner-notice: dry run, nothing changed in U", file=sys.stderr)
         return
     if clear_slug is not None:
         done = clear(clear_slug, root)

@@ -3292,7 +3292,7 @@ def cmd_notify(args):
         print(send(body, dedup_key=dedup, dry_run=args.dry_run, project=project))
         return
 
-    if args.body is not None or isinstance(getattr(args, "clear_owner_notice", None), str):
+    if args.body is not None or cli_owner_notice.requested(args):
         # #334: --body is the EXTERNAL send primitive (foreign scripts only).
         # With no owner it falls to resolve_owner()'s tmux auto-detect, WRONG
         # for a headless caller that inherited an unrelated pane's $TMUX (the
