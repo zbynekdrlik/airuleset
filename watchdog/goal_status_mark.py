@@ -43,3 +43,32 @@ def goal_status_end_marker(entry):
     cond = att.get("condition")
     return {"state": "cleared", "clear_kind": kind,
             "payload": cond if isinstance(cond, str) and cond else None}
+
+
+# clear_kind -> the dark-watch journal word, for every end CC made ITSELF.
+_CC_END_WORDS = {"auth": "auth-clear", "failed": "failed"}
+
+
+def cc_end_lines(sid, loc, mark, latch, lost_line):
+    """dark-watch's decision line for a goal CC ended itself, once per episode
+    (`latch`, keyed by the marker ts), or None when `mark` is no such end (a
+    user `/goal clear`, an `error` clear, no marker: the caller just ends the
+    episode).
+
+    `auth` (#675) and `failed` (CC gave up) are journalled as a LOST goal via
+    `lost_line` (goal._goal_lost_line); `met` is a normal end and gets its own
+    `goal-ended:met` line, so a finished loop is never silent (#486: every
+    decision is logged). Nothing here re-arms (#1324)."""
+    if not isinstance(mark, dict) or mark.get("state") != "cleared":
+        return None
+    kind = mark.get("clear_kind")
+    ts = mark.get("ts")
+    if kind in _CC_END_WORDS:
+        return lost_line(sid, loc, ts, _CC_END_WORDS[kind], latch=latch)
+    if kind != "met":
+        return None
+    if sid in latch and latch.get(sid) == ts:
+        return []
+    latch[sid] = ts
+    return ["dark-watch %s sid=%s -> goal-ended:met (CC: the condition held; "
+            "NOT re-armed, #1324)" % (loc, sid)]

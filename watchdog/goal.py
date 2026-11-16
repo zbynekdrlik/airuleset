@@ -2584,13 +2584,13 @@ def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
         armed = watchdog.pane_goal_armed(captured)
 
         if mark is None or mark.get("state") != "set":
-            # #675/#1324 -- CC cleared the goal on an auth failure: JOURNAL it
-            # once, never re-arm (the owner re-arms with /autopilot). A USER
-            # `/goal clear` or a non-auth `error` clear just ends the episode.
-            if (mark is not None and mark.get("state") == "cleared"
-                    and mark.get("clear_kind") == "auth"):
-                logs += _goal_lost_line(sid, loc, mark.get("ts"), "auth-clear",
-                                        latch=lost_state)
+            # #675/#1309/#1324 -- CC ended the goal itself (auth clear, met, failed):
+            # JOURNAL it once, never re-arm (the owner re-arms with /autopilot). A
+            # USER `/goal clear` or a non-auth `error` clear just ends the episode.
+            from watchdog import goal_status_mark as _gsm
+            _end = _gsm.cc_end_lines(sid, loc, mark, lost_state, _goal_lost_line)
+            if _end is not None:
+                logs += _end
             else:
                 lost_state.pop(sid, None)
             seen_state.pop(sid, None)
