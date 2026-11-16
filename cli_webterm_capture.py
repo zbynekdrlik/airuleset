@@ -190,7 +190,17 @@ class PhoneReader:
             sys.stderr.write("webterm-gateway: phone read %s rc=%s: %s\n"
                              % (sid, proc.returncode, err[-200:].decode("utf-8", "replace")))
             return None
-        return out if extra else out[-PHONE_READ_MAX_BYTES:]
+        return out if extra else tail_whole_lines(out, PHONE_READ_MAX_BYTES)
+
+
+def tail_whole_lines(out, cap):
+    """The last `cap` bytes of a capture, from a line start: a cut inside an SGR
+    escape or a UTF-8 char would otherwise show as junk text (#1287 round 2)."""
+    if len(out) <= cap:
+        return out
+    tail = out[-cap:]
+    nl = tail.find(b"\n")
+    return tail[nl + 1:] if nl >= 0 else tail
 
 
 def message_of(entry):

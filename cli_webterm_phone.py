@@ -85,8 +85,9 @@ const PHONE_ANSI_KEYS = ['black', 'red', 'green', 'yellow', 'blue', 'magenta', '
   'brightCyan', 'brightWhite'];
 const PHONE_PLAIN = { b: false, d: false, i: false, u: false, v: false, fg: null, bg: null };
 // CSI (SGR when it ends in m), OSC (to BEL / ST / the end), any other ESC sequence
-// (intermediates + one final byte, e.g. `ESC ( B`). An unfinished one at the end is dropped.
-const PHONE_ESC_RE = /\x1b\[([0-?]*)([ -\/]*)([@-~]|$)|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\|$)|\x1b[ -\/]*[0-~]?/g;
+// (intermediates + one final byte, e.g. `ESC ( B`). An unfinished one at the end is
+// dropped; an unfinished OSC stops at the line end, never eats the screen below it.
+const PHONE_ESC_RE = /\x1b\[([0-?]*)([ -\/]*)([@-~]|$)|\x1b\][^\x07\x1b\n]*(?:\x07|\x1b\\)?|\x1b[ -\/]*[0-~]?/g;
 const PHONE_C0_RE = /[\x00-\x08\x0b-\x1f\x7f]/g;
 function phoneRgb(r, g, b) { return 'rgb(' + r + ',' + g + ',' + b + ')'; }
 function phoneByte(x) { const n = /^\d{1,3}$/.test(x || '') ? +x : -1; return n <= 255 ? n : -1; }
@@ -134,10 +135,10 @@ function phoneSgr(st, params) {
     else if (c >= 100 && c <= 107) st.bg = phoneColor256(c - 92);
     else if (c === 39) st.fg = null;
     else if (c === 49) st.bg = null;
-    else if (c === 38 || c === 48) {
+    else if (c === 38 || c === 48 || c === 58) {   // 58: underline colour, read and dropped
       const r = phoneExtColor(p, i);
       used = r[1];
-      if (c === 38) st.fg = r[0]; else st.bg = r[0];
+      if (c === 38) st.fg = r[0]; else if (c === 48) st.bg = r[0];
     }
     i += used;
   }
@@ -163,16 +164,17 @@ function phoneAnsiLines(raw) {
   return lines;
 }
 function phoneLineText(l) { return l.map((r) => r.t).join(''); }
+// trimEnd/trimStart, never a whitespace-to-end regex: quadratic on a long space run.
 function phoneTrimEnd(l) {
   while (l.length) {
-    const r = l[l.length - 1], t = r.t.replace(/\s+$/, '');
+    const r = l[l.length - 1], t = r.t.trimEnd();
     if (t) { r.t = t; return; }
     l.pop();
   }
 }
 function phoneTrimStart(l) {
   while (l.length) {
-    const t = l[0].t.replace(/^\s+/, '');
+    const t = l[0].t.trimStart();
     if (t) { l[0].t = t; return; }
     l.shift();
   }
