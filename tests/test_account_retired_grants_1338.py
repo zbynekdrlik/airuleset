@@ -165,13 +165,16 @@ class TestSweep(unittest.TestCase):
             (target / "f").write_text("x")
             (dirs["userns"] / "linked").symlink_to(target)
             (dirs["limits.d"] / "90-linked-rtprio.conf").symlink_to(target / "f")
-            bad = dirs["limits.d"] / "90-Bad$x-rtprio.conf"
-            bad.write_text("Bad$x - rtprio 20\n")
+            bad = [dirs["limits.d"] / ("90-%s-rtprio.conf" % n)
+                   for n in ("Bad$x", "1digit", "x", "a" * 33)]
+            for b in bad:
+                b.write_text("%s - rtprio 20\n" % b.name[3:-len("-rtprio.conf")])
             _run(step, tmp)
             self.assertTrue((target / "f").exists())
             self.assertTrue((dirs["userns"] / "linked").is_symlink())
             self.assertTrue((dirs["limits.d"] / "90-linked-rtprio.conf").is_symlink())
-            self.assertTrue(bad.exists())
+            for b in bad:
+                self.assertTrue(b.exists(), b)
 
     def test_empty_dirs_and_missing_dirs_are_fine(self):
         step = hardening.render_retired_grants_step(["keep"])
