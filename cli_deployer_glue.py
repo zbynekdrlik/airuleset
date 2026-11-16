@@ -296,7 +296,6 @@ try:
     sys.path.insert(0, "{{REPO_DIR}}")
     try:
         import statusbar
-        import transcript_weight   # #1301 `restart <N>M`
     except ImportError as _ie:
         _shim_log("import-error %s" % _ie)
         raise
@@ -343,9 +342,12 @@ try:
     rel = statusbar.release_idle_segment(cwd=cwd)
     if rel:
         segs.append(rel)
-    # --- session context size: 'ctx 570K' (#37; shortened #223; #928 removed
-    # the '~$<cost>' suffix — owner directive 2026-09-07). ---
-    segs += transcript_weight.restart_segments(d)   # #1301: heavy session, owner restarts
+    try:   # #1301 `restart <N>M`: OWN guard, a missing module never blanks the footer
+        import transcript_weight
+        segs += transcript_weight.restart_segments(d)
+    except Exception as _twe:  # airuleset:script-ok optional segment, logged
+        _shim_log("transcript-weight %s" % _twe)
+    # --- 'ctx 570K' (#37/#223; #928 removed the '~$<cost>' suffix, 7.9.2026) ---
     cc_full = statusbar.context_cost_segment(d)
     cc_short = ""   # no short form needed since #928 removed cost
     if cc_full:
