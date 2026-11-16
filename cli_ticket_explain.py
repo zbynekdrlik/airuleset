@@ -55,7 +55,10 @@ def _footer_extras(cwd=None, cover=None):
     #1218 label-U `cover`, the SAME source as the footer and `--waiting`).
     `--count` never includes them — they are a footer display term."""
     import cli_quals_cmd
-    return [("U", 1, "ticketless question ping, no ticket to label (#512)",
+    from question_attribution import is_notice
+    return [("U", 1, "owner notice of an unattended tool, cleared by the tool "
+             "(notify --clear-owner-notice, #1300)" if is_notice(v) else
+             "ticketless question ping, no ticket to label (#512)",
              v.get("question") or v.get("block") or "")
             for v in cli_quals_cmd._waiting_ping_entries(cwd, cover=cover)]
 
