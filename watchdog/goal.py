@@ -959,11 +959,11 @@ def _clear_stranded_truncated_goal(sid, cwd, captured, tpath, pid, run, state,
     #617-review 🔴, and the #372 CRITICAL-1 "content alone can't prove
     ownership for /goal" because of the documented manual paste-the-template
     arm flow). The WHOLE box content is reconstructed from every wrapped row
-    and must be a whitespace-normalised prefix of the template, at least
-    `GOAL_STRANDED_MIN_MATCH` chars and NOT the complete text (a complete own
-    draft is `_submit_stranded_own_goal`'s job). A user would have to paste
-    the exact first 200+ chars of the ~3.8k template with zero edits -- and
-    the recent-human gate still VETOES if they just did.
+    and must be a prefix of the template with all whitespace removed (#1303:
+    a hard-broken token), >= `GOAL_STRANDED_MIN_MATCH` non-space chars and NOT
+    the complete text (a complete own draft is `_submit_stranded_own_goal`'s
+    job). A user would have to paste the exact first 200+ chars of the ~3.8k
+    template with zero edits -- and the recent-human gate still VETOES then.
 
     Gates, all required: a CLEAN idle input boundary (`_classify_boundary`
     == "input" -- never Escape a spinner / dialog / non-boundary); the
@@ -996,15 +996,18 @@ def _clear_stranded_truncated_goal(sid, cwd, captured, tpath, pid, run, state,
     text, _auth = (rearm_fn or _default_rearm_fn)(cwd)
     if not text:
         return [], False
-    # #737 -- the SAME head-first whole-box reconstruction `_goal_box_kind` uses
-    # (single-sourced in `_box_norm_from_capture`, never a second inline copy).
+    # #737 -- the head-first whole-box reconstruction (single-sourced in
+    # `_box_norm_from_capture`, never a second inline copy).
     box_norm = watchdog._box_norm_from_capture(captured)
     if not box_norm:
         return [], False
-    text_norm = " ".join(text.split())
-    if not (len(box_norm) >= GOAL_STRANDED_MIN_MATCH
-            and len(box_norm) < len(text_norm)
-            and text_norm.startswith(box_norm)):
+    # #1303 -- no whitespace: a row join inside a CC hard-broken token adds a
+    # space; a non-space prefix is still byte-exact, so an edited paste fails.
+    box_ns = "".join(box_norm.split())
+    text_ns = "".join(text.split())
+    if not (len(box_ns) >= GOAL_STRANDED_MIN_MATCH
+            and len(box_ns) < len(text_ns)
+            and text_ns.startswith(box_ns)):
         return [], False
     # PROVEN a stranded truncated own /goal. The give-up rec is keyed on the
     # content signature so a DIFFERENT/gone draft starts a fresh episode.
@@ -1082,36 +1085,27 @@ def _goal_box_kind(captured, text):
       "ours"   -- the occupied #35 stash slot, OR own-shaped box content
                   (`_looks_like_own_stuck_content`: our `/goal `/`/compact` prefix
                   or the collapsed-paste placeholder a multi-KB own type renders),
-                  OR a whitespace-normalized #617 whole-box match of the request's
-                  OWN frozen `text` (>= GOAL_STRANDED_MIN_MATCH; exact or a prefix
-                  of a truncated type).
+                  OR the shared `_box_is_own_leftover` proof: a >= 80-char
+                  contiguous run of the request's OWN frozen `text`, or a
+                  whitespace-stripped run of a shipped template variant (#1303).
       "other"  -- non-empty box content that is none of the above: a FOREIGN
                   draft, left completely untouched.
     Ownership is UNION-of-proofs so BOTH render shapes are recognised (the literal
     `/goal ...` a short text renders AND the placeholder a large one collapses to);
-    the frozen-text match is the tighter #617 proof against a human paste."""
+    the frozen-text match is the proof against a human paste."""
     occupied = watchdog.STASH_MARKER in (captured or "")
     head = watchdog._input_box_head_text(captured)
     if not head and not occupied:
         return "empty"
     if occupied or watchdog._looks_like_own_stuck_content(head):
         return "ours"
-    box_norm = watchdog._box_norm_from_capture(captured)
-    text_norm = " ".join((text or "").split())
-    if box_norm and text_norm:
-        if (len(box_norm) >= GOAL_STRANDED_MIN_MATCH
-                and (box_norm == text_norm or text_norm.startswith(box_norm))):
-            return "ours"
-        # #737 -- a SCROLLED long /goal renders only its TAIL rows, so the
-        # reconstructed whole-box content is a contiguous SUBSTRING of the
-        # payload (not a prefix -- the head with the `/goal ` marker scrolled
-        # off). >= GOAL_ARM_LEFTOVER_MIN_SUBSTR contiguous normalized chars of
-        # the request's OWN frozen `text` is the missing proof; a short human
-        # draft (below the floor) or a foreign draft (never a substring of the
-        # template) can never false-positive.
-        if (len(box_norm) >= watchdog.GOAL_ARM_LEFTOVER_MIN_SUBSTR
-                and box_norm in text_norm):
-            return "ours"
+    # #737/#1303 -- the ONE shared proof (arm-confirm cleanup + janitor use it
+    # too); its template branch survives a CC hard-broken token (a pane under
+    # ~67 cols, the 13.11. gk `box=other`). A short/foreign draft never matches.
+    if watchdog._box_is_own_leftover(captured, text,
+                                     watchdog.GOAL_ARM_LEFTOVER_MIN_SUBSTR,
+                                     match_templates=True):
+        return "ours"
     return "other"
 
 
@@ -1184,8 +1178,8 @@ def _goal_cap_drop(sid, cwd, text, dl_fails, request_ts, run,
     same guard core (`_recovery_pane_ready`) + a CLEAN idle input-boundary check
     (#731-review: never Escape/clear a live turn's render) + the same
     `_janitor_recover` driver the #566 livelock resolver uses. It clears ONLY our
-    OWN leftover (proven by `_goal_box_kind` -- own-shape / #35 stash slot / #617
-    frozen-text match); a FOREIGN draft is left completely untouched. The
+    OWN leftover (proven by `_goal_box_kind` -- own-shape / #35 stash slot /
+    `_box_is_own_leftover`); a FOREIGN draft is left completely untouched. The
     `leftover` word is READ BACK from the janitor's own verdict (#731-review /
     #134/#726 honesty bar -- never asserted "cleared" for a box the janitor
     actually left untouched or failed to clear). Never types a NEW /goal."""
