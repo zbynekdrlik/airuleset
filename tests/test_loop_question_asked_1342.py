@@ -4,8 +4,9 @@ the one asked about".
 The asked ticket stays in the footer `I` until its `needs-answer` label
 reaches the (120 s) footer cache, so a session asking a genuine blocker on its
 ONLY workable ticket read `I 1` and was pushed to a `⏳ WORKING` with nothing
-else to do. The gate now subtracts the asked ticket (at most one) when the
-cache shows it as a counted row not yet in U.
+else to do. The footer now records the I numbers (`open_numbers`), and the gate
+subtracts the asked ticket (at most one) when it is one of the owed rows
+(`open_numbers` + `done_numbers`).
 """
 import hashlib
 import json
@@ -18,6 +19,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import cli_ticket_route  # noqa: E402
 from gates import loopquestion  # noqa: E402
 
 ARMED = "  ctx ███░  caveman:lite  ◎ /goal active (12m)\n"
@@ -37,16 +39,14 @@ class AskedTicketIsNotOtherWork(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.home, True)
         self.cwd = "/repo/x"
 
-    def _cache(self, open_n, rows=None, label_u=None, waiting=None):
+    def _cache(self, open_n, open_numbers=None, done=0, done_numbers=None, **extra):
         d = Path(self.home) / ".claude" / "tickets-status"
         d.mkdir(parents=True, exist_ok=True)
-        entry = {"open": open_n, "ts": time.time() - 30}
-        if rows is not None:
-            entry["question_cover_rows"] = rows
-        if label_u is not None:
-            entry["question_cover_numbers"] = label_u
-        if waiting is not None:
-            entry["user_waiting_numbers"] = waiting
+        entry = {"open": open_n, "done": done, "ts": time.time() - 30, **extra}
+        if open_numbers is not None:
+            entry["open_numbers"] = open_numbers
+        if done_numbers is not None:
+            entry["done_numbers"] = done_numbers
         key = hashlib.sha1(self.cwd.encode()).hexdigest()[:12]
         (d / (key + ".json")).write_text(json.dumps(entry))
 
@@ -56,43 +56,59 @@ class AskedTicketIsNotOtherWork(unittest.TestCase):
                                    capture=ARMED, home=self.home)
 
     def test_only_workable_ticket_is_the_asked_one_allows(self):
-        self._cache(1, rows=[7], label_u=[], waiting=[])
+        self._cache(1, open_numbers=[7])
         self.assertFalse(self._decide(_block("#7"))[0])
 
     def test_other_workable_ticket_still_blocks(self):
-        self._cache(2, rows=[7, 9], label_u=[], waiting=[])
+        self._cache(2, open_numbers=[7, 9])
         block, reason = self._decide(_block("#7"))
         self.assertTrue(block)
         self.assertIn("I 1", reason)
 
-    def test_asked_ticket_already_in_u_is_not_subtracted(self):
-        # #7 is already parked in U, so the one I row is ANOTHER ticket.
-        self._cache(1, rows=[7, 9], label_u=[7], waiting=[7])
-        self.assertTrue(self._decide(_block("#7"))[0])
+    def test_asked_ticket_not_in_i_is_not_subtracted(self):
+        # #12 is parked (W / U / skip / another role's): the one I row is #9.
+        self._cache(1, open_numbers=[9], question_cover_rows=[9, 12])
+        self.assertTrue(self._decide(_block("#12"))[0])
 
-    def test_legacy_cache_without_cover_fields_blocks_as_before(self):
-        self._cache(1)
-        self.assertTrue(self._decide(_block("#7"))[0])
+    def test_owed_close_row_asked_is_subtracted(self):
+        self._cache(0, open_numbers=[], done=1, done_numbers=[7])
+        self.assertFalse(self._decide(_block("#7"))[0])
 
-    def test_uncounted_ref_is_not_subtracted(self):
-        self._cache(1, rows=[9], label_u=[], waiting=[])
+    def test_legacy_cache_without_open_numbers_blocks_as_before(self):
+        self._cache(1, question_cover_rows=[7], question_cover_numbers=[])
         self.assertTrue(self._decide(_block("#7"))[0])
 
     def test_cross_repo_ref_is_not_subtracted(self):
-        self._cache(1, rows=[7], label_u=[], waiting=[])
+        self._cache(1, open_numbers=[7])
         self.assertTrue(self._decide(_block("zbynekdrlik/odoo-erp#7"))[0])
 
     def test_at_most_one_ticket_is_subtracted(self):
-        self._cache(2, rows=[7, 8], label_u=[], waiting=[])
+        self._cache(2, open_numbers=[7, 8])
         msg = _block("#7").replace("formáte výstupu", "formáte výstupu (aj #8)")
         self.assertTrue(self._decide(msg)[0])
 
     def test_ref_outside_the_question_block_is_not_the_asked_one(self):
-        # a ticket mentioned in the progress text above the question block is
-        # not the asked ticket.
-        self._cache(1, rows=[5], label_u=[], waiting=[])
+        self._cache(1, open_numbers=[5])
         msg = "Hotové #5 čiastočne.\n\n" + _block("#7")
         self.assertTrue(self._decide(msg)[0])
+
+    def test_trailing_blank_lines_keep_the_asked_ticket(self):
+        self._cache(1, open_numbers=[12])
+        self.assertFalse(self._decide("Robím.\n\n❓ NEEDS YOU: schváliš #12?\n\n")[0])
+
+    def test_odd_cache_shapes_fail_toward_the_full_count(self):
+        for numbers in ([[1]], ["7"], [None]):
+            self._cache(1, open_numbers=numbers)
+            self.assertTrue(self._decide(_block("#7"))[0], numbers)
+
+
+class FooterRecordsOpenNumbers(unittest.TestCase):
+    def test_record_writes_the_i_numbers(self):
+        entry = {}
+        buckets = {k: {} for k in ("I", "M", "P", "C", "U", "W", "gk")}
+        buckets["I"] = {"7": {}, 3: {}}
+        cli_ticket_route.record(entry, buckets)
+        self.assertEqual(entry["open_numbers"], [3, 7])
 
 
 if __name__ == "__main__":

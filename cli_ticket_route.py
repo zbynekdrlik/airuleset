@@ -133,8 +133,10 @@ count = ts.stop_count   # the `--count` / `/goal` stop-proof number (I + C)
 
 def record(entry, buckets):
     """The footer cache fields of the fact buckets: `merged_unreleased` (M,
-    #1083), `pipeline` (P) and `done` (C), each with its `_numbers` list, and
-    `conflicts` + `conflicts_numbers` (`record_conflicts`)."""
+    #1083), `pipeline` (P) and `done` (C), each with its `_numbers` list,
+    `open_numbers` (I, #1342: the loop-question Stop gate tells the asked
+    ticket from other work) and `conflicts` + `conflicts_numbers`."""
+    entry["open_numbers"] = sorted(int(n) for n in buckets["I"])
     for key, bucket in (("merged_unreleased", "M"), ("pipeline", "P"),
                         ("done", "C")):
         entry[key] = len(buckets[bucket])

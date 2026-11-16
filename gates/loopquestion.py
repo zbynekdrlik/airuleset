@@ -14,7 +14,7 @@ goal_armed` and the watchdog read; `ND_FAKE_PANE_CAPTURE` is the shared test
 seam); the per-cwd footer cache (`statusbar.cwd_key`, the file the footer
 renders) is fresh, not carried forward over a failed refresh (`stale_since`),
 and its owed count `open + done` (I + C, `statusbar.obligation_count`), minus
-the asked ticket while it is not yet in U (#1342, `_asked_in_i`), is > 0.
+the asked ticket while it is still counted there (#1342, `_asked_in_i`), is > 0.
 
 Honest limit: the Stop path has no dispatchable count (`slice-quals
 --count-dispatchable` takes ~20 s against the hook's 5 s budget), so `I` -- a
@@ -93,27 +93,30 @@ def _workable(cwd, home, now):
 
 
 def _asked_in_i(msg, cwd, home):
-    """#1342: 1 when the asked ticket is still counted in I, else 0. The asked
-    refs are the bare same-repo `#N` of the question block (from the last
-    `**Otázka — projekt` line, else the final line); one counts when the cache
-    lists it as a counted row (`question_cover_rows`) not yet in U
-    (`question_cover_numbers` / `user_waiting_numbers`). At most one: one
-    question, one decision. A cache without those fields subtracts nothing."""
-    import statusbar
-    cache = statusbar._load(statusbar.cache_dir(home) /
-                            (statusbar.cwd_key(cwd) + ".json"))
-    rows = cache.get("question_cover_rows") if isinstance(cache, dict) else None
-    if not isinstance(rows, list):
+    """#1342: 1 when the asked ticket is still counted in I + C, else 0. The
+    asked refs are the bare same-repo `#N` of the question block (from the last
+    `**Otázka — projekt` line, else the last non-blank line); one counts when
+    the cache lists it in `open_numbers` (I, written by
+    `cli_ticket_route.record`) or `done_numbers` (C), the exact rows the owed
+    count sums. At most one: one question, one decision. A cache without
+    `open_numbers` (written before #1342) or any odd shape subtracts nothing,
+    so the gate never weakens on data it cannot read."""
+    try:
+        import statusbar
+        cache = statusbar._load(statusbar.cache_dir(home) /
+                                (statusbar.cwd_key(cwd) + ".json"))
+        if not isinstance(cache, dict) or not isinstance(cache.get("open_numbers"), list):
+            return 0
+        owed = {n for key in ("open_numbers", "done_numbers")
+                for n in (cache.get(key) or []) if type(n) is int}
+        lines = [ln for ln in msg.splitlines() if ln.strip()]
+        heads = [i for i, ln in enumerate(lines) if _QUESTION_HEAD_RE.search(ln)]
+        block = "\n".join(lines[heads[-1]:]) if heads else lines[-1]
+        refs = {int(n) for n in _BARE_REF_RE.findall(block)}
+        return 1 if refs & owed else 0
+    except Exception as e:  # noqa: BLE001 -- a Stop gate fails toward today's count
+        _log(home, "asked-ticket read failed (%s): no subtraction" % type(e).__name__)
         return 0
-    in_u = set()
-    for key in ("question_cover_numbers", "user_waiting_numbers"):
-        if isinstance(cache.get(key), list):
-            in_u.update(cache[key])
-    lines = msg.splitlines()
-    heads = [i for i, ln in enumerate(lines) if _QUESTION_HEAD_RE.search(ln)]
-    block = "\n".join(lines[heads[-1]:]) if heads else lines[-1]
-    refs = {int(n) for n in _BARE_REF_RE.findall(block)}
-    return 1 if any(n in rows and n not in in_u for n in refs) else 0
 
 
 def decide(payload, capture=None, home=None, now=None):
