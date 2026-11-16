@@ -14,6 +14,7 @@ real tmux server, never a real process.
 import ast
 import inspect
 import os
+import pty
 import shutil
 import subprocess
 import sys
@@ -51,6 +52,7 @@ class _World:
         self.calls = []
         self.pid_after_check = {}  # pane_id -> pid reported on the re-check
         self.child_on_recheck = {}  # pid -> child that appears at the re-check
+        self.exec_on_recheck = {}   # pid -> argv the shell exec'ed into by then
         self.rechecks = 0
 
     def add_proc(self, pid, cmdline, start, children=()):
@@ -89,6 +91,9 @@ class _World:
                                         "children")
                     with open(path, "w") as f:
                         f.write("%d " % kid)
+                for pid, argv in self.exec_on_recheck.items():
+                    with open(os.path.join(self.proc, str(pid), "cmdline"), "wb") as f:
+                        f.write(b"\0".join(a.encode() for a in argv) + b"\0")
                 pane = argv[argv.index("-t") + 1]
                 pid = self.pid_after_check.get(pane, dict(self.panes).get(pane))
                 return 0, "%s\n" % pid
@@ -182,6 +187,17 @@ class TestRespawnDecision(unittest.TestCase):
             self.assertEqual(w.rechecks, 1)
             self.assertEqual(w.respawned(), [])
 
+    def test_shell_that_exec_ed_a_program_before_the_respawn_is_kept(self):
+        """`exec vim` keeps the pid and has no child: only the command line
+        tells (review round 2)."""
+        with tempfile.TemporaryDirectory() as td:
+            w = _World(td)
+            w.add_pane("%0", 4001)
+            w.exec_on_recheck[4001] = ["vim", "notes.md"]
+            w.go()
+            self.assertEqual(w.rechecks, 1)
+            self.assertEqual(w.respawned(), [])
+
     def test_only_the_stale_pane_of_several_is_respawned(self):
         with tempfile.TemporaryDirectory() as td:
             w = _World(td)
@@ -200,12 +216,16 @@ class TestRespawnDecision(unittest.TestCase):
             w.go()
             self.assertEqual(w.respawned(), [])
 
-    def test_missing_session_is_a_quiet_no_op(self):
+    def test_missing_session_is_a_logged_no_op(self):
+        """Review round 2: a declared session tmux cannot find (a name with
+        `:` never resolves as `=name`) prints one line instead of nothing."""
         with tempfile.TemporaryDirectory() as td:
             w = _World(td)
             w.add_pane("%0", 4001)
             w.run = lambda argv, _r=w.run: (1, "") if argv[1] == "has-session" else _r(argv)
-            self.assertEqual(w.go(), [])
+            lines = w.go()
+            self.assertEqual(len(lines), 1, lines)
+            self.assertIn("not found", lines[0])
             self.assertEqual(w.respawned(), [])
 
 
@@ -222,16 +242,26 @@ class TestRespawnDecision(unittest.TestCase):
 class TestRealTmux(unittest.TestCase):
     """The same decision on a REAL tmux server of its own (`-S` private
     socket, `-f /dev/null`, TMUX unset) and the real /proc: the fake runner
-    once hid a target syntax real tmux 3.7b does not resolve (review 🔴)."""
+    once hid a target syntax real tmux 3.7b does not resolve (review 🔴).
+
+    The idle pane runs `exec bash --noprofile -l` (still a login shell for
+    `_is_login`): a full `bash -l` runs /etc/profile.d scripts as children for
+    a moment, which made the busy/idle split flaky (review round 2)."""
+
+    IDLE = "exec bash --noprofile --norc -l"
+    BUSY = "bash --noprofile --norc -l -c 'sleep 60; :'"
 
     def setUp(self):
         if not shutil.which("tmux"):
             self.fail("tmux is required for this test")
-        self.dir = tempfile.mkdtemp(prefix="respawn1310-")
-        self.sock = os.path.join(self.dir, "sock")
+        # short path: a unix socket path is capped at 108 bytes
+        self.dir = tempfile.mkdtemp(prefix="rsp1310-", dir="/tmp")
+        self.sock = os.path.join(self.dir, "s")
         self.env = {k: v for k, v in os.environ.items()
                     if k not in ("TMUX", "TMUX_PANE")}
         self.env.update(HOME=self.dir, TMUX_TMPDIR=self.dir)
+        if self.env.get("TERM", "dumb") in ("", "dumb"):
+            self.env["TERM"] = "xterm-256color"
         self.addCleanup(shutil.rmtree, self.dir, True)
         self.addCleanup(self.tmux, "kill-server")
 
@@ -250,35 +280,77 @@ class TestRealTmux(unittest.TestCase):
             "list-panes", "-s", "-t", "=proj", "-F",
             "#{pane_id} #{pane_pid}")[1].splitlines())
 
-    def test_idle_pane_respawned_busy_pane_kept(self):
-        self.assertEqual(self.tmux("new-session", "-d", "-s", "proj", "-c",
-                                   self.dir, "exec bash -l")[0], 0)
-        self.assertEqual(self.tmux("split-window", "-t", "=proj:", "-c", self.dir,
-                                   "bash -l -c 'sleep 60; :'")[0], 0)
-        before = self.pids()
-        busy = []
-        for _ in range(50):                 # the sleep child forks after exec
-            busy = [p for p, pid in before.items() if pr._children(pid, "/proc")]
-            if busy:
-                break
+    def new_pane(self, cmd, split=False):
+        verb = ["split-window", "-t", "=proj:"] if split else [
+            "new-session", "-d", "-s", "proj"]
+        rc, out = self.tmux(*verb, "-P", "-F", "#{pane_id}", "-c", self.dir, cmd)
+        self.assertEqual(rc, 0)
+        return out.strip()
+
+    def settle(self, idle, busy):
+        """Wait until the busy pane has its child and the idle one has none,
+        on two reads in a row."""
+        pids, steady = self.pids(), 0
+        for _ in range(100):
+            ok = (not pr._children(pids[idle], "/proc")
+                  and (busy is None or pr._children(pids[busy], "/proc")))
+            steady = steady + 1 if ok else 0
+            if steady >= 2:
+                return pids
             time.sleep(0.1)
-        self.assertEqual(len(busy), 1, before)
+        self.fail("panes never settled: %r" % pids)
+
+    def stamp(self):
         since = os.path.join(self.dir, "since")
         open(since, "w").close()
         later = time.time() + 30
         os.utime(since, (later, later))
-        lines = pr.respawn_stale_panes("proj", self.dir, since, run=self.run_tmux)
+        return since
+
+    def attach_client(self, session):
+        """A real client on a pty, the way a webterm tab attaches."""
+        master, slave = pty.openpty()
+        p = subprocess.Popen(
+            ["tmux", "-S", self.sock, "-f", "/dev/null", "attach", "-t", session],
+            stdin=slave, stdout=slave, stderr=slave, env=self.env)
+        os.close(slave)
+        self.addCleanup(os.close, master)
+        self.addCleanup(p.wait, 10)
+        self.addCleanup(p.kill)
+        for _ in range(50):
+            if self.tmux("list-clients", "-F", "#{client_session}")[1].strip():
+                return
+            time.sleep(0.1)
+        self.fail("client never attached")
+
+    def test_idle_pane_respawned_busy_pane_kept(self):
+        idle = self.new_pane(self.IDLE)
+        busy = self.new_pane(self.BUSY, split=True)
+        before = self.settle(idle, busy)
+        lines = pr.respawn_stale_panes("proj", self.dir, self.stamp(),
+                                       run=self.run_tmux)
         after = self.pids()
-        idle = [p for p in before if p not in busy][0]
         self.assertNotEqual(after[idle], before[idle], lines)
-        self.assertEqual(after[busy[0]], before[busy[0]], lines)
+        self.assertEqual(after[busy], before[busy], lines)
         self.assertTrue(any("respawned" in ln for ln in lines), lines)
 
     def test_attached_count_is_read_by_exact_session_name(self):
-        self.assertEqual(self.tmux("new-session", "-d", "-s", "proj", "-c",
-                                   self.dir, "exec bash -l")[0], 0)
+        self.new_pane(self.IDLE)
         self.assertEqual(pr._attached("proj", self.run_tmux), "0")
         self.assertIsNone(pr._attached("pro", self.run_tmux))
+
+    def test_client_on_a_grouped_session_keeps_the_panes(self):
+        """A viewer attached to a grouped clone sees proj's panes too
+        (webterm can attach a group member; review round 2 🟡)."""
+        idle = self.new_pane(self.IDLE)
+        self.assertEqual(self.tmux("new-session", "-d", "-t", "=proj",
+                                   "-s", "clone")[0], 0)
+        self.attach_client("=clone")
+        before = self.settle(idle, None)
+        lines = pr.respawn_stale_panes("proj", self.dir, self.stamp(),
+                                       run=self.run_tmux)
+        self.assertEqual(self.pids()[idle], before[idle], lines)
+        self.assertTrue(any("attached" in ln for ln in lines), lines)
 
 
 class TestInstallEntry(unittest.TestCase):
