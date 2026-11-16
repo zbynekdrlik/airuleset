@@ -2221,52 +2221,21 @@ fi
 # #1343 (owner 16.11.2026) — owner-facing clock times are Europe/Bratislava
 # local time, never raw UTC. Incident: devbridge quoted CI times read raw from
 # `gh` (UTC) as "hotovo okolo 21:00" while it was 21:35 CET for the owner.
-# Blocks (a) an ISO timestamp ending in `Z` and (b) an `HH:MM[:SS]` followed by
-# UTC/GMT/Z, in PROSE only: reads MSG_MENTION (fenced code, inline code and
-# double-quoted spans already stripped, #96), skips blockquoted log lines, and
-# exempts a UTC time inside parentheses when the SAME line also states a time
-# outside them (`21:45 (20:45 UTC)`). A timestamp glued to a filename/path
-# character (`run-…Z.log`, `/…Z/`) is not prose. Bypass (logged):
-# `airuleset:utc-time-ok <reason>`.
-UTC_TRAIL='([^[:alnum:]_./-]|[.]([^[:alnum:]_]|$)|$)'
-UTC_ISO_RX="(^|[^[:alnum:]_./-])[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}(:[0-9]{2}([.][0-9]+)?)?Z${UTC_TRAIL}"
-UTC_HM_RX="(^|[^[:alnum:]_:./])[0-2]?[0-9]:[0-5][0-9](:[0-5][0-9])?[[:space:]]*(UTC|GMT|Z)${UTC_TRAIL}"
-UTC_ANY_RX="${UTC_ISO_RX}|${UTC_HM_RX}"
-if LC_ALL=C.UTF-8 msg_has "$MSG_MENTION" -qE "$UTC_ANY_RX"; then
-    UTC_HIT=""
-    if UTC_LINES=$(LC_ALL=C.UTF-8 msg_lines "$MSG_MENTION" -E "$UTC_ANY_RX"); then
-        while IFS= read -r _uline; do
-            [[ "$_uline" =~ ^[[:space:]]*\> ]] && continue
-            _unp="$_uline"
-            while [[ "$_unp" =~ \([^\(\)]*\) ]]; do
-                _unp="${_unp/"${BASH_REMATCH[0]}"/ }"
-            done
-            if LC_ALL=C.UTF-8 msg_has "$_unp" -qE "$UTC_ANY_RX"; then
-                UTC_HIT="$_uline"; break
-            fi
-            # UTC only inside parentheses: allowed only next to a local time.
-            if LC_ALL=C.UTF-8 msg_missing "$_unp" -qE '(^|[^[:alnum:]_:./])[0-2]?[0-9]:[0-5][0-9]'; then
-                UTC_HIT="$_uline"; break
-            fi
-        done <<<"$UTC_LINES"
-    else
-        UTC_HIT="(undeterminable line scan)"
-    fi
-    if [ -n "$UTC_HIT" ]; then
-        UTC_BYPASS=""
-        if UTC_BYPASS=$(msg_lines "$MSG" -oE 'airuleset:utc-time-ok.*'); then
-            UTC_BYPASS="${UTC_BYPASS%%$'\n'*}"
-        else
-            UTC_BYPASS=""
-        fi
-        if [ -n "$UTC_BYPASS" ]; then
-            { printf '%s utc-time-ok sid=%s cwd=%s %s\n' "$(date -Is 2>/dev/null)" \
-                "${SESSION_ID:-?}" "$PWD" "$UTC_BYPASS" \
-                >>"${HOME}/.claude/prose-bypasses.log"; } 2>/dev/null || true
-        else
-            echo "VIOLATION: You quoted a raw UTC clock time to the owner (${UTC_HIT:0:160}). The owner reads Europe/Bratislava local time — a UTC hour from gh/an API reads as an hour off (#1343). Convert it before quoting: TZ=Europe/Bratislava date -d <ts> +%H:%M (e.g. TZ=Europe/Bratislava date -d 2026-11-16T20:45:07Z +%H:%M → 21:45). Stating UTC too is fine in parentheses next to the local time: '21:45 (20:45 UTC)'. A log/API quote belongs in a code block or backticks. Bypass (logged): # airuleset:utc-time-ok <reason>. See response-structure.md." >&2
-            add_hard "Raw UTC clock time quoted to the owner — give Europe/Bratislava local time (TZ=Europe/Bratislava date -d <ts> +%H:%M); UTC only in parentheses next to it; bypass # airuleset:utc-time-ok <reason> (logged)"
-        fi
+# The decision lives in `gates.utctime` (ISO `…Z` timestamps and HH:MM + UTC/
+# GMT/Z, prose only: blockquotes, URLs, filename-glued stamps and a UTC time
+# in brackets next to a local time are exempt; bypass `airuleset:utc-time-ok
+# <reason>` logged via gates.audit). This bash side is a cheap SUPERSET
+# pre-screen on MSG_MENTION so a message with no UTC-shaped time never spawns
+# python. Reads MSG_MENTION (fenced/inline code and quotes stripped, #96).
+# exit 2 = block, 0 = clean/bypassed, any other rc = infra -> fail OPEN.
+if LC_ALL=C.UTF-8 msg_has "$MSG_MENTION" -qE '[0-9]{2}(:[0-9]{2})?([.][0-9]+)?[[:space:]]*([Uu][Tt][Cc]|[Gg][Mm][Tt]|Z)'; then
+    UTC_RC=0
+    UTC_HIT=$(printf '%s' "$MSG_MENTION" | env AIRULESET_SESSION_ID="${SESSION_ID:-}" PYTHONPATH="${_PROSE_REPO_ROOT}${PYTHONPATH:+:$PYTHONPATH}" python3 -P -m gates.utctime 2>/dev/null) || UTC_RC=$?
+    if [ "$UTC_RC" = "2" ]; then
+        echo "VIOLATION: You quoted a raw UTC clock time to the owner (${UTC_HIT:0:160}). The owner reads Europe/Bratislava local time — a UTC hour from gh/an API reads as an hour off (#1343). Convert it before quoting: TZ=Europe/Bratislava date -d <ts> +%H:%M (e.g. TZ=Europe/Bratislava date -d 2026-11-16T20:45:07Z +%H:%M → 21:45). Stating UTC too is fine in brackets next to the local time: '21:45 (20:45 UTC)'. A log/API quote belongs in a code block or backticks. Bypass (logged): # airuleset:utc-time-ok <reason>. See response-structure.md." >&2
+        add_hard "Raw UTC clock time quoted to the owner — give Europe/Bratislava local time (TZ=Europe/Bratislava date -d <ts> +%H:%M); UTC only in brackets next to it; bypass # airuleset:utc-time-ok <reason> (logged)"
+    elif [ "$UTC_RC" != "0" ]; then
+        printf 'stop-check-prose-violations: utc-time gate infra rc=%s — fail-open (#1343)\n' "$UTC_RC" >&2
     fi
 fi
 
