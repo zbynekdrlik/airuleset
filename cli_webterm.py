@@ -630,7 +630,7 @@ def _html_escape(s):
 
 def _short_alias(entry):
     """A Windows-Terminal-style SHORT tab alias mirroring the owner's own tab
-    names (dev1, dev2, gk, m1..m8 for montalu, miva, d1..d4 for david); an
+    names (dev1, dev2, gk, miva, d1..d4 for david); an
     unrecognized session gets a sensible short form. The FULL id/label stays as
     the tab's `title` tooltip, so a short alias is never ambiguous (#579).
 

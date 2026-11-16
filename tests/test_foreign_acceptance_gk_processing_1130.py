@@ -135,8 +135,8 @@ class HandoffLabelSetsDeriveOnce1130(unittest.TestCase):
 
 SLUG = "zbynekdrlik/odoo-erp"
 ROOT = "/tmp/does-not-matter-1130"
-STREAM = "montalu1"   # the canonical key `_stream_owner_of` returns (#1141)
-QUALS = ["assignee:@me", "author:@me", "label:stream:montalu"]
+STREAM = "david1"   # the canonical key `_stream_owner_of` returns (#1141; montalu1 until #1306)
+QUALS = ["assignee:@me", "author:@me", "label:stream:david"]
 
 
 def _drive_slice(number, labels):
@@ -170,18 +170,18 @@ class OwningStreamSliceBox1130(unittest.TestCase):
     RE-PINNED by #1141 slice 2 (owner ruling in the #1141 design comment: "an
     owner question beats any hand-off label"): an UNSENT acceptance in either
     hand-off state is the owner's court on its owning box → U, not gk. The
-    box's own stream is its canonical key (`montalu1`, what `_stream_owner_of`
-    resolves `stream:montalu` to): the former `montalu` spelling made the row
+    box's own stream is its canonical key (`david1`, what `_stream_owner_of`
+    resolves `stream:david` to): the former bare-base spelling made the row
     read as FOREIGN, so these tests never exercised the owning box."""
 
     def test_acceptance_ready_for_review_is_U(self):
-        r = _drive_slice(301, ["stream:montalu", "needs-acceptance",
+        r = _drive_slice(301, ["stream:david", "needs-acceptance",
                                "ready-for-review"])
         self.assertEqual(r["gk"], 0)
         self.assertIn(301, r["waiting"])
 
     def test_acceptance_gk_processing_is_U(self):
-        r = _drive_slice(302, ["stream:montalu", "needs-acceptance",
+        r = _drive_slice(302, ["stream:david", "needs-acceptance",
                                "gk-processing"])
         self.assertEqual(r["gk"], 0)
         self.assertIn(302, r["waiting"])

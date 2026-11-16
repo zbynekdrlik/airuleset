@@ -35,12 +35,11 @@ set -euo pipefail
 #   - simap1@<subdev>     — ONLY with -i .../gatekeeper_access_ed25519
 #                          (airuleset#143 — simap's authorized_keys are the
 #                          SAME operator keys as marek, so it shares marek's
-#                          identity requirement, not montalu's default-key
-#                          path).
+#                          identity requirement).
 #   - miva1@<subdev>     — ONLY with -i .../gatekeeper_access_ed25519
 #                          (airuleset#300 — phase-1 isolated, same shape as
 #                          simap, so it shares the identical identity
-#                          requirement, not montalu's default-key path).
+#                          requirement).
 #   - root@<subdev>      — ONLY with -i .../subdev_admin (#68, gatekeeper
 #                          VPS's own admin identity) — explicit on the
 #                          command line, OR implicit via a bare `ssh subdev`

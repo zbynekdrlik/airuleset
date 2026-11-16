@@ -129,14 +129,14 @@ _MAREK_GO_LIVE = (
     "       is delivered.\n"
     "    5. #661/#787/2026-09-03 ssh tabs: deploy the dedicated key %s\n"
     "       (private key on subdev as marek; pubkey in authorized_keys of\n"
-    "       montalu2@subdev, miva1@subdev, montalu4@subdev, newlevel@dev1,\n"
+    "       miva1@subdev, newlevel@dev1,\n"
     "       newlevel@dev2, gatekeeper@gk, admin@forestshop-dev). RECOMMENDED\n"
     "       DEFAULT (#661 review): a forced-command entry —\n"
     "       restrict,pty,command=\"tmux ...\" (keep `pty`; `restrict` alone\n"
     "       kills the PTY) — especially on newlevel@dev1/dev2 AND gatekeeper@gk\n"
     "       (OWNER-REALM accounts: an unrestricted key there is a full shell\n"
-    "       with transitive fleet reach). Until the key lands the montalu2/\n"
-    "       miva1/montalu4/dev1/dev2/gatekeeper/forestshop tabs fail visibly;\n"
+    "       with transitive fleet reach). Until the key lands the\n"
+    "       miva1/dev1/dev2/gatekeeper/forestshop tabs fail visibly;\n"
     "       marek@subdev keeps working.\n"
     % (WEBTERM_MAREK_TUNNEL_UUID, WEBTERM_MAREK_TUNNEL_UUID,
        profiles.WEBTERM_MAREK_IDENTITY))

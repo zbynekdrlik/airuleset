@@ -2660,6 +2660,11 @@ def _stream_owner_of(labels):
         if profile != "full" and any(("stream:%s" % n) in names
                                       for n in _stream_rename_equivalents(user)):
             return user
+    # #1306: a retired stream (accounts deleted) still owns its labelled
+    # tickets — foreign to every box, never core work for the gatekeeper.
+    for name in sorted(airuleset.RETIRED_STREAM_LABELS):
+        if "stream:%s" % name in names:
+            return name
     return ""
 
 

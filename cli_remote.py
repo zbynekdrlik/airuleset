@@ -157,8 +157,8 @@ def _deployable_hosts(hosts=None):
     filters through here, so a pending OR paused target is NEVER contacted:
     a password/pubkey attempt against a non-existent (pending) or
     deliberately-off-limits (paused) account is exactly the fail2ban/
-    unwanted-heal risk both flags exist to prevent, and the montalu family
-    uses the shared default-key sshpass path. The live-op rename ticket
+    unwanted-heal risk both flags exist to prevent (an identity-less host
+    uses the shared default-key sshpass path). The live-op rename ticket
     removes the `"pending"` flag (and the old entry) once each account is
     created + verified; the owner removes the `"paused"` flag when the
     stream resumes.
@@ -529,7 +529,7 @@ def _deliver_secret_to_hosts(targets, value, remote_write_cmd, noun, run,
     `require_identity` (a general owner-secret safety option, #659 review): a
     target WITHOUT an `identity` is REFUSED with a `failed` entry -- an owner
     secret must never ride the fleet-shared subdev password. Soniox passes False
-    (the montalu family authenticates via the shared default key by design)."""
+    (an identity-less host authenticates via the shared default key)."""
     import time
     control_opts = list(control_opts or [])
     failed = []

@@ -112,7 +112,7 @@ class TestDominikaInventory(unittest.TestCase):
 
 class TestDominikaConnectAllowlistScoped(unittest.TestCase):
     """The heart of the boundary: dominika's ttyd child reads her inventory, so
-    connect_main can ONLY resolve her own two-member set — never another stream's,
+    connect_main can ONLY resolve her own one-member set — never another stream's,
     another person's, a david id, a marek id, or an owner-realm box."""
 
     def _dominika_inv_file(self):
