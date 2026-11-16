@@ -33,9 +33,9 @@ set -euo pipefail
 #                          montalu5/6/7/8 are FOUR MORE (airuleset#378,
 #                          odoo-erp#3642)).
 #   - marek@<subdev>     — ONLY with -i .../gatekeeper_access_ed25519.
-#   - david[1-8]@<subdev> — ONLY with -i .../gatekeeper_access_ed25519
+#   - david[1234]@<subdev> — ONLY with -i .../gatekeeper_access_ed25519
 #                          (david1 is the renamed base (#537, was `david` —
-#                          the OS account `david` is GONE), david2-8 are its
+#                          the OS account `david` is GONE), david2/3/4 are its
 #                          family, airuleset#326 — three MORE parallel david
 #                          streams, additional capacity for the same external
 #                          developer, so they share the same operator
@@ -58,9 +58,9 @@ set -euo pipefail
 # BLOCK everything else, in particular:
 #   - no user at all UNLESS the local ~/.ssh/config resolves it to the
 #     sanctioned root+subdev_admin case above.
-#   - any user other than montalu[12345678]/marek/david[1-8]/simap1/miva1/root
+#   - any user other than montalu[12345678]/marek/david[1234]/simap1/miva1/root
 #     (newlevel, gatekeeper,...).
-#   - marek/david[1-8]/simap1/miva1 WITHOUT the gatekeeper_access_ed25519 identity.
+#   - marek/david[1234]/simap1/miva1 WITHOUT the gatekeeper_access_ed25519 identity.
 #   - root WITHOUT the subdev_admin identity.
 #
 # A non-subdev target (dev2, gatekeeper, anything else) is completely
@@ -172,10 +172,6 @@ _SUBDEV_ACCOUNTS_HARDCODED = {
     "david2": "gatekeeper_access_ed25519",
     "david3": "gatekeeper_access_ed25519",
     "david4": "gatekeeper_access_ed25519",
-    "david5": "gatekeeper_access_ed25519",
-    "david6": "gatekeeper_access_ed25519",
-    "david7": "gatekeeper_access_ed25519",
-    "david8": "gatekeeper_access_ed25519",
     "dominika": "gatekeeper_access_ed25519",
     "simap1": "gatekeeper_access_ed25519",
     "miva1": "gatekeeper_access_ed25519",
@@ -433,7 +429,7 @@ def check_target(user, host, tokens, label):
     if key_req == "default":
         # montalu family — no identity requirement
         return None
-    # Requires the gatekeeper key (marek/david1-8/dominika/simap1/miva1)
+    # Requires the gatekeeper key (marek/david1-4/dominika/simap1/miva1)
     if has_gatekeeper_key(tokens):
         return None
     return ("%s as %s@subdev without -i .../%s"
@@ -511,7 +507,7 @@ if [ "$RC" -eq 2 ]; then
     echo "  source of truth, read it before any ad-hoc subdev ssh):" >&2
     echo "    montalu[12345678]@subdev — default key OR sshpass -f" >&2
     echo "    marek@subdev  -i ~/.secrets/gatekeeper_access_ed25519" >&2
-    echo "    david[1-8]@subdev  -i ~/.secrets/gatekeeper_access_ed25519" >&2
+    echo "    david[1234]@subdev  -i ~/.secrets/gatekeeper_access_ed25519" >&2
     echo "    simap1@subdev  -i ~/.secrets/gatekeeper_access_ed25519" >&2
     echo "    miva1@subdev  -i ~/.secrets/gatekeeper_access_ed25519" >&2
     echo "    root@subdev   -i ~/.ssh/subdev_admin (gatekeeper VPS only," >&2

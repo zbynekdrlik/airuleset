@@ -156,7 +156,6 @@ STREAM_NOTIFY_OWNER = {
     "david2": "david",
     "david3": "david",
     "david4": "david",
-    "david5": "david", "david6": "david", "david7": "david", "david8": "david",  # #1341
     # admin/stepan (airuleset#572, 2026-08-19): the forestshop-dev box's two
     # linux accounts (cli_fleet.py -- admin@forestshop-dev /
     # stepan@forestshop-dev). Originally routed to claude-marek; rerouted to

@@ -39,7 +39,7 @@ owner-approved BEFORE posting.
   a glance which stream owns it (montalu3 → "Kontrola zákazníckych e-mailov 3").
   The suffix is
   the STREAM'S NUMBER: for a NUMBERED stream it is the trailing digits of the
-  stream name (montalu2..8 → 2..8, david2..8 → 2..8, miva1 → 1). For an
+  stream name (montalu2..8 → 2..8, david2..4 → 2..4, miva1 → 1). For an
   UNNUMBERED base stream (montalu, marek, david, simap) the suffix is "1" — the
   first stream of its client family — CONFIRMED by the owner on airuleset #532 (renames #537), so every active
   handover stream ends with its number. **The name is at most ~30 CHARACTERS including that trailing number**

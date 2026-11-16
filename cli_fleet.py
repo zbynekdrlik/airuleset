@@ -290,21 +290,6 @@ REMOTE_HOSTS = [
              "role": None},
         ],
     },
-    # david5@subdev, david6@subdev, david7@subdev, david8@subdev (#1341): the
-    # david2-4 shape. Gatekeeper's `/new-subdev` creates the accounts; `pending`
-    # keeps every ssh path off them until then — DELETE it once `ls /home` on
-    # subdev shows david5-8 (an ssh to a missing user risks fail2ban).
-    *({"pending": True,
-        "name": "%s@subdev" % _u,
-        "host": "100.118.174.27",
-        "user": _u,
-        "repo_path": "~/devel/airuleset",
-        "identity": "~/.secrets/gatekeeper_access_ed25519",
-        "windows": [
-            {"name": "d" + _u[5:], "cwd": "~/devel/odoo/odoo-erp",
-             "role": None},
-        ],
-    } for _u in ("david5", "david6", "david7", "david8")),
     {
         # montalu5/montalu6/montalu7/montalu8 (airuleset#378,
         # odoo-erp#3642): FOUR MORE full parallel montalu streams, same
@@ -986,11 +971,6 @@ AUTHORITY_BY_USER = {
     "david2": "fork-no-merge",
     "david3": "fork-no-merge",
     "david4": "fork-no-merge",
-    # david5-david8 (#1341): four more clones of the same family.
-    "david5": "fork-no-merge",
-    "david6": "fork-no-merge",
-    "david7": "fork-no-merge",
-    "david8": "fork-no-merge",
     # montalu5/montalu6/montalu7/montalu8 (airuleset#378, odoo-erp#3642):
     # four MORE full parallel montalu streams -- same authority as
     # montalu/montalu2/montalu3/montalu4.
@@ -1107,7 +1087,6 @@ WEBTERM_OBSERVER_USERS = frozenset({"dominika", "marek"})
 # Test-locked: subset of subdev REMOTE_HOSTS users.
 WEBTERM_ONLY_USERS = frozenset({
     "david1", "david2", "david3", "david4", "dominika",
-    "david5", "david6", "david7", "david8",   # #1341
 })
 
 

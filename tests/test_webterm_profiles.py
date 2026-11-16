@@ -64,10 +64,10 @@ class TestProfileForHost(unittest.TestCase):
 
 
 class TestDavidInventory(unittest.TestCase):
-    def test_exact_member_list(self):
+    def test_exactly_five_members(self):
         inv = p.david_inventory()
         ids = [e["id"] for e in inv]
-        self.assertEqual(ids, ["david1", "david2", "david3", "david4", "david5", "david6", "david7", "david8",
+        self.assertEqual(ids, ["david1", "david2", "david3", "david4",
                                "codex-bridge"])
 
     def test_david_accounts_use_dedicated_identity(self):
@@ -117,7 +117,7 @@ class TestProfileInventoryScoping(unittest.TestCase):
         fleet = _fleet_inventory()
         david_ids = p.allowed_ids(p.DAVID, fleet)
         self.assertEqual(david_ids,
-                         {"david1", "david2", "david3", "david4", "david5", "david6", "david7", "david8", "codex-bridge"})
+                         {"david1", "david2", "david3", "david4", "codex-bridge"})
         # The security invariant: NONE of the owner fleet ids leak in.
         for owner_id in ("dev1", "dev2", "gatekeeper", "montalu-subdev"):
             self.assertNotIn(owner_id, david_ids)
@@ -133,7 +133,7 @@ class TestWebtermInventoryProfileArg(unittest.TestCase):
     def test_david_profile_returns_david_set(self):
         inv = w.webterm_inventory(profile=p.DAVID)
         self.assertEqual([e["id"] for e in inv],
-                         ["david1", "david2", "david3", "david4", "david5", "david6", "david7", "david8", "codex-bridge"])
+                         ["david1", "david2", "david3", "david4", "codex-bridge"])
 
 
 def _david_inv_file():

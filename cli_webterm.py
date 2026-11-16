@@ -691,14 +691,13 @@ def _tab_order_key(alias):
 # owner gateway (WEBTERM_LOGIN_USER, zbynek.newlevel.media), "david"/"marek" for
 # theirs. A human with no list, or a render with human=None (the david gateway
 # path, whose scoped cli_webterm_profiles.david_inventory is ALREADY exactly
-# david1-8 + codex-bridge), is not filtered here. The ids are the sanitized fleet
+# david1-4 + codex-bridge), is not filtered here. The ids are the sanitized fleet
 # inventory ids (_sanitize_id: marek@subdev -> marek-subdev).
 WEBTERM_DASHBOARD_TABS = {
     # zbynek.newlevel.media -- owner ROZHODNUTÉ 2026-08-24, EXACT order (verbatim
     # "dev1, dev2, gk, m1..m6, d1, d2, miva, sb"); david3 (d3) added after d2 per
     # owner request 2026-08-26 (#719); david4 (d4) added after d3 per owner
-    # request 2026-09-07 (#934); david5-8 (d5..d8) after d4 per owner request
-    # 2026-11-16 (#1341); ar (controller local tab) added as first entry
+    # request 2026-09-07 (#934); ar (controller local tab) added as first entry
     # per #938 (was in zbynek_inventory since #870 F4a but missing here).
     # EXCLUDES montalu7/8, simap1, marek@subdev, stepan@forestshop-dev,
     # admin@forestshop-dev. #1302 (owner 11.11.2026): montalu1-6 (m1..m6)
@@ -707,7 +706,6 @@ WEBTERM_DASHBOARD_TABS = {
         "ar", "claudy", "fohmixer", "varos", "wall-bridge", "songplayer",  # #1220, #1267
         "dstack", "dasio", "iemmixer", "dcontroller", "dsync", "intercom", "obs", "shading", "vstack", "nlch-finances", "tuke", "mikrotik-pz", "devbridge", "fleet-backup", "dev1", "dev2", "gatekeeper",  # #1270, #1295, #1296, #1310, #1320, #1339
         "david1-subdev", "david2-subdev", "david3-subdev", "david4-subdev",
-        "david5-subdev", "david6-subdev", "david7-subdev", "david8-subdev",  # #1341
         "miva1-subdev", "spinbike-vps",
     ],
     # marek.newlevel.media -- Marek's OBSERVER set (#882 scope correction
@@ -722,17 +720,15 @@ WEBTERM_DASHBOARD_TABS = {
     # (its Claude ran in newlevel@dev2's marek group before the migration).
     "marek": [
         "miva1-subdev", "david3-subdev",  # david3: owner 11.11.2026
-        "david5-subdev", "david6-subdev", "david7-subdev", "david8-subdev",  # #1341, owner 16.11.2026
         "ar", "claudy", "fohmixer", "varos", "wall-bridge", "songplayer",  # #1267
         "dstack", "dasio", "iemmixer", "dcontroller", "dsync", "intercom", "obs", "shading", "vstack", "nlch-finances", "tuke", "mikrotik-pz", "devbridge", "fleet-backup", "dev1", "dev2", "gatekeeper", "forestshop",  # #1270, #1295, #1296, #1310, #1320, #1339
     ],
     # david.newlevel.media -- David's working accounts. The david GATEWAY renders
     # its own physically-scoped inventory (cli_webterm_profiles.david_inventory,
-    # ids david1..8 + codex-bridge) and does NOT consume this list; this records
+    # ids david1..4 + codex-bridge) and does NOT consume this list; this records
     # the same per-domain policy declaratively (and is what a full-fleet render
     # for "david" would filter to -- exercised by the tests).
-    "david": ["david1-subdev", "david2-subdev", "david3-subdev", "david4-subdev",
-              "david5-subdev", "david6-subdev", "david7-subdev", "david8-subdev"],  # #1341
+    "david": ["david1-subdev", "david2-subdev", "david3-subdev", "david4-subdev"],
     # dominika.newlevel.media -- dominika's OBSERVE set (owner request 2026-09-04,
     # #867): TWO tabs only, the two subdev streams she watches — montalu5 (m5) then
     # miva1 (miva). The ids are the DOMINIKA LANE inventory ids
