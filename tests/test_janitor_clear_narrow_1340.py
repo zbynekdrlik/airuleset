@@ -21,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import goal_registry  # noqa: E402
 import watchdog as wd  # noqa: E402
+from watchdog import janitor_clear  # noqa: E402
 
 from test_goal_box_kind_wrap_1303 import _capture, _cc_rows  # noqa: E402
 
@@ -99,6 +100,53 @@ class JanitorClearNarrowPane(unittest.TestCase):
         self.assertLessEqual(pane.captures, 3)
         self.assertTrue(any("no progress" in ln for ln in self.logs), self.logs)
 
+    def test_a_pass_clears_the_whole_visible_box_not_one_row(self):
+        # 3 visible rows of ~36 cols: a whole-box pass removes ~90-108 chars, a
+        # tail-row pass ~36. Only the whole-box batch fits this pass budget.
+        pane = _NarrowPane(_GOAL, width=40, rows=3)
+        self.assertTrue(self._clear(pane), self.logs)
+        self.assertLessEqual(pane.captures, len(_GOAL) // 60)
+
+    def test_one_slow_redraw_is_not_no_progress(self):
+        # the first capture after a pass still shows the old box (a slow
+        # render); the clear waits one settle, sends no key, and goes on.
+        pane = _NarrowPane(_GOAL[:300], width=40, rows=3)
+        real, first, stale = pane.render, [], []
+
+        def render():
+            if not first:
+                first.append(real())
+            if pane.bspaces and not stale:
+                stale.append(1)
+                return first[0]
+            return real()
+        pane.render = render
+        self.assertTrue(self._clear(pane), self.logs)
+        self.assertLessEqual(pane.bspaces, 300)
+
+    def test_line_break_only_box_clears_one_key_per_pass(self):
+        # #1332: a box holding only line breaks shows no character.
+        pane = _NarrowPane("\n\n", width=40, rows=3)
+        pane.render = lambda: _capture(["❯"] + [""] * len(pane.box)) if pane.box \
+            else _capture(["❯\xa0"])
+        self.assertTrue(self._clear(pane), self.logs)
+        self.assertEqual(pane.bspaces, 2)
+
+    def test_volume_bound_ends_the_clear(self):
+        pane = _NarrowPane(_GOAL, width=40, rows=3)
+        with m.patch.object(janitor_clear, "JANITOR_CLEAR_MAX_CHARS", 200):
+            self.assertFalse(self._clear(pane))
+        self.assertLess(pane.bspaces, 400)
+        self.assertTrue(any("did not converge" in ln for ln in self.logs), self.logs)
+
+    def test_time_bound_ends_the_clear(self):
+        pane = _NarrowPane(_GOAL, width=40, rows=3)
+        ticks = iter(range(0, 10000, 30))
+        ok = wd._janitor_clear_box("%9", pane, lambda *_a: None, self.logs.append,
+                                   clock=lambda: next(ticks))
+        self.assertFalse(ok)
+        self.assertLess(pane.bspaces, 200)
+
     def test_short_box_still_one_pass(self):
         pane = _NarrowPane("/compact", width=40, rows=3)
         self.assertTrue(self._clear(pane))
@@ -149,8 +197,9 @@ class JanitorClearNarrowRealTmux(unittest.TestCase):
         self._tmux("send-keys", "-t", "t:0.0", "-l", "--", _GOAL)
         tail = _GOAL.split()[-1][-10:]
         self.assertTrue(self._wait(lambda c: tail in c), "the /goal never landed")
-        logs = []
-        ok = wd._janitor_clear_box("t:0.0", self._run, time.sleep, logs.append)
+        logs, ok = [], False
+        for _sweep in range(3):    # a False clear is retried by the next sweep
+            ok = ok or wd._janitor_clear_box("t:0.0", self._run, time.sleep, logs.append)
         cap = wd.capture_pane("t:0.0", self._run, lines=40)
         return ok, wd._input_line_text(cap), logs
 
