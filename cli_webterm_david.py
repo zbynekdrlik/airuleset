@@ -15,7 +15,7 @@ permissions on the 0700 dir are the local account boundary on the shared subdev
 box. Its scoped inventory — handed to the ttyd child via the `WEBTERM_INVENTORY`
 env var the launcher exports (NOT a client-injectable argv flag: ttyd's `-a`
 appends client `?arg=` values as argv, so an argv flag would be injectable, #612
-review) — is david1..4 + codex-bridge ONLY, so the connect allowlist can never
+review) — is david1..8 + codex-bridge ONLY, so the connect allowlist can never
 resolve an owner-fleet id.
 
 AUTH (#612 owner directive 2026-08-22): NO password/credential — Cloudflare Access
@@ -80,7 +80,7 @@ _DAVID_GO_LIVE = (
     "    2. Install ttyd on subdev + run a cloudflared tunnel (as david1, no\n"
     "       sudo) fronting HTTPS david.newlevel.media -> the gateway's #663 UNIX\n"
     "       socket (service: unix:%s).\n"
-    "    3. Deploy the dedicated key %s (authorized ONLY on david1-4).\n"
+    "    3. Deploy the dedicated key %s (authorized ONLY on david1-8).\n"
     "    4. AUTH (#612 owner directive): NO password. Put a Cloudflare Access\n"
     "       email-OTP app in front — set WEBTERM_ACCESS_APPS['david'] allow-list\n"
     "       and run `airuleset.py webterm-access --apply`. Adding a person\n"
@@ -136,7 +136,7 @@ def _spec():
             name_upper="DAVID", name_lower="david", account_suffix="",
             runtime_owner="david1's", tunnel_adjective="a",
             hostname=WEBTERM_DAVID_TUNNEL_HOSTNAME,
-            scoped_inventory="Scoped inventory: david1-4 + codex-bridge only\n"
+            scoped_inventory="Scoped inventory: david1-8 + codex-bridge only\n"
                              "# (never the owner fleet)."),
         go_live=_DAVID_GO_LIVE,
         label="(subdev david)",

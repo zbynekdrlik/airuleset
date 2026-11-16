@@ -35,6 +35,7 @@ ZBYNEK_ORDER = [
     "wall-bridge", "songplayer", "dstack", "dasio", "iemmixer", "dcontroller", "dsync", "intercom", "obs", "shading", "vstack", "nlch-finances", "tuke", "mikrotik-pz", "devbridge", "fleet-backup",   # #1267, #1270, #1295, #1310, #1320, #1339 dev1 project accounts
     "dev1", "dev2", "gatekeeper",   # #1302: montalu1-6 removed (client gone)
     "david1-subdev", "david2-subdev", "david3-subdev", "david4-subdev",
+    "david5-subdev", "david6-subdev", "david7-subdev", "david8-subdev",   # #1341
     "miva1-subdev", "spinbike-vps",
 ]
 # Fleet targets the owner EXCLUDED from his domain (#934 david4 in; #1302 m1-6 out).
@@ -49,7 +50,7 @@ ZBYNEK_EXCLUDED = [
 ZBYNEK_ALIAS_ORDER = [
     "ar", "claudy", "fohmixer", "varos", "wall-bri", "songplay", "dstack", "dasio", "iemmixer", "dcontrol", "dsync", "intercom", "obs", "shading", "vstack", "nlch-fin", "tuke", "mt-pz", "devbridg", "fleet-ba",   # 8-char cut
     "dev1", "dev2", "gk",
-    "d1", "d2", "d3", "d4", "miva", "sb",
+    "d1", "d2", "d3", "d4", "d5", "d6", "d7", "d8", "miva", "sb",
 ]
 
 
@@ -117,7 +118,8 @@ class TestExclusiveTabListMechanism(unittest.TestCase):
         # david_inventory() (which HAS david4), not the owner inventory.
         inv = _owner_inv()
         got = {e["id"] for e in w.entries_for_tab_list(inv, w.WEBTERM_DASHBOARD_TABS["david"])}
-        self.assertEqual(got, {"david1-subdev", "david2-subdev", "david3-subdev", "david4-subdev"})
+        self.assertEqual(got, {"david1-subdev", "david2-subdev", "david3-subdev", "david4-subdev",
+                               "david5-subdev", "david6-subdev", "david7-subdev", "david8-subdev"})
 
     def test_dominika_domain_resolves_her_lane_inventory_to_exact_order(self):
         # #867 (owner request 2026-09-04): dominika's OBSERVE set is exactly the
@@ -138,6 +140,7 @@ class TestExclusiveTabListMechanism(unittest.TestCase):
             profiles.marek_inventory(), w.WEBTERM_DASHBOARD_TABS["marek"])]
         self.assertEqual(got, [
             "miva1-subdev", "david3-subdev",
+            "david5-subdev", "david6-subdev", "david7-subdev", "david8-subdev",   # #1341
             "ar", "claudy", "fohmixer", "varos", "wall-bridge", "songplayer",  # #1267
             "dstack", "dasio", "iemmixer", "dcontroller", "dsync", "intercom", "obs", "shading", "vstack", "nlch-finances", "tuke", "mikrotik-pz", "devbridge", "fleet-backup", "dev1", "dev2", "gatekeeper", "forestshop",
         ])
@@ -147,7 +150,7 @@ class TestExclusiveTabListMechanism(unittest.TestCase):
         aliases = re.findall(r'<span class="al">([^<]+)</span>', html)
         # miva1->miva, dev1, dev2, gatekeeper->gk, forestshop->fs — from the
         # SINGLE #592 cli_aliases source.
-        self.assertEqual(aliases, ["miva", "d3", "ar", "claudy",
+        self.assertEqual(aliases, ["miva", "d3", "d5", "d6", "d7", "d8", "ar", "claudy",
                                    "fohmixer", "varos", "wall-bri", "songplay",
                                    "dstack", "dasio", "iemmixer", "dcontrol", "dsync", "intercom", "obs", "shading", "vstack", "nlch-fin", "tuke", "mt-pz", "devbridg", "fleet-ba", "dev1", "dev2", "gk", "fs"])
         # No marek-subdev (dead stream) on the dashboard.
