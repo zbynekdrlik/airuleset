@@ -48,8 +48,9 @@ def _run(step, tmp):
         '%s() { printf "%%s\\n" "%s $*" >> "%s"; %s }\n'
         % (t, t, log, 'echo dev0;' if t == "nmcli" else ":;") for t in _TOOLS)
     # the test user owns the fake tree; the real one is root's
-    stubs += ('stat() { if [ "$2" = "%U %a" ]; then echo "root $(command stat -c %a "$3")"; '
-              'else command stat "$@"; fi; }\n')
+    # (a dir named `notroot` reads as another owner)
+    stubs += ('stat() { if [ "$2" = "%U %a" ]; then o=root; case "$3" in */notroot) o=nobody ;; esac; '
+              'echo "$o $(command stat -c %a "$3")"; else command stat "$@"; fi; }\n')
     r = subprocess.run(["bash", "-c", "set -euo pipefail\n" + stubs + body],
                        capture_output=True, text=True)
     if r.returncode:
@@ -153,6 +154,18 @@ class TestSweep(unittest.TestCase):
             self.assertNotIn("tc qdisc del dev dev0 root", log)
             self.assertIn("lan0 stays", out)
 
+    def test_a_dropped_key_keeps_a_shared_qdisc_too(self):
+        """The 3d-hw removal branch uses the same teardown (#1282 path)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            dirs = _world(tmp)
+            _grant(dirs, "dstack")
+            _grant(dirs, "other")
+            out, log = _run("ACCOUNT=dstack\n" + hardening.render_host_grants_step("dstack", {}), tmp)
+            self.assertFalse((dirs["dispatcher.d"] / "90-dstack-noqueue").exists())
+            self.assertTrue((dirs["dispatcher.d"] / "90-other-noqueue").exists())
+            self.assertNotIn("tc qdisc del dev dev0 root", log)
+            self.assertIn("lan0 stays", out)
+
     def test_nothing_retired_is_a_quiet_none(self):
         step = hardening.render_retired_grants_step(["keep"])
         with tempfile.TemporaryDirectory() as tmp:
@@ -181,7 +194,8 @@ class TestSweep(unittest.TestCase):
             for p, text in foreign.items():
                 p.write_text(text)
             # undeclared dirs that are not our 0750 dir holding an unshare copy
-            for name, mode, copy in (("open", 0o755, True), ("empty", 0o750, False)):
+            for name, mode, copy in (("open", 0o755, True), ("empty", 0o750, False),
+                                     ("notroot", 0o750, True)):
                 d = dirs["userns"] / name
                 d.mkdir()
                 d.chmod(mode)
