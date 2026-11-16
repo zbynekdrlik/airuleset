@@ -63,7 +63,7 @@ class TestForcedCommandRead(unittest.TestCase):
         r, log = self._run(cap.WEBTERM_CAPTURE_VERB)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(r.stdout.strip(), "pane-text")
-        self.assertIn("capture-pane -p -J -S -%d -t =zbynek:" % cap.WEBTERM_CAPTURE_LINES, log)
+        self.assertIn("capture-pane -p -e -J -S -%d -t =zbynek:" % cap.WEBTERM_CAPTURE_LINES, log)
 
     def test_the_read_touches_nothing_in_the_session(self):
         _, log = self._run(cap.WEBTERM_CAPTURE_VERB)
@@ -330,9 +330,9 @@ class TestGatewayRoute(unittest.TestCase):
 
 class TestLeaf(unittest.TestCase):
     def test_pane_text_is_never_markup(self):
+        # round 2 draws colour spans and markdown nodes: textContent only, never markup
         self.assertNotIn("innerHTML", phone.PHONE_HTML)
-        self.assertIn("screen.textContent = text", phone.PHONE_HTML)
-        self.assertIn("div.textContent = m.t", phone.PHONE_HTML)
+        self.assertIn("sp.textContent = t", phone.PHONE_HTML)
 
     def test_off_unless_the_gateway_has_the_route(self):
         html = w.render_dashboard_html(INVENTORY, ttyd_base="/t")
@@ -350,6 +350,7 @@ const { chromium: cr } = require(pwPath);
   const ph = await b.newContext({ viewport: { width: 390, height: 780 }, hasTouch: true, isMobile: true });
   const p = await ph.newPage(); watch(p);
   await p.goto(BASE + '/', { waitUntil: 'load' });
+  await p.tap('#phonetoggle');      // round 2: a fresh device opens the terminal
   await p.waitForFunction(() => document.getElementById('phonelog').textContent.includes('tab0'));
   await p.waitForFunction(() => { const f = made[0]; return f && f.contentWindow && f.contentWindow.term; });
   const log = () => p.evaluate(() => document.getElementById('phonelog').textContent);
@@ -494,7 +495,7 @@ class TestBrowser(unittest.TestCase):
         self.assertIn("<b>raw</b>", self.out["text"])
 
     def test_history_sits_above_the_screen_as_text(self):
-        self.assertEqual(self.out["hist"], [["m u", "otázka <i>alfa</i>"], ["m a", "odpoveď alfa"]])
+        self.assertEqual(self.out["hist"], [["m u", "› otázka <i>alfa</i>"], ["m a", "● odpoveď alfa"]])
         self.assertLess(self.out["text"].index("odpoveď alfa"), self.out["text"].index("tab0"))
 
     def test_tidy_rejoins_and_cuts_rules(self):
