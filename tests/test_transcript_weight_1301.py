@@ -73,11 +73,11 @@ class RestartSegment(unittest.TestCase):
 class ShimRendersIt(unittest.TestCase):
     """End to end through the REAL rendered statusline shim."""
 
-    def _render(self, payload):
+    def _render(self, payload, content=None):
         with tempfile.TemporaryDirectory() as home:
             shim = os.path.join(home, "shim.sh")
             with open(shim, "w") as fh:
-                fh.write(airuleset.CAVEMAN_SHIM_CONTENT)
+                fh.write(content or airuleset.CAVEMAN_SHIM_CONTENT)
             env = dict(os.environ)
             env["HOME"] = home
             env.pop("TMUX_PANE", None)
@@ -99,6 +99,24 @@ class ShimRendersIt(unittest.TestCase):
                               "transcript_path": p})
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertNotIn("restart", r.stdout)
+
+    def test_missing_module_never_blanks_the_rest_of_the_footer(self):
+        # review 2: the optional segment's import must not share the statusbar
+        # import guard, or one missing file drops every other segment.
+        content = airuleset.CAVEMAN_SHIM_CONTENT
+        self.assertEqual(content.count("import transcript_weight"), 1)
+        broken = content.replace("import transcript_weight",
+                                 "import transcript_weight_gone_1301")
+        payload = {"workspace": {"current_dir": "/tmp/nowhere-1301"},
+                   "model": {"id": "claude-opus-5-5"},
+                   "context_window": {"current_usage": {
+                       "cache_read_input_tokens": 570000,
+                       "cache_creation_input_tokens": 0}}}
+        ok = self._render(payload)
+        self.assertIn("ctx 570K", ok.stdout)          # the control renders it
+        r = self._render(payload, content=broken)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("ctx 570K", r.stdout)
 
 
 if __name__ == "__main__":
