@@ -255,6 +255,18 @@ class TestReviewRound3(unittest.TestCase):
         self.assertIn("needs-disposition F1", blk)
         self.assertIn(" 3 ", blk)
 
+    def test_bounce_citing_its_rfr_comment_id_takes_that_lane(self):
+        # live gk verdicts carry `RFR: issuecomment-<id>` and often no @sha
+        rows = [_rfr(6893223827, "2026-11-03T10:00:00Z", U16, "aaaaaaa1111"),
+                _rfr(6893300000, "2026-11-03T11:00:00Z", U18, "ccccccc3333"),
+                {"id": 6893389909, "login": "gk",
+                 "created_at": "2026-11-03T12:00:00Z",
+                 "body": "## Gatekeeper review verdict: BOUNCE\n"
+                         "- RFR: issuecomment-6893223827.\n- F1: broken\n"}]
+        st = _state(rows)
+        self.assertEqual(st["gk_latest"]["lane_branch"], U16)
+        self.assertIsNone(_pf(st, U18))
+
     def test_regex_is_linear_on_long_star_runs(self):
         import time
         t0 = time.monotonic()
