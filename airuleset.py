@@ -4684,14 +4684,14 @@ HANDOFF_GATE_DIR = ".claude/handoff-gate"
 # Decision log path.
 HANDOFF_GATE_LOG = ".claude/handoff-gate.log"
 
-# Finding id shape (#1081): ids come ONLY from a bullet-anchored emoji marker
-# (line start + optional indent/bullet/bold; group 1 = number) or the legacy
-# `F<n>` at a line/bullet boundary (group 2). A bare `[A-Z]\d+` prose token, a
-# mid-sentence emoji mention, and the count line (`0 🔴 · 2 🟡`, number BEFORE the
-# emoji) are all EXCLUDED positionally — no count-line cross-check (main, #1081).
+# Finding id shape (#1081): ids come ONLY from a bullet-anchored marker (line
+# start + optional indent/bullet/bold): an emoji (group 1 = number) or the
+# legacy `F<n>` (group 2). A bare `[A-Z]\d+` prose token, a mid-sentence emoji or
+# `F<n>` (a lens citation `(#5244 F1)`, #1219) and the count line (`0 🔴 · 2 🟡`)
+# are all EXCLUDED positionally — no count-line cross-check (main, #1081).
 _GK_FINDING_ID_RE = re.compile(
-    r'^[ \t]*(?:[-*•][ \t]*)?\**[ \t]*(?:🔴|🟡|🔵)[ \t]*(\d+)'
-    r'|(?:^|[\s(\[-])F(\d+)\b', re.MULTILINE | re.UNICODE)
+    r'^[ \t]*(?:[-*•][ \t]*)?\**[ \t]*(?:(?:🔴|🟡|🔵)[ \t]*(\d+)|F(\d+)\b)',
+    re.MULTILINE | re.UNICODE)
 
 
 def _parse_gk_findings(comment_body):
