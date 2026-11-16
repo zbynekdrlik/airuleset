@@ -21,9 +21,9 @@ class TestShortTargetAlias(unittest.TestCase):
     def test_gatekeeper(self):
         self.assertEqual(cli_aliases.short_target_alias("gatekeeper", "gatekeeper-cx23"), "gk")
 
-    def test_montalu_family(self):
-        self.assertEqual(cli_aliases.short_target_alias("montalu2", "subdev"), "m2")
-        self.assertEqual(cli_aliases.short_target_alias("montalu8", "subdev"), "m8")
+    def test_retired_montalu_gets_the_generic_cut(self):
+        self.assertEqual(cli_aliases.short_target_alias("montalu2", "subdev"), "montalu2")
+        self.assertEqual(cli_aliases.short_target_alias("montalu8", "subdev"), "montalu8")
 
     def test_david_family_base_is_d1(self):
         self.assertEqual(cli_aliases.short_target_alias("david", "subdev"), "d1")

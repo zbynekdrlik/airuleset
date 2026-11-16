@@ -7,6 +7,7 @@ paths:
   - "cli_question_block.py"
   - "cli_disk_guard_root.py"
   - "cli_logrotate_owner.py"
+  - "cli_fail2ban.py"
 ---
 
 ### airuleset internals — per-user quota on shared-stream boxes (#950 / #1140)

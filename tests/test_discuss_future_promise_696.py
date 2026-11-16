@@ -128,17 +128,17 @@ class TestArtifactVerifiedPresent(unittest.TestCase):
 
 class TestEvaluateMessagePostPromise(unittest.TestCase):
     def test_future_promise_without_evidence_is_a_violation(self):
-        v = g.evaluate_message_post_promise(PROMISE_MP, "montalu5")
+        v = g.evaluate_message_post_promise(PROMISE_MP, "david5")
         self.assertIsNotNone(v)
         self.assertEqual(v.number, "5")
         self.assertTrue(any("zajtrajš" in p for p in v.matched))
 
     def test_past_tense_passes(self):
-        self.assertIsNone(g.evaluate_message_post_promise(PAST_MP, "montalu5"))
+        self.assertIsNone(g.evaluate_message_post_promise(PAST_MP, "david5"))
 
     def test_artifact_verified_evidence_passes(self):
         content = PROMISE_MP + "  # " + ARTIFACT_EVID
-        self.assertIsNone(g.evaluate_message_post_promise(content, "montalu5"))
+        self.assertIsNone(g.evaluate_message_post_promise(content, "david5"))
 
     def test_non_stream_user_is_silent(self):
         self.assertIsNone(g.evaluate_message_post_promise(PROMISE_MP, "newlevel"))
@@ -146,11 +146,11 @@ class TestEvaluateMessagePostPromise(unittest.TestCase):
     def test_non_message_post_op_is_silent(self):
         create = ("env['discuss.channel'].create({'name': 'Oprava 2'}) "
                   "# od zajtra pripravujeme")
-        self.assertIsNone(g.evaluate_message_post_promise(create, "montalu2"))
+        self.assertIsNone(g.evaluate_message_post_promise(create, "david2"))
 
 
 class _HookBase(unittest.TestCase):
-    def run_hook(self, *, command, user="montalu5"):
+    def run_hook(self, *, command, user="david5"):
         payload = {"tool_input": {"command": command}, "cwd": "/some/repo",
                    "session_id": "p696-sess"}
         env = hermetic_hook_env(self)
@@ -192,7 +192,7 @@ class TestHookPromise(_HookBase):
         cmd = ("python3 -c '" + PROMISE_MP + "'  # airuleset:discuss-name-ok "
                "airuleset:discuss-sig-ok airuleset:discuss-approval-ok "
                "airuleset:discuss-bind-ok interny post")
-        r = self.run_hook(command=cmd, user="montalu2")
+        r = self.run_hook(command=cmd, user="david2")
         self.assertEqual(r.returncode, 2, r.stderr)
         self.assertIn("airuleset:artifact-verified", r.stderr)
         self.assertIn("#696", r.stderr)

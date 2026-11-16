@@ -1,7 +1,7 @@
 r"""Client Odoo Discuss thread-NAME compliance detection for sub-dev streams
 (#596 + #597). The importable core `hooks/block-discuss-thread-name.sh` calls.
 
-THE PROBLEM. A sub-dev stream (montaluN / davidN / simapN / mivaN) that creates
+THE PROBLEM. A sub-dev stream (davidN / simapN / mivaN) that creates
 a client Odoo `discuss.channel` (a top-level channel or a `parent_channel_id`
 sub-thread) MUST name it so the name:
   (#596) ENDS with the stream's number as a trailing standalone token ("... N"),

@@ -2,7 +2,7 @@
 
 Verifies:
   1. erp_test_deploy_user returns ddeploy for david-family, mdeploy for
-     montalu/miva, None for non-stream users.
+     miva, None for non-stream users (montalu retired, #1306).
   2. render_erp_test_ssh_config_block produces the correct Host block with
      the right User.
   3. ensure_erp_test_ssh_config is idempotent: a stale block with the wrong
@@ -25,9 +25,9 @@ class TestErpTestDeployUser(unittest.TestCase):
             self.assertEqual(erp_test_deploy_user(user), "ddeploy",
                              f"{user} should use ddeploy")
 
-    def test_montalu_streams_use_mdeploy(self):
-        for user in ("montalu1", "montalu2", "montalu3", "montalu4",
-                      "montalu5", "montalu6", "montalu7", "montalu8"):
+    def test_numbered_miva_streams_use_mdeploy(self):
+        for user in ("miva1", "miva2", "miva3", "miva4",
+                      "miva5", "miva6", "miva7", "miva8"):
             self.assertEqual(erp_test_deploy_user(user), "mdeploy",
                              f"{user} should use mdeploy")
 
@@ -54,10 +54,10 @@ class TestRenderErpTestSshConfigBlock(unittest.TestCase):
         self.assertIn("User ddeploy", block)
         self.assertNotIn("mdeploy", block)
 
-    def test_montalu1_block_has_mdeploy(self):
+    def test_miva1_block_has_mdeploy(self):
         import airuleset
-        block = airuleset.render_erp_test_ssh_config_block("montalu1")
-        self.assertIn("Host erp-test-montalu1", block)
+        block = airuleset.render_erp_test_ssh_config_block("miva1")
+        self.assertIn("Host erp-test-miva1", block)
         self.assertIn("User mdeploy", block)
         self.assertNotIn("ddeploy", block)
 
@@ -140,12 +140,12 @@ class TestEnsureErpTestSshConfig(unittest.TestCase):
         self.assertIn("Host other-host", text)
         self.assertIn("Host another-host", text)
 
-    def test_montalu1_uses_mdeploy(self):
-        """montalu1 gets User mdeploy."""
-        text, changed = self._run_ensure(None, "montalu1")
+    def test_miva1_uses_mdeploy(self):
+        """miva1 gets User mdeploy."""
+        text, changed = self._run_ensure(None, "miva1")
         self.assertTrue(changed)
         self.assertIn("User mdeploy", text)
-        self.assertIn("Host erp-test-montalu1", text)
+        self.assertIn("Host erp-test-miva1", text)
 
     def test_non_stream_is_noop(self):
         """Non-stream users get no block."""
@@ -216,12 +216,12 @@ class TestIdentityFileLine(unittest.TestCase):
         self.assertIsNotNone(block)
         self.assertIn("IdentityFile ~/.ssh/erp-test-david3_deploy", block)
 
-    def test_montalu2_block_has_identity_file(self):
-        """montalu2 managed block must contain IdentityFile."""
+    def test_miva2_block_has_identity_file(self):
+        """miva2 managed block must contain IdentityFile."""
         import airuleset
-        block = airuleset.render_erp_test_ssh_config_block("montalu2")
+        block = airuleset.render_erp_test_ssh_config_block("miva2")
         self.assertIsNotNone(block)
-        self.assertIn("IdentityFile ~/.ssh/erp-test-montalu2_deploy", block)
+        self.assertIn("IdentityFile ~/.ssh/erp-test-miva2_deploy", block)
 
     def test_miva1_block_has_identity_file(self):
         """miva1 managed block must contain IdentityFile."""
@@ -269,9 +269,9 @@ class TestErpTestDeployKeyName(unittest.TestCase):
                              f"erp-test-{user}_deploy",
                              f"{user} key name mismatch")
 
-    def test_montalu_streams(self):
+    def test_miva_streams(self):
         from cli_aliases import erp_test_deploy_key_name
-        for user in ("montalu1", "montalu2", "montalu3"):
+        for user in ("miva1", "miva2", "miva3"):
             self.assertEqual(erp_test_deploy_key_name(user),
                              f"erp-test-{user}_deploy",
                              f"{user} key name mismatch")
