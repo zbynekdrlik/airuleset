@@ -844,7 +844,7 @@ def render_root_bootstrap(account):
     script += hardening.render_sudo_step(account, spec)
     script += hardening.render_reach_teardown_step(account)
     script += hardening.render_lockout_step()
-    script += hardening.render_isolation_check_step() + hardening.render_rtprio_step(account, spec) + hardening.render_userns_step(account, spec) + hardening.render_host_grants_step(account, spec)
+    script += hardening.render_isolation_check_step() + hardening.render_rtprio_step(account, spec) + hardening.render_userns_step(account, spec) + hardening.render_host_grants_step(account, spec) + hardening.render_retired_grants_step(a for a in SERVICE_ACCOUNTS if account_spec(a)["host"] == host)
     # 4-7: keys + dirs (4 space-indented template → dedent)
     script += "\n" + textwrap.dedent(_KEYS_TEMPLATE).format(ak_content=ak_content)
     # 8. System packages — only when the account declares them (#973)
