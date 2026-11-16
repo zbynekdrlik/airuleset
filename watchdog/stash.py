@@ -1463,6 +1463,10 @@ JANITOR_CLEAR_BATCH_MAX = 200     # per-iteration backspace batch, sized to
                                   # guessing at a placeholder's true length
                                   # instead of reading it)
 JANITOR_CLEAR_SETTLE_S = 0.3
+# #1340 -- `_janitor_clear_box`'s bound is progress + volume, not a pass count:
+# 25 tail-row passes clear ~950 chars at 40 cols, the own /goal is ~3.6k.
+JANITOR_CLEAR_MAX_CHARS = 8000    # >= 2x the largest own payload
+JANITOR_CLEAR_MAX_PASSES = 120    # degenerate 1-key passes (#1332 line breaks)
 
 # Bounds `state['janitor_watch'][pid]` (#372 adversarial-review CRITICAL-1
 # — the janitor's provenance gate). Generous on purpose: a stuck-forever

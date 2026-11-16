@@ -62,15 +62,24 @@ def _janitor_clear_box(pid, run, sleep_fn, log_fn):
     held a ~26-char placeholder. Converges correctly regardless of whether
     Claude Code clears a collapsed placeholder atomically (bare after the
     first small batch) or character-by-character (several batches).
-    Bounded by `JANITOR_CLEAR_MAX_ITER`; returns True only once a fresh
-    capture confirms bare."""
+
+    #1340 -- a batch is the WHOLE visible box's non-space count, not the tail
+    row's: CC drops a word-wrap break's space and draws a scrolled box's last
+    rows only, so the buffer behind what is on screen holds at least that many
+    characters and a pass never reaches past it. The loop stops on bare, on an
+    unreadable box, on NO PROGRESS (the box rows unchanged after a pass: the
+    keys do not land), or at `JANITOR_CLEAR_MAX_CHARS` backspaces /
+    `JANITOR_CLEAR_MAX_PASSES` passes -- never a fixed 25 tail-row passes,
+    which cleared ~950 chars of a ~3.6k own /goal at 40 cols. Returns True
+    only once a fresh capture confirms bare."""
     sleep_fn = sleep_fn or time.sleep
     # #1002 -- janitor cleanup is RECOVERY (kind="janitor", ungated): it CLEANS UP
     # a stranded machine nudge / closes a menu overlay, so it must run regardless
     # of the #994 switch (a nudge stranded BEFORE the owner turned nudges OFF must
     # still be reclaimed). Routed through the ONE `keys` primitive like every key.
     watchdog.keys(pid, "Escape", kind="janitor", run=run)
-    for _ in range(watchdog.JANITOR_CLEAR_MAX_ITER):
+    sent, prev_rows = 0, None
+    for _ in range(watchdog.JANITOR_CLEAR_MAX_PASSES):
         cap = watchdog.capture_pane(pid, run, lines=30)
         cur = watchdog._input_line_text(cap)
         if cur == "":
@@ -88,11 +97,19 @@ def _janitor_clear_box(pid, run, sleep_fn, log_fn):
             # attempt cleanly; the janitor tries again next sweep.
             log_fn("janitor: box unreadable mid-clear")
             return False
-        batch = min(len(cur), watchdog.JANITOR_CLEAR_BATCH_MAX)
+        rows = tuple(watchdog._input_box_rows_raw(cap))
+        if rows == prev_rows:
+            log_fn("janitor: clear made no progress after %d backspaces" % sent)
+            return False
+        if sent >= watchdog.JANITOR_CLEAR_MAX_CHARS:
+            break
+        visible = len("".join(watchdog._box_norm_from_capture(cap).split()))
+        # #1332: a line-break-only box shows no character: one key per pass.
+        batch = min(visible, watchdog.JANITOR_CLEAR_BATCH_MAX) or 1
         watchdog.keys(pid, *(["BSpace"] * batch), kind="janitor", run=run)
+        sent, prev_rows = sent + batch, rows
         sleep_fn(watchdog.JANITOR_CLEAR_SETTLE_S)
-    log_fn("janitor: clear did not converge within %d iterations"
-           % watchdog.JANITOR_CLEAR_MAX_ITER)
+    log_fn("janitor: clear did not converge within %d backspaces" % sent)
     return False
 
 
