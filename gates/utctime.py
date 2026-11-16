@@ -24,7 +24,7 @@ import sys
 # A UTC time must end here: not glued to a filename / path / offset character.
 _TRAIL = r"(?=[^\w./+-]|\.(?:\W|$)|$)"
 _ISO_RX = re.compile(
-    r"(?<![\w./=<>:+-])\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?Z"
+    r"(?<![\w./=<>+-])\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?Z"
     + _TRAIL)
 # HH:MM[:SS] + a UTC zone. `UTC+0`/`UTC+00:00` is still UTC; `UTC+1` is a
 # local offset (Bratislava in winter) and passes via _TRAIL's `+` exclusion.
@@ -39,6 +39,7 @@ _MAX_BRACKET_PASSES = 32  # nesting depth bound; each pass is linear
 # The bypass must carry a reason and sit in prose (a backticked MENTION of the
 # marker is stripped before this module sees the text, review F4).
 _BYPASS_RX = re.compile(r"airuleset:utc-time-ok[ \t]+(\S[^\n]*)")
+_PLACEHOLDER_RX = re.compile(r"^<[^>]*>$")
 AUDIT_LOG = "utc-time-bypasses.log"
 
 
@@ -74,7 +75,11 @@ def find_raw_utc(text):
 
 def bypass_reason(text):
     m = _BYPASS_RX.search(text or "")
-    return m.group(1).strip() if m else None
+    if not m:
+        return None
+    reason = m.group(1).strip()
+    # The doc's `<reason>` placeholder copied verbatim is not a reason.
+    return None if _PLACEHOLDER_RX.match(reason) else reason
 
 
 def main():
@@ -85,9 +90,13 @@ def main():
     reason = bypass_reason(text)
     if reason:
         from gates import audit
+        try:
+            cwd = os.getcwd()
+        except OSError:  # a removed worktree must not lose the audit line
+            cwd = "?"
         audit.append_line(AUDIT_LOG, "%s  session=%s  cwd=%s  airuleset:utc-time-ok %s" % (
             audit.iso_now(), os.environ.get("AIRULESET_SESSION_ID") or "?",
-            os.getcwd(), reason))
+            cwd, reason))
         print("utc-time gate: bypass honoured (%s)" % reason, file=sys.stderr)
         return 0
     print(hit[:200])

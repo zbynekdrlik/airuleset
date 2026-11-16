@@ -2225,12 +2225,13 @@ fi
 # GMT/Z, prose only: blockquotes, URLs, filename-glued stamps and a UTC time
 # in brackets next to a local time are exempt; bypass `airuleset:utc-time-ok
 # <reason>` logged via gates.audit). This bash side is a cheap SUPERSET
-# pre-screen on MSG_MENTION so a message with no UTC-shaped time never spawns
-# python. Reads MSG_MENTION (fenced/inline code and quotes stripped, #96).
+# pre-screen on MSG_MENTION (`.{0,4}`, not [[:space:]], so a no-break space
+# before UTC still reaches python) so a message with no UTC-shaped time never
+# spawns python. Reads MSG_MENTION (fenced/inline code and quotes stripped, #96).
 # exit 2 = block, 0 = clean/bypassed, any other rc = infra -> fail OPEN.
-if LC_ALL=C.UTF-8 msg_has "$MSG_MENTION" -qE '[0-9]{2}(:[0-9]{2})?([.][0-9]+)?[[:space:]]*([Uu][Tt][Cc]|[Gg][Mm][Tt]|Z)'; then
+if LC_ALL=C.UTF-8 msg_has "$MSG_MENTION" -qE '[0-9]{2}(:[0-9]{2})?([.][0-9]+)?.{0,4}([Uu][Tt][Cc]|[Gg][Mm][Tt]|Z)'; then
     UTC_RC=0
-    UTC_HIT=$(printf '%s' "$MSG_MENTION" | env AIRULESET_SESSION_ID="${SESSION_ID:-}" PYTHONPATH="${_PROSE_REPO_ROOT}${PYTHONPATH:+:$PYTHONPATH}" python3 -P -m gates.utctime 2>/dev/null) || UTC_RC=$?
+    UTC_HIT=$(printf '%s' "$MSG_MENTION" | env AIRULESET_SESSION_ID="${SESSION_ID:-}" PYTHONPATH="${_PROSE_REPO_ROOT}${PYTHONPATH:+:$PYTHONPATH}" python3 -P -m gates.utctime) || UTC_RC=$?
     if [ "$UTC_RC" = "2" ]; then
         echo "VIOLATION: You quoted a raw UTC clock time to the owner (${UTC_HIT:0:160}). The owner reads Europe/Bratislava local time — a UTC hour from gh/an API reads as an hour off (#1343). Convert it before quoting: TZ=Europe/Bratislava date -d <ts> +%H:%M (e.g. TZ=Europe/Bratislava date -d 2026-11-16T20:45:07Z +%H:%M → 21:45). Stating UTC too is fine in brackets next to the local time: '21:45 (20:45 UTC)'. A log/API quote belongs in a code block or backticks. Bypass (logged): # airuleset:utc-time-ok <reason>. See response-structure.md." >&2
         add_hard "Raw UTC clock time quoted to the owner — give Europe/Bratislava local time (TZ=Europe/Bratislava date -d <ts> +%H:%M); UTC only in brackets next to it; bypass # airuleset:utc-time-ok <reason> (logged)"
