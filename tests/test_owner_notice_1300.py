@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -224,6 +225,54 @@ class OwnerNoticeCli(unittest.TestCase):
         log = (self.home / ".claude" / "notify-delivery.log").read_text()
         self.assertIn("owner-notice-recorded", log)
         self.assertIn("owner-notice-cleared", log)
+
+
+    # --- review round 2 (#1300) ------------------------------------------
+
+    def test_clear_finds_a_notice_recorded_through_a_symlink(self):
+        real = Path(self._tmp.name) / "real2"
+        (real / "lnproj" / ".git").mkdir(parents=True)
+        link = self.home / "work2"
+        link.symlink_to(real)
+        for clear_cwd, run_cwd in ((str(real / "lnproj"), None),
+                                   (".", link / "lnproj")):
+            r = self.run_notify("--body", "x", "--owner-name", "zbynek",
+                                "--owner-notice=n1", "--cwd", str(link / "lnproj"))
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual(self.count(link / "lnproj"), 1)
+            r = self.run_notify("--clear-owner-notice", "n1", "--cwd", clear_cwd,
+                                cwd=run_cwd)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn("cleared", r.stderr)
+            self.assertEqual(self.count(link / "lnproj"), 0, clear_cwd)
+
+    def test_owner_notice_without_body_names_the_missing_body(self):
+        r = self.run_notify("--owner-notice", "restart-needed",
+                            "--cwd", str(self.proj))
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("--owner-notice needs --body", r.stderr)
+
+    def test_dry_run_clear_says_it_changed_nothing(self):
+        self.send("Reštartuj Claude.")
+        r = self.run_notify("--clear-owner-notice", "restart-needed",
+                            "--cwd", str(self.proj), "--dry-run")
+        self.assertIn("dry run", r.stderr)
+
+    def test_log_line_names_the_project(self):
+        self.send("Reštartuj Claude.")
+        log = (self.home / ".claude" / "notify-delivery.log").read_text()
+        line = [ln for ln in log.splitlines() if "owner-notice-recorded" in ln][0]
+        self.assertIn("toolproj", line)
+
+    def test_explain_labels_a_notice_as_a_notice(self):
+        import cli_ticket_explain
+        self.send("Reštartuj Claude.")
+        entry = self.notice("restart-needed")
+        with unittest.mock.patch("cli_quals_cmd._waiting_ping_entries",
+                                 return_value=[entry]):
+            rows = cli_ticket_explain._footer_extras(str(self.proj))
+        self.assertEqual(len(rows), 1)
+        self.assertIn("owner notice", rows[0][2])
 
 
 if __name__ == "__main__":
