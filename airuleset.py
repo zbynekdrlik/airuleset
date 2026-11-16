@@ -5085,11 +5085,11 @@ def _handoff_gk_preflight(issue, repo, body, *, branch=None, cwd=None,
         gk_ts = gl.get("created_at")
         gk_id = gl.get("id")
         gk_sha = gl.get("sha")
-        verdict_branch = gl.get("branch")
-        # (a) a BOUNCE for a DIFFERENT branch/phase is not this readiness's --
-        # advisory, never a block (the #1071 other-phase FP); its finding ids
-        # belong to that phase, so skip the disposition check too.
-        if branch and verdict_branch and verdict_branch != branch:
+        # (a) a BOUNCE for a DIFFERENT lane (its Branch: line, else the RFR it
+        # reviewed, #1288) is advisory, never a block (the #1071 FP); its
+        # finding ids belong to that lane, so skip the disposition check too.
+        verdict_branch = cli_gk_watch.bounce_other_lane(gl, branch)
+        if verdict_branch:
             _pf_journal(repo, issue, gl,
                         "advisory: BOUNCE for branch %r != readiness %r"
                         % (verdict_branch, branch), journal=journal)
@@ -5149,23 +5149,20 @@ def _handoff_gk_preflight(issue, repo, body, *, branch=None, cwd=None,
     return None
 
 
-def _handoff_clear_bounce(repo, issue, gk_state):
+def _handoff_clear_bounce(repo, issue, gk_state, branch=None, body=None):
     """Clear `prio:bounce` after a SUCCESSFUL RFR post — the ONE sanctioned
     composer clear (#1056 L2 (f)).
 
     #1056 L2 review-A 🟡: clear ONLY when the pre-flight resolved state
-    `bounce-unanswered` — the case where a standing gk BOUNCE was VERIFIABLY
-    answered by THIS hand-off (the pre-flight already confirmed a commit landed
-    since the verdict AND every finding id is dispositioned, else it would have
-    BLOCKED). In EVERY other state the composer does NOT clear:
-      * `unknown` (gh error / low budget — the pre-flight failed OPEN): clearing
-        here would strip `prio:bounce` with NO commit-since-bounce check, the
-        exact blind re-flag this lane fixes, AND the freshly-posted RFR flips
-        gk-watch to `rfr-current` so the gk-side revert automat (Job 50) never
-        fires either — both guards bypassed;
-      * `rfr-current` / `needs-disposition` / `no-gk-comment`: no standing
-        unanswered bounce THIS hand-off resolves — a lingering `prio:bounce` is
-        left to the guarded labeler workflow (its own gh reads) / the gk.
+    `bounce-unanswered` (a commit landed since the verdict AND every finding id
+    is dispositioned, else it would have BLOCKED) AND THIS RFR answers that
+    BOUNCE — same lane (`branch`) or the `body` names its comment id (#1291:
+    another lane's open bounce on the same ticket keeps the label). Every other
+    state never clears: `unknown` (pre-flight failed OPEN — a clear would skip
+    the commit-since-bounce check, and the new RFR flips gk-watch to
+    `rfr-current` so Job 50's revert never fires); `rfr-current` /
+    `needs-disposition` / `no-gk-comment` leave a lingering label to the
+    guarded labeler workflow / the gk.
 
     Best-effort: a read-role collaborator's 403 (david) or any gh hiccup is
     swallowed (the labeler workflow is the fallback clear for a fork stream).
@@ -5173,13 +5170,13 @@ def _handoff_clear_bounce(repo, issue, gk_state):
     `block-blind-label-flip.sh` Bash hook (which pre-filters the top-level
     command for `issue`+`edit`) — the sanctioned clear needs no bypass. Returns
     True iff the label was removed."""
+    import cli_gk_watch
     if not repo:
         return False
     state = gk_state.get("state") if isinstance(gk_state, dict) else None
-    if state != "bounce-unanswered":
-        # No verified standing-bounce answer → leave the label to the guarded
-        # labeler / the gk (never a blind clear on a fail-open or stale state).
-        return False
+    if state != "bounce-unanswered" or not cli_gk_watch.rfr_answers_bounce(
+            gk_state.get("gk_latest"), branch, body):
+        return False   # no verified answer to THIS bounce → label stays
     import subprocess
     try:
         r = subprocess.run(
@@ -5355,7 +5352,7 @@ def _cmd_handoff_post_body_file(repo, issue, branch, body_file):
     # successful RFR post (the worker doctrine forbids workers touching it),
     # and (review-A 🟡) only when the pre-flight VERIFIED a standing bounce was
     # answered (state bounce-unanswered), never on a fail-open/stale state.
-    if _handoff_clear_bounce(repo, issue, _gk_state):
+    if _handoff_clear_bounce(repo, issue, _gk_state, branch, body):
         print("handoff: prio:bounce cleared on #%s" % issue)
     print("handoff: READY-FOR-REVIEW posted verbatim on #%s (round %d, "
           "HEAD %s)" % (issue, rnd, body_head[:12]))
@@ -5706,7 +5703,7 @@ def cmd_handoff(args):
     # successful RFR post, and only when the pre-flight VERIFIED a standing
     # bounce was answered (state bounce-unanswered), never a fail-open/stale
     # clear (review-A 🟡).
-    if _handoff_clear_bounce(repo, issue, _gk_state):
+    if _handoff_clear_bounce(repo, issue, _gk_state, branch, body):
         print("handoff: prio:bounce cleared on #%s" % issue)
     print("handoff: READY-FOR-REVIEW posted on #%s (round %d, HEAD %s)"
           % (issue, rnd, head_sha[:12]))

@@ -69,6 +69,15 @@ class TestLaneInference(unittest.TestCase):
         rows = [_bounce(3, "2026-11-03T12:00:00Z", "aaaaaaa1111")]
         self.assertIsNone(_state(rows)["gk_latest"]["lane_branch"])
 
+    def test_two_lanes_and_no_sha_match_is_unknown_not_guessed(self):
+        rows = [_rfr(1, "2026-11-03T10:00:00Z", U16, "aaaaaaa1111"),
+                _rfr(2, "2026-11-03T11:00:00Z", U18, "ccccccc3333"),
+                _bounce(3, "2026-11-03T12:00:00Z", "bbbbbbb2222")]
+        st = _state(rows)
+        self.assertIsNone(st["gk_latest"]["lane_branch"])
+        # unknown lane keeps the ticket-level guard: no new commit -> block
+        self.assertIsNotNone(_pf(st, U18))
+
 
 class TestPreflightLaneScope1288(unittest.TestCase):
 

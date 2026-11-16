@@ -32,6 +32,11 @@ _GK_STATE_MARKER_RE = re.compile(
 # markdown tolerant, first value token.
 _BRANCH_RE = re.compile(r"(?im)^[ \t>*#-]*\**[ \t]*Branch\**[ \t]*:[ \t]*\**[ \t]*(\S+)")
 
+# #1288 -- the `HEAD:` line the composer stamps on every RFR
+# (cli_handoff_template), read to tell which lane's RFR a BOUNCE reviewed.
+_HEAD_RE = re.compile(
+    r"(?im)^[ \t>*#-]*\**[ \t]*HEAD\**[ \t]*:[ \t]*[`*]*([0-9a-f]{7,40})")
+
 # A git sha attached with `@` (7-40 hex chars), allowing the optional space the
 # gk `**Počty (otvorené @ <sha>)**` header uses as well as the marker's
 # space-less `@<sha>`. The literal `@ sha` placeholder in an unfilled template
@@ -71,6 +76,72 @@ _DISPOSITION_CONTEXT_RE = re.compile(
 # `airuleset._READINESS_LINE_RE` / `subdev-handoff-match.sh` enforce (optional
 # markdown emphasis/header/list prefix, then READY-FOR-REVIEW at line start).
 _RFR_RE = re.compile(r"^\s*([#*_-]+\s*)?READY-FOR-REVIEW", re.MULTILINE)
+
+
+def norm_branch(b):
+    """A branch name comparable across forms (#1288): strips backticks/bold/
+    quotes, `refs/heads/` and the `<owner>:` fork shorthand the composer stamps
+    (#969; git forbids `:` in a ref name). None for an empty value."""
+    b = (b or "").strip().strip("`*'\"")
+    if b.startswith("refs/heads/"):
+        b = b[len("refs/heads/"):]
+    if ":" in b:
+        b = b.split(":", 1)[1]
+    return b or None
+
+
+def bounce_lane(bounce, rfrs):
+    """The lane (normalised branch) a gk BOUNCE belongs to, or None (#1288).
+
+    `bounce` is a gk comment record (`ts`, `sha`, `branch`); `rfrs` are the
+    stream's RFR records (`ts`, `branch`, `head`). Precedence: the bounce's own
+    `Branch:` line; else the branch of the RFR before it whose `HEAD:` matches
+    the bounce `@sha` (the hand-off it reviewed); else, when every earlier RFR
+    is the SAME lane, that lane. Several lanes and no sha match = unknown, so
+    the caller keeps the ticket-level behaviour (never a guessed lane)."""
+    own = norm_branch(bounce.get("branch"))
+    if own:
+        return own
+    prior = [r for r in rfrs if r.get("branch") and r["ts"] < bounce["ts"]]
+    sha = bounce.get("sha")
+    if sha:
+        for r in sorted(prior, key=lambda r: r["ts"], reverse=True):
+            head = r.get("head")
+            if head and (head.startswith(sha) or sha.startswith(head)):
+                return r["branch"]
+    lanes = {r["branch"] for r in prior}
+    return lanes.pop() if len(lanes) == 1 else None
+
+
+def _lane_of(gk_latest):
+    """The bounced lane from a `gk_latest` snapshot: `lane_branch`, else its raw
+    `branch` (a snapshot built without lane inference) -- normalised."""
+    gl = gk_latest or {}
+    return gl.get("lane_branch") or norm_branch(gl.get("branch"))
+
+
+def bounce_other_lane(gk_latest, branch):
+    """The bounced lane when it is KNOWN and differs from the readiness `branch`
+    (#1288: another lane's BOUNCE is advisory for this hand-off), else None."""
+    lane = _lane_of(gk_latest)
+    mine = norm_branch(branch)
+    return lane if lane and mine and lane != mine else None
+
+
+def rfr_answers_bounce(gk_latest, branch, body):
+    """True when this RFR answers the newest open BOUNCE (#1291): the bounced
+    lane is the readiness `branch`, or the RFR `body` names the BOUNCE comment
+    id as a standalone token. Unknown lane and no id = False, so the composer
+    leaves `prio:bounce` to the gk verdict flow."""
+    gl = gk_latest or {}
+    lane = _lane_of(gl)
+    if lane and norm_branch(branch) == lane:
+        return True
+    gid = gl.get("id")
+    if gid is None or not body:
+        return False
+    return bool(re.search(r"(?<![0-9A-Za-z])%s(?![0-9A-Za-z])"
+                          % re.escape(str(gid)), body))
 
 
 def _parse_iso(s):
@@ -260,10 +331,12 @@ def watch_issue(issue, *, fetch, gk_login, self_login,
         base["state"] = "unknown"
         return base
 
+    rfrs = []                 # {ts, branch, head} -- #1288 lane inference
+
     def _snapshot(g):
         return {"id": g["id"], "verdict": g["verdict"], "created_at": g["ts"],
                 "sha": g["sha"], "ids": list(g["ids"]),
-                "branch": g.get("branch")}
+                "branch": g.get("branch"), "lane_branch": bounce_lane(g, rfrs)}
 
     gk_comments = []          # {ts, id, verdict, sha, ids}
     stream_comments = []      # {ts, body}
@@ -292,6 +365,10 @@ def watch_issue(issue, *, fetch, gk_login, self_login,
                                     "branch": bm.group(1) if bm else None})
         if match(login, self_login):
             stream_comments.append({"ts": ts, "body": body})
+            if is_rfr and ts is not None:
+                bm, hm = _BRANCH_RE.search(body), _HEAD_RE.search(body)
+                rfrs.append({"ts": ts, "head": hm.group(1) if hm else None,
+                             "branch": norm_branch(bm.group(1) if bm else None)})
             if is_rfr and ts is not None and (rfr_ts is None or ts > rfr_ts):
                 rfr_ts, rfr_id = ts, cid
 
