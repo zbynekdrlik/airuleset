@@ -251,9 +251,9 @@ class TestControllerRenderShape(_TempCache):
                 mock.patch.object(tun, "_provision_managed_tunnel", side_effect=capture):
             _ct().apply_tunnel(_ct().hosted_lanes())
         cfg = configs[0]
-        order = [timo._spec().tunnel_hostname, "drop-gk.newlevel.media",
-                 "backup.newlevel.media", "claudy.newlevel.media",
-                 "service: http_status:404"]
+        # whole `hostname:` lines: drop-dev1-fleet-backup contains backup.newlevel.media
+        order = ["hostname: " + h for h in (timo._spec().tunnel_hostname, "drop-gk.newlevel.media",
+                 "backup.newlevel.media", "claudy.newlevel.media")] + ["service: http_status:404"]
         idx = [cfg.index(x) for x in order]
         self.assertEqual(idx, sorted(idx), cfg)
         self.assertTrue(cfg.rstrip("\n").endswith("service: http_status:404"))
