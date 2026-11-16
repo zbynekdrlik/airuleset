@@ -74,11 +74,13 @@ def _pane_pid(pane_id, run):
 
 
 def _attached(session, run):
-    """``#{session_attached}`` of ``session`` by EXACT name, read from
-    ``list-sessions`` (``display-message -t =name`` is a PANE target and
-    prints nothing on tmux 3.7b); None when unreadable or absent."""
+    """Clients viewing ``session`` by EXACT name, read from ``list-sessions``
+    (``display-message -t =name`` is a PANE target and prints nothing on tmux
+    3.7b); for a grouped session the whole group's count, since a client on a
+    grouped clone sees the same panes. None when unreadable or absent."""
     rc, out = run(["tmux", "list-sessions", "-F",
-                   "#{session_attached} #{session_name}"])
+                   "#{?session_grouped,#{session_group_attached},"
+                   "#{session_attached}} #{session_name}"])
     for row in (out.splitlines() if rc == 0 else []):
         count, _, name = row.partition(" ")
         if name == session:
@@ -106,7 +108,8 @@ def respawn_stale_panes(session, start_dir, since_path, *, run=_run,
     if not os.path.exists(since_path):
         return []
     if run(["tmux", "has-session", "-t", "=" + session])[0] != 0:
-        return []
+        return ["  pane respawn: session %s not found — nothing to do (#1310)"
+                % session]
     clk_tck = clk_tck or os.sysconf("SC_CLK_TCK")
     since = os.stat(since_path).st_mtime
     if _attached(session, run) != "0":
@@ -118,8 +121,10 @@ def respawn_stale_panes(session, start_dir, since_path, *, run=_run,
         pane_id, _, pid = row.partition(" ")
         try:
             why = _why_kept(pid, since, proc, clk_tck)
+            # re-check right before the kill: same pid, still an idle login
+            # shell (an `exec vim` keeps the pid), nobody attached since
             if why is None and (_pane_pid(pane_id, run) != pid
-                                or _children(pid, proc)
+                                or _why_kept(pid, since, proc, clk_tck)
                                 or _attached(session, run) != "0"):
                 why = "changed since the check"
         except FileNotFoundError:
