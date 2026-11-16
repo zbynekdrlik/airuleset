@@ -93,6 +93,7 @@ _GENERATED_DROP_PORTS = {
     ("dev1", "tuke"): 8907,   # #1296
     ("dev1", "mikrotik-pz"): 8908,   # #1310
     ("dev1", "devbridge"): 8909,   # #1320
+    ("dev1", "fleet-backup"): 8910,   # #1339
 }
 
 

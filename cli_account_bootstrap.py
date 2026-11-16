@@ -407,6 +407,16 @@ SERVICE_ACCOUNTS = {
         "tmux_session": "devbridge",
         "webterm_sessions": {h: {"preferred": "devbridge", "start_dir_chain": ["devel/devbridge"]} for h in ("zbynek", "marek")},
     },
+    # #1339 (owner 16.11.): the fleet backup manager (restic + Hetzner Storage Box) leaves
+    # `newlevel`, so only its own account reads the Storage Box keys and host credentials.
+    "fleet-backup": {
+        "host": "dev1", "sudo": False,
+        "repo": "zbynekdrlik/fleet-backup",   # private
+        "github_app": True, "repo_secrets": [],
+        "tools": ["pipx:uv==0.9.18"], "secrets": [],
+        "project_dir": "devel/fleet-backup", "tmux_session": "fleet-backup",
+        "webterm_sessions": {h: {"preferred": "fleet-backup", "start_dir_chain": ["devel/fleet-backup"]} for h in ("zbynek", "marek")},
+    },
     "iemmixer": {
         "host": "dev1",
         "sudo": False,
