@@ -19,7 +19,7 @@ import cli_ticket_route as route  # noqa: E402
 import cli_ticket_state as ts  # noqa: E402
 
 N = 8827
-ROW = {"labels": [{"name": "stream:montalu1"}, {"name": "needs-answer"}], "title": "t"}
+ROW = {"labels": [{"name": "stream:miva1"}, {"name": "needs-answer"}], "title": "t"}
 
 
 class TestClassify(unittest.TestCase):
@@ -39,7 +39,7 @@ class TestClassify(unittest.TestCase):
         self.assertNotIn(N, out[ts.HIDDEN])
 
     def test_a_slice_box_without_an_asked_ref_keeps_its_own_route(self):
-        box = ts.Box(own_stream="montalu2")
+        box = ts.Box(own_stream="david1")
         self.assertEqual(ts.classify(ROW, None, box, number=N)[0], "I")
 
 
@@ -47,7 +47,7 @@ class TestAskedBeatsEveryBucket(unittest.TestCase):
     """Live gk finding (odoo-erp 8715): the asked ticket carried no owner label,
     so it was I, not HIDDEN, and the question was still counted nowhere."""
 
-    HANDOFF = {"labels": [{"name": "stream:montalu1"}, {"name": "needs-gatekeeper"},
+    HANDOFF = {"labels": [{"name": "stream:miva1"}, {"name": "needs-gatekeeper"},
                           {"name": "gk-processing"}], "title": "t"}
     OPS_WAIT = {"labels": [{"name": "ops-wait"}], "title": "t"}
 
@@ -63,8 +63,8 @@ class TestAskedBeatsEveryBucket(unittest.TestCase):
                                      number=N)[0], "U")
 
     def test_a_stream_box_counts_its_own_asked_ticket(self):
-        own = {"labels": [{"name": "stream:montalu2"}], "title": "t"}
-        box = ts.Box(own_stream="montalu2", asked=frozenset({N}))
+        own = {"labels": [{"name": "stream:david1"}], "title": "t"}
+        box = ts.Box(own_stream="david1", asked=frozenset({N}))
         self.assertEqual(ts.classify(own, ts.TicketFacts().of(N), box, number=N)[0], "U")
 
     def test_footer_fills_asked_on_a_stream_box_too(self):
@@ -72,7 +72,7 @@ class TestAskedBeatsEveryBucket(unittest.TestCase):
                 mock.patch.object(route.cli_ticket_facts, "refresh",
                                   return_value=ts.TicketFacts()):
             buckets, _f = route.footer({N: self.HANDOFF}, "/r", "o/r", merged=[],
-                                       own_stream="montalu2")
+                                       own_stream="david1")
         self.assertIn(N, buckets["U"])
 
 

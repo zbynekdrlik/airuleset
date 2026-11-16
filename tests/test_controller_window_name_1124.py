@@ -120,7 +120,7 @@ class TestWindowNameEligibility(unittest.TestCase):
 
     def test_single_session_users_stay_eligible(self):
         with _box("shared-stream"):
-            self.assertTrue(bash_appliers.is_window_name_eligible("montalu2"))
+            self.assertTrue(bash_appliers.is_window_name_eligible("miva1"))
             self.assertTrue(
                 bash_appliers.is_window_name_eligible("gatekeeper"))
             self.assertFalse(
@@ -215,7 +215,7 @@ class TestOwnerAuditIndex(unittest.TestCase):
                               "session-created[%d]" % idx], user)
 
     def test_audit_still_stripped_on_single_session_boxes(self):
-        for user in ("gatekeeper", "montalu2"):
+        for user in ("gatekeeper", "miva1"):
             text, rec = self._apply_audit(user, "shared-stream")
             self.assertNotIn(tmuxprov.OWNER_AUDIT_MARK_START, text, user)
             self.assertEqual(rec.hook_calls(), [], user)
@@ -236,7 +236,7 @@ class TestNoUnindexedSessionCreatedWriter(unittest.TestCase):
                  ("newlevel", "dev1", "workstation"),
                  ("newlevel", "dev2", "workstation"),
                  ("gatekeeper", "gatekeeper-cx23", "workstation"),
-                 ("montalu2", "subdev", "shared-stream"))
+                 ("miva1", "subdev", "shared-stream"))
         for user, host, cls in boxes:
             p, home = _tmp_conf("")
             rec = _Rec()
@@ -276,7 +276,7 @@ class TestReviewFindings1124(unittest.TestCase):
 
     def test_window_name_and_ssh_attach_eligibility_are_equal_today(self):
         # Two names on purpose; a divergence must be a deliberate edit here.
-        users = ("airuleset", "newlevel", "montalu2", "gatekeeper",
+        users = ("airuleset", "newlevel", "miva1", "gatekeeper",
                  "dominika", "claudy", "david1")
         for cls in ("controller", "workstation", "shared-stream", None):
             with _box(cls):

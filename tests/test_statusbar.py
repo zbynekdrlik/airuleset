@@ -1332,7 +1332,7 @@ class RefreshCLI(unittest.TestCase):
                 '  *label:stream:*) echo "[]";;\n'
                 '  *label:needs-gatekeeper,ready-for-review*) '
                 'echo \'[{"number":55,"labels":[{"name":"needs-gatekeeper"},'
-                '{"name":"stream:montalu4"}]}]\';;\n'
+                '{"name":"stream:miva1"}]}]\';;\n'
                 '  *graphql*) echo \'{"data":{"repository":{"i55":'
                 '{"timelineItems":{"nodes":[{"label":{"name":"handed-by:%s"}}'
                 ']}}}}}\';;\n' % user +
@@ -1349,7 +1349,7 @@ class RefreshCLI(unittest.TestCase):
             cache = json.loads((statusbar.cache_dir(home) /
                                 (statusbar.cwd_key(repo) + ".json")).read_text())
             self.assertEqual(cache["open"], 0)
-            self.assertEqual(cache["gk"], 0)     # #55 stays montalu4's, not ours
+            self.assertEqual(cache["gk"], 0)     # #55 stays miva1's, not ours
 
     def test_refresh_full_authority_excludes_other_streams_labels(self):
         # Stream-label ownership (odoo-erp PR #1440, 2026-07-11): the FULL box's

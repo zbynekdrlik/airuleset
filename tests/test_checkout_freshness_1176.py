@@ -378,9 +378,9 @@ class TestDiscoveryAndWiring(unittest.TestCase):
         home = tempfile.mkdtemp(prefix="t1176-stream-")
         self.addCleanup(shutil.rmtree, home, True)
         os.makedirs(os.path.join(home, "devel/odoo/odoo-erp/.git"))
-        got = _job().discover_checkouts(home=home, user="montalu2", windows=[],
+        got = _job().discover_checkouts(home=home, user="miva1", windows=[],
                                         registry_path=os.path.join(home, "none"))
-        self.assertEqual([c["source"] for c in got], ["stream:montalu2"])
+        self.assertEqual([c["source"] for c in got], ["stream:miva1"])
 
     def test_run_once_reaches_the_job_only_when_enabled(self):
         from test_run_once_characterization import _drive

@@ -196,17 +196,17 @@ class TestTmuxSessionExists(TestCase):
     def test_true_on_rc_zero(self):
         def run(argv):
             return _FakeCP(returncode=0)
-        self.assertTrue(airuleset._tmux_session_exists("montalu2", run=run))
+        self.assertTrue(airuleset._tmux_session_exists("david2", run=run))
 
     def test_false_on_rc_nonzero(self):
         def run(argv):
             return _FakeCP(returncode=1)
-        self.assertFalse(airuleset._tmux_session_exists("montalu2", run=run))
+        self.assertFalse(airuleset._tmux_session_exists("david2", run=run))
 
     def test_none_when_tmux_unreachable(self):
         def run(argv):
             raise OSError("no such file")
-        self.assertIsNone(airuleset._tmux_session_exists("montalu2", run=run))
+        self.assertIsNone(airuleset._tmux_session_exists("david2", run=run))
 
     def test_calls_has_session_with_an_exact_match_target(self):
         # #263 review finding: a bare `-t name` does PREFIX matching (tmux
@@ -220,8 +220,8 @@ class TestTmuxSessionExists(TestCase):
             calls.append(argv)
             return _FakeCP(returncode=1)
 
-        airuleset._tmux_session_exists("montalu2", run=run)
-        self.assertEqual(calls, [["tmux", "has-session", "-t", "=montalu2"]])
+        airuleset._tmux_session_exists("david2", run=run)
+        self.assertEqual(calls, [["tmux", "has-session", "-t", "=david2"]])
 
 
 class TestEnsureStreamTmuxSession(TestCase):
@@ -254,7 +254,7 @@ class TestEnsureStreamTmuxSession(TestCase):
 
         with m.patch.object(Path, "home", return_value=d):
             result = airuleset.ensure_stream_tmux_session(
-                user="montalu2", run=run, sentinel_path=self._sentinel())
+                user="david2", run=run, sentinel_path=self._sentinel())
         self.assertIn("already exists", result)
         self.assertIn("left untouched", result)
         # ONLY read-only probes ran -- has-session + the cwd check -- no
@@ -283,9 +283,9 @@ class TestEnsureStreamTmuxSession(TestCase):
             return _FakeCP(returncode=1)   # inconclusive either way
 
         airuleset.ensure_stream_tmux_session(
-            user="montalu2", run=run, sentinel_path=self._sentinel())
+            user="david2", run=run, sentinel_path=self._sentinel())
         probe = next(c for c in calls if c[:2] == ["tmux", "list-panes"])
-        self.assertEqual(probe, ["tmux", "list-panes", "-s", "-t", "=montalu2",
+        self.assertEqual(probe, ["tmux", "list-panes", "-s", "-t", "=david2",
                                  "-F", "#{pane_current_path}"])
 
     def test_a_mismatched_cwd_on_an_existing_session_is_reported_loudly(self):
@@ -352,7 +352,7 @@ class TestEnsureStreamTmuxSession(TestCase):
 
         with m.patch.object(Path, "home", return_value=d):
             result = airuleset.ensure_stream_tmux_session(
-                user="montalu2", run=run, sentinel_path=self._sentinel())
+                user="david2", run=run, sentinel_path=self._sentinel())
         self.assertNotIn("WARNING", result)
         self.assertIn("already exists", result)
 
@@ -371,7 +371,7 @@ class TestEnsureStreamTmuxSession(TestCase):
             return _FakeCP(returncode=0)
 
         result = airuleset.ensure_stream_tmux_session(
-            user="montalu2", run=run, sentinel_path=self._sentinel())
+            user="david2", run=run, sentinel_path=self._sentinel())
         self.assertIn("already exists", result)
         self.assertNotIn("WARNING", result)
 
@@ -387,12 +387,12 @@ class TestEnsureStreamTmuxSession(TestCase):
         d = Path(tempfile.mkdtemp())
         with m.patch.object(Path, "home", return_value=d):
             result = airuleset.ensure_stream_tmux_session(
-                user="montalu2", run=run, launch_script="/x/launch.sh",
+                user="david2", run=run, launch_script="/x/launch.sh",
                 sentinel_path=self._sentinel())
-        self.assertIn("created session 'montalu2'", result)
+        self.assertIn("created session 'david2'", result)
         self.assertIn("claude launched", result)
         self.assertTrue(any(
-            c[:4] == ["tmux", "new-session", "-d", "-s"] and "montalu2" in c
+            c[:4] == ["tmux", "new-session", "-d", "-s"] and "david2" in c
             for c in calls))
         # cwd falls back to $HOME (no odoo-erp checkout in this fresh tmpdir)
         self.assertTrue(any(str(d) in " ".join(c) for c in calls
@@ -415,7 +415,7 @@ class TestEnsureStreamTmuxSession(TestCase):
         (checkout / ".git").mkdir(parents=True)  # #1088: must be a git work tree
         with m.patch.object(Path, "home", return_value=d):
             airuleset.ensure_stream_tmux_session(
-                user="montalu3", run=run, sentinel_path=self._sentinel())
+                user="david3", run=run, sentinel_path=self._sentinel())
         new_session_call = next(c for c in calls if c[:2] == ["tmux", "new-session"])
         self.assertIn(str(checkout), new_session_call)
 
@@ -431,7 +431,7 @@ class TestEnsureStreamTmuxSession(TestCase):
             return _FakeCP(returncode=0)
 
         result = airuleset.ensure_stream_tmux_session(
-            user="montalu4", run=run, sentinel_path=self._sentinel())
+            user="david4", run=run, sentinel_path=self._sentinel())
         self.assertIn("FAILED", result)
         self.assertFalse(any(c[:2] == ["tmux", "send-keys"] for c in calls))
 
@@ -439,7 +439,7 @@ class TestEnsureStreamTmuxSession(TestCase):
         def run(argv):
             raise OSError("tmux missing")
         result = airuleset.ensure_stream_tmux_session(
-            user="montalu1", run=run, sentinel_path=self._sentinel())
+            user="david1", run=run, sentinel_path=self._sentinel())
         self.assertIn("unreachable", result)
 
     def test_unreachable_tmux_never_writes_the_sentinel(self):
@@ -451,7 +451,7 @@ class TestEnsureStreamTmuxSession(TestCase):
             raise OSError("tmux missing")
 
         airuleset.ensure_stream_tmux_session(
-            user="montalu1", run=run, sentinel_path=sentinel)
+            user="david1", run=run, sentinel_path=sentinel)
         self.assertFalse(sentinel.exists())
 
     def test_second_call_never_recreates_a_session_the_user_deliberately_killed(self):
@@ -475,14 +475,14 @@ class TestEnsureStreamTmuxSession(TestCase):
         d = Path(tempfile.mkdtemp())
         with m.patch.object(Path, "home", return_value=d):
             first = airuleset.ensure_stream_tmux_session(
-                user="montalu2", run=run, sentinel_path=sentinel)
+                user="david2", run=run, sentinel_path=sentinel)
         self.assertIn("created session", first)
         self.assertTrue(sentinel.exists())
 
         calls.clear()
         with m.patch.object(Path, "home", return_value=d):
             second = airuleset.ensure_stream_tmux_session(
-                user="montalu2", run=run, sentinel_path=sentinel)
+                user="david2", run=run, sentinel_path=sentinel)
         self.assertIn("already bootstrapped once", second)
         self.assertIn("never re-created", second)
         # #309: has-session now DOES run on every call, even a bootstrapped
@@ -492,7 +492,7 @@ class TestEnsureStreamTmuxSession(TestCase):
         # NO CREATE ever happens a second time -- no new-session, no
         # send-keys, no kill-session -- regardless of how many read-only
         # probe calls ran.
-        self.assertEqual(calls, [["tmux", "has-session", "-t", "=montalu2"]])
+        self.assertEqual(calls, [["tmux", "has-session", "-t", "=david2"]])
         self.assertFalse(any(c[:2] in (["tmux", "new-session"],
                                         ["tmux", "send-keys"],
                                         ["tmux", "kill-session"])
@@ -516,19 +516,19 @@ class TestEnsureStreamTmuxSession(TestCase):
             if argv[:2] == ["tmux", "has-session"]:
                 return _FakeCP(returncode=0)   # a session exists
             if argv[:2] == ["tmux", "list-panes"]:
-                return _FakeCP(returncode=0, stdout="/home/montalu2\n")  # wrong cwd
+                return _FakeCP(returncode=0, stdout="/home/david2\n")  # wrong cwd
             return _FakeCP(returncode=0)
 
         checkout = d / "devel" / "odoo" / "odoo-erp"
         (checkout / ".git").mkdir(parents=True)  # #1088: must be a git work tree
         sentinel = self._sentinel()
         sentinel.parent.mkdir(parents=True, exist_ok=True)
-        sentinel.write_text("bootstrapped for montalu2\n")   # already bootstrapped
+        sentinel.write_text("bootstrapped for david2\n")   # already bootstrapped
         with m.patch.object(Path, "home", return_value=d):
             result = airuleset.ensure_stream_tmux_session(
-                user="montalu2", run=run, sentinel_path=sentinel)
+                user="david2", run=run, sentinel_path=sentinel)
         self.assertIn("WARNING", result)
-        self.assertIn("/home/montalu2", result)
+        self.assertIn("/home/david2", result)
         self.assertIn(str(checkout), result)
         # Still never a mutation, on an already-bootstrapped account either.
         self.assertFalse(any(c[:2] == ["tmux", "new-session"] for c in calls))
@@ -552,10 +552,10 @@ class TestEnsureStreamTmuxSession(TestCase):
 
         sentinel = self._sentinel()
         sentinel.parent.mkdir(parents=True, exist_ok=True)
-        sentinel.write_text("bootstrapped for montalu2\n")
+        sentinel.write_text("bootstrapped for david2\n")
         with m.patch.object(Path, "home", return_value=d):
             result = airuleset.ensure_stream_tmux_session(
-                user="montalu2", run=run, sentinel_path=sentinel)
+                user="david2", run=run, sentinel_path=sentinel)
         self.assertNotIn("WARNING", result)
         self.assertIn("already bootstrapped once", result)
         self.assertIn("never re-created", result)
@@ -572,7 +572,7 @@ class TestEnsureStreamTmuxSession(TestCase):
             return _FakeCP(returncode=0)   # has-session: exists
 
         airuleset.ensure_stream_tmux_session(
-            user="montalu2", run=run, sentinel_path=sentinel)
+            user="david2", run=run, sentinel_path=sentinel)
         self.assertTrue(sentinel.exists())
 
 
@@ -640,7 +640,7 @@ class TestReportStreamDevEnv(TestCase):
         out, err = StringIO(), StringIO()
         with m.patch.object(Path, "home", return_value=d), \
                 m.patch("sys.stdout", out), m.patch("sys.stderr", err):
-            airuleset.report_stream_dev_env(user="montalu2")
+            airuleset.report_stream_dev_env(user="david2")
         self.assertIn("gap(s)", err.getvalue())
         self.assertEqual(out.getvalue(), "")
         self.assertTrue(todo.exists())
@@ -659,7 +659,7 @@ class TestReportStreamDevEnv(TestCase):
         out, err = StringIO(), StringIO()
         with m.patch.object(Path, "home", return_value=d), \
                 m.patch("sys.stdout", out), m.patch("sys.stderr", err):
-            airuleset.report_stream_dev_env(user="montalu2")
+            airuleset.report_stream_dev_env(user="david2")
         self.assertIn("Renamed", out.getvalue())
         self.assertFalse(todo.exists())
         done = d / "TODO-PROVISIONING.md.done"
@@ -675,7 +675,7 @@ class TestReportStreamDevEnv(TestCase):
         out, err = StringIO(), StringIO()
         with m.patch.object(Path, "home", return_value=d), \
                 m.patch("sys.stdout", out), m.patch("sys.stderr", err):
-            airuleset.report_stream_dev_env(user="montalu2")
+            airuleset.report_stream_dev_env(user="david2")
         self.assertEqual(out.getvalue(), "")
         self.assertEqual(err.getvalue(), "")
 
@@ -694,7 +694,7 @@ class TestApplyStreamSshAttach(TestCase):
 
     def test_adds_block_for_a_stream_account(self):
         p = self._tmp("# existing content\n")
-        changed = airuleset.apply_stream_ssh_attach(p, user="montalu2")
+        changed = airuleset.apply_stream_ssh_attach(p, user="david2")
         self.assertTrue(changed)
         text = p.read_text()
         self.assertIn(airuleset.STREAM_SSH_ATTACH_MARK_START, text)
@@ -718,8 +718,8 @@ class TestApplyStreamSshAttach(TestCase):
 
     def test_idempotent_second_call_is_a_no_op(self):
         p = self._tmp("# existing content\n")
-        airuleset.apply_stream_ssh_attach(p, user="montalu2")
-        changed = airuleset.apply_stream_ssh_attach(p, user="montalu2")
+        airuleset.apply_stream_ssh_attach(p, user="david2")
+        changed = airuleset.apply_stream_ssh_attach(p, user="david2")
         self.assertFalse(changed)
 
     def test_guarded_for_interactive_ssh_tty_and_not_already_in_tmux(self):
@@ -739,7 +739,7 @@ class TestApplyStreamSshAttach(TestCase):
 
     def test_write_is_atomic_no_tmp_file_left_behind(self):
         p = self._tmp("# existing content\n")
-        airuleset.apply_stream_ssh_attach(p, user="montalu2")
+        airuleset.apply_stream_ssh_attach(p, user="david2")
         tmp = p.with_suffix(p.suffix + ".airuleset-tmp")
         self.assertFalse(tmp.exists())
         self.assertIn(airuleset.STREAM_SSH_ATTACH_MARK_START, p.read_text())
@@ -747,7 +747,7 @@ class TestApplyStreamSshAttach(TestCase):
     def test_creates_file_when_absent(self):
         d = tempfile.mkdtemp()
         p = Path(d) / ".bashrc"
-        changed = airuleset.apply_stream_ssh_attach(p, user="montalu1")
+        changed = airuleset.apply_stream_ssh_attach(p, user="david1")
         self.assertTrue(changed)
         self.assertTrue(p.exists())
 
@@ -885,9 +885,9 @@ class TestStreamMarkerBlockSpansSafety(TestCase):
         )
         p = Path(tempfile.mkdtemp()) / ".bashrc"
         p.write_text(corrupted)
-        airuleset.apply_stream_ssh_attach(p, user="montalu2")
+        airuleset.apply_stream_ssh_attach(p, user="david2")
         # run it AGAIN -- the second run is where the lazy-regex bug bites
-        airuleset.apply_stream_ssh_attach(p, user="montalu2")
+        airuleset.apply_stream_ssh_attach(p, user="david2")
         self.assertIn("IMPORTANT_UNRELATED_LINE=1", p.read_text())
 
     def test_two_full_blocks_both_rewrite_cleanly_and_preserve_content_between(self):
@@ -902,12 +902,12 @@ class TestStreamMarkerBlockSpansSafety(TestCase):
         # the FIRST call is a genuine no-op (nothing to rewrite) -- the
         # real assertion is that BOTH blocks survive, distinct, with the
         # mid-content preserved, never merged/deduplicated into one.
-        airuleset.apply_stream_ssh_attach(p, user="montalu2")
+        airuleset.apply_stream_ssh_attach(p, user="david2")
         text1 = p.read_text()
         self.assertIn("MID_CONTENT=kept", text1)
         self.assertEqual(text1.count(airuleset.STREAM_SSH_ATTACH_MARK_START), 2)
         # idempotent on a second run too
-        changed2 = airuleset.apply_stream_ssh_attach(p, user="montalu2")
+        changed2 = airuleset.apply_stream_ssh_attach(p, user="david2")
         self.assertFalse(changed2)
         self.assertEqual(p.read_text(), text1)
 
@@ -929,7 +929,7 @@ class TestStreamMarkerBlockSpansSafety(TestCase):
         )
         p = Path(tempfile.mkdtemp()) / ".bashrc"
         p.write_text(corrupted)
-        airuleset.apply_stream_ssh_attach(p, user="montalu2")
+        airuleset.apply_stream_ssh_attach(p, user="david2")
         self.assertNotIn("IMPORTANT_SECRET", p.read_text())
 
 
@@ -1746,7 +1746,7 @@ class TestApplyStreamTmuxWindowName(TestCase):
     #264 ssh-auto-attach uses), NEVER an owner/newlevel MULTI-PROJECT box (dev1/
     dev2), where one fixed name + automatic-rename off froze every project window
     and destroyed navigation (the #592 regression). The name = the box's
-    `cli_aliases.short_target_alias` (gatekeeper->gk, montaluN->mN, davidN->dN)
+    `cli_aliases.short_target_alias` (gatekeeper->gk, davidN->dN)
     -- ONE shared alias source, never a second parallel map. Idempotent per-box
     marker-block (shape of apply_stream_ssh_attach, #264); the block is stripped
     when a box is not single-session or has no safe alias."""
@@ -1759,7 +1759,7 @@ class TestApplyStreamTmuxWindowName(TestCase):
         return p
 
     def test_renders_the_window_naming_directives_with_the_baked_stream_name(self):
-        block = airuleset.render_stream_tmux_window_block("montalu1")
+        block = airuleset.render_stream_tmux_window_block("david1")
         self.assertIn(airuleset.STREAM_TMUX_WINDOW_MARK_START, block)
         self.assertIn(airuleset.STREAM_TMUX_WINDOW_MARK_END, block)
         # automatic-rename off makes the name STICK against a command change.
@@ -1767,7 +1767,7 @@ class TestApplyStreamTmuxWindowName(TestCase):
         # session-created hook renames every (primary AND grouped-attach)
         # new session's window to the baked stream literal -- verified live
         # to converge on both tmux 3.4 and 3.7b.
-        self.assertIn('set-hook -g session-created[0] "rename-window montalu1"', block)
+        self.assertIn('set-hook -g session-created[0] "rename-window david1"', block)
 
     def test_after_new_window_hook_is_never_emitted(self):
         # #554: `after-new-window` fires ONLY on windows opened after the
@@ -1779,18 +1779,18 @@ class TestApplyStreamTmuxWindowName(TestCase):
         self.assertNotIn("after-new-window", block)
 
     def test_adds_block_for_a_stream_account_with_its_alias(self):
-        # #592: a stream box is named by its ALIAS (montalu2 -> m2), matching
+        # #592: a stream box is named by its ALIAS (david2 -> d2), matching
         # the owner's own webterm tab + live mitigation, not the full username.
         # `host="subdev"` = the stream account's real box; without it the test
         # would inherit the test box's own hostname (dev1) and the `dev1`
         # short-circuit would fire (montalu2 never actually runs on dev1).
         p = self._tmp("# existing content\n")
         changed = airuleset.apply_stream_tmux_window_name(
-            p, user="montalu2", host="subdev", run=lambda argv: None)
+            p, user="david2", host="subdev", run=lambda argv: None)
         self.assertTrue(changed)
         text = p.read_text()
         self.assertIn(airuleset.STREAM_TMUX_WINDOW_MARK_START, text)
-        self.assertIn('set-hook -g session-created[0] "rename-window m2"', text)
+        self.assertIn('set-hook -g session-created[0] "rename-window d2"', text)
 
     def test_gk_gets_the_gk_alias(self):
         # #592: gk (gatekeeper account) was the owner's report -- window showed
@@ -1833,7 +1833,7 @@ class TestApplyStreamTmuxWindowName(TestCase):
         # streams YES, the owner's newlevel multi-project boxes NO.
         self.assertFalse(airuleset.is_single_session_box_user("newlevel"))
         self.assertTrue(airuleset.is_single_session_box_user("gatekeeper"))
-        self.assertTrue(airuleset.is_single_session_box_user("montalu2"))
+        self.assertTrue(airuleset.is_single_session_box_user("david2"))
 
     def test_window_naming_gates_on_the_same_set_as_ssh_attach(self):
         # #593: the extracted `is_single_session_box_user` predicate IS the
@@ -1841,7 +1841,7 @@ class TestApplyStreamTmuxWindowName(TestCase):
         # features can never drift on "which boxes are single-session". Note
         # newlevel@subdev yields a SAFE alias ("subdev"), so the predicate --
         # not alias safety -- is what must exclude it.
-        for u in ("newlevel", "gatekeeper", "montalu2", "david", "root"):
+        for u in ("newlevel", "gatekeeper", "david2", "david", "root"):
             ps = self._tmp("# c\n")
             airuleset.apply_stream_ssh_attach(ps, user=u)
             ssh_has = airuleset.STREAM_SSH_ATTACH_MARK_START in ps.read_text()
@@ -1865,9 +1865,9 @@ class TestApplyStreamTmuxWindowName(TestCase):
 
     def test_idempotent_second_call_is_a_no_op(self):
         p = self._tmp("# existing content\n")
-        airuleset.apply_stream_tmux_window_name(p, user="montalu2", run=lambda argv: None)
+        airuleset.apply_stream_tmux_window_name(p, user="david2", run=lambda argv: None)
         changed = airuleset.apply_stream_tmux_window_name(
-            p, user="montalu2", run=lambda argv: None)
+            p, user="david2", run=lambda argv: None)
         self.assertFalse(changed)
 
     def test_never_touches_content_outside_the_markers(self):
@@ -1881,12 +1881,12 @@ class TestApplyStreamTmuxWindowName(TestCase):
         d = tempfile.mkdtemp()
         p = Path(d) / ".tmux.conf"
         changed = airuleset.apply_stream_tmux_window_name(
-            p, user="montalu1", run=lambda argv: None)
+            p, user="david1", run=lambda argv: None)
         self.assertTrue(changed)
         self.assertTrue(p.exists())
 
     def test_a_stray_unpaired_start_does_not_eat_content_up_to_a_later_end(self):
-        block = airuleset.render_stream_tmux_window_block("montalu2")
+        block = airuleset.render_stream_tmux_window_block("david2")
         corrupted = (
             f"{airuleset.STREAM_TMUX_WINDOW_MARK_START}\n"
             "# stray leftover start with no matching end anywhere before this\n"
@@ -1894,21 +1894,21 @@ class TestApplyStreamTmuxWindowName(TestCase):
             f"{block}\n"
         )
         p = self._tmp(corrupted)
-        airuleset.apply_stream_tmux_window_name(p, user="montalu2", run=lambda argv: None)
-        airuleset.apply_stream_tmux_window_name(p, user="montalu2", run=lambda argv: None)
+        airuleset.apply_stream_tmux_window_name(p, user="david2", run=lambda argv: None)
+        airuleset.apply_stream_tmux_window_name(p, user="david2", run=lambda argv: None)
         self.assertIn("IMPORTANT_UNRELATED_LINE=1", p.read_text())
 
     def test_live_applies_the_server_options_for_a_stream_account(self):
         calls = []
         p = self._tmp("# existing content\n")
         airuleset.apply_stream_tmux_window_name(
-            p, user="montalu2", host="subdev", run=calls.append)
+            p, user="david2", host="subdev", run=calls.append)
         # server-option sets (no keystrokes) -- automatic-rename off + the
         # session-created rename hook, exactly what the conf block carries.
-        # #592: the hook renames to the ALIAS (m2), not the full username.
+        # #592: the hook renames to the ALIAS (d2), not the full username.
         self.assertIn(["tmux", "set-option", "-gw", "automatic-rename", "off"], calls)
         self.assertIn(
-            ["tmux", "set-hook", "-g", "session-created[0]", "rename-window m2"],
+            ["tmux", "set-hook", "-g", "session-created[0]", "rename-window d2"],
             calls)
 
     def test_live_apply_renames_every_window_on_the_server_to_the_alias(self):
@@ -1930,9 +1930,9 @@ class TestApplyStreamTmuxWindowName(TestCase):
 
         p = self._tmp("# existing content\n")
         airuleset.apply_stream_tmux_window_name(
-            p, user="montalu2", host="subdev", run=run)
-        self.assertIn(["tmux", "rename-window", "-t", "@0", "m2"], seen)
-        self.assertIn(["tmux", "rename-window", "-t", "@3", "m2"], seen)
+            p, user="david2", host="subdev", run=run)
+        self.assertIn(["tmux", "rename-window", "-t", "@0", "d2"], seen)
+        self.assertIn(["tmux", "rename-window", "-t", "@3", "d2"], seen)
 
     def test_live_apply_names_declared_windows_by_their_cwd_not_the_alias(self):
         # #998 (owner 2026-09-12, "prečo mám dva gk"): gk DECLARES windows
@@ -2033,7 +2033,7 @@ class TestApplyStreamTmuxWindowName(TestCase):
             seen)
 
     def test_undeclared_target_live_hook_is_byte_identical_bare_rename(self):
-        # #998 finisher: an undeclared target (subdev stream, box_windows == [])
+        # #998 finisher: an undeclared target (subdev stream simap1, no windows)
         # must live-apply EXACTLY today's bare `rename-window <alias>` -- the
         # refactor changes nothing for the 99% path.
         seen = []
@@ -2046,9 +2046,9 @@ class TestApplyStreamTmuxWindowName(TestCase):
 
         p = self._tmp("# existing content\n")
         airuleset.apply_stream_tmux_window_name(
-            p, user="montalu2", host="subdev", run=run)
+            p, user="simap1", host="subdev", run=run)
         self.assertIn(
-            ["tmux", "set-hook", "-g", "session-created[0]", "rename-window m2"],
+            ["tmux", "set-hook", "-g", "session-created[0]", "rename-window si1"],
             seen)
 
     def test_newlevel_owner_box_does_NO_window_naming_live_apply(self):
@@ -2157,12 +2157,12 @@ class TestApplyStreamTmuxWindowName(TestCase):
         p = self._tmp("set -g mouse on\n")
         airuleset.apply_tmux_history_limit(p, run=lambda argv: None)
         airuleset.apply_stream_tmux_window_name(
-            p, user="montalu2", host="subdev", run=lambda argv: None)
+            p, user="david2", host="subdev", run=lambda argv: None)
         # a second install of BOTH must be a byte-for-byte no-op
         before = p.read_text()
         c1 = airuleset.apply_tmux_history_limit(p, run=lambda argv: None)
         c2 = airuleset.apply_stream_tmux_window_name(
-            p, user="montalu2", host="subdev", run=lambda argv: None)
+            p, user="david2", host="subdev", run=lambda argv: None)
         after = p.read_text()
         self.assertFalse(c1)
         self.assertFalse(c2)
@@ -2172,7 +2172,7 @@ class TestApplyStreamTmuxWindowName(TestCase):
         self.assertEqual(after.count(airuleset.STREAM_TMUX_WINDOW_MARK_START), 1)
         self.assertIn("set -g mouse on", after)
         self.assertIn("set-option -g history-limit", after)
-        self.assertIn('rename-window m2', after)  # #592: alias, not full username
+        self.assertIn('rename-window d2', after)  # #592: alias, not full username
 
 
 # ---------------------------------------------------------------------------
@@ -2222,7 +2222,7 @@ class TestManagedWindowCreation998(TestCase):
         self.assertEqual(airuleset.render_stream_tmux_window_block("dev1"),
                          expected)
         # no create machinery leaks for an undeclared box (windows None or [])
-        for name in ("dev1", "m2", "montalu1"):
+        for name in ("dev1", "m2", "david1"):
             for windows in (None, []):
                 b = airuleset.render_stream_tmux_window_block(name, windows=windows)
                 self.assertNotIn("run-shell", b)
@@ -2403,12 +2403,12 @@ class TestManagedWindowCreation998(TestCase):
         def run(argv):
             seen.append(argv)
             if argv[:3] == ["tmux", "list-windows", "-a"]:
-                return _FakeCP(returncode=0, stdout="@0\t/home/montalu2\n")
+                return _FakeCP(returncode=0, stdout="@0\t/home/david2\n")
             return _FakeCP(returncode=0, stdout="")
 
         p = self._tmp("# x\n")
         airuleset.apply_stream_tmux_window_name(
-            p, user="montalu2", host="subdev", home="/home/montalu2", run=run)
+            p, user="david2", host="subdev", home="/home/david2", run=run)
         # an undeclared box never lists sessions nor fires a create run-shell
         self.assertNotIn(["tmux", "run-shell"],
                          [a[:2] for a in seen])
@@ -2443,10 +2443,10 @@ class TestOwnerVpsProjectPredicate(TestCase):
     def test_subdev_streams_and_gatekeeper_are_never_owner_vps_projects(self):
         # they have their own #264/#562 subdev block; a stream account on a
         # spinbike-named host must still be refused (the user gate).
-        self.assertIsNone(airuleset._owner_vps_project(user="montalu2", hostname="subdev"))
+        self.assertIsNone(airuleset._owner_vps_project(user="david2", hostname="subdev"))
         self.assertIsNone(airuleset._owner_vps_project(user="gatekeeper", hostname="gk"))
         self.assertIsNone(
-            airuleset._owner_vps_project(user="montalu2", hostname="spinbike-vps"))
+            airuleset._owner_vps_project(user="david2", hostname="spinbike-vps"))
 
     def test_registry_is_keyed_by_hostname_prefix_not_the_webterm_alias(self):
         # robustness: keyed by the hostname prefix (`spinbike`), so it does not
@@ -2534,7 +2534,7 @@ class TestApplyOwnerVpsSshAttach(TestCase):
     def test_never_added_on_a_subdev_stream(self):
         p = self._tmp("# existing\n")
         changed = airuleset.apply_owner_vps_ssh_attach(
-            p, user="montalu2", host="subdev")
+            p, user="david2", host="subdev")
         self.assertFalse(changed)
         self.assertNotIn(airuleset.OWNER_VPS_SSH_ATTACH_MARK_START, p.read_text())
 

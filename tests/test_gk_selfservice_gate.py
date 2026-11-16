@@ -21,7 +21,7 @@ The hook resolves authority via airuleset.resolve_authority(cwd). Since #839
 a test engages the gate the UN-spoofable way — a `<!-- airuleset:authority=
 <profile> -->` marker written into the hook's cwd (honored FIRST by
 `resolve_authority`), the profile derived from `user` via AUTHORITY_BY_USER
-(david2 = fork-no-merge, montalu1 = branch-merge). Same seam as
+(david2 = fork-no-merge, miva1 = branch-merge). Same seam as
 test_scope_gate.py's #390 stream-routing tests.
 """
 
@@ -167,10 +167,10 @@ class AuthorityScope(TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
 
     def test_branch_merge_stream_also_gated(self):
-        # montalu1 (renamed from montalu, #537) is a branch-merge reduced
+        # miva1 (montalu1 until #1306) is a branch-merge reduced
         # stream — its gk-request without a self-service line is still gated.
         r = run('python3 ~/devel/airuleset/airuleset.py gk-request --issue 5 '
-                '--comment "prod read"', user="montalu1")
+                '--comment "prod read"', user="miva1")
         self.assertEqual(r.returncode, 2, r.stderr)
 
 

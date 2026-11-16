@@ -87,12 +87,11 @@ class TestDiscordNotifyCheckSshHint(TestCase):
         self.assertIn("david1@100.118.174.27", out)
 
     def test_hint_has_no_identity_flag_for_host_with_none(self):
-        # montalu1@subdev (renamed from montalu, #537) authorizes the DEFAULT
-        # key — no -i should be printed.
+        # admin@forestshop-dev authorizes the DEFAULT key — no -i printed.
         with tempfile.TemporaryDirectory() as tmp:
-            with mock.patch.object(airuleset, "_whoami", return_value="montalu1"):
+            with mock.patch.object(airuleset, "_whoami", return_value="admin"):
                 out = self._run(tmp)
-        self.assertIn("ssh montalu1@100.118.174.27", out)
+        self.assertIn("ssh admin@forestshop-dev.newlevel.media", out)
         self.assertNotIn(" -i ", out)
 
     def test_hint_falls_back_to_placeholder_for_unrecognized_user(self):

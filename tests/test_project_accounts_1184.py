@@ -127,7 +127,7 @@ class TestDeclarationValidator(unittest.TestCase):
     def test_an_existing_fleet_account_can_never_be_declared(self):
         # review 1: declaring a stream/webterm account would REPLACE its keys
         for name, host in (("dominika", "subdev"), ("david1", "subdev"),
-                           ("montalu3", "subdev"), ("marek", "dev1"),
+                           ("miva1", "subdev"), ("marek", "dev1"),
                            ("admin", "dev1")):
             errs = bootstrap.validate_account(name, _valid_spec(host=host))
             self.assertTrue(any("existing" in e for e in errs), (name, errs))
@@ -389,7 +389,7 @@ class TestOnboardGate(unittest.TestCase):
         # review 1 🔴: an ALLOW-list — the control/stream accounts too
         for acct, host in (("airuleset", None), ("root", "dev1"),
                            ("gatekeeper", "gatekeeper"), ("david1", "david1@subdev"),
-                           ("montalu3", "montalu3@subdev")):
+                           ("miva1", "miva1@subdev")):
             self.assertIsNotNone(
                 accounts.onboard_account_gate(acct, None, host=host), acct)
 

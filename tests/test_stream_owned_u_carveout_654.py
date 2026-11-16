@@ -111,11 +111,11 @@ class PartitionOwnershipCarveout(unittest.TestCase):
 
     def test_foreign_row_routes_to_workable_on_another_slice_box(self):
         # A row owned by ANOTHER stream, seen by a different slice box
-        # (own_stream=montalu1), is foreign → workable action-only, never
-        # montalu's U — montalu cannot field david's owner-question.
+        # (own_stream=miva1), is foreign → workable action-only, never
+        # miva1's U — miva1 cannot field david's owner-question.
         rows = {7: {"number": 7, "labels": _labels("stream:david", "needs-decision")}}
         workable, waiting, _ = airuleset._partition_workable(
-            rows, own_stream="montalu1")
+            rows, own_stream="miva1")
         self.assertIn(7, workable)
         self.assertNotIn(7, waiting)
 
@@ -126,7 +126,7 @@ class PartitionOwnershipCarveout(unittest.TestCase):
         # FOREIGN stream's owner question is hidden on the full-authority box
         # (it counts in that stream's U). Mirrors test_gk_i_counting_audit_578.
         rows = {4007: {"number": 4007,
-                       "labels": _labels("needs-acceptance", "stream:montalu3")}}
+                       "labels": _labels("needs-acceptance", "stream:miva1")}}
         workable, waiting, ops_wait = airuleset._partition_workable(
             rows, own_stream=None)
         self.assertEqual(waiting, {},

@@ -314,13 +314,13 @@ class TestFactReader(unittest.TestCase):
         self.assertIsNone(ae.tenant_agent_eval(d, "montalu1"))
 
     def test_alias_resolution_via_read_stream_file(self):
-        # montalu1 -> montalu.md (the fleet rename alias gates.navody resolves)
+        # david1 -> david.md (the fleet rename alias gates.navody resolves)
         d = tempfile.mkdtemp()
         sd = os.path.join(d, ".claude", "streams")
         os.makedirs(sd)
-        with open(os.path.join(sd, "montalu.md"), "w", encoding="utf-8") as fh:
+        with open(os.path.join(sd, "david.md"), "w", encoding="utf-8") as fh:
             fh.write("agent_eval: NONE — bez agenta\n")
-        self.assertIsNotNone(ae.tenant_agent_eval(d, "montalu1"))
+        self.assertIsNotNone(ae.tenant_agent_eval(d, "david1"))
 
 
 # --------------------------------------------------------------------------- #

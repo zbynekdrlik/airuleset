@@ -28,15 +28,15 @@ import watchdog.cross_stream as cs
 class DecisionPure(unittest.TestCase):
     def test_no_line_handed_by_stream_bounces(self):
         should, reason = cs._selfservice_bounce_decide(
-            ["needs-gatekeeper", "handed-by:montalu"], has_line=False,
-            origin_stream="montalu")
+            ["needs-gatekeeper", "handed-by:david"], has_line=False,
+            origin_stream="david")
         self.assertTrue(should, reason)
         self.assertEqual(reason, "no-self-service-line")
 
     def test_line_present_is_left_for_manual_triage(self):
         should, reason = cs._selfservice_bounce_decide(
-            ["needs-gatekeeper", "handed-by:montalu"], has_line=True,
-            origin_stream="montalu")
+            ["needs-gatekeeper", "handed-by:david"], has_line=True,
+            origin_stream="david")
         self.assertFalse(should)
         self.assertEqual(reason, "has-self-service-line")
 
@@ -49,15 +49,15 @@ class DecisionPure(unittest.TestCase):
 
     def test_review_handoff_ready_for_review_never_bounced(self):
         should, reason = cs._selfservice_bounce_decide(
-            ["needs-gatekeeper", "ready-for-review", "handed-by:montalu"],
-            has_line=False, origin_stream="montalu")
+            ["needs-gatekeeper", "ready-for-review", "handed-by:david"],
+            has_line=False, origin_stream="david")
         self.assertFalse(should)
         self.assertEqual(reason, "review-handoff:ready-for-review")
 
     def test_already_bounced_never_re_bounced(self):
         should, reason = cs._selfservice_bounce_decide(
-            ["needs-gatekeeper", "handed-by:montalu", "prio:bounce"],
-            has_line=False, origin_stream="montalu")
+            ["needs-gatekeeper", "handed-by:david", "prio:bounce"],
+            has_line=False, origin_stream="david")
         self.assertFalse(should)
         self.assertEqual(reason, "already-bounced")
 
@@ -84,28 +84,28 @@ class OriginResolution(unittest.TestCase):
     def test_stream_label_is_not_an_origin_marker(self):
         # stream:<x> is the REVIEW ownership primitive, NOT the action-request
         # origin marker; it must not be read as an origin here.
-        self.assertIsNone(cs._origin_reduced_stream(["stream:montalu"]))
+        self.assertIsNone(cs._origin_reduced_stream(["stream:david"]))
 
     def test_handed_by_legacy_prerename_name_attributes_to_canonical(self):
         # #564: a gk request FILED before the base-stream rename carries the OLD
-        # `handed-by:montalu` label. It must still attribute to the reduced
-        # stream (its CANONICAL name montalu1), routed through the single
-        # _stream_rename_equivalents primitive. RED before the fix (montalu is
+        # `handed-by:david` label. It must still attribute to the reduced
+        # stream (its CANONICAL name david1), routed through the single
+        # _stream_rename_equivalents primitive. RED before the fix (david is
         # not in _REDUCED_STREAM_USERS -> None).
         self.assertEqual(
-            cs._origin_reduced_stream(["needs-gatekeeper", "handed-by:montalu"]),
-            "montalu1")
+            cs._origin_reduced_stream(["needs-gatekeeper", "handed-by:david"]),
+            "david1")
 
     def test_handed_by_current_name_still_attributes(self):
         # #564 regression: the current numbered name attributes to itself.
         self.assertEqual(
-            cs._origin_reduced_stream(["handed-by:montalu1"]), "montalu1")
+            cs._origin_reduced_stream(["handed-by:david1"]), "david1")
 
     def test_handed_by_non_renamed_stream_is_unchanged(self):
         # #564: a stream not involved in any rename attributes to itself exactly
         # as before (equivalents expand to just the name).
         self.assertEqual(
-            cs._origin_reduced_stream(["handed-by:montalu2"]), "montalu2")
+            cs._origin_reduced_stream(["handed-by:david2"]), "david2")
 
 
 # --------------------------------------------------------------------------- #
@@ -145,11 +145,11 @@ class JobBehaviour(unittest.TestCase):
     def test_no_line_request_is_bounced(self):
         rec = _Recorder()
         logs, st = _run(
-            [{"number": 3316, "labels": ["needs-gatekeeper", "handed-by:montalu"],
-              "has_line": False, "origin_stream": "montalu"}], rec)
+            [{"number": 3316, "labels": ["needs-gatekeeper", "handed-by:david"],
+              "has_line": False, "origin_stream": "david"}], rec)
         self.assertEqual(rec.calls,
-                         [("/home/gatekeeper/devel/odoo-erp", 3316, "montalu")])
-        self.assertTrue(any("gk-selfservice-bounce odoo-erp#3316 -> stream:montalu"
+                         [("/home/gatekeeper/devel/odoo-erp", 3316, "david")])
+        self.assertTrue(any("gk-selfservice-bounce odoo-erp#3316 -> stream:david"
                             in ln for ln in logs), logs)
         # dedup recorded
         self.assertIn("odoo-erp#3316", st["gk_selfservice_bounce"]["seen"])
@@ -157,8 +157,8 @@ class JobBehaviour(unittest.TestCase):
     def test_request_with_line_is_not_bounced(self):
         rec = _Recorder()
         logs, _ = _run(
-            [{"number": 7, "labels": ["needs-gatekeeper", "handed-by:montalu"],
-              "has_line": True, "origin_stream": "montalu"}], rec)
+            [{"number": 7, "labels": ["needs-gatekeeper", "handed-by:david"],
+              "has_line": True, "origin_stream": "david"}], rec)
         self.assertEqual(rec.calls, [])
         self.assertTrue(any("gk-selfservice-skip odoo-erp#7 (has-self-service-line)"
                             in ln for ln in logs), logs)
@@ -175,17 +175,17 @@ class JobBehaviour(unittest.TestCase):
     def test_already_bounced_is_not_bounced(self):
         rec = _Recorder()
         logs, _ = _run(
-            [{"number": 5, "labels": ["needs-gatekeeper", "handed-by:montalu",
+            [{"number": 5, "labels": ["needs-gatekeeper", "handed-by:david",
                                       "prio:bounce"],
-              "has_line": False, "origin_stream": "montalu"}], rec)
+              "has_line": False, "origin_stream": "david"}], rec)
         self.assertEqual(rec.calls, [])
         self.assertTrue(any("already-bounced" in ln for ln in logs), logs)
 
     def test_dedup_does_not_re_bounce_a_seen_ticket(self):
         rec = _Recorder()
         logs, _ = _run(
-            [{"number": 3316, "labels": ["needs-gatekeeper", "handed-by:montalu"],
-              "has_line": False, "origin_stream": "montalu"}], rec,
+            [{"number": 3316, "labels": ["needs-gatekeeper", "handed-by:david"],
+              "has_line": False, "origin_stream": "david"}], rec,
             seen={"odoo-erp#3316": 1})
         self.assertEqual(rec.calls, [])
         self.assertTrue(any("gk-selfservice-already odoo-erp#3316" in ln
@@ -193,28 +193,28 @@ class JobBehaviour(unittest.TestCase):
 
     def test_reduced_stream_box_never_bounces(self):
         # a requester (reduced-stream) home is skipped entirely. #537: the
-        # montalu box now runs as montalu1 (/home/montalu1), which _bounce_quals
+        # david box now runs as david1 (/home/david1), which _bounce_quals
         # / _gkreq_supervisor_root recognise as a reduced stream via its home.
         rec = _Recorder()
         logs, _ = _run(
-            [{"number": 3316, "labels": ["needs-gatekeeper", "handed-by:montalu1"],
-              "has_line": False, "origin_stream": "montalu1"}], rec,
-            roots={"/home/montalu1/devel/odoo-erp": "odoo-erp"})
+            [{"number": 3316, "labels": ["needs-gatekeeper", "handed-by:david1"],
+              "has_line": False, "origin_stream": "david1"}], rec,
+            roots={"/home/david1/devel/odoo-erp": "odoo-erp"})
         self.assertEqual(rec.calls, [])
 
     def test_non_cross_stream_repo_never_bounces(self):
         rec = _Recorder()
         logs, _ = _run(
-            [{"number": 1, "labels": ["needs-gatekeeper", "handed-by:montalu"],
-              "has_line": False, "origin_stream": "montalu"}], rec,
+            [{"number": 1, "labels": ["needs-gatekeeper", "handed-by:david"],
+              "has_line": False, "origin_stream": "david"}], rec,
             roots={"/home/gatekeeper/devel/some-other-repo": "some-other-repo"})
         self.assertEqual(rec.calls, [])
 
     def test_apply_failure_undoes_dedup_for_retry(self):
         rec = _Recorder(ok=False)
         logs, st = _run(
-            [{"number": 3316, "labels": ["needs-gatekeeper", "handed-by:montalu"],
-              "has_line": False, "origin_stream": "montalu"}], rec)
+            [{"number": 3316, "labels": ["needs-gatekeeper", "handed-by:david"],
+              "has_line": False, "origin_stream": "david"}], rec)
         self.assertEqual(len(rec.calls), 1)                 # it TRIED to bounce
         self.assertNotIn("odoo-erp#3316", st["gk_selfservice_bounce"]["seen"])
         self.assertTrue(any("gk-selfservice-bounce-failed" in ln for ln in logs),
@@ -229,8 +229,8 @@ class JobBehaviour(unittest.TestCase):
         rec = _Recorder()
         st = {"gk_selfservice_bounce": {"last_check": 10 ** 9 - 5, "seen": {}}}
         logs, _ = _run(
-            [{"number": 3316, "labels": ["needs-gatekeeper", "handed-by:montalu"],
-              "has_line": False, "origin_stream": "montalu"}], rec,
+            [{"number": 3316, "labels": ["needs-gatekeeper", "handed-by:david"],
+              "has_line": False, "origin_stream": "david"}], rec,
             state=st, now=10 ** 9)          # only 5s since last check < 1800
         self.assertEqual(rec.calls, [])
         self.assertEqual(logs, [])
@@ -239,8 +239,8 @@ class JobBehaviour(unittest.TestCase):
         # #516 review F1: a diagnostic --dry-run must NOT persist the one-shot
         # `seen` latch, else the next real timer sweep skips the ticket forever.
         cand = [{"number": 3316,
-                 "labels": ["needs-gatekeeper", "handed-by:montalu"],
-                 "has_line": False, "origin_stream": "montalu"}]
+                 "labels": ["needs-gatekeeper", "handed-by:david"],
+                 "has_line": False, "origin_stream": "david"}]
         st = {}
         rec_dry = _Recorder()
         _run(cand, rec_dry, state=st, now=10 ** 9, dry_run=True)
@@ -252,7 +252,7 @@ class JobBehaviour(unittest.TestCase):
         rec_real = _Recorder()
         logs, st = _run(cand, rec_real, state=st, now=10 ** 9 + 2000)
         self.assertEqual(rec_real.calls,
-                         [("/home/gatekeeper/devel/odoo-erp", 3316, "montalu")])
+                         [("/home/gatekeeper/devel/odoo-erp", 3316, "david")])
 
 
 
@@ -282,17 +282,17 @@ class ApplyBounce(unittest.TestCase):
         with mock.patch.object(cs, "_gh_env", lambda *a, **k: {}), \
              mock.patch("subprocess.run", run):
             ok = cs._apply_selfservice_bounce(
-                "/repo", 3316, "montalu", home=None, dry_run=False)
+                "/repo", 3316, "david", home=None, dry_run=False)
         self.assertTrue(ok)
         # comment first, carrying the template (with the stream filled in)
         self.assertIn("comment", calls[0])
         body = calls[0][calls[0].index("--body") + 1]
-        self.assertIn("REFRESH-DEV-BOX-FROM-PROD: montalu", body)
+        self.assertIn("REFRESH-DEV-BOX-FROM-PROD: david", body)
         self.assertIn("Self-service-checked", body)
-        # the label ops: add prio:bounce, add stream:montalu, remove needs-gatekeeper
+        # the label ops: add prio:bounce, add stream:david, remove needs-gatekeeper
         joined = [" ".join(c) for c in calls]
         self.assertTrue(any("--add-label prio:bounce" in j for j in joined), joined)
-        self.assertTrue(any("--add-label stream:montalu" in j for j in joined),
+        self.assertTrue(any("--add-label stream:david" in j for j in joined),
                         joined)
         self.assertTrue(
             any("--remove-label needs-gatekeeper" in j for j in joined), joined)
@@ -305,7 +305,7 @@ class ApplyBounce(unittest.TestCase):
         with mock.patch.object(cs, "_gh_env", lambda *a, **k: {}), \
              mock.patch("subprocess.run", run):
             ok = cs._apply_selfservice_bounce(
-                "/repo", 3316, "montalu", home=None, dry_run=False)
+                "/repo", 3316, "david", home=None, dry_run=False)
         self.assertFalse(ok)
         self.assertEqual(len(calls), 1)          # only the failed comment attempt
 
@@ -313,7 +313,7 @@ class ApplyBounce(unittest.TestCase):
         run, calls = self._fake_run()
         with mock.patch("subprocess.run", run):
             ok = cs._apply_selfservice_bounce(
-                "/repo", 3316, "montalu", home=None, dry_run=True)
+                "/repo", 3316, "david", home=None, dry_run=True)
         self.assertTrue(ok)
         self.assertEqual(calls, [])
 
@@ -351,11 +351,11 @@ class RealFetch(unittest.TestCase):
     def test_parses_labels_body_and_line_in_a_COMMENT(self):
         # has_line must be True when the Self-service-checked line is in a
         # COMMENT (not the body) — the --issue-mode gk-request shape.
-        # #537: montalu renamed to montalu1, so a current handed-by carries the
+        # #537: david renamed to david1, so a current handed-by carries the
         # numbered name (_origin_reduced_stream reads it from _REDUCED_STREAM_USERS).
         view = {"3316": {"number": 3316,
                          "labels": [{"name": "needs-gatekeeper"},
-                                    {"name": "handed-by:montalu1"}],
+                                    {"name": "handed-by:david1"}],
                          "body": "Zaseknutá fronta.",
                          "comments": [{"body": "GATEKEEPER-ACTION: reštart. "
                                        "Self-service-checked: čítal som z PROD "
@@ -366,7 +366,7 @@ class RealFetch(unittest.TestCase):
             out = cs._fetch_gk_action_requests("/repo")
         self.assertEqual(len(out), 1)
         self.assertTrue(out[0]["has_line"])
-        self.assertEqual(out[0]["origin_stream"], "montalu1")
+        self.assertEqual(out[0]["origin_stream"], "david1")
 
     def test_no_line_anywhere_is_has_line_false(self):
         view = {"5": {"number": 5,
@@ -384,7 +384,7 @@ class RealFetch(unittest.TestCase):
     def test_gatekeeper_action_title_filter_excludes_mere_mention(self):
         # the in:title fallback client-side keeps ONLY titles that literally
         # START with GATEKEEPER-ACTION: (GitHub search tokenizes, #1768).
-        view = {"9": {"number": 9, "labels": [{"name": "handed-by:montalu"}],
+        view = {"9": {"number": 9, "labels": [{"name": "handed-by:david"}],
                       "body": "x", "comments": []}}
         ga = [{"number": 9, "title": "GATEKEEPER-ACTION: do X"},
               {"number": 99, "title": "a gatekeeper action runner note"}]

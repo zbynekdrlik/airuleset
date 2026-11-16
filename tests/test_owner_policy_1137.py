@@ -99,7 +99,7 @@ class ZbynekPolicy(_Home):
         self.assertEqual(self.posts, [])
 
     def test_persona_routing_into_zbynek_is_suppressed(self):
-        self.assertEqual(notify.send("hotovo", owner="montalu1",
+        self.assertEqual(notify.send("hotovo", owner="miva1",
                                      dedup_key="gkstale:x:1"), "suppressed")
 
     def test_suppressed_marker_counts_as_delivered(self):

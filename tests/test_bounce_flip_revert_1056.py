@@ -168,7 +168,7 @@ class JobBehaviour(unittest.TestCase):
     def test_reduced_stream_box_never_reconciles(self):
         # a requester (sub-dev) box must not run the automat.
         logs, _, rec, _ = _run(
-            [_facts()], roots={"/home/montalu1/devel/odoo-erp": "odoo-erp"})
+            [_facts()], roots={"/home/miva1/devel/odoo-erp": "odoo-erp"})
         self.assertEqual(rec.calls, [])
 
     def test_label_failed_pings_with_a_dedicated_template(self):

@@ -413,11 +413,8 @@ def check_target(user, host, tokens, label):
     # #869: derive the allow-list from the conf (or hardcoded fallback)
     if user not in _SUBDEV_ACCOUNTS:
         return "%s as unauthorized user '%s'@subdev" % (label, user)
-    key_req = _SUBDEV_ACCOUNTS[user]
-    if key_req == "default":
-        # a default-key account — no identity requirement (none since #1306)
-        return None
-    # Requires the gatekeeper key (marek/david1-4/dominika/simap1/miva1)
+    # Every subdev account requires the gatekeeper key (marek/david1-4/
+    # dominika/simap1/miva1); the default-key montalu family left with #1306.
     if has_gatekeeper_key(tokens):
         return None
     return ("%s as %s@subdev without -i .../%s"

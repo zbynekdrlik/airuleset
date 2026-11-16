@@ -544,12 +544,12 @@ class TestStreamLabelAcceptanceClose(TestCase):
 
     # #564 rename-equivalents — verified IN-PROCESS since airuleset#839.
     #
-    # These two used to run the hook as unix user montalu1 via LOGNAME/USER so
+    # These two used to run the hook as unix user david1 via LOGNAME/USER so
     # `authority --stream-label` (a `python3 airuleset.py …` subprocess) resolved
-    # `montalu1`. #839 hardened `_current_user()` to the UNSPOOFABLE
+    # `david1`. #839 hardened `_current_user()` to the UNSPOOFABLE
     # `pwd.getpwuid(os.getuid()).pw_name`, so the env no longer sets a subprocess
-    # identity — the montalu1-box round-trip is only exercisable on a real
-    # montalu1 uid. The hook's ownership decision is `ticket-label ∈ the set
+    # identity — the david1-box round-trip is only exercisable on a real
+    # david1 uid. The hook's ownership decision is `ticket-label ∈ the set
     # `authority --stream-label` emits`, so we assert that SET (the exact thing
     # the hook matches against) IN-PROCESS with the identity patched — mirroring
     # test_authority_profiles.py::test_cli_stream_label_emits_rename_equivalents.
@@ -566,17 +566,17 @@ class TestStreamLabelAcceptanceClose(TestCase):
         return [str(c.args[0]) for c in p.call_args_list if c.args]
 
     def test_ownership_set_includes_legacy_prerename_stream_label(self):
-        # #564: a montalu1 box's ownership set MUST include the OLD `stream:montalu`
+        # #564: a david1 box's ownership set MUST include the OLD `stream:david`
         # label (transition tickets still carry it), so the hook allows their
-        # acceptance-close. RED before #564 (only `stream:montalu1` emitted).
-        labels = self._stream_label_set("montalu1")
-        self.assertIn("stream:montalu", labels, labels)
+        # acceptance-close. RED before #564 (only `stream:david1` emitted).
+        labels = self._stream_label_set("david1")
+        self.assertIn("stream:david", labels, labels)
 
     def test_ownership_set_includes_current_name_label_after_rename(self):
         # #564 regression lock: emitting MULTIPLE equivalents must not drop the
-        # exact CURRENT-name label — `stream:montalu1` stays in the set.
-        labels = self._stream_label_set("montalu1")
-        self.assertIn("stream:montalu1", labels, labels)
+        # exact CURRENT-name label — `stream:david1` stays in the set.
+        labels = self._stream_label_set("david1")
+        self.assertIn("stream:david1", labels, labels)
 
     def test_blocks_acceptance_close_with_foreign_stream_label(self):
         # #564 fail-safe: a reduced box must NOT get the carve-out for a DIFFERENT

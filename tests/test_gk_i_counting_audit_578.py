@@ -111,7 +111,7 @@ class ForeignAcceptanceRoute(unittest.TestCase):
 
     def test_bare_needs_acceptance_no_draft_routes_to_user_waiting_U(self):
         rows = {4007: {"number": 4007,
-                       "labels": _labels("needs-acceptance", "stream:montalu3")}}
+                       "labels": _labels("needs-acceptance", "stream:miva1")}}
         # #622: a bare needs-acceptance → U unconditionally (pure label partition,
         # no acceptance_present routing param). RE-PINNED by #1141 slice 2
         # (owner ruling in the #1141 design comment: "on the full-authority

@@ -4107,24 +4107,10 @@ class TestStreamNotifyOwnerRouting(TestCase):
 
     def test_stream_users_route_to_the_expected_owner(self):
         self.assertEqual(self.notify.STREAM_NOTIFY_OWNER["simap1"], "zbynek")
-        # montalu1 (renamed from montalu, #537 live 2026-08-19) — same
-        # zbynek routing as the base; the bare `montalu` key is gone.
-        self.assertEqual(self.notify.STREAM_NOTIFY_OWNER["montalu1"], "zbynek")
-        self.assertNotIn("montalu", self.notify.STREAM_NOTIFY_OWNER)
-        self.assertEqual(self.notify.STREAM_NOTIFY_OWNER["montalu2"], "zbynek")
-        self.assertEqual(self.notify.STREAM_NOTIFY_OWNER["montalu3"], "zbynek")
-        # montalu4 was marek's stream (airuleset#295); #882 decommissioned
-        # marek and re-routed montalu4 to zbynek.
-        self.assertEqual(self.notify.STREAM_NOTIFY_OWNER["montalu4"], "zbynek")
-        # montalu5/6/7/8: owner routing decision 2026-08-19 (airuleset#572)
-        # REVERSED the 2026-08-11 #378 decision that montalu5 was Marek's --
-        # montalu5 now routes to zbynek (-> claude-zbynek), same as 6/7/8.
-        # The invariant is inverted here (not deleted) because the ROUTING
-        # OWNER genuinely changed by owner directive, per regression-test-first.
-        self.assertEqual(self.notify.STREAM_NOTIFY_OWNER["montalu5"], "zbynek")
-        self.assertEqual(self.notify.STREAM_NOTIFY_OWNER["montalu6"], "zbynek")
-        self.assertEqual(self.notify.STREAM_NOTIFY_OWNER["montalu7"], "zbynek")
-        self.assertEqual(self.notify.STREAM_NOTIFY_OWNER["montalu8"], "zbynek")
+        # #1306: the montalu accounts were deleted (owner 16.11.2026) — no
+        # routing row may survive for montalu or montalu1..8.
+        for who in ["montalu"] + ["montalu%d" % i for i in range(1, 9)]:
+            self.assertNotIn(who, self.notify.STREAM_NOTIFY_OWNER)
         # david1 (renamed from david, #537 live rename 2026-08-21) — same
         # routing to the `david` owner/thread as the base; the bare `david`
         # unix-account KEY is GONE (the OS account no longer exists). `david`
@@ -4180,16 +4166,14 @@ class TestStreamNotifyOwnerRouting(TestCase):
                     m.patch.object(self.notify, "_current_user", return_value=who):
                 self.assertEqual(self.notify.resolve_owner(), "david", who)
 
-    def test_montalu5_8_resolve_per_the_owner_routing_decision(self):
-        # airuleset#572 (2026-08-19) REVERSED #378: montalu5 -> zbynek (no
-        # longer Marek's stream), montalu6/7/8 -> zbynek. Resolved directly
-        # inside resolve_owner() with no TMUX and no env override, exactly
-        # like the other stream personas above.
-        for who, owner in (("montalu5", "zbynek"), ("montalu6", "zbynek"),
-                           ("montalu7", "zbynek"), ("montalu8", "zbynek")):
+    def test_deleted_montalu_accounts_no_longer_resolve(self):
+        # #1306 (inverted from the #572 montalu5-8 routing lock): the
+        # accounts are deleted, so with no TMUX and no env override they
+        # resolve to "" like any unmapped user, never to zbynek.
+        for who in ["montalu%d" % i for i in range(1, 9)]:
             with m.patch.dict(os.environ, {}, clear=True), \
                     m.patch.object(self.notify, "_current_user", return_value=who):
-                self.assertEqual(self.notify.resolve_owner(), owner, who)
+                self.assertEqual(self.notify.resolve_owner(), "", who)
 
     def test_forestshop_dev_accounts_resolve_to_zbynek(self):
         # airuleset#572: the forestshop-dev box's two linux accounts (admin,
@@ -4251,13 +4235,8 @@ class TestStreamNotifyOwnerRouting(TestCase):
     # resolving SOMEONE/SOMETHING ELSE's raw owner string (watchdog.pane_owner()
     # has no _current_user()/env context of its own to resolve against). ---
     def test_stream_redirect_maps_known_stream_personas(self):
-        # montalu1 (renamed from montalu, #537) redirects to zbynek like the
-        # base did; a bare `montalu` no longer maps (returns itself).
-        self.assertEqual(self.notify.stream_redirect("montalu1"), "zbynek")
-        self.assertEqual(self.notify.stream_redirect("montalu2"), "zbynek")
-        self.assertEqual(self.notify.stream_redirect("montalu3"), "zbynek")
-        # montalu4 → zbynek (#882: marek decommissioned, montalu4 re-routed)
-        self.assertEqual(self.notify.stream_redirect("montalu4"), "zbynek")
+        # #1306: the deleted montalu accounts no longer map (pass through).
+        self.assertEqual(self.notify.stream_redirect("montalu1"), "montalu1")
         self.assertEqual(self.notify.stream_redirect("simap1"), "zbynek")
         self.assertEqual(self.notify.stream_redirect("miva1"), "zbynek")
         # david1 (renamed from david, #537) redirects to the `david` owner
@@ -11394,9 +11373,9 @@ class TestApiWatchdog(TestCase):
         # usage alert never got redirected to the real person's thread,
         # unlike every other notification on that box.
         now = 1_000_000
-        cwd = "/devel/montalutest"
+        cwd = "/devel/mivatest"
         self._transcript(cwd, [self._OK], 5, now)
-        fake = _FakeTmux(panes="%0\tclaude\t" + cwd + "\n", owners={"%0": "montalu1"})
+        fake = _FakeTmux(panes="%0\tclaude\t" + cwd + "\n", owners={"%0": "miva1"})
         logs = self.w.run_once(now=now, run=fake, send_fn=self._send,
                                projects_dir=self.projects, state_path=self.state,
                                usage_fetch=lambda: self._wk(99, "RWSTREAM"))
@@ -11681,13 +11660,9 @@ class TestRemoteHosts(TestCase):
     def test_all_expected_targets_present_once(self):
         names = [r["name"] for r in airuleset.REMOTE_HOSTS]
         self.assertEqual(len(names), len(set(names)), "duplicate target name")
-        for expected in ("dev2", "gatekeeper", "montalu1@subdev",
-                         "david1@subdev", "simap1@subdev",
-                         "montalu2@subdev", "montalu3@subdev",
-                         "montalu4@subdev", "miva1@subdev",
+        for expected in ("dev2", "gatekeeper",
+                         "david1@subdev", "simap1@subdev", "miva1@subdev",
                          "david2@subdev", "david3@subdev", "david4@subdev",
-                         "montalu5@subdev", "montalu6@subdev",
-                         "montalu7@subdev", "montalu8@subdev",
                          "admin@forestshop-dev", "stepan@forestshop-dev",
                          "spinbike-vps"):
             self.assertIn(expected, names)
@@ -11696,11 +11671,11 @@ class TestRemoteHosts(TestCase):
                          "2026-08-21) — the old OS account is gone, so its "
                          "target must NOT be here (a push would fail + risk "
                          "fail2ban)")
-        self.assertNotIn("montalu@subdev", names,
-                         "montalu was RENAMED to montalu1 (#537 live rename, "
-                         "2026-08-19) — the old OS account is gone, so its "
-                         "target must NOT be here (a push would fail + risk "
-                         "fail2ban)")
+        for gone in ["montalu@subdev"] + ["montalu%d@subdev" % i
+                                          for i in range(1, 9)]:
+            self.assertNotIn(gone, names, "#537 renamed / #1306 deleted "
+                             "montalu account — a push would fail + risk "
+                             "fail2ban")
         self.assertNotIn("montalu@dev1", names,
                          "montalu migrated to subdev (airuleset#33, "
                          "odoo-erp#1895) — the dev1 account is "
@@ -11798,45 +11773,18 @@ class TestRemoteHosts(TestCase):
         self.assertNotIn("newlevel", airuleset.AUTHORITY_BY_USER)
         self.assertIn("newlevel", airuleset.FULL_AUTHORITY_USERS)
 
-    def test_montalu_subdev_target_shape(self):
-        # montalu1 (was montalu; #537 live rename 2026-08-19, in-place usermod
-        # on subdev: uid 1002 kept, home /home/montalu1, group renamed, linger
-        # re-enabled, ssh with the montalu-family DEFAULT key verified). The
-        # OLD montalu@subdev entry must be GONE (the OS account no longer
-        # exists — pushing to it would fail + risk a fail2ban strike on the
-        # default-key path); montalu1 is LIVE (no pending) and reachable with
-        # the DEFAULT newlevel key — unlike marek/david/simap1, the
-        # gatekeeper_access identity is NOT authorized for the montalu family.
-        names = [r["name"] for r in airuleset.REMOTE_HOSTS]
-        self.assertNotIn("montalu@subdev", names,
-                         "the renamed-away montalu account must not be a target")
-        entries = [r for r in airuleset.REMOTE_HOSTS
-                   if r["name"] == "montalu1@subdev"]
-        self.assertEqual(len(entries), 1, "montalu1@subdev target missing")
-        m = entries[0]
-        self.assertEqual(m["host"], "100.118.174.27")
-        self.assertEqual(m["user"], "montalu1")
-        self.assertNotIn("pending", m, "montalu1 is LIVE since the #537 rename")
-        self.assertNotIn("identity", m,
-                         "montalu1 authorizes the DEFAULT newlevel key, not "
-                         "gatekeeper_access (unlike marek/david/simap1) — "
-                         "live-verified at the rename")
-
-    def test_montalu_family_subdev_target_shape(self):
-        # airuleset#251: montalu2/3/4 are three MORE full parallel montalu
-        # streams ("zhodné s dnešným montalu") — accounts created by
-        # gatekeeper (odoo-erp#2961 Phase 1), same subdev box, SAME
-        # default-key shape as montalu (never gatekeeper_access).
-        for user in ("montalu2", "montalu3", "montalu4"):
-            name = "%s@subdev" % user
-            entries = [r for r in airuleset.REMOTE_HOSTS if r["name"] == name]
-            self.assertEqual(len(entries), 1, "%s target missing" % name)
-            e = entries[0]
-            self.assertEqual(e["host"], "100.118.174.27")
-            self.assertEqual(e["user"], user)
-            self.assertNotIn("identity", e,
-                             "%s authorizes the DEFAULT newlevel key, "
-                             "same as montalu" % user)
+    def test_every_subdev_account_pins_the_gatekeeper_identity(self):
+        # #1306 (replaces the montalu1..8 default-key shape locks): the
+        # montalu family was the ONLY default-key subdev shape; with it
+        # deleted, every subdev target must pin gatekeeper_access, so no
+        # default-key push can land a fail2ban strike.
+        subdev = [r for r in airuleset.REMOTE_HOSTS
+                  if r["host"] == "100.118.174.27"]
+        self.assertTrue(subdev)
+        for r in subdev:
+            self.assertFalse(r["user"].startswith("montalu"), r["name"])
+            self.assertEqual(r.get("identity"),
+                             "~/.secrets/gatekeeper_access_ed25519", r["name"])
 
     def test_simap_subdev_target_shape(self):
         # simap1 (was simap, airuleset#143; renamed in-place #537, live
@@ -11889,22 +11837,6 @@ class TestRemoteHosts(TestCase):
             self.assertEqual(e["user"], user)
             self.assertEqual(e.get("identity"),
                              "~/.secrets/gatekeeper_access_ed25519")
-
-    def test_montalu5_8_subdev_target_shape(self):
-        # montalu5/6/7/8 (airuleset#378, odoo-erp#3642): four MORE full
-        # parallel montalu streams, same shape as montalu2/3/4 (airuleset#251)
-        # -- accounts created by gatekeeper on the SAME subdev box, SAME
-        # default-key shape as montalu (never gatekeeper_access).
-        for user in ("montalu5", "montalu6", "montalu7", "montalu8"):
-            name = "%s@subdev" % user
-            entries = [r for r in airuleset.REMOTE_HOSTS if r["name"] == name]
-            self.assertEqual(len(entries), 1, "%s target missing" % name)
-            e = entries[0]
-            self.assertEqual(e["host"], "100.118.174.27")
-            self.assertEqual(e["user"], user)
-            self.assertNotIn("identity", e,
-                             "%s authorizes the DEFAULT newlevel key, "
-                             "same as montalu" % user)
 
     def test_subdev_users_share_one_host_and_identity(self):
         entries = self._subdev_entries()
@@ -14567,7 +14499,7 @@ class TestBlockSubdevSshMisuseHook(TestCase):
     implying the shell user). The prose dev-rule did not stop a SECOND
     occurrence the same day — this is the mechanical backstop. ALLOW-list
     mirrors airuleset.py's REMOTE_HOSTS exactly: montalu1@subdev (no identity
-    requirement), marek/david@subdev ONLY with the gatekeeper_access_ed25519
+    requirement until #1306 deleted it), marek/david@subdev ONLY with the gatekeeper_access_ed25519
     identity. Everything else — wrong/missing user, marek/david without the
     key — is blocked. A non-subdev target (dev2, gatekeeper) is untouched."""
 
@@ -14700,13 +14632,18 @@ class TestBlockSubdevSshMisuseHook(TestCase):
 
     # --- allowed shapes --------------------------------------------------
 
-    def test_allows_montalu1_default_key(self):
-        # montalu renamed to montalu1 (#537 live rename 2026-08-19) — the hook
-        # allow-list follows the OS account. montalu1 is a DEFAULT-key family
-        # member (never gatekeeper_access), so a bare `ssh montalu1@subdev`
-        # with no -i flag is allowed.
-        r = self._run('ssh montalu1@subdev "ls"')
-        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+    def test_blocks_deleted_montalu_family(self):
+        # #1306 (inverted from the montalu1..8 default-key ALLOW locks): the
+        # accounts are deleted, so ssh/sshpass/scp to any of them is now an
+        # unauthorized user, with or without the gatekeeper key.
+        for user in ["montalu%d" % i for i in range(1, 9)]:
+            for cmd in ('ssh %s@subdev "ls"',
+                        'ssh -i ~/.secrets/gatekeeper_access_ed25519 %s@subdev "ls"',
+                        'sshpass -f "$PWFILE" ssh %s@subdev "ls"',
+                        "scp file.txt %s@subdev:/tmp/"):
+                r = self._run(cmd % user)
+                self.assertEqual(r.returncode, 2, cmd % user)
+                self.assertIn("unauthorized user '%s'@subdev" % user, r.stderr)
 
     def test_blocks_renamed_away_montalu(self):
         # #537: the bare `montalu` account no longer exists (renamed to
@@ -14720,21 +14657,6 @@ class TestBlockSubdevSshMisuseHook(TestCase):
         # assertIn("montalu") would pass for any blocked user).
         self.assertIn("unauthorized user 'montalu'@subdev", r.stderr)
 
-    def test_allows_montalu_family_default_key(self):
-        # airuleset#251: montalu2/3/4 share montalu's own no-identity-
-        # required shape (three more full parallel montalu streams).
-        for user in ("montalu2", "montalu3", "montalu4"):
-            r = self._run('ssh %s@subdev "ls"' % user)
-            self.assertEqual(r.returncode, 0, user + " " + r.stdout + r.stderr)
-
-    def test_allows_montalu5_8_default_key(self):
-        # airuleset#378, odoo-erp#3642: montalu5/6/7/8 share montalu's own
-        # no-identity-required shape (four MORE full parallel montalu
-        # streams).
-        for user in ("montalu5", "montalu6", "montalu7", "montalu8"):
-            r = self._run('ssh %s@subdev "ls"' % user)
-            self.assertEqual(r.returncode, 0, user + " " + r.stdout + r.stderr)
-
     def test_blocks_unknown_montalu9_at_subdev(self):
         # #378/#537: widening the montalu[12345678] allow-list must NOT widen
         # it into an open-ended prefix match -- an unregistered sibling
@@ -14744,13 +14666,6 @@ class TestBlockSubdevSshMisuseHook(TestCase):
         self.assertEqual(r.returncode, 2, r.stdout)
         self.assertIn("unauthorized user", r.stderr)
         self.assertIn("montalu9", r.stderr)
-
-    def test_allows_montalu1_via_sshpass(self):
-        # montalu1 (renamed from montalu, #537) shares the default-key family's
-        # sshpass path — no identity required.
-        r = self._run(
-            'sshpass -f "$PWFILE" ssh -o StrictHostKeyChecking=no montalu1@subdev "ls"')
-        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
     def test_allows_marek_with_gatekeeper_identity_882(self):
         # #882 scope correction: marek@subdev restored (observer lane).
@@ -14786,11 +14701,6 @@ class TestBlockSubdevSshMisuseHook(TestCase):
     def test_allows_fused_identity_flag(self):
         # david1 (renamed from david, #537) with the fused `-i~/...` flag form.
         r = self._run('ssh -i~/.secrets/gatekeeper_access_ed25519 david1@subdev "ls"')
-        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-
-    def test_allows_scp_montalu1(self):
-        # montalu1 (renamed from montalu, #537) — scp to the default-key family.
-        r = self._run("scp file.txt montalu1@subdev:/tmp/")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
     def test_allows_rsync_marek_882(self):

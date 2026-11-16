@@ -253,7 +253,7 @@ class TestSearchIndexCrossCheckAssertsNonEmpty(TestCase):
             with mk.patch.object(airuleset, "_gh_login",
                                  return_value="zbynekdrlik"):
                 with mk.patch.object(airuleset, "_current_user",
-                                     return_value="montalu1"):
+                                     return_value="miva1"):
                     with mk.patch.object(airuleset, "_gh_out", side_effect=gh):
                         with contextlib.redirect_stdout(buf):
                             try:
@@ -269,7 +269,7 @@ class TestSearchIndexCrossCheckAssertsNonEmpty(TestCase):
         def gh(*a, **k):
             args = [str(x) for x in a]
             if args and args[0] == "label":
-                return '[{"name": "stream:montalu"}]'
+                return '[{"name": "stream:miva1"}]'
             if "--search" in args:
                 return "[]"          # search sees nothing, anywhere
             return '[{"number": 4242}]'   # the REST listing path does
@@ -284,7 +284,7 @@ class TestSearchIndexCrossCheckAssertsNonEmpty(TestCase):
             args = [str(x) for x in a]
             j = " ".join(args)
             if args and args[0] == "label":
-                return '[{"name": "stream:montalu"}]'
+                return '[{"name": "stream:miva1"}]'
             if "sort:created-desc" in j:
                 return '[{"number": 4242}]'   # search demonstrably answers
             return "[]"
@@ -299,7 +299,7 @@ class TestSearchIndexCrossCheckAssertsNonEmpty(TestCase):
         def gh(*a, **k):
             args = [str(x) for x in a]
             if args and args[0] == "label":
-                return '[{"name": "stream:montalu"}]'
+                return '[{"name": "stream:miva1"}]'
             return "[]"
 
         out, exc = self._run(gh)
@@ -311,7 +311,7 @@ class TestSearchIndexCrossCheckAssertsNonEmpty(TestCase):
             args = [str(x) for x in a]
             j = " ".join(args)
             if args and args[0] == "label":
-                return '[{"name": "stream:montalu"}]'
+                return '[{"name": "stream:miva1"}]'
             if "sort:created-desc" in j:
                 return ""            # gh error on the probe itself
             return "[]"
@@ -568,16 +568,16 @@ class TestTheSelectionSourceCarriesTheOwnershipDiscriminator(TestCase):
         def gh(*a, **k):
             args = [str(x) for x in a]
             if args and args[0] == "label":
-                return '[{"name": "stream:montalu"}]'
+                return '[{"name": "stream:miva1"}]'
             if "--search" in args:
                 return _json.dumps([
                     {"number": 7, "title": "mine",
                      "createdAt": "2026-07-01T00:00:00Z",
-                     "labels": [{"name": "stream:montalu"}]}])
+                     "labels": [{"name": "stream:miva1"}]}])
             return "[]"
 
         out, _, exc = _drive(airuleset.cmd_slice_quals, gh,
-                             authority="branch-merge", user="montalu1",
+                             authority="branch-merge", user="miva1",
                              login="zbynekdrlik", count=False, list=True)
         self.assertIsNone(exc)
         row = [ln for ln in out.splitlines() if ln.startswith("7\t")]

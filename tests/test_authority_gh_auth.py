@@ -364,7 +364,7 @@ class TestCIRunnerAuth839(TestCase):
     def test_stream_with_hosted_env_cannot_reach_full(self):
         # constraint 5: a stream pw_name + the full hosted-runner env STILL
         # resolves its reduced profile -- the branch requires pw_name=="runner".
-        with m.patch.object(airuleset, "_current_user", return_value="montalu1"):
+        with m.patch.object(airuleset, "_current_user", return_value="miva1"):
             with m.patch.dict(os.environ, self._HOSTED):
                 self.assertEqual(airuleset.resolve_authority(), "branch-merge")
 
@@ -495,10 +495,10 @@ class TestCIRunnerAuth839(TestCase):
     def test_skill_names_for_user_ignores_env_spoof(self):
         # #839 Q4: skill_names_for_user must resolve identity via the hardened
         # _current_user() (uid-based), NOT raw getpass.getuser(). A stream
-        # (montalu1) setting USER=newlevel must NOT get the full-authority-only
+        # (miva1) setting USER=newlevel must NOT get the full-authority-only
         # skills. RED on the direct getpass.getuser() call.
         import cli_deployer_glue
-        with m.patch.object(airuleset, "_current_user", return_value="montalu1"):
+        with m.patch.object(airuleset, "_current_user", return_value="miva1"):
             with m.patch.dict(os.environ, {"USER": "newlevel",
                                            "LOGNAME": "newlevel"}):
                 names = cli_deployer_glue.skill_names_for_user()

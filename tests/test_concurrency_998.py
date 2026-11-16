@@ -75,8 +75,8 @@ class TestFleetWindows(TestCase):
     def test_stream_windows_keep_their_tmux_names(self):
         # The stream boxes keep a role-less declared window that names tmux.
         for u, alias, cwd in (("david3", "d3", "~/devel/odoo/odoo-erp"),
-                              ("montalu4", "m4", "~/devel/odoo/odoo-erp"),
-                              ("montalu1", "m1", "~/devel/odoo/odoo-slovnormal")):
+                              ("miva1", "miva", "~/devel/odoo/odoo-erp"),
+                              ("david1", "d1", "~/devel/odoo/odoo-erp")):
             w = cli_fleet.box_windows(u)
             self.assertEqual([x["name"] for x in w], [alias])
             self.assertEqual(w[0]["cwd"], cwd)
