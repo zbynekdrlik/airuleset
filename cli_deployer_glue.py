@@ -296,6 +296,7 @@ try:
     sys.path.insert(0, "{{REPO_DIR}}")
     try:
         import statusbar
+        import transcript_weight   # #1301 `restart <N>M`
     except ImportError as _ie:
         _shim_log("import-error %s" % _ie)
         raise
@@ -344,6 +345,7 @@ try:
         segs.append(rel)
     # --- session context size: 'ctx 570K' (#37; shortened #223; #928 removed
     # the '~$<cost>' suffix — owner directive 2026-09-07). ---
+    segs += transcript_weight.restart_segments(d)   # #1301: heavy session, owner restarts
     cc_full = statusbar.context_cost_segment(d)
     cc_short = ""   # no short form needed since #928 removed cost
     if cc_full:
