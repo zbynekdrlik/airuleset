@@ -84,8 +84,25 @@ class AskedTicketIsNotOtherWork(unittest.TestCase):
 
     def test_at_most_one_ticket_is_subtracted(self):
         self._cache(2, open_numbers=[7, 8])
-        msg = _block("#7").replace("formáte výstupu", "formáte výstupu (aj #8)")
+        msg = _block("#7").replace("má mať #7?", "majú mať #7 a #8?")
         self.assertTrue(self._decide(msg)[0])
+
+    def test_heading_names_the_ticket_when_the_decision_line_does_not(self):
+        self._cache(1, open_numbers=[7])
+        msg = _block("#7").replace("má mať #7?", "má mať výstup?")
+        self.assertFalse(self._decide(msg)[0])
+
+    def test_other_work_named_in_the_briefing_is_not_the_asked_one(self):
+        # the question is about parked #12; the briefing mentions workable #13.
+        self._cache(1, open_numbers=[13])
+        msg = _block("#12").replace("potrebuje tvoje", "(na to čaká aj #13) potrebuje tvoje")
+        msg = msg.replace("**Otázka — projekt airuleset (správa Claude pravidiel):** Ticket #12 ",
+                          "**Otázka — projekt airuleset (správa Claude pravidiel):** Ticket #12\n")
+        self.assertTrue(self._decide(msg)[0])
+
+    def test_old_cache_with_done_numbers_but_no_open_numbers_blocks(self):
+        self._cache(0, done=1, done_numbers=[7])
+        self.assertTrue(self._decide(_block("#7"))[0])
 
     def test_ref_outside_the_question_block_is_not_the_asked_one(self):
         self._cache(1, open_numbers=[5])
@@ -97,9 +114,10 @@ class AskedTicketIsNotOtherWork(unittest.TestCase):
         self.assertFalse(self._decide("Robím.\n\n❓ NEEDS YOU: schváliš #12?\n\n")[0])
 
     def test_odd_cache_shapes_fail_toward_the_full_count(self):
-        for numbers in ([[1]], ["7"], [None]):
+        for numbers in ([[1]], ["7"], [None], [True]):
             self._cache(1, open_numbers=numbers)
             self.assertTrue(self._decide(_block("#7"))[0], numbers)
+            self.assertTrue(self._decide(_block("#1"))[0], numbers)   # True == 1
 
 
 class FooterRecordsOpenNumbers(unittest.TestCase):

@@ -94,8 +94,10 @@ def _workable(cwd, home, now):
 
 def _asked_in_i(msg, cwd, home):
     """#1342: 1 when the asked ticket is still counted in I + C, else 0. The
-    asked refs are the bare same-repo `#N` of the question block (from the last
-    `**Otázka — projekt` line, else the last non-blank line); one counts when
+    asked refs are the bare same-repo `#N` on the final `❓ NEEDS YOU` line, else
+    on the last `**Otázka — projekt` heading line (never the briefing or the
+    options, which may name other work; a decision line naming two counted
+    tickets still subtracts one, the accepted residual); one counts when
     the cache lists it in `open_numbers` (I, written by
     `cli_ticket_route.record`) or `done_numbers` (C), the exact rows the owed
     count sums. At most one: one question, one decision. A cache without
@@ -110,9 +112,10 @@ def _asked_in_i(msg, cwd, home):
         owed = {n for key in ("open_numbers", "done_numbers")
                 for n in (cache.get(key) or []) if type(n) is int}
         lines = [ln for ln in msg.splitlines() if ln.strip()]
-        heads = [i for i, ln in enumerate(lines) if _QUESTION_HEAD_RE.search(ln)]
-        block = "\n".join(lines[heads[-1]:]) if heads else lines[-1]
-        refs = {int(n) for n in _BARE_REF_RE.findall(block)}
+        heads = [ln for ln in lines if _QUESTION_HEAD_RE.search(ln)]
+        refs = {int(n) for n in _BARE_REF_RE.findall(lines[-1])}
+        if not refs and heads:          # the decision line names none
+            refs = {int(n) for n in _BARE_REF_RE.findall(heads[-1])}
         return 1 if refs & owed else 0
     except Exception as e:  # noqa: BLE001 -- a Stop gate fails toward today's count
         _log(home, "asked-ticket read failed (%s): no subtraction" % type(e).__name__)
