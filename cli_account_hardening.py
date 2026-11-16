@@ -72,6 +72,9 @@ SUDO_DENY_BASENAMES = frozenset({
 })
 
 
+# THE project-account name rule (cli_account_bootstrap validates with it too).
+ACCOUNT_RE = re.compile(r"[a-z_][a-z0-9_-]{1,31}")
+
 LIMITS_DIR = "/etc/security/limits.d"
 UDEV_RULES_DIR = "/etc/udev/rules.d"
 USERNS_DIR = "/usr/local/lib/airuleset/userns"
@@ -386,14 +389,25 @@ def render_host_grants_step(account, spec):
     return device_part + _render_noqueue(account, spec.get("nic_noqueue"))
 
 
+def _noqueue_teardown(path):
+    """The lines that restore the qdisc of the dispatcher at ``path`` (a literal
+    path or a bash expansion such as ``$f``) and remove it. The qdisc stays
+    when another dispatcher still names the same connection (#1338 review)."""
+    return ('  c=$(sed -n \'s/.*CONNECTION_ID" = \\([A-Za-z0-9_-]*\\).*/\\1/p\' "{p}")\n'
+            '  dev=$(nmcli -g GENERAL.DEVICES connection show "$c" 2>/dev/null || true)\n'
+            '  for o in "{nm}"/90-*-noqueue; do\n'
+            '    if [ "$o" != "{p}" ] && [ -f "$o" ] && grep -qF "\\"\\$CONNECTION_ID\\" = $c ]" "$o"; then\n'
+            '      dev=""; echo "  noqueue: $c stays, $o still wants it"\n'
+            '    fi\n'
+            '  done\n'
+            '  if [ -n "$dev" ]; then tc qdisc del dev "$dev" root || true; fi\n'
+            '  rm -f "{p}"\n').format(p=path, nm=NM_DISPATCHER_DIR)
+
+
 def _render_noqueue(account, conn):
     path = "%s/90-%s-noqueue" % (NM_DISPATCHER_DIR, account)
     if conn is None:
-        return ('if [ -f "{p}" ]; then\n'
-                '  c=$(sed -n \'s/.*CONNECTION_ID" = \\([A-Za-z0-9_-]*\\).*/\\1/p\' "{p}")\n'
-                '  dev=$(nmcli -g GENERAL.DEVICES connection show "$c" 2>/dev/null || true)\n'
-                '  if [ -n "$dev" ]; then tc qdisc del dev "$dev" root || true; fi\n'
-                '  rm -f "{p}"\nfi\n').format(p=path)
+        return 'if [ -f "%s" ]; then\n%sfi\n' % (path, _noqueue_teardown(path))
     script = ("#!/bin/sh\n# airuleset-managed (#1282). Do not edit.\n"
               'if [ "$2" = up ] && [ "$CONNECTION_ID" = %s ]; then\n'
               '  exec /usr/sbin/tc qdisc replace dev "$1" root noqueue\n'
@@ -405,6 +419,99 @@ def _render_noqueue(account, conn):
         if [ -n "$dev" ]; then tc qdisc replace dev "$dev" root noqueue; fi
         echo "  noqueue: ${{dev:-connection down, the dispatcher applies it}}"
     """).format(script=shlex.quote(script), path=path, conn=shlex.quote(conn))
+
+
+# Bash for step 3d-rg. `@DECLARED@`, `@MARKER_HEAD@`/`@MARKER_TAIL@` and the dirs
+# are filled in by render_retired_grants_step; `$a` is checked by rg_retired
+# (the same name rule as a declaration, spelled out so no locale widens a
+# range) before it reaches any path, pattern or command.
+_RETIRED_GRANTS_SH = r"""
+# 3d-rg. Grants of accounts no longer declared on this host (#1338)
+RG_DECLARED=' @DECLARED@ '
+RG_N=0
+RG_UDEV=0
+rg_retired() {
+  case "$1" in
+    ''|[!abcdefghijklmnopqrstuvwxyz_]*|*[!abcdefghijklmnopqrstuvwxyz0123456789_-]*) return 1 ;;
+  esac
+  [ "${#1}" -le 32 ] && [ "${#1}" -ge 2 ] || return 1
+  case "$RG_DECLARED" in *" $1 "*) return 1 ;; esac
+}
+rg_kept() { echo "  retired-grants: kept $1 (no airuleset signature)"; }
+echo "  retired-grants: declared here:$RG_DECLARED"
+for f in "@APPARMOR@"/airuleset-userns-*; do
+  [ -f "$f" ] && [ ! -L "$f" ] || continue
+  a=${f##*/airuleset-userns-}
+  rg_retired "$a" || continue
+  if [ "$(head -n 1 "$f")" != "@MARKER_HEAD@$a@MARKER_TAIL@" ]; then rg_kept "$f"; continue; fi
+  apparmor_parser -R "$f" || echo "  retired-grants: profile $f was not loaded"
+  rm -f "$f"
+  echo "  retired-grants: removed userns profile of $a"; RG_N=$((RG_N + 1))
+done
+for f in "@USERNS@"/*; do
+  [ -d "$f" ] && [ ! -L "$f" ] || continue
+  a=${f##*/}
+  rg_retired "$a" || continue
+  if [ "$(stat -c '%U %a' "$f")" != "root 750" ] || [ ! -f "$f/unshare" ] || [ -L "$f/unshare" ]; then rg_kept "$f"; continue; fi
+  rm -rf "$f"
+  echo "  retired-grants: removed unshare copy of $a"; RG_N=$((RG_N + 1))
+done
+for f in "@LIMITS@"/90-*-rtprio.conf; do
+  [ -f "$f" ] && [ ! -L "$f" ] || continue
+  a=${f##*/90-}; a=${a%-rtprio.conf}
+  rg_retired "$a" || continue
+  n=$(sed -n "1s/^$a - rtprio \([0-9][0-9]*\)\$/\1/p" "$f")
+  if [ -z "$n" ] || ! printf '%s - rtprio %s\n' "$a" "$n" | cmp -s - "$f"; then rg_kept "$f"; continue; fi
+  rm -f "$f"
+  echo "  retired-grants: removed rtprio limit of $a"; RG_N=$((RG_N + 1))
+done
+for f in "@UDEV@"/90-*-devices.rules; do
+  [ -f "$f" ] && [ ! -L "$f" ] || continue
+  a=${f##*/90-}; a=${a%-devices.rules}
+  rg_retired "$a" || continue
+  if [ ! -s "$f" ] || grep -qvxE "KERNEL==\"[a-z_]+\", RUN\+=\"/usr/bin/setfacl -m u:$a:rw /dev/%k\"" "$f"; then rg_kept "$f"; continue; fi
+  sed -n 's/^KERNEL=="\([a-z_]*\)".*/\1/p' "$f" | while read -r d; do
+    setfacl -x "u:$a" "/dev/$d" 2>/dev/null || true
+  done
+  rm -f "$f"; RG_UDEV=1
+  echo "  retired-grants: removed device grants of $a"; RG_N=$((RG_N + 1))
+done
+if [ "$RG_UDEV" = 1 ]; then udevadm control --reload; fi
+for f in "@NM@"/90-*-noqueue; do
+  [ -f "$f" ] && [ ! -L "$f" ] || continue
+  a=${f##*/90-}; a=${a%-noqueue}
+  rg_retired "$a" || continue
+  if ! grep -qxF '# airuleset-managed (#1282). Do not edit.' "$f"; then rg_kept "$f"; continue; fi
+@NOQUEUE@  echo "  retired-grants: removed NIC dispatcher of $a"; RG_N=$((RG_N + 1))
+done
+if [ "$RG_N" = 0 ]; then echo "  retired-grants: none"; fi
+"""
+
+
+def render_retired_grants_step(declared):
+    """Step 3d-rg (#1338): remove the per-account root grants of every account
+    that is NOT in ``declared`` (the accounts declared on THIS host). Each
+    per-account step removes its grant only while its account is still
+    declared, so a deleted declaration used to leave them for good. Only the
+    airuleset-named artifacts that carry the exact signature our renderers
+    write are removed (a generic ``90-*-rtprio.conf`` may be an admin's own,
+    #1323 lesson); a symlink, an invalid name or a foreign file is kept and
+    logged. The user, its home and its marker are never touched (owner-gated).
+    Idempotent; prints one line per removal, or ``none``."""
+    declared = list(declared)
+    bad = [a for a in declared if not (isinstance(a, str) and ACCOUNT_RE.fullmatch(a))]
+    if not declared or bad:
+        raise ValueError("declared accounts must be a non-empty list of account names, got %r"
+                         % (bad or declared,))
+    head, tail = userns_profile("@ACCT@").splitlines()[0].split("@ACCT@")
+    sh = _RETIRED_GRANTS_SH
+    for key, value in (("@DECLARED@", " ".join(sorted(set(declared)))),
+                       ("@MARKER_HEAD@", head), ("@MARKER_TAIL@", tail),
+                       ("@APPARMOR@", APPARMOR_DIR), ("@USERNS@", USERNS_DIR),
+                       ("@LIMITS@", LIMITS_DIR), ("@UDEV@", UDEV_RULES_DIR),
+                       ("@NM@", NM_DISPATCHER_DIR), ("@NOQUEUE@", _noqueue_teardown("$f"))):
+        sh = sh.replace(key, value)
+    return sh
 
 
 def nft_table_name(account):
