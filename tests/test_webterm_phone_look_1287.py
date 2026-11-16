@@ -37,6 +37,12 @@ class TestCaptureKeepsColour(unittest.TestCase):
     def test_capture_argv_carries_e(self):
         self.assertIn("exec tmux capture-pane -p -e -J -S -", cap.WEBTERM_READ_SH)
 
+    def test_a_capped_capture_starts_at_a_whole_line(self):
+        out = b"a" * 50 + b"\x1b[38;5;114m\xe2\x97\x8f\nline2\nline3\n"
+        self.assertEqual(cap.tail_whole_lines(out, 1000), out)
+        self.assertEqual(cap.tail_whole_lines(out, 20), b"line2\nline3\n")
+        self.assertEqual(cap.tail_whole_lines(b"x" * 30, 10), b"x" * 10)
+
     def test_page_never_builds_markup_from_text(self):
         for bad in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "DOMParser"):
             self.assertNotIn(bad, phone.PHONE_HTML)
@@ -68,6 +74,8 @@ _CASES = {
     "badrgb": ESC + "[38;2;300;0;0mX",
     "inject": ESC + "[31m<img src=x onerror=window.__pwned=1>",
     "unterminated": "ok" + ESC + "[38;5",
+    "osc_open": "top" + ESC + "]8;;x\nline2",
+    "ul58": ESC + "[58;2;1;2;3mU" + ESC + "[58;5;9mV",
 }
 
 # A grid-broken line in green continues bold on the next row; a coloured rule;
@@ -105,6 +113,8 @@ const { chromium: cr } = require(pwPath);
     return r;
   }, JSON.parse(CASES));
   out.pwned = await p.evaluate(() => !!window.__pwned);
+  out.spacesMs = await p.evaluate(() => { const raw = ' '.repeat(100000) + 'x\n' + 'y'.repeat(10) + ' '.repeat(100000);
+    const t0 = performance.now(); phoneTidy(phoneAnsiLines(raw)); return performance.now() - t0; });
   out.tidy = await p.evaluate((raw) => { const pre = document.createElement('pre');
     phoneRender(phoneTidy(phoneAnsiLines(raw)), pre);
     return { text: pre.textContent, spans: [...pre.querySelectorAll('span')].map(s => [s.textContent.slice(0, 30), s.style.color, s.style.fontWeight, s.style.backgroundColor]) }; }, TIDY);
@@ -242,6 +252,21 @@ class TestPhoneLook(unittest.TestCase):
         self.assertEqual(self.out["cases"]["unterminated"]["text"], "ok")
         for case in self.out["cases"].values():
             self.assertNotIn(ESC, case["text"])
+
+    def test_an_open_osc_stops_at_the_line_end(self):
+        self.assertEqual(self.out["cases"]["osc_open"]["text"], "top\nline2")
+
+    def test_underline_colour_is_not_read_as_attributes(self):
+        self.assertEqual(self.out["cases"]["ul58"]["text"], "UV")
+        for row in self.out["cases"]["ul58"]["d"]:
+            self.assertEqual(row[3:6], ["", "", ""])
+
+    def test_long_space_runs_trim_in_linear_time(self):
+        # /\s+$/ is quadratic on a long space run in node and older engines (10 s
+        # for 100k spaces); current Chromium happens to run it fast, hence the lock.
+        for slow in (r"/\s+$/", r"/^\s+/"):
+            self.assertNotIn(slow, phone.PHONE_HTML)
+        self.assertLess(self.out["spacesMs"], 1500)
 
     def test_out_of_range_colours_are_ignored(self):
         self.assertEqual(self.out["cases"]["bad256"]["text"], "X")
