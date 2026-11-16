@@ -18,6 +18,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import uuid
 from pathlib import Path
 from unittest import TestCase, main
@@ -27,6 +28,7 @@ from _hook_state_cleanup import (  # noqa: E402
     MODULE_HOOK_HOME, sweep_session_files)
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
 HOOK = ROOT / "hooks" / "stop-check-prose-violations.sh"
 
 
@@ -145,19 +147,83 @@ class TestNegativesStayUnblocked(TestCase):
     def test_name_starting_with_z_after_time(self):
         self._assert_passes("O 21:45 Zbynek dostal správu.")
 
+    def _home(self):
+        td = tempfile.TemporaryDirectory(prefix="utc1343-home-")
+        self.addCleanup(td.cleanup)
+        return td.name
+
     def test_bypass_marker_passes_and_is_logged(self):
-        home = tempfile.mkdtemp(prefix="utc1343-home-")
-        os.makedirs(os.path.join(home, ".clau" + "de"), exist_ok=True)
+        home = self._home()
         p = _run("Server loguje v 20:45 UTC (bez lokálneho času).\n"
                  "airuleset:utc-time-ok citujem serverový log", home=home)
         self.assertFalse(_utc_blocked(p), p.stdout[:300])
-        log = os.path.join(home, ".clau" + "de", "prose-bypasses.log")
+        # #1343 review F5: the ONE fleet bypass audit dir (gates.audit), so
+        # count_cli_bypasses sees it — never a parallel private log.
+        log = os.path.join(home, "devel", "airuleset", "audits",
+                           "utc-time-bypasses.log")
         self.assertTrue(os.path.exists(log), "bypass was not logged")
         with open(log, encoding="utf-8") as fh:
             body = fh.read()
-        self.assertIn("utc-time-ok", body)
+        self.assertIn("airuleset:utc-time-ok", body)
         self.assertIn("citujem serverový log", body)
+        from gates import audit
+        counted = audit.count_cli_bypasses(
+            root=os.path.dirname(log), tmp_dir=home)
+        self.assertEqual(counted["per_kind"].get("airuleset:utc-time-ok"), 1)
 
+
+class TestReviewFindings(TestCase):
+    """#1343 fresh-context review (F1-F7, F10), each reproduced live."""
+
+    def _blocks(self, msg):
+        p = _run(msg)
+        self.assertTrue(_utc_blocked(p), "NOT blocked: %r" % msg)
+
+    def _passes(self, msg):
+        p = _run(msg)
+        self.assertFalse(_utc_blocked(p), "false positive: %r" % msg)
+
+    def test_f1_local_offset_is_local_time(self):
+        self._passes("Hotovo 21:45 UTC+1.")
+        self._passes("Hotovo 21:45 GMT+1, nasadené.")
+        self._passes("Leto: 22:45 UTC+02:00.")
+
+    def test_f1_zero_offset_is_still_utc(self):
+        self._blocks("Hotovo 20:45 UTC+0.")
+        self._blocks("Hotovo 20:45 UTC+00:00.")
+
+    def test_f2_timestamp_in_url_query(self):
+        self._passes("Pozri https://example.com/x?since=2026-11-16T20:45:07Z")
+        self._passes("Pozri https://example.com/x?since=2026-11-16T20:45:07Z&a=1 tam.")
+
+    def test_f3_lowercase_utc(self):
+        self._blocks("Hotovo 20:45 utc.")
+
+    def test_f4_bypass_needs_a_reason(self):
+        self._blocks("Hotovo 20:45 UTC.\nairuleset:utc-time-ok")
+
+    def test_f4_backticked_marker_is_a_mention_not_a_bypass(self):
+        self._blocks("Hotovo 20:45 UTC. Bypass je `airuleset:utc-time-ok <reason>`.")
+
+    def test_f7_slovak_preposition_z_after_time(self):
+        self._passes("Odchod 7:30 Z Košíc, príchod 9:10.")
+
+    def test_f10_square_brackets_like_parentheses(self):
+        self._passes("Bratislava 21:45 [20:45 UTC].")
+
+    def test_f6_many_exempt_lines_stay_fast(self):
+        msg = "\n".join("- 21:45 (20:45 UTC) item %d" % i for i in range(3000))
+        t = time.monotonic()
+        p = _run(msg)
+        self.assertLess(time.monotonic() - t, 8.0)
+        self.assertFalse(_utc_blocked(p))
+
+    def test_f6_many_parentheses_on_one_line_stay_fast(self):
+        msg = "21:45 " + "(x)" * 20000 + " (20:45 UTC)"
+        t = time.monotonic()
+        p = _run(msg)
+        self.assertLess(time.monotonic() - t, 8.0)
+        self.assertFalse(_utc_blocked(p))
 
 if __name__ == "__main__":
     main()
