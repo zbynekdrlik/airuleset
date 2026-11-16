@@ -64,7 +64,7 @@ class TestProfileForHost(unittest.TestCase):
 
 
 class TestDavidInventory(unittest.TestCase):
-    def test_exactly_five_members(self):
+    def test_exact_member_list(self):
         inv = p.david_inventory()
         ids = [e["id"] for e in inv]
         self.assertEqual(ids, ["david1", "david2", "david3", "david4", "david5", "david6", "david7", "david8",

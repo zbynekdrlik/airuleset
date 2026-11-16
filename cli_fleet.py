@@ -290,11 +290,11 @@ REMOTE_HOSTS = [
              "role": None},
         ],
     },
-    # david5-david8 (#1341, owner 16.11.2026): four MORE david streams, the
-    # same shape as david2-david4 — same subdev VPS, same operator identity,
-    # fork-no-merge, webterm-only. Accounts are created by gatekeeper's odoo-erp
-    # `/new-subdev` recipe (root@subdev is reachable only from the gk VPS).
-    *({
+    # david5@subdev, david6@subdev, david7@subdev, david8@subdev (#1341): the
+    # david2-4 shape. Gatekeeper's `/new-subdev` creates the accounts; `pending`
+    # keeps every ssh path off them until then — DELETE it once `ls /home` on
+    # subdev shows david5-8 (an ssh to a missing user risks fail2ban).
+    *({"pending": True,
         "name": "%s@subdev" % _u,
         "host": "100.118.174.27",
         "user": _u,

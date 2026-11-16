@@ -10,7 +10,7 @@ profily. Doména sa mapuje na (session set + auth realm):
     ``OWNER_GATEWAY_ACCESS_MODE`` v cli_webterm.py — session set + login sa
     nemenia, mení sa len front (cloudflared tunel + Access namiesto tailnet+hesla).
   * ``david`` — subdev, VEREJNÝ HTTPS front (david.newlevel.media, Cloudflare),
-    session set = david1..4 (subdev) + codex-bridge (dev2), login ``david``.
+    session set = david1..8 (subdev) + codex-bridge (dev2), login ``david``.
   * ``marek`` — subdev (marek účet), VEREJNÝ HTTPS front (marek.newlevel.media,
     Cloudflare). Session set (#661 rework, owner ruling 2026-08-25; #787
     doplnenie 2026-08-31; owner request 2026-09-03) = marek lokálny attach +
@@ -20,7 +20,7 @@ profily. Doména sa mapuje na (session set + auth realm):
     ``WEBTERM_MAREK_IDENTITY`` kľúč, nikdy gatekeeper kľúč, nikdy sshpass vetva.
 
 Bezpečnostné invarianty (celé v tomto leaf + connect allowliste v cli_webterm):
-  1. Davidov inventár = { david1..4, codex-bridge } IBA. Jeho ttyd child dostane
+  1. Davidov inventár = { david1..8, codex-bridge } IBA. Jeho ttyd child dostane
      TENTO inventár cez ``WEBTERM_INVENTORY`` env premennú, ktorú launcher
      EXPORTUJE — NIE cez klientsky argv flag (ttyd ``-a`` pridáva klientom
      kontrolované ``?arg=`` hodnoty do argv, takže argv ``--inventory`` by bol
@@ -28,8 +28,8 @@ Bezpečnostné invarianty (celé v tomto leaf + connect allowliste v cli_webterm
      Preto ``connect_main`` allowlist NIKDY nevie resolvnúť owner-fleet id
      (dev1/gk/marek/montalu…) → refused. Session set je KONFIG brány, nie
      klientská voľba.
-  2. david1..4 sa dosahujú DEDIKOVANÝM kľúčom (``WEBTERM_DAVID_IDENTITY``)
-     authorized VÝHRADNE na david1-4 — NIKDY fleet gatekeeper kľúč (ten dosiahne
+  2. david1..8 sa dosahujú DEDIKOVANÝM kľúčom (``WEBTERM_DAVID_IDENTITY``)
+     authorized VÝHRADNE na david1-8 — NIKDY fleet gatekeeper kľúč (ten dosiahne
      marek/montalu/simap/miva). Server-side reprezentácia Davidovho vlastného
      4-účtového setu; nerozširuje jeho dosah (na svoje 4 účty sa dostane už dnes).
   3. codex-bridge tab ZRKADLÍ Davidov EXISTUJÚCI dev2 prístup (owner ruling
@@ -159,13 +159,13 @@ def profile_for_host_set(box_class, account=None):
 # existing access with zero new authorization (owner ruling 2026-08-21).
 DAVID_GATEWAY_USER = "david1"
 
-# Dedicated key for the david1-4 tabs, authorized ONLY on david1-4. NEVER the
+# Dedicated key for the david1-8 tabs, authorized ONLY on david1-8. NEVER the
 # fleet gatekeeper key (`~/.secrets/gatekeeper_access_ed25519`), which reaches
 # marek/montalu/simap/miva — that would be a cross-stream escalation. Its pubkey
-# distribution to david1-4 authorized_keys is needs-owner-action.
+# distribution to david1-8 authorized_keys is needs-owner-action.
 WEBTERM_DAVID_IDENTITY = "~/.secrets/webterm_david_ed25519"
 
-# david1-4 are local unix accounts on the subdev gateway box; the gateway ssh's
+# david1-8 are local unix accounts on the subdev gateway box; the gateway ssh's
 # them over loopback with the dedicated key (uniform for all four, so the
 # gateway user is irrelevant to correctness — it only needs the private key).
 SUBDEV_LOCAL = "127.0.0.1"
@@ -189,8 +189,8 @@ def _subdev_target_host(human):
     return SUBDEV_LOCAL
 # #1341 (owner 16.11.2026): the four streams added after david4 — tabs on the
 # david, zbynek and marek dashboards.
-NEW_DAVID_STREAMS_1341 = ("david5", "david6", "david7", "david8")
-DAVID_ACCOUNTS = ("david1", "david2", "david3", "david4") + NEW_DAVID_STREAMS_1341
+DAVID_STREAMS_5_8 = ("david5", "david6", "david7", "david8")
+DAVID_ACCOUNTS = ("david1", "david2", "david3", "david4") + DAVID_STREAMS_5_8
 
 # codex-bridge tab — David's dev2 ssh tab. Connects as newlevel@dev2 via the
 # dedicated david webterm key (WEBTERM_DAVID_IDENTITY), the existing `david`
@@ -386,7 +386,7 @@ def marek_inventory():
             "user": u,
             "identity": WEBTERM_MAREK_IDENTITY,
             "preferred": u,
-        } for u in NEW_DAVID_STREAMS_1341),
+        } for u in DAVID_STREAMS_5_8),
         {
             # owner request 2026-09-29 ("pridaj ar marekovi do webtermu"): marek's
             # gateway runs AS airuleset on the controller, so `ar` is a LOCAL
@@ -810,7 +810,7 @@ def zbynek_inventory():
             "preferred": u,
             "u_tenant": True,
             "collect_identity": ZBYNEK_COLLECT_IDENTITY,
-        } for u in NEW_DAVID_STREAMS_1341),
+        } for u in DAVID_STREAMS_5_8),
         {
             "id": "miva1-subdev",
             "label": "miva1@subdev",
@@ -857,7 +857,7 @@ def profile_inventory(profile, fleet_inventory):
 
 def allowed_ids(profile, fleet_inventory):
     """The set of session ids reachable in ``profile`` — the connect allowlist.
-    For ``david`` this is exactly {david1..4, codex-bridge}; the security test
+    For ``david`` this is exactly {david1..8, codex-bridge}; the security test
     asserts NO owner-fleet id is ever a member."""
     return {e["id"] for e in profile_inventory(profile, fleet_inventory)}
 

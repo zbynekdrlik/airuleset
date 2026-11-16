@@ -4,7 +4,7 @@ Owner directive (2026-09-04, present, verbatim): "priamy pristup cez ssh bude
 uz len fallback pre mna a mareka, david a dominika nech vedia robit len cez
 webterm!!"
 
-Manages ``~/.ssh/authorized_keys`` for WEBTERM_ONLY_USERS (david1-4, dominika)
+Manages ``~/.ssh/authorized_keys`` for WEBTERM_ONLY_USERS (david1-8, dominika)
 DECLARATIVELY — the desired-state key set is rendered on every install/push,
 foreign keys are quarantined (never destroyed), and a structural lockout guard
 refuses to write ANY set that lacks the fleet push pubkey.
@@ -58,7 +58,7 @@ FLEET_PUSH_PUBKEYS = (
 FLEET_PUSH_PUBKEY = FLEET_PUSH_PUBKEYS[0]
 
 # The webterm david lane pubkey — the key the webterm david gateway uses to
-# loopback-ssh between david1-4 accounts on subdev.  Read from subdev's
+# loopback-ssh between david1-8 accounts on subdev.  Read from subdev's
 # ``~david1/.ssh/authorized_keys`` (the ``webterm_david@subdev #612`` entry,
 # manual go-live 2026-09-04; fingerprint verified 2026-09-05).
 WEBTERM_DAVID_LANE_PUBKEY = (
@@ -191,7 +191,7 @@ def _fingerprint(line, run=None):
 
 def _webterm_only_user_to_human(user):
     """Map a webterm-only account name to its human's lane key.
-    david1-4 -> "david", dominika -> "dominika", else None."""
+    david1-8 -> "david", dominika -> "dominika", else None."""
     if user.startswith("david") and user[5:].isdigit():
         return "david"
     if user == "dominika":
