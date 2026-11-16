@@ -14,9 +14,12 @@ real tmux server, never a real process.
 import ast
 import inspect
 import os
+import shutil
+import subprocess
 import sys
 import tempfile
 import textwrap
+import time
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -47,6 +50,8 @@ class _World:
         self.attached = "0"
         self.calls = []
         self.pid_after_check = {}  # pane_id -> pid reported on the re-check
+        self.child_on_recheck = {}  # pid -> child that appears at the re-check
+        self.rechecks = 0
 
     def add_proc(self, pid, cmdline, start, children=()):
         d = os.path.join(self.proc, str(pid))
@@ -69,11 +74,21 @@ class _World:
         self.calls.append(list(argv))
         if argv[:2] == ["tmux", "has-session"]:
             return 0, ""
+        if "-t" in argv and argv[1] in ("display-message", "respawn-pane"):
+            target = argv[argv.index("-t") + 1]
+            if target.startswith("=") and ":" not in target:
+                return 0, "\n"     # tmux 3.7b: a bare =name is no pane target
+        if argv[:2] == ["tmux", "list-sessions"]:
+            return 0, "%s proj\n1 projx\n" % self.attached
         if argv[:2] == ["tmux", "display-message"]:
             fmt = argv[-1]
-            if fmt == "#{session_attached}":
-                return 0, self.attached + "\n"
             if fmt == "#{pane_pid}":
+                self.rechecks += 1
+                for pid, kid in self.child_on_recheck.items():
+                    path = os.path.join(self.proc, str(pid), "task", str(pid),
+                                        "children")
+                    with open(path, "w") as f:
+                        f.write("%d " % kid)
                 pane = argv[argv.index("-t") + 1]
                 pid = self.pid_after_check.get(pane, dict(self.panes).get(pane))
                 return 0, "%s\n" % pid
@@ -157,6 +172,16 @@ class TestRespawnDecision(unittest.TestCase):
             w.go()
             self.assertEqual(w.respawned(), [])
 
+    def test_child_that_appears_before_the_respawn_keeps_the_pane(self):
+        """The owner types `claude` between the check and the respawn."""
+        with tempfile.TemporaryDirectory() as td:
+            w = _World(td)
+            w.add_pane("%0", 4001)
+            w.child_on_recheck[4001] = 4002
+            w.go()
+            self.assertEqual(w.rechecks, 1)
+            self.assertEqual(w.respawned(), [])
+
     def test_only_the_stale_pane_of_several_is_respawned(self):
         with tempfile.TemporaryDirectory() as td:
             w = _World(td)
@@ -182,6 +207,78 @@ class TestRespawnDecision(unittest.TestCase):
             w.run = lambda argv, _r=w.run: (1, "") if argv[1] == "has-session" else _r(argv)
             self.assertEqual(w.go(), [])
             self.assertEqual(w.respawned(), [])
+
+
+    def test_vanished_pane_is_skipped_and_the_rest_still_run(self):
+        with tempfile.TemporaryDirectory() as td:
+            w = _World(td)
+            w.panes.append(("%9", 4999))       # listed, but no /proc entry
+            w.add_pane("%0", 4001)
+            lines = w.go()
+            self.assertEqual(w.respawned(), ["%0"])
+            self.assertTrue(any("%9" in ln and "gone" in ln for ln in lines), lines)
+
+
+class TestRealTmux(unittest.TestCase):
+    """The same decision on a REAL tmux server of its own (`-S` private
+    socket, `-f /dev/null`, TMUX unset) and the real /proc: the fake runner
+    once hid a target syntax real tmux 3.7b does not resolve (review 🔴)."""
+
+    def setUp(self):
+        if not shutil.which("tmux"):
+            self.fail("tmux is required for this test")
+        self.dir = tempfile.mkdtemp(prefix="respawn1310-")
+        self.sock = os.path.join(self.dir, "sock")
+        self.env = {k: v for k, v in os.environ.items()
+                    if k not in ("TMUX", "TMUX_PANE")}
+        self.env.update(HOME=self.dir, TMUX_TMPDIR=self.dir)
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.addCleanup(self.tmux, "kill-server")
+
+    def tmux(self, *args):
+        r = subprocess.run(["tmux", "-S", self.sock, "-f", "/dev/null", *args],
+                           capture_output=True, text=True, timeout=10,
+                           env=self.env)
+        return r.returncode, r.stdout
+
+    def run_tmux(self, argv):
+        self.assertEqual(argv[0], "tmux")
+        return self.tmux(*argv[1:])
+
+    def pids(self):
+        return dict(ln.split() for ln in self.tmux(
+            "list-panes", "-s", "-t", "=proj", "-F",
+            "#{pane_id} #{pane_pid}")[1].splitlines())
+
+    def test_idle_pane_respawned_busy_pane_kept(self):
+        self.assertEqual(self.tmux("new-session", "-d", "-s", "proj", "-c",
+                                   self.dir, "exec bash -l")[0], 0)
+        self.assertEqual(self.tmux("split-window", "-t", "=proj:", "-c", self.dir,
+                                   "bash -l -c 'sleep 60; :'")[0], 0)
+        before = self.pids()
+        busy = []
+        for _ in range(50):                 # the sleep child forks after exec
+            busy = [p for p, pid in before.items() if pr._children(pid, "/proc")]
+            if busy:
+                break
+            time.sleep(0.1)
+        self.assertEqual(len(busy), 1, before)
+        since = os.path.join(self.dir, "since")
+        open(since, "w").close()
+        later = time.time() + 30
+        os.utime(since, (later, later))
+        lines = pr.respawn_stale_panes("proj", self.dir, since, run=self.run_tmux)
+        after = self.pids()
+        idle = [p for p in before if p not in busy][0]
+        self.assertNotEqual(after[idle], before[idle], lines)
+        self.assertEqual(after[busy[0]], before[busy[0]], lines)
+        self.assertTrue(any("respawned" in ln for ln in lines), lines)
+
+    def test_attached_count_is_read_by_exact_session_name(self):
+        self.assertEqual(self.tmux("new-session", "-d", "-s", "proj", "-c",
+                                   self.dir, "exec bash -l")[0], 0)
+        self.assertEqual(pr._attached("proj", self.run_tmux), "0")
+        self.assertIsNone(pr._attached("pro", self.run_tmux))
 
 
 class TestInstallEntry(unittest.TestCase):
