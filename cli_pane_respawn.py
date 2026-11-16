@@ -73,6 +73,19 @@ def _pane_pid(pane_id, run):
     return out.strip() if rc == 0 else ""
 
 
+def _attached(session, run):
+    """``#{session_attached}`` of ``session`` by EXACT name, read from
+    ``list-sessions`` (``display-message -t =name`` is a PANE target and
+    prints nothing on tmux 3.7b); None when unreadable or absent."""
+    rc, out = run(["tmux", "list-sessions", "-F",
+                   "#{session_attached} #{session_name}"])
+    for row in (out.splitlines() if rc == 0 else []):
+        count, _, name = row.partition(" ")
+        if name == session:
+            return count
+    return None
+
+
 def _why_kept(pid, since, proc, clk_tck):
     """None when the pane may be respawned, else the reason it is kept."""
     import cli_account_verify
@@ -80,7 +93,8 @@ def _why_kept(pid, since, proc, clk_tck):
         return "not a login shell"
     if _children(pid, proc):
         return "has a child process"
-    if _start_epoch(pid, proc, clk_tck) >= since:
+    # +1: /proc/stat's btime is whole seconds, so a start can read 1 s early
+    if _start_epoch(pid, proc, clk_tck) + 1 >= since:
         return "started after the launcher"
     return None
 
@@ -95,18 +109,21 @@ def respawn_stale_panes(session, start_dir, since_path, *, run=_run,
         return []
     clk_tck = clk_tck or os.sysconf("SC_CLK_TCK")
     since = os.stat(since_path).st_mtime
-    rc, attached = run(["tmux", "display-message", "-p", "-t", "=" + session,
-                        "#{session_attached}"])
-    if rc != 0 or attached.strip() != "0":
+    if _attached(session, run) != "0":
         return ["  pane respawn: session %s is attached — kept (#1310)" % session]
     rc, listing = run(["tmux", "list-panes", "-s", "-t", "=" + session,
                        "-F", "#{pane_id} #{pane_pid}"])
     lines = []
     for row in (listing.splitlines() if rc == 0 else []):
         pane_id, _, pid = row.partition(" ")
-        why = _why_kept(pid, since, proc, clk_tck)
-        if why is None and (_pane_pid(pane_id, run) != pid or _children(pid, proc)):
-            why = "changed since the check"
+        try:
+            why = _why_kept(pid, since, proc, clk_tck)
+            if why is None and (_pane_pid(pane_id, run) != pid
+                                or _children(pid, proc)
+                                or _attached(session, run) != "0"):
+                why = "changed since the check"
+        except FileNotFoundError:
+            why = "gone"
         if why is None:
             rc, _ = run(["tmux", "respawn-pane", "-k", "-t", pane_id,
                          "-c", start_dir, LOGIN_SHELL_CMD])
