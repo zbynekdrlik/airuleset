@@ -167,18 +167,21 @@ REMOTE_HOSTS = [
         "name": "montalu2@subdev",
         "host": "100.118.174.27",
         "user": "montalu2",
+        "paused": "owner 2026-11-16: montalu accounts deleted on subdev (#1306)",
         "repo_path": "~/devel/airuleset",
     },
     {
         "name": "montalu3@subdev",
         "host": "100.118.174.27",
         "user": "montalu3",
+        "paused": "owner 2026-11-16: montalu accounts deleted on subdev (#1306)",
         "repo_path": "~/devel/airuleset",
     },
     {
         "name": "montalu4@subdev",
         "host": "100.118.174.27",
         "user": "montalu4",
+        "paused": "owner 2026-11-16: montalu accounts deleted on subdev (#1306)",
         "repo_path": "~/devel/airuleset",
         # The declared window names the box's tmux window (issue 1169 added it
         # for the since-removed sequential mode, #1137).
@@ -301,24 +304,28 @@ REMOTE_HOSTS = [
         "name": "montalu5@subdev",
         "host": "100.118.174.27",
         "user": "montalu5",
+        "paused": "owner 2026-11-16: montalu accounts deleted on subdev (#1306)",
         "repo_path": "~/devel/airuleset",
     },
     {
         "name": "montalu6@subdev",
         "host": "100.118.174.27",
         "user": "montalu6",
+        "paused": "owner 2026-11-16: montalu accounts deleted on subdev (#1306)",
         "repo_path": "~/devel/airuleset",
     },
     {
         "name": "montalu7@subdev",
         "host": "100.118.174.27",
         "user": "montalu7",
+        "paused": "owner 2026-11-16: montalu accounts deleted on subdev (#1306)",
         "repo_path": "~/devel/airuleset",
     },
     {
         "name": "montalu8@subdev",
         "host": "100.118.174.27",
         "user": "montalu8",
+        "paused": "owner 2026-11-16: montalu accounts deleted on subdev (#1306)",
         "repo_path": "~/devel/airuleset",
     },
     {
@@ -490,6 +497,7 @@ REMOTE_HOSTS = [
         "name": "montalu1@subdev",
         "host": "100.118.174.27",
         "user": "montalu1",
+        "paused": "owner 2026-11-16: montalu accounts deleted on subdev (#1306)",
         "repo_path": "~/devel/airuleset",
         # The declared window names the box's tmux window (added 2026-09-30 for
         # the since-removed sequential mode, #1137).
