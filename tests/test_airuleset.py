@@ -14710,6 +14710,15 @@ class TestBlockSubdevSshMisuseHook(TestCase):
             "./local/ marek@subdev:/remote/")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
+    def test_allows_scp_and_sshpass_david1_with_gatekeeper_identity(self):
+        # #1306 review: the scp/sshpass allow shapes were locked on montalu1
+        # (default key); keep them on a live gatekeeper-key account.
+        for cmd in ("scp -i ~/.secrets/gatekeeper_access_ed25519 f david1@subdev:/tmp/",
+                    "sshpass -f ~/.p ssh -i ~/.secrets/gatekeeper_access_ed25519 "
+                    'david1@subdev "ls"'):
+            r = self._run(cmd)
+            self.assertEqual(r.returncode, 0, cmd + " " + r.stdout + r.stderr)
+
     # --- non-subdev traffic is completely untouched ----------------------
 
     def test_non_subdev_dev2_untouched(self):

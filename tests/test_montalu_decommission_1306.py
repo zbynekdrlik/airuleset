@@ -104,6 +104,14 @@ class TestRetiredLabelsStayOutOfTheCore(unittest.TestCase):
             with self.subTest(name=name):
                 self.assertIn("-label:stream:%s" % name, quals[0].split())
 
+    def test_retired_label_still_names_a_foreign_owner(self):
+        # Review 🟡: without an owner, a montalu ticket pulled back by a gk
+        # queue label would read `implement` on the gatekeeper (#561 class).
+        for name in STREAMS:
+            with self.subTest(name=name):
+                self.assertEqual(cli_quals._stream_owner_of(
+                    [{"name": "stream:%s" % name}]), name)
+
     def test_a_live_stream_is_not_retired(self):
         self.assertFalse(set(airuleset.RETIRED_STREAM_LABELS)
                          & set(airuleset.AUTHORITY_BY_USER))
