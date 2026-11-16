@@ -2107,10 +2107,8 @@ def cmd_install(args):
     except Exception as e:
         print(f"  stream dev-env gap report error (non-fatal): {e}", file=sys.stderr)
 
-    # --- 3g-ter. erp-test ssh config provisioning (#964): the stream's
-    # ~/.ssh/config `Host erp-test-<stream>` alias with the correct deploy
-    # user (ddeploy for david-family, mdeploy for montalu/miva). Runs on
-    # stream accounts only; a no-op on dev1/dev2/gk. Non-fatal.
+    # --- 3g-ter. erp-test ssh config (#964): `Host erp-test-<stream>` with the
+    # deploy user (ddeploy/mdeploy); stream accounts only, non-fatal.
     try:
         erp_ssh_changed = ensure_erp_test_ssh_config()
         if erp_ssh_changed:
@@ -2131,6 +2129,7 @@ def cmd_install(args):
         print(f"  watchdog setup error (non-fatal): {e}", file=sys.stderr)
     maybe_setup_project_gh_token_timer()   # #1190: controller-only, never raises
     maybe_refresh_project_gh_app_shim()    # #1199: project accounts only, never raises
+    maybe_respawn_stale_project_panes()    # #1310: a pane older than claude() gets it
 
     # --- 5b. web terminal gateway (#555/#612): dispatch by (nodename, account) —
     # dev1->owner, subdev+marek->marek, subdev(david1/default)->david; else no-op. ---
@@ -9329,6 +9328,7 @@ from cli_project_gh_token import (  # noqa: E402, F401
     maybe_refresh_shim as maybe_refresh_project_gh_app_shim,
     register_parser as _register_project_gh_token_parser,
 )
+from cli_pane_respawn import maybe_respawn_stale_project_panes  # noqa: E402, F401
 # --- #1224: print the last delivered ❓ block (never read the own transcript) ---
 from cli_question_block import (  # noqa: E402, F401
     cmd_question_block as cmd_question_block,
