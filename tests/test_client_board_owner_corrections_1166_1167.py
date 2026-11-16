@@ -157,8 +157,17 @@ class TestMontaluProfileRemoved1306(TestCase):
 
     def test_injected_files_never_name_montalu(self):
         for path in (CORE, STAGES, QUESTIONS, ATTACHMENTS):
-            with self.subTest(path=path.name):
-                self.assertNotIn("montalu", _read(path).lower())
+            text = _read(path)
+            for token in ("montalu", "potrebuje ujasni", "realizáci", "todo →"):
+                with self.subTest(path=path.name, token=token):
+                    self.assertNotIn(token, text.lower())
+
+    def test_history_keeps_the_owner_quotes(self):
+        # the provenance archive keeps the 28.9. quotes + records the removal
+        history = _norm(_read(HISTORY))
+        self.assertIn("a musi byt oznaceny v spravach a taskoch patrik", history)
+        self.assertIn("budeme musiet zvolit nejaky autoclose rezim", history)
+        self.assertIn("removed 16.11.2026, #1306", history)
 
     def test_no_auto_close_path(self):
         for path in (CORE, STAGES):

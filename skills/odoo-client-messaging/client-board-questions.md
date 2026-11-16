@@ -1,6 +1,6 @@
 # Client Board Tasks — Questions, Answers & Mixed Communication (#1102)
 
-Topic companion of `client-board-tasks.md` (CORE). Auto-loads on a `project.task` question (`needs-answer` / Potrebuje ujasniť) or a ❓ about a board task. These rules govern asking the client a question and routing every answer.
+Topic companion of `client-board-tasks.md` (CORE). Auto-loads on a `project.task` question (`needs-answer` / the profile's question stage) or a ❓ about a board task. These rules govern asking the client a question and routing every answer.
 
 ---
 

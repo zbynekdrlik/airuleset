@@ -29,7 +29,7 @@ no `partner_ids`); the TRANSPORT uses `body_is_html=True` per
 `handover-compose.md`. The shape is Stop-checked.
 
 **ONE step (#1180):** post it via `odoo_post.py --handover` (odoo-erp#8606:
-post + move; until it ships, move by hand, same turn). A handover or `Acceptance-thread:` leaving a task unmoved is Stop-blocked.
+post + move, plus an assignee only where rule 5 names one). A handover or `Acceptance-thread:` leaving a task unmoved is Stop-blocked.
 
 ### 5. Assignee — per profile
 
