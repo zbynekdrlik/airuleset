@@ -195,7 +195,7 @@ def _bounce_quals(cwd):
             # to just itself (byte-identical to before).
             return ["label:stream:%s" % n
                     for n in airuleset._stream_rename_equivalents(u)]
-    names = set()
+    names = set(airuleset.RETIRED_STREAM_LABELS)  # #1306: gone accounts' labels
     for u in watchdog._REDUCED_STREAM_USERS:
         names.update(airuleset._stream_rename_equivalents(u))
     return [" ".join("-label:stream:%s" % n for n in sorted(names))]

@@ -151,42 +151,8 @@ REMOTE_HOSTS = [
             "relocate": ["/home/gh-runner", "/var/lib/docker", "~/.cache"],
         },
     },
-    {
-        # montalu2/montalu3/montalu4 — three MORE full parallel montalu
-        # streams (airuleset#251, odoo-erp#2961: "zhodné s dnešným
-        # montalu" — same subdev box, same default-key shape, same
-        # branch-merge authority). Accounts created by GATEKEEPER (Phase 1
-        # of #2961 — SSH access/Hetzner ownership stays with gatekeeper per
-        # the user's 2026-08-05 ownership split; airuleset only wires the
-        # ALREADY-EXISTING accounts into its own push/authority registries).
-        # Live-verified 2026-08-05: all three accounts' default-key push
-        # access had to be restored via root@subdev (see the montalu
-        # entry's own comment above — same #258 access-cleanup mistake hit
-        # montalu2/3/4 too, since they were provisioned from the same
-        # authorized_keys template the cleanup rewrote).
-        "name": "montalu2@subdev",
-        "host": "100.118.174.27",
-        "user": "montalu2",
-        "repo_path": "~/devel/airuleset",
-    },
-    {
-        "name": "montalu3@subdev",
-        "host": "100.118.174.27",
-        "user": "montalu3",
-        "repo_path": "~/devel/airuleset",
-    },
-    {
-        "name": "montalu4@subdev",
-        "host": "100.118.174.27",
-        "user": "montalu4",
-        "repo_path": "~/devel/airuleset",
-        # The declared window names the box's tmux window (issue 1169 added it
-        # for the since-removed sequential mode, #1137).
-        "windows": [
-            {"name": "m4", "cwd": "~/devel/odoo/odoo-erp",
-             "role": None},
-        ],
-    },
+    # montalu1..8@subdev were removed with the montalu client (#1306, owner
+    # 16.11.2026: the accounts and their homes are deleted on subdev).
     {
         # marek@subdev — webterm OBSERVER lane account (#882 scope correction,
         # 2026-09-05: DEV STREAM cancelled but webterm dashboard survives per
@@ -289,37 +255,6 @@ REMOTE_HOSTS = [
             {"name": "d4", "cwd": "~/devel/odoo/odoo-erp",
              "role": None},
         ],
-    },
-    {
-        # montalu5/montalu6/montalu7/montalu8 (airuleset#378,
-        # odoo-erp#3642): FOUR MORE full parallel montalu streams, same
-        # shape as montalu2/3/4 (airuleset#251) -- same subdev box, same
-        # default-key shape (no `identity` entry — the montalu family
-        # authenticates via dev1's own default newlevel key, never
-        # gatekeeper_access_ed25519), same branch-merge authority. Accounts
-        # created by GATEKEEPER, repo side wired per odoo-erp#3642.
-        "name": "montalu5@subdev",
-        "host": "100.118.174.27",
-        "user": "montalu5",
-        "repo_path": "~/devel/airuleset",
-    },
-    {
-        "name": "montalu6@subdev",
-        "host": "100.118.174.27",
-        "user": "montalu6",
-        "repo_path": "~/devel/airuleset",
-    },
-    {
-        "name": "montalu7@subdev",
-        "host": "100.118.174.27",
-        "user": "montalu7",
-        "repo_path": "~/devel/airuleset",
-    },
-    {
-        "name": "montalu8@subdev",
-        "host": "100.118.174.27",
-        "user": "montalu8",
-        "repo_path": "~/devel/airuleset",
     },
     {
         # forestshop-dev (airuleset#406, 2026-08-12): owner-dedicated Hetzner
@@ -473,28 +408,6 @@ REMOTE_HOSTS = [
         # the since-removed sequential mode, #1137).
         "windows": [
             {"name": "d1", "cwd": "~/devel/odoo/odoo-erp",
-             "role": None},
-        ],
-    },
-    {
-        # montalu1 — the renamed base montalu stream (was `montalu`; #537 live
-        # rename 2026-08-19: in-place usermod on subdev, uid 1002 kept, home
-        # moved to /home/montalu1, primary group renamed, linger re-enabled,
-        # ssh from dev1 with the montalu-family DEFAULT key verified; the old
-        # `montalu@subdev` entry + its AUTHORITY_BY_USER row are GONE — the OS
-        # account no longer exists). Unlike david1/simap1 it authenticates
-        # with the DEFAULT newlevel key (no `identity`, like montalu2..8) — the
-        # montalu family's shared default-key/sshpass path, never
-        # gatekeeper_access. Original history: airuleset#33 + odoo-erp#1895
-        # (migrated 2026-07-24 from dev1 to the subdev VPS).
-        "name": "montalu1@subdev",
-        "host": "100.118.174.27",
-        "user": "montalu1",
-        "repo_path": "~/devel/airuleset",
-        # The declared window names the box's tmux window (added 2026-09-30 for
-        # the since-removed sequential mode, #1137).
-        "windows": [
-            {"name": "m1", "cwd": "~/devel/odoo/odoo-slovnormal",
              "role": None},
         ],
     },
@@ -941,15 +854,11 @@ AUTHORITY_BY_USER = {
     "marek": "fork-no-merge",
     # david (airuleset#23) was renamed to david1 (#537, 2026-08-21) — its row
     # moved to the numbered block below; the OS account `david` is gone.
-    # montalu (airuleset#33) was renamed to montalu1 (#537, 2026-08-19) — its
-    # row moved to the numbered block below; the OS account `montalu` is gone.
     # simap (airuleset#143) was renamed to simap1 (#537, 2026-08-18) — its
     # row moved to the numbered block below; the OS account `simap` is gone.
-    # montalu2/montalu3/montalu4 (airuleset#251, odoo-erp#2961): three MORE
-    # full parallel montalu streams — same authority as montalu itself.
-    "montalu2": "branch-merge",
-    "montalu3": "branch-merge",
-    "montalu4": "branch-merge",
+    # montalu1..8 were removed with the montalu client (#1306, 16.11.2026);
+    # their old `stream:` labels stay out of the core via
+    # RETIRED_STREAM_LABELS below.
     # miva1 (airuleset#300, 2026-08-07): activated phase-1 isolated (fork-no-merge).
     # PROMOTED to branch-merge (airuleset#821, 2026-09-01): odoo-erp CLAUDE.md
     # phase-2 (#3244, 2026-08-14) made miva1 a full write stream "in the montalu
@@ -971,23 +880,14 @@ AUTHORITY_BY_USER = {
     "david2": "fork-no-merge",
     "david3": "fork-no-merge",
     "david4": "fork-no-merge",
-    # montalu5/montalu6/montalu7/montalu8 (airuleset#378, odoo-erp#3642):
-    # four MORE full parallel montalu streams -- same authority as
-    # montalu/montalu2/montalu3/montalu4.
-    "montalu5": "branch-merge",
-    "montalu6": "branch-merge",
-    "montalu7": "branch-merge",
-    "montalu8": "branch-merge",
-    # montalu1/david1/simap1 (#537): the NUMBERED names for the base-stream
-    # rename (owner directive on #532 — montalu->montalu1, david->david1,
-    # simap->simap1; marek was un-renamed but is now decommissioned #882). All three
-    # renames are now LIVE (montalu1 2026-08-19, simap1 2026-08-18, david1
-    # 2026-08-21) — each runs as the new OS account, so every base row above is
-    # gone. Each keeps its base's authority profile. STREAM_RENAME_ALIASES
-    # (below) is KEPT so old `stream:<base>` tickets still resolve via
-    # `_stream_rename_equivalents`, in BOTH directions, until no open
-    # `stream:<base>` ticket remains.
-    "montalu1": "branch-merge",
+    # david1/simap1 (#537): the NUMBERED names for the base-stream rename
+    # (owner directive on #532 — david->david1, simap->simap1; marek was
+    # un-renamed but is now decommissioned #882). Both renames are LIVE
+    # (simap1 2026-08-18, david1 2026-08-21) — each runs as the new OS account,
+    # so every base row above is gone. Each keeps its base's authority profile.
+    # STREAM_RENAME_ALIASES (below) is KEPT so old `stream:<base>` tickets still
+    # resolve via `_stream_rename_equivalents`, in BOTH directions, until no
+    # open `stream:<base>` ticket remains.
     "david1": "fork-no-merge",
     "simap1": "fork-no-merge",
     # dominika (airuleset#867, 2026-09-04): a webterm OBSERVER, NOT a dev stream —
@@ -1193,7 +1093,17 @@ def _is_github_ci_runner(user) -> bool:
 # re-export), NEVER `cli_fleet.STREAM_RENAME_ALIASES` directly, so a
 # `patch.object(airuleset, "STREAM_RENAME_ALIASES", ...)` in a test is honoured
 # (the same L-E rule AUTHORITY_BY_USER above follows).
-STREAM_RENAME_ALIASES = {"montalu": "montalu1", "david": "david1", "simap": "simap1"}
+STREAM_RENAME_ALIASES = {"david": "david1", "simap": "simap1"}
+
+# Retired streams (#1306): a stream whose accounts are gone but whose
+# `stream:<name>` labels still sit on open tickets of another repo (the
+# montalu client left 11.11.2026; odoo-erp still holds its tickets, that
+# repo's call). These labels stay OUT of the full-authority core exactly as
+# while the accounts existed (`cli_quals._core_search_excl`,
+# `_ticket_is_stream_labeled`), so removing the accounts moves no ticket
+# into the gatekeeper's counts. Read via the `airuleset` facade (L-E rule).
+RETIRED_STREAM_LABELS = frozenset(
+    ["montalu"] + ["montalu%d" % i for i in range(1, 9)])
 
 
 # --- #775: shared-stream resource-guard apply targets ----------------------

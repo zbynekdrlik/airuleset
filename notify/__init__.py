@@ -101,21 +101,7 @@ STREAM_NOTIFY_OWNER = {
     # (resolve_owner falls back to the tmux session group for a self-mapped
     # stream).
     "david1": "david",
-    "montalu1": "zbynek",   # #537 rename of montalu (live 2026-08-19) — see the david1 comment above
-    "montalu2": "zbynek",
-    "montalu3": "zbynek",
-    "montalu4": "zbynek",   # #882: rerouted from marek (decommissioned) to zbynek
-    # montalu5/6/7/8 (airuleset#378, odoo-erp#3642): FOUR MORE full parallel
-    # montalu streams -> claude-zbynek. Owner routing decision 2026-08-19
-    # (airuleset#572) REVERSED the earlier 2026-08-11 #378 decision that
-    # montalu5 was operated by marek: montalu5's notifications now go to
-    # claude-zbynek, same as montalu6/7/8.
-    # §6a still requires verifying delivery with a REAL notify-delivery.log
-    # ping on the montalu5 box, not only configuring it.
-    "montalu5": "zbynek",
-    "montalu6": "zbynek",
-    "montalu7": "zbynek",
-    "montalu8": "zbynek",
+    # montalu1..8 left with the montalu client (#1306, accounts deleted).
     "simap1": "zbynek",   # #537 rename of simap (live 2026-08-18) — see the david1 comment above
     # miva1 (airuleset#300, 2026-08-07): phase-1 isolated stream, same shape
     # as simap/montalu -- its own tmux session name carries no Discord

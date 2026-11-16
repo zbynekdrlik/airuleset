@@ -12,14 +12,13 @@ wrappers delegating to that engine.
 
 Session set (owner request 2026-09-04 — "pridat noveho webterm uzivatela dominika
 … aby mala pristup k m5, miva"): dominika is a PURE OBSERVER — she has NO local
-attach. BOTH her tabs are loopback ssh, and BOTH are CROSS-TENANT OBSERVE tabs —
-`montalu5@subdev` (a montalu-family stream) and `miva1@subdev` (a separate
-external sub-dev stream
-notify-routed to the OWNER) — so she merely WATCHES them, never a within-tenant
-read (neither carries `u_tenant`, #703). Every ssh tab goes via the DEDICATED
+attach. Her one tab is loopback ssh, a CROSS-TENANT OBSERVE tab —
+`miva1@subdev` (a separate external sub-dev stream notify-routed to the OWNER;
+her `montalu5@subdev` tab left with the deleted account, #1306) — so she merely
+WATCHES it, never a within-tenant read (it carries no `u_tenant`, #703). Every ssh tab goes via the DEDICATED
 `profiles.WEBTERM_DOMINIKA_IDENTITY` key (never the fleet gatekeeper key, never the
 sshpass shared-password branch). The connect allowlist is physically this
-two-member set: it can never resolve another stream's id, a david id, or
+one-member set: it can never resolve another stream's id, a david id, or
 another person's account. The lane dash renders through the owner-defined per-domain
 tab policy (`LaneSpec.dashboard_human="dominika"` → WEBTERM_DASHBOARD_TABS).
 
@@ -32,15 +31,15 @@ password/credential), exactly like the david lane.
 
 SECURITY NOTE — the boundary this lane DOES and does NOT provide (honest, #612 R1
 review shape). The PUBLIC Access-gated path reaches ONLY dominika's scoped
-two-member set — the connect allowlist is physically `{montalu5-subdev,
-miva1-subdev}` (ssh only via the dedicated dominika key), so a dominika WEB LOGIN
+one-member set — the connect allowlist is physically `{miva1-subdev}` (ssh only
+via the dedicated dominika key), so a dominika WEB LOGIN
 can never drive another stream's, david's, or the owner's id, and
-dominika's Access realm/tunnel are separate from every other lane's. Both targets
-are OBSERVE-only (loopback ssh into their own tmux group), so there is NO
+dominika's Access realm/tunnel are separate from every other lane's. The target
+is OBSERVE-only (loopback ssh into its own tmux group), so there is NO
 owner-realm transitive-reach consequence here —
-montalu5 + miva1 are sub-dev stream accounts, not the owner's maintainer account.
+miva1 is a sub-dev stream account, not the owner's maintainer account.
 Because dominika has NO local tab, until the dedicated key + authorized_keys land
-(owner-action, `_DOMINIKA_GO_LIVE` step 5) BOTH tabs fail VISIBLY; there is no
+(owner-action, `_DOMINIKA_GO_LIVE` step 5) the tab fails VISIBLY; there is no
 keyless fallback tab.
 The multi-tenant LOOPBACK floor is CLOSED (#663): the gateway + ttyd bind mode-0700
 UNIX sockets in dominika's runtime dir, so a peer subdev account can no longer reach
@@ -119,15 +118,12 @@ _DOMINIKA_GO_LIVE = (
     "       POST-FLIP (LANE_HOST['dominika']=='controller'):\n"
     "         - PRIVATE KEY on the CONTROLLER at %s.\n"
     "         - PUBKEY as forced-command entries in authorized_keys of\n"
-    "           montalu5@subdev and miva1@subdev:\n"
+    "           miva1@subdev:\n"
     "           restrict,pty,command=\"<rendered from cli_webterm._remote_command>\"\n"
     "           (keep `pty`; `restrict` alone kills the PTY).\n"
-    "         - montalu5@subdev: reached via gatekeeper root@subdev (the\n"
-    "           montalu family has NO explicit identity in REMOTE_HOSTS — the\n"
-    "           push path uses the default key, which does NOT reach montalu5's\n"
-    "           authorized_keys; root is needed for key distribution).\n"
-    "         - miva1@subdev: reached via gatekeeper root@subdev (same).\n"
-    "       dominika has NO local tab, so BOTH tabs fail VISIBLY until\n"
+    "         - miva1@subdev: reached via gatekeeper root@subdev (root is\n"
+    "           needed for key distribution).\n"
+    "       dominika has NO local tab, so the tab fails VISIBLY until\n"
     "       the key + authorized_keys land.\n"
     % (WEBTERM_DOMINIKA_TUNNEL_UUID, WEBTERM_DOMINIKA_TUNNEL_UUID,
        profiles.WEBTERM_DOMINIKA_IDENTITY,
@@ -186,7 +182,7 @@ def _spec():
             runtime_owner="dominika's", tunnel_adjective="a SEPARATE",
             hostname=WEBTERM_DOMINIKA_TUNNEL_HOSTNAME,
             scoped_inventory="Scoped inventory (#867, owner request 2026-09-04):\n"
-                             "# TWO OBSERVE tabs only — montalu5@subdev + miva1@subdev\n"
+                             "# ONE OBSERVE tab only — miva1@subdev\n"
                              "# (loopback ssh via the dedicated webterm_dominika key,\n"
                              "# never the fleet gatekeeper key, never another lane's).\n"
                              "# NO local attach, NO other stream, NO owner-realm box."),

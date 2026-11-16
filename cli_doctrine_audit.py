@@ -280,21 +280,10 @@ ALLOWLIST = [
 # over the memory text), `scope` (regex the file path OR text must match — the
 # rule it contradicts is tenant-specific; miva keeps NO assignee by design),
 # `superseded_by` (the rule + its origin). Extend with a row per new ruling.
+# Empty since #1306: its one row (montalu `board-tasks-no-assignee`, #1166)
+# left with the montalu client, whose rule 5 and accounts are gone.
 # --------------------------------------------------------------------------- #
-SUPERSEDED_MEMORY = [
-    {
-        "id": "board-tasks-no-assignee",
-        "scope": r"montalu",
-        "pattern": (r"\b(?:no|bez|žiadn\w*|nikdy\s+nenastav\w*)\s+"
-                    r"(?:assignee|user_ids)"
-                    r"|\b(?:assignee|user_ids)\s*[:=]?\s*(?:none|empty|prázdn\w*|\[\])"),
-        # a line already carrying the new rule is up to date, not stale
-        "current_markers": ("#1166", "addressee", "adresát", "adresat"),
-        "superseded_by": ("skills/odoo-client-messaging/client-board-stages.md rule 5 "
-                          "(#1166, owner 28.9.2026: on montalu the handover addressee "
-                          "IS the task assignee)"),
-    },
-]
+SUPERSEDED_MEMORY = []
 
 
 def scan_superseded_memory(home, table=None):

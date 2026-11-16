@@ -74,14 +74,8 @@ _GENERATED_DROP_PORTS = {
     ("forestshop-dev", "admin"): 8880,
     ("forestshop-dev", "stepan"): 8881,
     ("subdev", "miva1"): 8882,
-    ("subdev", "montalu1"): 8883,
-    ("subdev", "montalu2"): 8884,
-    ("subdev", "montalu3"): 8885,
-    ("subdev", "montalu4"): 8886,
-    ("subdev", "montalu5"): 8887,
-    ("subdev", "montalu6"): 8888,
-    ("subdev", "montalu7"): 8889,
-    ("subdev", "montalu8"): 8890,
+    # 8883-8890 were montalu1..8@subdev (removed with the client, #1306);
+    # left unassigned so no live lane's port moves.
     # #1115 slice G: the LOCAL controller account (not a REMOTE_HOSTS target, so
     # never reached by the fleet loop — read by _add_controller_local_lane).
     ("airuleset", "airuleset"): 8891,

@@ -133,7 +133,7 @@ PRIVILEGES: List[Privilege] = [
         kind=KIND_SSH_KEY,
         local_path="~/.ssh/id_ed25519",
         reach="account default ssh key — the no-identity REMOTE_HOSTS "
-              "(dev2, montalu1-8@subdev, forestshop-dev admin/stepan) that "
+              "(dev2, forestshop-dev admin/stepan) that "
               "authorize the box's own default key",
         rotation="MOVED: controller box's own default key. Owner cancelled "
                  "rotation (issuecomment-5549153954) — dev1's key stays "
@@ -184,7 +184,7 @@ PRIVILEGES: List[Privilege] = [
         kind=KIND_SSH_KEY,
         local_path="~/.secrets/webterm_marek_ed25519",
         reach="dedicated webterm ssh key for marek's OBSERVE lane tabs on the "
-              "controller (montalu/miva/dev/gk/forestshop + project accounts — never the "
+              "controller (miva/dev/gk/forestshop + project accounts — never the "
               "fleet gatekeeper key)",
         rotation="F4b DONE: generated on the controller (2026-09-06), "
                  "distributed with forced-command entries.",
@@ -196,10 +196,10 @@ PRIVILEGES: List[Privilege] = [
         kind=KIND_SSH_KEY,
         local_path="~/.secrets/webterm_dominika_ed25519",
         reach="dedicated webterm ssh key for dominika's OBSERVE lane tabs on "
-              "the controller (montalu5/miva1 loopback — never the fleet "
+              "the controller (miva1 loopback — never the fleet "
               "gatekeeper key)",
         rotation="F4b DONE: generated on the controller (2026-09-06), "
-                 "distributed for montalu5/miva1@subdev.",
+                 "distributed for miva1@subdev (montalu5 left, #1306).",
         must_move=True,
         used_by=("cli_webterm_profiles.py:397 (WEBTERM_DOMINIKA_IDENTITY)",),
     ),
@@ -287,8 +287,8 @@ PRIVILEGES: List[Privilege] = [
         local_path="~/.git-credentials",
         reach="GitHub auth FALLBACK — _gh_env() (airuleset.py:2503) reads "
               "this only when no GH_TOKEN/GITHUB_TOKEN env AND no "
-              "gh-app-tokens/primary exist. Sub-dev stream boxes (david, "
-              "montalu) use it as their primary auth; the controller uses "
+              "gh-app-tokens/primary exist. Sub-dev stream boxes (david) "
+              "use it as their primary auth; the controller uses "
               "gh_cli_token (~/.config/gh/hosts.yml) instead.",
         rotation="SUB-DEV FALLBACK: not needed on the controller (gh_cli_token "
                  "covers it). Present on sub-dev stream boxes that never "
@@ -328,7 +328,7 @@ PRIVILEGES: List[Privilege] = [
         kind=KIND_PASSWORD,
         local_path="~/.secrets/newlevel-ssh-password",  # #1236 (was a literal)
         reach="fleet shared ssh password (`sshpass -f` this 0600 file) — dev2, "
-              "montalu1-8, forestshop admin/stepan (the no-identity hosts)",
+              "forestshop admin/stepan (the no-identity hosts)",
         rotation="#1236: moved out of the public source into this file, value "
                  "unchanged (owner 14.10.2026: no rotation); history purge open.",
         must_move=True,
@@ -387,7 +387,7 @@ PRIVILEGES: List[Privilege] = [
         kind=KIND_OAUTH,
         local_path="~/.config/gh-app-tokens/primary",
         reach="GitHub App installation token — the live-refresh path for "
-              "sub-dev stream boxes (david2-4, marek, montalu/2/3/4 on "
+              "sub-dev stream boxes (david2-4, marek on "
               "subdev). Delivered by the gatekeeper timer every 45 min. "
               "The controller is NOT a sub-dev stream box; it authenticates "
               "via gh_cli_token.",
