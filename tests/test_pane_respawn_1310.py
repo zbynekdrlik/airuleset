@@ -91,9 +91,9 @@ class _World:
                                         "children")
                     with open(path, "w") as f:
                         f.write("%d " % kid)
-                for pid, argv in self.exec_on_recheck.items():
+                for pid, new_argv in self.exec_on_recheck.items():
                     with open(os.path.join(self.proc, str(pid), "cmdline"), "wb") as f:
-                        f.write(b"\0".join(a.encode() for a in argv) + b"\0")
+                        f.write(b"\0".join(a.encode() for a in new_argv) + b"\0")
                 pane = argv[argv.index("-t") + 1]
                 pid = self.pid_after_check.get(pane, dict(self.panes).get(pane))
                 return 0, "%s\n" % pid
@@ -263,13 +263,20 @@ class TestRealTmux(unittest.TestCase):
         if self.env.get("TERM", "dumb") in ("", "dumb"):
             self.env["TERM"] = "xterm-256color"
         self.addCleanup(shutil.rmtree, self.dir, True)
-        self.addCleanup(self.tmux, "kill-server")
+        self.addCleanup(self.kill_server)
 
-    def tmux(self, *args):
+    def tmux(self, *args, timeout=10):
         r = subprocess.run(["tmux", "-S", self.sock, "-f", "/dev/null", *args],
-                           capture_output=True, text=True, timeout=10,
+                           capture_output=True, text=True, timeout=timeout,
                            env=self.env)
         return r.returncode, r.stdout
+
+    def kill_server(self):
+        """Teardown must not ERROR on a slow box (1 of 70 runs did)."""
+        try:
+            self.tmux("kill-server", timeout=30)
+        except subprocess.TimeoutExpired:
+            pass
 
     def run_tmux(self, argv):
         self.assertEqual(argv[0], "tmux")
