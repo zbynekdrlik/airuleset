@@ -1453,7 +1453,7 @@ _JANITOR_OWN_PREFIXES = ("/goal ", "/compact", "lane-check: ",
                          "bounce-backstop: ", "gk-request backstop: ",
                          "stuck-check: ", "goal-guard: ", "nudge:")
 
-JANITOR_CLEAR_MAX_ITER = 25       # bounds the observed-state clear loop
+JANITOR_CLEAR_MAX_ITER = 25       # own-suffix/apierr/send_outcome loops (#1340)
 JANITOR_CLEAR_BATCH_MAX = 200     # per-iteration backspace batch, sized to
                                   # the CURRENTLY OBSERVED remaining content
                                   # -- never a blind `len(text)`-sized single
@@ -1467,7 +1467,7 @@ JANITOR_CLEAR_SETTLE_S = 0.3
 # Bounds `state['janitor_watch'][pid]` (#372 adversarial-review CRITICAL-1
 # — the janitor's provenance gate). Generous on purpose: a stuck-forever
 # episode this mechanism exists to fix can legitimately sit unresolved for
-# many sweeps (the `JANITOR_CLEAR_MAX_ITER`-bounded clear loop can itself
+# many sweeps (the bounded clear loop, `janitor_clear.py`, can itself
 # fail, escalate, and need to be retried later) — the bound exists only to
 # stop a genuinely stale mark (a delivering job's own state got wedged, or
 # this pane was never revisited) from licensing action on unrelated LATER

@@ -124,6 +124,20 @@ class JanitorClearNarrowPane(unittest.TestCase):
         self.assertTrue(self._clear(pane), self.logs)
         self.assertLessEqual(pane.bspaces, 300)
 
+    def test_every_slow_redraw_gets_its_own_wait(self):
+        # two slow renders in one clear (after pass 1 and pass 3): each gets one
+        # key-free settle; the clear still converges.
+        pane = _NarrowPane(_GOAL[:600], width=40, rows=3)
+        real, prev, calls = pane.render, [None], [0]
+
+        def render():
+            calls[0] += 1
+            out = prev[0] if calls[0] in (2, 5) and prev[0] else real()
+            prev[0] = out
+            return out
+        pane.render = render
+        self.assertTrue(self._clear(pane), self.logs)
+
     def test_line_break_only_box_clears_one_key_per_pass(self):
         # #1332: a box holding only line breaks shows no character.
         pane = _NarrowPane("\n\n", width=40, rows=3)
