@@ -1,7 +1,7 @@
 """The fleet-shared `newlevel` ssh password: sshpass reads it from a 0600 file (#1236).
 
-The identity-less `cli_fleet.REMOTE_HOSTS` entries (dev2's `newlevel`, the
-montalu family on subdev, forestshop-dev's admin/stepan) log in through
+The identity-less `cli_fleet.REMOTE_HOSTS` entries (dev2's `newlevel`,
+forestshop-dev's admin/stepan; the montalu family left with #1306) log in through
 `sshpass ... ssh` whenever the account's default key does not. The password
 used to be a literal in this PUBLIC repo. It now lives only in the account's
 secrets dir as `~/.secrets/newlevel-ssh-password` (mode 0600) and reaches

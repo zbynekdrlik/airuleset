@@ -40,6 +40,15 @@ from _hook_state_cleanup import hermetic_hook_env, sweep_session_files  # noqa: 
 
 import cli_doctrine_audit as da  # noqa: E402
 
+# #1306: the real SUPERSEDED_MEMORY is empty (its only row, the montalu
+# no-assignee memory, left with the client); the scanner is locked on this
+# former row as a FIXTURE table so the mechanism keeps its teeth.
+_ROW = {"id": "board-tasks-no-assignee", "scope": r"montalu",
+        "pattern": (r"\b(?:no|bez|žiadn\w*|nikdy\s+nenastav\w*)\s+(?:assignee|user_ids)"
+                    r"|\b(?:assignee|user_ids)\s*[:=]?\s*(?:none|empty|prázdn\w*|\[\])"),
+        "current_markers": ("#1166", "addressee", "adresát", "adresat"),
+        "superseded_by": "skills/odoo-client-messaging/client-board-stages.md rule 5 (#1166)"}
+
 INJECT = REPO / "hooks" / "inject-situational-rule.sh"
 PROSE = REPO / "hooks" / "stop-check-prose-violations.sh"
 STAGES = REPO / "skills" / "odoo-client-messaging" / "client-board-stages.md"
@@ -286,12 +295,14 @@ class TestSupersededMemory(unittest.TestCase):
             Path(d, name).write_text(text, encoding="utf-8")
         return home
 
-    def test_flags_montalu_no_assignee_memory(self):
+    def test_flags_a_memory_contradicting_a_row(self):
         home = self._home([("-home-montalu4-devel-odoo-odoo-erp",
                             "project_board-tasks-no-assignee.md",
                             "---\nname: board tasks\n---\nBoard tasks: no assignee "
                             "(owner 9.7.) — nikdy nenastavuj user_ids.\n")])
-        found = da.scan_superseded_memory(home)
+        self.assertEqual(da.SUPERSEDED_MEMORY, [])   # #1306: row retired
+        self.assertEqual(da.scan_superseded_memory(home), [])
+        found = da.scan_superseded_memory(home, table=[_ROW])
         self.assertEqual(len(found), 1)
         self.assertIn("#1166", found[0]["superseded_by"])
         self.assertIn("client-board-stages.md", found[0]["superseded_by"])
@@ -299,13 +310,13 @@ class TestSupersededMemory(unittest.TestCase):
     def test_miva_no_assignee_is_current_doctrine(self):
         home = self._home([("-home-miva1-devel-odoo-odoo-erp", "board.md",
                             "miva client task carries no assignee (user_ids empty).\n")])
-        self.assertEqual(da.scan_superseded_memory(home), [])
+        self.assertEqual(da.scan_superseded_memory(home, table=[_ROW]), [])
 
     def test_report_only_never_edits(self):
         text = "Board tasks: no assignee.\n"
         home = self._home([("-home-montalu1-devel-odoo-odoo-erp", "x.md", text)])
         da.audit(home, fix=True)
-        da.scan_superseded_memory(home)
+        self.assertEqual(len(da.scan_superseded_memory(home, table=[_ROW])), 1)
         path = Path(home, ".claude", "projects", "-home-montalu1-devel-odoo-odoo-erp",
                     "memory", "x.md")
         self.assertEqual(path.read_text(encoding="utf-8"), text)
@@ -318,7 +329,9 @@ class TestSupersededMemory(unittest.TestCase):
                            capture_output=True, text=True, env=env, timeout=120)
         self.assertEqual(p.returncode, 0, p.stderr)
         self.assertIn("superseded", p.stdout.lower())
-        self.assertIn("#1166", p.stdout)
+        # #1306: no row left, so the section still prints but flags nothing
+        self.assertIn("superseded memory: none", p.stdout)
+        self.assertNotIn("#1166", p.stdout)
 
 
 # --------------------------------------------------------------------------- #
@@ -436,7 +449,9 @@ class TestInstallStepReportsSupersededMemory(unittest.TestCase):
                          "-home-montalu4-devel-odoo-odoo-erp", "memory")
         os.makedirs(d)
         Path(d, "b.md").write_text("Board tasks: no assignee.\n", encoding="utf-8")
-        lines = airuleset._run_doctrine_audit_step(home=home, repo_dir=None)
+        from unittest import mock
+        with mock.patch.object(da, "SUPERSEDED_MEMORY", [_ROW]):
+            lines = airuleset._run_doctrine_audit_step(home=home, repo_dir=None)
         self.assertTrue(any("#1179" in ln and "contradict" in ln for ln in lines), lines)
 
 
@@ -631,7 +646,7 @@ class TestSupersededReview2(unittest.TestCase):
                 d = os.path.join(home, ".clau" + "de", "projects", "-home-x-devel", "memory")
                 os.makedirs(d)
                 Path(d, "m.md").write_text(text, encoding="utf-8")
-                self.assertEqual(da.scan_superseded_memory(home), [])
+                self.assertEqual(da.scan_superseded_memory(home, table=[_ROW]), [])
 
 
 if __name__ == "__main__":

@@ -316,11 +316,10 @@ class JobBehaviour(unittest.TestCase):
                         logs)
 
     def test_reduced_stream_box_never_reconciles(self):
-        # montalu1 (renamed from montalu, #537 flip — the bare name left
-        # _REDUCED_STREAM_USERS, so the OLD path would now read as a
-        # full-authority box and reconcile, inverting this test's intent).
+        # miva1: a live reduced (branch-merge) stream home (was montalu1 until
+        # #1306); a requester box must never run the reconcile.
         logs, _, rec, _ = _run([_ORPHAN],
-                               roots={"/home/montalu1/devel/odoo-erp": "odoo-erp"})
+                               roots={"/home/miva1/devel/odoo-erp": "odoo-erp"})
         self.assertEqual(rec.calls, [])
 
     def test_non_cross_stream_repo_never_reconciles(self):

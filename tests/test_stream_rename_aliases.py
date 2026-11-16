@@ -1,7 +1,7 @@
 """Base-stream rename repo-side prep (#537).
 
 Owner directive (2026-08-18, on #532): the unnumbered base streams violate the
-`<name><N>` convention — `montalu` -> `montalu1`, `david` -> `david1`,
+`<name><N>` convention — `montalu` -> `montalu1` (client gone, #1306), `david` -> `david1`,
 `simap` -> `simap1`. `marek` deliberately does NOT rename (owner: stays marek,
 possible future removal is out of scope).
 
@@ -35,14 +35,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import airuleset
 
 
-RENAMES = (("montalu", "montalu1"), ("david", "david1"), ("simap", "simap1"))
+RENAMES = (("david", "david1"), ("simap", "simap1"))
 
 
 class TestRenameAliasTable(TestCase):
-    def test_table_is_exactly_the_three_base_renames(self):
+    def test_table_is_exactly_the_live_base_renames(self):
         self.assertEqual(
             airuleset.STREAM_RENAME_ALIASES,
-            {"montalu": "montalu1", "david": "david1", "simap": "simap1"})
+            {"david": "david1", "simap": "simap1"})
 
     def test_marek_is_absent_as_key_and_as_value(self):
         # Owner: marek stays marek. It must never appear on EITHER side of the
@@ -72,7 +72,7 @@ class TestStreamRenameEquivalents(TestCase):
             self.assertIn(old, eq)
 
     def test_a_non_renamed_stream_expands_to_only_itself(self):
-        for u in ("marek", "montalu2", "montalu5", "david2", "miva1"):
+        for u in ("marek", "david2", "david3", "david4", "miva1"):
             self.assertEqual(airuleset._stream_rename_equivalents(u), [u], u)
 
     def test_no_duplicate_names_in_the_expansion(self):
@@ -87,8 +87,7 @@ class TestAuthorityCoversNewNames(TestCase):
     # AUTHORITY_BY_USER alongside the new; once the live rename lands (simap,
     # 2026-08-18) the old OS account + its row are gone. Profiles pinned per
     # base so the check survives the old key's removal.
-    BASE_PROFILE = {"montalu": "branch-merge", "david": "fork-no-merge",
-                    "simap": "fork-no-merge"}
+    BASE_PROFILE = {"david": "fork-no-merge", "simap": "fork-no-merge"}
 
     def _old_still_live(self, old):
         return any(h["user"] == old for h in airuleset.REMOTE_HOSTS)
@@ -125,10 +124,10 @@ class TestSliceQualsAliasBothDirections(TestCase):
 
     def test_shared_account_rename_stream_carries_both_labels(self):
         with m.patch.object(airuleset, "_gh_login", return_value="zbynekdrlik"):
-            for name in ("montalu", "montalu1"):
+            for name in ("david", "david1"):
                 q = airuleset._slice_quals(name)
-                self.assertIn("label:stream:montalu", q, name)
-                self.assertIn("label:stream:montalu1", q, name)
+                self.assertIn("label:stream:david", q, name)
+                self.assertIn("label:stream:david1", q, name)
 
     def test_own_account_rename_stream_carries_both_labels_plus_identity(self):
         with m.patch.object(airuleset, "_gh_login", return_value="kvaskodev"):
@@ -147,11 +146,11 @@ class TestSliceQualsAliasBothDirections(TestCase):
                 self.assertIn("label:stream:simap1", q, name)
 
     def test_a_non_renamed_shared_stream_stays_single_label(self):
-        # montalu2..8 are NOT renamed — their slice must stay exactly one label
+        # david2..4 are NOT renamed — their slice must stay exactly one label
         # (no alias sprawl onto unrelated streams).
         with m.patch.object(airuleset, "_gh_login", return_value="zbynekdrlik"):
-            self.assertEqual(airuleset._slice_quals("montalu2"),
-                             ["label:stream:montalu2"])
+            self.assertEqual(airuleset._slice_quals("david2"),
+                             ["label:stream:david2"])
 
 
 class TestTicketIsStreamLabeledAlias(TestCase):
@@ -160,23 +159,23 @@ class TestTicketIsStreamLabeledAlias(TestCase):
 
     def test_new_name_label_is_recognised(self):
         self.assertTrue(
-            airuleset._ticket_is_stream_labeled(self._labels("stream:montalu1")))
+            airuleset._ticket_is_stream_labeled(self._labels("stream:david1")))
 
     def test_old_name_label_is_recognised(self):
         self.assertTrue(
-            airuleset._ticket_is_stream_labeled(self._labels("stream:montalu")))
+            airuleset._ticket_is_stream_labeled(self._labels("stream:david")))
 
     def test_old_label_survives_removal_of_old_key_from_authority(self):
         # The live-op END state removes the OLD names from AUTHORITY_BY_USER,
-        # keeping only montalu1/david1/simap1. Historical tickets still carry
-        # `stream:montalu` — the alias must keep recognising them as
+        # keeping only david1/simap1. Historical tickets still carry
+        # `stream:david` — the alias must keep recognising them as
         # stream-owned so they never fall into the full-authority CORE slice.
-        only_new = {"montalu1": "branch-merge", "david1": "fork-no-merge",
+        only_new = {"david1": "fork-no-merge",
                     "simap1": "fork-no-merge"}
         with m.patch.object(airuleset, "AUTHORITY_BY_USER", only_new):
             self.assertTrue(
                 airuleset._ticket_is_stream_labeled(
-                    self._labels("stream:montalu")))
+                    self._labels("stream:david")))
             self.assertTrue(
                 airuleset._ticket_is_stream_labeled(
                     self._labels("stream:david")))
@@ -233,8 +232,9 @@ class TestPendingRemoteHostsAreRegisteredButNeverSshd(TestCase):
                                  "%s renamed away — stale target" % old)
                 self.assertIn(new, deployable, new)
 
-    def test_montalu1_uses_the_default_key_like_montalu(self):
-        self.assertNotIn("identity", self._by_user()["montalu1"])
+    def test_retired_montalu_accounts_are_gone(self):
+        # Inverted (#1306): the default-key montalu accounts are gone.
+        self.assertFalse(set(self._by_user()) & airuleset.RETIRED_STREAM_LABELS)
 
     def test_david1_and_simap1_use_the_operator_identity(self):
         hosts = self._by_user()
@@ -243,7 +243,7 @@ class TestPendingRemoteHostsAreRegisteredButNeverSshd(TestCase):
                              "~/.secrets/gatekeeper_access_ed25519", new)
 
     def test_soniox_provisioning_never_ssh_a_pending_account(self):
-        # A pending montalu1 IS in AUTHORITY_BY_USER, so it would pass the
+        # A pending david1 IS in AUTHORITY_BY_USER, so it would pass the
         # stream-account filter — the pending filter is what keeps it out of
         # every ssh (a password attempt against a non-existent account is a
         # fail2ban strike, #341/#300/#326).
@@ -251,9 +251,9 @@ class TestPendingRemoteHostsAreRegisteredButNeverSshd(TestCase):
         src = d / ".env"
         src.write_text("SONIOX_API_KEY=FAKE-KEY-NEVER-REAL\n")
         hosts = [
-            {"name": "montalu@subdev", "host": "9.9.9.9", "user": "montalu",
+            {"name": "david@subdev", "host": "9.9.9.9", "user": "david",
              "repo_path": "~/devel/airuleset"},
-            {"name": "montalu1@subdev", "host": "9.9.9.9", "user": "montalu1",
+            {"name": "david1@subdev", "host": "9.9.9.9", "user": "david1",
              "repo_path": "~/devel/airuleset", "pending": True},
         ]
         calls = []
@@ -263,12 +263,12 @@ class TestPendingRemoteHostsAreRegisteredButNeverSshd(TestCase):
             return m.Mock(returncode=0, stdout="", stderr="")
 
         with m.patch.object(airuleset, "AUTHORITY_BY_USER",
-                            {"montalu": "branch-merge", "montalu1": "branch-merge"}):
+                            {"david": "fork-no-merge", "david1": "fork-no-merge"}):
             airuleset.provision_subdev_soniox_key(hosts=hosts, run=run, source=src)
         joined = " ".join(str(a) for a in calls)
-        self.assertNotIn("montalu1@9.9.9.9", joined,
+        self.assertNotIn("david1@9.9.9.9", joined,
                          "a pending account must never be ssh'd")
-        self.assertIn("montalu@9.9.9.9", joined,
+        self.assertIn("david@9.9.9.9", joined,
                       "the live base account must still be provisioned")
 
 
@@ -282,9 +282,9 @@ class TestFleetBurnSkipsPendingHosts(TestCase):
 
     def _hosts(self):
         return [
-            {"name": "montalu@subdev", "host": "9.9.9.9", "user": "montalu",
+            {"name": "david@subdev", "host": "9.9.9.9", "user": "david",
              "repo_path": "~/devel/airuleset"},
-            {"name": "montalu1@subdev", "host": "9.9.9.9", "user": "montalu1",
+            {"name": "david1@subdev", "host": "9.9.9.9", "user": "david1",
              "repo_path": "~/devel/airuleset", "pending": True},
         ]
 
@@ -298,14 +298,14 @@ class TestFleetBurnSkipsPendingHosts(TestCase):
 
         with m.patch.object(cli_burn, "_fleet_remote_row", side_effect=fake_row):
             result = airuleset._watchdog_fleet_fetch(self._hosts(), want_hour_bucket=123)
-        self.assertIn("montalu@subdev", rowed)
+        self.assertIn("david@subdev", rowed)
         self.assertNotIn(
-            "montalu1@subdev", rowed,
+            "david1@subdev", rowed,
             "a pending account must never be ssh'd by the hourly fleet-burn job")
-        self.assertNotIn("montalu1@subdev", result)
+        self.assertNotIn("david1@subdev", result)
 
     def test_watchdog_fleet_fetch_default_excludes_pending_from_real_registry(self):
-        # hosts=None must resolve to REMOTE_HOSTS MINUS pending (montalu1 etc.).
+        # hosts=None must resolve to REMOTE_HOSTS MINUS pending (david1 etc.).
         import cli_burn
         rowed = []
 
@@ -336,14 +336,14 @@ class TestC2GuardWithAliasedSlice(TestCase):
     """The C2 false-empty guard used to key on `len(quals) == 1`. The
     symmetric alias makes a shared-account slice carry TWO labels, so the
     guard is generalised: refuse an empty slice only when NONE of its labels
-    exists on the repo — an existing `stream:montalu` (with a transitionally
-    absent `stream:montalu1`) makes a genuine 0 trustworthy, not refused."""
+    exists on the repo — an existing `stream:david` (with a transitionally
+    absent `stream:david1`) makes a genuine 0 trustworthy, not refused."""
 
     def test_empty_slice_trustworthy_when_at_least_one_alias_label_exists(self):
-        quals = ["label:stream:montalu", "label:stream:montalu1"]
+        quals = ["label:stream:david", "label:stream:david1"]
 
         def label_exists(label, cwd=None):
-            return label == "stream:montalu"  # old exists, new not yet created
+            return label == "stream:david"  # old exists, new not yet created
 
         with m.patch.object(airuleset, "_label_exists_on_repo",
                             side_effect=label_exists), \
@@ -353,7 +353,7 @@ class TestC2GuardWithAliasedSlice(TestCase):
             airuleset._refuse_unless_empty_is_trustworthy("slice-quals", quals)
 
     def test_empty_slice_refused_when_no_alias_label_exists(self):
-        quals = ["label:stream:montalu", "label:stream:montalu1"]
+        quals = ["label:stream:david", "label:stream:david1"]
 
         def label_exists(label, cwd=None):
             return False  # neither exists — a 0 here is unreliable
@@ -368,10 +368,10 @@ class TestCoreSearchExclAliasExpansion(TestCase):
     """#561: `_core_search_excl()` is the THIRD `_stream_rename_equivalents()`
     consumer the #537 staging missed. It builds the full-authority CORE
     gh-search exclusion straight from AUTHORITY_BY_USER keys, so after the live
-    rename removed the OLD `montalu`/`simap` keys (their OS accounts are gone)
-    it stopped excluding the OLD `stream:montalu`/`stream:simap` labels the
+    rename removed the OLD `david`/`simap` keys (their OS accounts are gone)
+    it stopped excluding the OLD `stream:david`/`stream:simap` labels the
     odoo-erp tickets still carry (live gk audit 2026-08-19: 69 open
-    `stream:montalu`, 0 `stream:montalu1`), leaking ~50 tickets into gk
+    `stream:david`, 0 `stream:david1`), leaking ~50 tickets into gk
     core-quals / footer `I` / the /goal stop-proof / the Discord card.
 
     Patched to the post-rename END state (only-new keys) so the test is
@@ -379,28 +379,28 @@ class TestCoreSearchExclAliasExpansion(TestCase):
     `TestTicketIsStreamLabeledAlias.test_old_label_survives_removal_of_old_key
     _from_authority` above."""
 
-    ONLY_NEW = {"montalu1": "branch-merge", "simap1": "fork-no-merge",
+    ONLY_NEW = {"simap1": "fork-no-merge",
                 "david1": "fork-no-merge", "marek": "branch-merge",
-                "montalu2": "branch-merge"}
+                "david2": "fork-no-merge"}
 
     def test_new_names_are_still_excluded(self):
         # Exact-token membership (`excl.split()`), never substring `in excl`:
-        # `-label:stream:montalu` is a SUBSTRING of `-label:stream:montalu1`,
+        # `-label:stream:david` is a SUBSTRING of `-label:stream:david1`,
         # so a substring assertion would pass for the wrong reason.
         with m.patch.object(airuleset, "AUTHORITY_BY_USER", self.ONLY_NEW):
             toks = airuleset._core_search_excl().split()
-        for name in ("montalu1", "simap1", "david1", "marek", "montalu2"):
+        for name in ("simap1", "david1", "marek", "david2"):
             self.assertIn("-label:stream:%s" % name, toks, name)
 
     def test_legacy_alias_labels_are_also_excluded(self):
         # THE #561 regression: the OLD labels the repo still carries must be
         # excluded too, via the SAME `_stream_rename_equivalents()` primitive
         # `_slice_quals`/`_ticket_is_stream_labeled` already use — never a
-        # second parallel alias table. Exact-token membership: `montalu` is a
-        # prefix of `montalu1`, so a substring `in` would falsely pass.
+        # second parallel alias table. Exact-token membership: `david` is a
+        # prefix of `david1`, so a substring `in` would falsely pass.
         with m.patch.object(airuleset, "AUTHORITY_BY_USER", self.ONLY_NEW):
             toks = airuleset._core_search_excl().split()
-        self.assertIn("-label:stream:montalu", toks)   # FAILS before the fix
+        self.assertIn("-label:stream:david", toks)   # FAILS before the fix
         self.assertIn("-label:stream:simap", toks)     # FAILS before the fix
 
     def test_a_full_profile_entry_is_still_never_excluded(self):
@@ -471,7 +471,7 @@ class TestCoreQualsCountExcludesLegacyStreamTicket(TestCase):
     through the actual `cmd_core_quals` count path (not just the derivation),
     so it fails when the COUNT leaks — the number the /goal stop-proof reads."""
 
-    ONLY_NEW = {"montalu1": "branch-merge", "simap1": "fork-no-merge",
+    ONLY_NEW = {"simap1": "fork-no-merge",
                 "david1": "fork-no-merge", "marek": "branch-merge"}
 
     def _count(self):
@@ -479,7 +479,7 @@ class TestCoreQualsCountExcludesLegacyStreamTicket(TestCase):
         import io
         items = [
             {"number": 11, "labels": set()},                  # genuine gk core work
-            {"number": 3062, "labels": {"stream:montalu"}},   # renamed-away label
+            {"number": 3062, "labels": {"stream:david"}},   # renamed-away label
         ]
         gh = _gh_filtered(items)
         buf = io.StringIO()
@@ -492,10 +492,10 @@ class TestCoreQualsCountExcludesLegacyStreamTicket(TestCase):
                             ops_wait=False, audit=False, dep_wait=False, count_dispatchable=False, extra=None))
         return buf.getvalue().strip()
 
-    def test_a_stream_montalu_ticket_is_not_counted_into_gk_core(self):
+    def test_a_stream_david_ticket_is_not_counted_into_gk_core(self):
         self.assertEqual(
             self._count(), "1",
-            "a renamed-away stream:montalu ticket leaked into the gk core "
+            "a renamed-away stream:david ticket leaked into the gk core "
             "count — the exact 5->61 regression #561 fixes")
 
 
@@ -503,23 +503,23 @@ class TestStreamOwnerOfAlias(TestCase):
     """#561: `_stream_owner_of()` — the `implement`/`action-only` row
     discriminator (`_row_action`, the issue's exact 'appear as implement rows'
     evidence) and the re-adoption filter — must recognise a legacy
-    `stream:<old>` label, or a `stream:montalu`+`needs-gatekeeper` hand-off
+    `stream:<old>` label, or a `stream:david`+`needs-gatekeeper` hand-off
     (odoo-erp #2396/#2377, legitimately in the obligation UNION) would render
-    as `implement` and invite the gatekeeper to write montalu's code."""
+    as `implement` and invite the gatekeeper to write david's code."""
 
-    ONLY_NEW = {"montalu1": "branch-merge", "david1": "fork-no-merge"}
+    ONLY_NEW = {"david1": "fork-no-merge", "simap1": "fork-no-merge"}
 
     def test_legacy_label_resolves_to_the_canonical_renamed_stream(self):
         with m.patch.object(airuleset, "AUTHORITY_BY_USER", self.ONLY_NEW):
             # returns the AUTHORITY_BY_USER KEY (current canonical name), so a
-            # montalu1 box's own old-labeled ticket matches its own_stream and
+            # david1 box's own old-labeled ticket matches its own_stream and
             # still reads `implement`, while gk (own_stream="") reads action-only.
             self.assertEqual(
-                airuleset._stream_owner_of([{"name": "stream:montalu"}]),
-                "montalu1")                                    # "" before the fix
+                airuleset._stream_owner_of([{"name": "stream:david"}]),
+                "david1")                                    # "" before the fix
             self.assertEqual(
-                airuleset._stream_owner_of([{"name": "stream:montalu1"}]),
-                "montalu1")
+                airuleset._stream_owner_of([{"name": "stream:david1"}]),
+                "david1")
 
     def test_a_non_stream_label_is_not_owned(self):
         with m.patch.object(airuleset, "AUTHORITY_BY_USER", self.ONLY_NEW):
@@ -533,22 +533,22 @@ class TestStreamOwnerOfAlias(TestCase):
         # `test_a_full_profile_entry_is_still_never_excluded` locks for
         # `_core_search_excl`.
         with m.patch.object(airuleset, "AUTHORITY_BY_USER",
-                            {"montalu1": "branch-merge", "boss": "full"}):
+                            {"david1": "fork-no-merge", "boss": "full"}):
             self.assertEqual(
                 airuleset._stream_owner_of([{"name": "stream:boss"}]), "")
             self.assertEqual(
-                airuleset._stream_owner_of([{"name": "stream:montalu"}]),
-                "montalu1")
+                airuleset._stream_owner_of([{"name": "stream:david"}]),
+                "david1")
 
     def test_a_row_with_a_legacy_stream_handoff_is_marked_action_only(self):
-        # End-to-end through `cmd_core_quals --list`: a stream:montalu +
+        # End-to-end through `cmd_core_quals --list`: a stream:david +
         # needs-gatekeeper ticket surfaces via the obligation union and MUST be
         # `action-only` (gk reviews it, never implements). `implement` before fix.
         import contextlib
         import io
         items = [
             {"number": 11, "labels": set()},                            # core -> implement
-            {"number": 2396, "labels": {"stream:montalu", "needs-gatekeeper"}},
+            {"number": 2396, "labels": {"stream:david", "needs-gatekeeper"}},
         ]
         gh = _gh_filtered(items)
         buf = io.StringIO()
@@ -572,20 +572,20 @@ class TestBounceQualsFullAuthorityAlias(TestCase):
     """#561: the watchdog full-authority (dev1) bounce-nudge exclusion
     (`_bounce_quals`, cross_stream.py:108) is the SAME `stream:%s`-from-a-stream-
     registry leak class — after the rename `_REDUCED_STREAM_USERS` carries
-    `montalu1` but not `montalu`, so dev1's job-8 query would NOT exclude an
-    old `stream:montalu` bounce ticket and nudge the wrong person about it."""
+    `david1` but not `david`, so dev1's job-8 query would NOT exclude an
+    old `stream:david` bounce ticket and nudge the wrong person about it."""
 
     def test_full_authority_exclusion_covers_the_legacy_alias(self):
         import watchdog as wd
         quals = wd._bounce_quals("/home/newlevel/devel/odoo-erp")
         self.assertEqual(len(quals), 1)
-        toks = quals[0].split()  # exact-token: `montalu` is a prefix of `montalu1`
-        self.assertIn("-label:stream:montalu1", toks)
-        self.assertIn("-label:stream:montalu", toks)       # FAILS before the fix
+        toks = quals[0].split()  # exact-token: `david` is a prefix of `david1`
+        self.assertIn("-label:stream:david1", toks)
+        self.assertIn("-label:stream:david", toks)       # FAILS before the fix
 
     def test_a_reduced_box_own_slice_expands_to_equivalents(self):
-        # #564 (INVERTS the #537-locked own-slice narrowing): a montalu1 box's
-        # OWN bounce slice must ALSO cover the legacy `stream:montalu` label so
+        # #564 (INVERTS the #537-locked own-slice narrowing): a david1 box's
+        # OWN bounce slice must ALSO cover the legacy `stream:david` label so
         # it does not under-nudge itself about its own old-labeled bounce
         # tickets during the transition. #537 deliberately left this narrowed
         # ("own-slice narrowing is a separate concern, not a gk leak"); issue 564
@@ -594,15 +594,15 @@ class TestBounceQualsFullAuthorityAlias(TestCase):
         # quals are UNIONED per-qual by _fetch_bounce_tickets, so an extra
         # alias label never narrows the result. RED before the fix.
         import watchdog as wd
-        self.assertEqual(wd._bounce_quals("/home/montalu1/devel/odoo-erp"),
-                         ["label:stream:montalu1", "label:stream:montalu"])
+        self.assertEqual(wd._bounce_quals("/home/david1/devel/odoo-erp"),
+                         ["label:stream:david1", "label:stream:david"])
 
     def test_a_non_renamed_reduced_box_own_slice_is_unchanged(self):
-        # #564: a stream NOT involved in any rename (montalu2) expands to just
+        # #564: a stream NOT involved in any rename (david2) expands to just
         # itself, so its own slice is byte-identical to before.
         import watchdog as wd
-        self.assertEqual(wd._bounce_quals("/home/montalu2/devel/odoo-erp"),
-                         ["label:stream:montalu2"])
+        self.assertEqual(wd._bounce_quals("/home/david2/devel/odoo-erp"),
+                         ["label:stream:david2"])
 
 
 if __name__ == "__main__":

@@ -102,7 +102,7 @@ class TestResolution(unittest.TestCase):
     def test_box_types(self):
         self.assertEqual(np.resolve_profile("gatekeeper"), "gk")
         self.assertEqual(np.resolve_profile("airuleset"), "controller")
-        for stream in ("montalu1", "montalu4", "montalu6", "david1", "miva1"):
+        for stream in ("david1", "david2", "david3", "david4", "miva1"):
             self.assertEqual(np.resolve_profile(stream), "stream", stream)
         self.assertEqual(np.resolve_profile("newlevel"), "workstation")
         # webterm observers run no Claude stream of their own
@@ -111,7 +111,7 @@ class TestResolution(unittest.TestCase):
 
     def test_explicit_entry_declaration_wins(self):
         self.assertEqual(
-            np.resolve_profile("montalu1", {"nudge_profile": "workstation"}),
+            np.resolve_profile("david1", {"nudge_profile": "workstation"}),
             "workstation")
 
     def test_box_profile_uses_self_entry(self):
@@ -152,8 +152,8 @@ class TestApply(unittest.TestCase):
     def test_first_adoption_matching_live_set_records_profile_no_change(self):
         with TemporaryDirectory() as home:
             _write_state(home, {"on": sorted(LIVE_STREAM), "since": "S",
-                                "by": "montalu1"})
-            r = np.apply_profile(home=home, user="montalu1")
+                                "by": "david1"})
+            r = np.apply_profile(home=home, user="david1")
             st = _state(home)
             self.assertEqual(st["profile"], "stream")
             self.assertEqual(set(st["on"]), LIVE_STREAM)
@@ -166,14 +166,14 @@ class TestApply(unittest.TestCase):
         with TemporaryDirectory() as home:
             live = (LIVE_STREAM - {"bounce"}) | {"card"}
             _write_state(home, {"on": sorted(live)})
-            r = np.apply_profile(home=home, user="montalu1")
+            r = np.apply_profile(home=home, user="david1")
             self.assertEqual(set(_state(home)["on"]), live)
             self.assertEqual(r["plus"], ["card"])
             self.assertEqual(r["minus"], ["bounce"])
 
     def test_first_adoption_absent_file_turns_nothing_on(self):
         with TemporaryDirectory() as home:
-            r = np.apply_profile(home=home, user="montalu1")
+            r = np.apply_profile(home=home, user="david1")
             self.assertEqual(wd.nudges_on_kinds(home), set())
             self.assertEqual(_state(home)["profile"], "stream")
             self.assertEqual(len(r["minus"]), len(LIVE_STREAM))
@@ -185,7 +185,7 @@ class TestApply(unittest.TestCase):
             live = (set(old_profile) - {"bounce"}) | {"card"}
             _write_state(home, {"on": sorted(live), "profile": "stream",
                                 "profile_kinds": old_profile})
-            r = np.apply_profile(home=home, user="montalu1")
+            r = np.apply_profile(home=home, user="david1")
             on = set(_state(home)["on"])
             self.assertIn("release-gap", on)      # added by the profile change
             self.assertIn("card", on)             # runtime +override kept
@@ -199,7 +199,7 @@ class TestApply(unittest.TestCase):
             old_profile = sorted(LIVE_STREAM | {"card"})
             _write_state(home, {"on": old_profile, "profile": "stream",
                                 "profile_kinds": old_profile})
-            r = np.apply_profile(home=home, user="montalu1")
+            r = np.apply_profile(home=home, user="david1")
             self.assertNotIn("card", set(_state(home)["on"]))
             self.assertEqual(r["removed"], ["card"])
 
@@ -209,7 +209,7 @@ class TestApply(unittest.TestCase):
         with TemporaryDirectory() as home:
             _write_state(home, {"on": ["card"], "profile": "stream",
                                 "profile_kinds": "garbage"})
-            np.apply_profile(home=home, user="montalu1")
+            np.apply_profile(home=home, user="david1")
             self.assertEqual(set(_state(home)["on"]), {"card"})
 
     def test_write_is_atomic_no_tmp_left(self):
@@ -230,7 +230,7 @@ class TestApply(unittest.TestCase):
         # recorded profile (else the next apply would re-adopt from scratch).
         with TemporaryDirectory() as home:
             _write_state(home, {"on": sorted(LIVE_STREAM)})
-            np.apply_profile(home=home, user="montalu1")
+            np.apply_profile(home=home, user="david1")
             wd.set_nudge_kind("card", True, home=home, by="owner")
             st = _state(home)
             self.assertEqual(st["profile"], "stream")
@@ -240,8 +240,8 @@ class TestApply(unittest.TestCase):
     def test_reset_realigns_to_the_profile(self):
         with TemporaryDirectory() as home:
             _write_state(home, {"on": ["card"]})
-            np.apply_profile(home=home, user="montalu1")
-            r = np.reset_to_profile(home=home, user="montalu1", by="owner")
+            np.apply_profile(home=home, user="david1")
+            r = np.reset_to_profile(home=home, user="david1", by="owner")
             self.assertEqual(wd.nudges_on_kinds(home), LIVE_STREAM)
             self.assertEqual((r["plus"], r["minus"]), ([], []))
             # Review F4: the discarded runtime deviations are REPORTED.
@@ -278,13 +278,13 @@ class TestFooter(unittest.TestCase):
     def test_profile_without_deviation(self):
         with TemporaryDirectory() as home:
             _write_state(home, {"on": sorted(LIVE_STREAM)})
-            np.apply_profile(home=home, user="montalu1")
+            np.apply_profile(home=home, user="david1")
             self.assertEqual(self._seg(home), "nudges stream · recovery on")
 
     def test_profile_plus_deviation(self):
         with TemporaryDirectory() as home:
             _write_state(home, {"on": sorted(LIVE_STREAM | {"card"})})
-            np.apply_profile(home=home, user="montalu1")
+            np.apply_profile(home=home, user="david1")
             self.assertEqual(self._seg(home), "nudges stream +1 · recovery on")
 
     def test_profile_minus_deviation(self):
@@ -322,8 +322,8 @@ class TestStatus(unittest.TestCase):
     def test_status_prints_profile_line(self):
         with TemporaryDirectory() as home:
             _write_state(home, {"on": sorted(LIVE_STREAM)})
-            np.apply_profile(home=home, user="montalu1")
-            out = self._status(home, "montalu1")
+            np.apply_profile(home=home, user="david1")
+            out = self._status(home, "david1")
             self.assertIn("profile: stream (8 kinds)", out)
             self.assertIn("deviation: none", out)
             self.assertIn("nudges: ON", out)     # fleet parser shape kept
@@ -332,8 +332,8 @@ class TestStatus(unittest.TestCase):
         with TemporaryDirectory() as home:
             _write_state(home, {"on": sorted((LIVE_STREAM - {"bounce"})
                                              | {"card"})})
-            np.apply_profile(home=home, user="montalu1")
-            out = self._status(home, "montalu1")
+            np.apply_profile(home=home, user="david1")
+            out = self._status(home, "david1")
             self.assertIn("+card", out)
             self.assertIn("-bounce", out)
 
@@ -343,7 +343,7 @@ class TestStatus(unittest.TestCase):
         with TemporaryDirectory() as home:
             _write_state(home, {"on": [], "profile": "workstation",
                                 "profile_kinds": []})
-            out = self._status(home, "montalu1")
+            out = self._status(home, "david1")
             self.assertIn("profile: workstation (0 kinds)", out)
             self.assertIn("fleet declares 'stream'", out)
 
@@ -351,20 +351,20 @@ class TestStatus(unittest.TestCase):
         with TemporaryDirectory() as home, \
                 m.patch.object(np, "status_lines",
                                side_effect=RuntimeError("boom")):
-            out = self._status(home, "montalu1")
+            out = self._status(home, "david1")
             self.assertIn("nudges: OFF", out)
             self.assertIn("profile: <unreadable", out)
 
     def test_reset_rejects_kind_and_reports_dropped(self):
         with TemporaryDirectory() as home:
             _write_state(home, {"on": sorted(LIVE_STREAM | {"card"})})
-            np.apply_profile(home=home, user="montalu1")
+            np.apply_profile(home=home, user="david1")
             args = m.Mock(nudges_action="reset", kind="card", all=False,
                           fleet=False)
             buf = io.StringIO()
             with m.patch("os.path.expanduser",
                          side_effect=lambda p: p.replace("~", home, 1)), \
-                    m.patch.object(np, "_current_user", return_value="montalu1"), \
+                    m.patch.object(np, "_current_user", return_value="david1"), \
                     redirect_stdout(buf):
                 self.assertEqual(airuleset.cmd_nudges(args), 2)
                 self.assertIn("card", wd.nudges_on_kinds(home))   # untouched

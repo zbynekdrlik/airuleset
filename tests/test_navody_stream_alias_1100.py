@@ -1,5 +1,5 @@
 """#1100 — gates.navody: the per-stream fact file is resolved through the fleet
-rename alias (montalu1 -> montalu.md, david1 -> david.md), in the ONE stream-
+rename alias (simap1 -> simap.md, david1 -> david.md), in the ONE stream-
 file reader every stream-fact gate uses.
 
 Root cause (design comment on #1100): `_current_stream()` returns the unspoofable
@@ -23,12 +23,12 @@ This suite locks:
    _stream_rename_equivalents`' one-edge-either-direction semantics (reading
    `cli_fleet` directly, never the `airuleset` facade), and `_stream_file_
    candidates(stream)` = exact-first + alias, deduplicated, NO suffix heuristic.
-2. READER — `_read_stream_file` / `tenant_guide` resolve montalu1->montalu.md and
+2. READER — `_read_stream_file` / `tenant_guide` resolve simap1->simap.md and
    david1->david.md; exact name wins over the alias; the reverse edge resolves;
-   an unaliased missing file (montalu7) stays UNKNOWN.
+   an unaliased missing file (simap7) stays UNKNOWN.
 3. UNKNOWN BLOCK — `evaluate_stop(..., candidates=...)` and `run()` name the
    candidate files in the fail-closed message.
-4. SPEC GATE — `gates.spec.specs_for_stream(cwd, "montalu1")` reads montalu.md's
+4. SPEC GATE — `gates.spec.specs_for_stream(cwd, "simap1")` reads simap.md's
    `specs:` fact for free (it calls `_read_stream_file`).
 5. HERMETIC DEGRADE — with the `cli_fleet` import failing, the reader degrades to
    the exact name only (no alias, still fail-closed, never a wrong tenant).
@@ -66,18 +66,18 @@ def _mapping_reader(mapping):
 # --------------------------------------------------------------------------- #
 class TestAliasPrimitive(unittest.TestCase):
     def test_old_to_new_edge(self):
-        # montalu -> montalu1 (old base-stream name -> new uid)
-        self.assertEqual(navody._alias_equivalents("montalu"), ["montalu1"])
+        # simap -> simap1 (old base-stream name -> new uid)
+        self.assertEqual(navody._alias_equivalents("simap"), ["simap1"])
         self.assertEqual(navody._alias_equivalents("david"), ["david1"])
 
     def test_new_to_old_edge(self):
-        # montalu1 -> montalu (new uid -> the file that kept the old name)
-        self.assertEqual(navody._alias_equivalents("montalu1"), ["montalu"])
+        # simap1 -> simap (new uid -> the file that kept the old name)
+        self.assertEqual(navody._alias_equivalents("simap1"), ["simap"])
         self.assertEqual(navody._alias_equivalents("david1"), ["david"])
 
     def test_unaliased_name_has_no_equivalent(self):
         # a numbered sibling stream is in NO rename -> no alias (no suffix heuristic)
-        self.assertEqual(navody._alias_equivalents("montalu7"), [])
+        self.assertEqual(navody._alias_equivalents("simap7"), [])
         self.assertEqual(navody._alias_equivalents("david3"), [])
         self.assertEqual(navody._alias_equivalents("miva1"), [])
 
@@ -86,17 +86,17 @@ class TestAliasPrimitive(unittest.TestCase):
         self.assertEqual(navody._alias_equivalents(""), [])
 
     def test_candidates_exact_first_then_alias(self):
-        self.assertEqual(navody._stream_file_candidates("montalu1"),
-                         ["montalu1", "montalu"])
-        self.assertEqual(navody._stream_file_candidates("montalu"),
-                         ["montalu", "montalu1"])
+        self.assertEqual(navody._stream_file_candidates("simap1"),
+                         ["simap1", "simap"])
+        self.assertEqual(navody._stream_file_candidates("simap"),
+                         ["simap", "simap1"])
         self.assertEqual(navody._stream_file_candidates("david1"),
                          ["david1", "david"])
 
     def test_candidates_no_suffix_heuristic(self):
-        # montalu7 must NEVER include montalu (a wrong tenant's fact is worse
+        # simap7 must NEVER include simap (a wrong tenant's fact is worse
         # than fail-closed UNKNOWN).
-        self.assertEqual(navody._stream_file_candidates("montalu7"), ["montalu7"])
+        self.assertEqual(navody._stream_file_candidates("simap7"), ["simap7"])
 
     def test_candidates_none(self):
         self.assertEqual(navody._stream_file_candidates(None), [])
@@ -107,11 +107,11 @@ class TestAliasPrimitive(unittest.TestCase):
 # 2. READER — tenant_guide via alias
 # --------------------------------------------------------------------------- #
 class TestReaderAliasResolution(unittest.TestCase):
-    def test_montalu1_resolves_url_from_montalu_file(self):
+    def test_simap1_resolves_url_from_simap_file(self):
         rt = _mapping_reader(
-            {"montalu.md": "navody_url: https://erp.montalu.cloud/p/tok/navody-money.html\n"})
-        url, ticket = navody.tenant_guide("/repo", "montalu1", read_text=rt)
-        self.assertEqual(url, "https://erp.montalu.cloud/p/tok/navody-money.html")
+            {"simap.md": "navody_url: https://erp.simap.cloud/p/tok/navody-money.html\n"})
+        url, ticket = navody.tenant_guide("/repo", "simap1", read_text=rt)
+        self.assertEqual(url, "https://erp.simap.cloud/p/tok/navody-money.html")
         self.assertIsNone(ticket)
 
     def test_david1_resolves_none_ticket_from_david_file(self):
@@ -121,25 +121,25 @@ class TestReaderAliasResolution(unittest.TestCase):
         self.assertEqual(ticket, "#7560")
 
     def test_exact_name_wins_over_alias(self):
-        # both montalu1.md and montalu.md present -> the EXACT file wins.
+        # both simap1.md and simap.md present -> the EXACT file wins.
         rt = _mapping_reader({
-            "montalu1.md": "navody_url: https://x/navody-EXACT.html\n",
-            "montalu.md": "navody_url: https://x/navody-OLD.html\n",
+            "simap1.md": "navody_url: https://x/navody-EXACT.html\n",
+            "simap.md": "navody_url: https://x/navody-OLD.html\n",
         })
-        url, _ = navody.tenant_guide("/repo", "montalu1", read_text=rt)
+        url, _ = navody.tenant_guide("/repo", "simap1", read_text=rt)
         self.assertEqual(url, "https://x/navody-EXACT.html")
 
-    def test_reverse_edge_montalu_finds_montalu1_file(self):
-        # a future rename of the FILE: stream 'montalu' resolving montalu1.md.
-        rt = _mapping_reader({"montalu1.md": "navody_url: https://x/navody-REV.html\n"})
-        url, _ = navody.tenant_guide("/repo", "montalu", read_text=rt)
+    def test_reverse_edge_simap_finds_simap1_file(self):
+        # a future rename of the FILE: stream 'simap' resolving simap1.md.
+        rt = _mapping_reader({"simap1.md": "navody_url: https://x/navody-REV.html\n"})
+        url, _ = navody.tenant_guide("/repo", "simap", read_text=rt)
         self.assertEqual(url, "https://x/navody-REV.html")
 
     def test_unaliased_missing_file_stays_unknown(self):
-        # montalu7 with no montalu7.md -> UNKNOWN even though montalu.md exists
+        # simap7 with no simap7.md -> UNKNOWN even though simap.md exists
         # (the negative lock: NO suffix heuristic).
-        rt = _mapping_reader({"montalu.md": "navody_url: https://x/navody-a.html\n"})
-        url, ticket = navody.tenant_guide("/repo", "montalu7", read_text=rt)
+        rt = _mapping_reader({"simap.md": "navody_url: https://x/navody-a.html\n"})
+        url, ticket = navody.tenant_guide("/repo", "simap7", read_text=rt)
         self.assertIsNone(url)
         self.assertIsNone(ticket)
 
@@ -149,12 +149,12 @@ class TestReaderAliasResolution(unittest.TestCase):
 # --------------------------------------------------------------------------- #
 class TestUnknownBlockNamesCandidates(unittest.TestCase):
     def test_evaluate_stop_names_both_candidate_files(self):
-        cands = navody._stream_file_candidates("montalu1")
+        cands = navody._stream_file_candidates("simap1")
         v, reason = navody.evaluate_stop(None, None, "…akceptačná správa…",
                                          candidates=cands)
         self.assertEqual(v, "block")
-        self.assertIn("montalu1.md", reason)
-        self.assertIn("montalu.md", reason)
+        self.assertIn("simap1.md", reason)
+        self.assertIn("simap.md", reason)
 
     def test_evaluate_stop_without_candidates_keeps_base_text(self):
         # backward compat: no candidates -> the existing #1073 fix text.
@@ -163,19 +163,19 @@ class TestUnknownBlockNamesCandidates(unittest.TestCase):
         self.assertIn("navody_url", reason)
 
     def test_run_unknown_block_threads_candidates(self):
-        # end-to-end: run() -> _current_stream (patched montalu1) ->
+        # end-to-end: run() -> _current_stream (patched simap1) ->
         # _stream_file_candidates -> evaluate_stop(candidates) -> named files.
         rt = _mapping_reader({})  # no file for any candidate -> UNKNOWN
         payload = {"last_assistant_message": "…akceptačná správa…", "cwd": "/repo"}
         err = io.StringIO()
-        with mock.patch.object(navody, "_current_stream", return_value="montalu1"):
+        with mock.patch.object(navody, "_current_stream", return_value="simap1"):
             with self.assertRaises(SystemExit) as cm:
                 with contextlib.redirect_stderr(err):
                     navody.run(payload, read_text=rt)
         self.assertEqual(cm.exception.code, 2)
         reason = err.getvalue()
-        self.assertIn("montalu1.md", reason)
-        self.assertIn("montalu.md", reason)
+        self.assertIn("simap1.md", reason)
+        self.assertIn("simap.md", reason)
 
 
 # --------------------------------------------------------------------------- #
@@ -184,13 +184,13 @@ class TestUnknownBlockNamesCandidates(unittest.TestCase):
 class TestSpecGateAliasResolution(unittest.TestCase):
     def test_specs_for_stream_resolves_alias(self):
         rt = _mapping_reader(
-            {"montalu.md": "navody_url: https://x\nspecs: #7801, #7802\n"})
-        got = spec.specs_for_stream("/repo", "montalu1", read_text=rt)
+            {"simap.md": "navody_url: https://x\nspecs: #7801, #7802\n"})
+        got = spec.specs_for_stream("/repo", "simap1", read_text=rt)
         self.assertEqual(got, [7801, 7802])
 
     def test_specs_for_stream_unaliased_missing_stays_empty(self):
-        rt = _mapping_reader({"montalu.md": "specs: #7801\n"})
-        self.assertEqual(spec.specs_for_stream("/repo", "montalu7", read_text=rt),
+        rt = _mapping_reader({"simap.md": "specs: #7801\n"})
+        self.assertEqual(spec.specs_for_stream("/repo", "simap7", read_text=rt),
                          [])
 
 
@@ -201,12 +201,12 @@ class TestHermeticDegrade(unittest.TestCase):
     def test_degrades_to_exact_name_when_cli_fleet_unavailable(self):
         # sys.modules[name] = None makes `import cli_fleet` raise ImportError.
         with mock.patch.dict(sys.modules, {"cli_fleet": None}):
-            self.assertEqual(navody._alias_equivalents("montalu1"), [])
-            self.assertEqual(navody._stream_file_candidates("montalu1"),
-                             ["montalu1"])
+            self.assertEqual(navody._alias_equivalents("simap1"), [])
+            self.assertEqual(navody._stream_file_candidates("simap1"),
+                             ["simap1"])
             rt = _mapping_reader(
-                {"montalu.md": "navody_url: https://x/navody-a.html\n"})
-            url, ticket = navody.tenant_guide("/repo", "montalu1", read_text=rt)
+                {"simap.md": "navody_url: https://x/navody-a.html\n"})
+            url, ticket = navody.tenant_guide("/repo", "simap1", read_text=rt)
             self.assertIsNone(url)
             self.assertIsNone(ticket)
 
@@ -215,16 +215,16 @@ class TestHermeticDegrade(unittest.TestCase):
         # `.items()`/`in` failure, not an import failure) must ALSO degrade to []
         # / exact-name-only, never raise out of the Stop hook.
         import cli_fleet
-        for bad in (None, ["montalu1"], 42):
+        for bad in (None, ["simap1"], 42):
             with mock.patch.object(cli_fleet, "STREAM_RENAME_ALIASES", bad):
-                self.assertEqual(navody._alias_equivalents("montalu1"), [])
-                self.assertEqual(navody._stream_file_candidates("montalu1"),
-                                 ["montalu1"])
+                self.assertEqual(navody._alias_equivalents("simap1"), [])
+                self.assertEqual(navody._stream_file_candidates("simap1"),
+                                 ["simap1"])
 
     def test_alias_still_works_after_degrade_context(self):
         # the try/except must not permanently poison the alias (cli_fleet is a
         # real leaf module once the patch is lifted).
-        self.assertEqual(navody._alias_equivalents("montalu1"), ["montalu"])
+        self.assertEqual(navody._alias_equivalents("simap1"), ["simap"])
 
 
 if __name__ == "__main__":

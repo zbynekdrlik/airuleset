@@ -113,7 +113,7 @@ def _core_search_excl():
     expands to the same pair — a naive nested comprehension would emit
     duplicate fragments), sorted for a deterministic query string."""
     import airuleset
-    names = set()
+    names = set(airuleset.RETIRED_STREAM_LABELS)  # #1306: gone accounts' labels
     for u, profile in airuleset.AUTHORITY_BY_USER.items():
         if profile != "full":
             names.update(_stream_rename_equivalents(u))
@@ -429,6 +429,7 @@ def _ticket_is_stream_labeled(labels):
              if isinstance(lb, dict)}
     recognized = {n for u in airuleset.AUTHORITY_BY_USER
                   for n in _stream_rename_equivalents(u)}
+    recognized |= airuleset.RETIRED_STREAM_LABELS  # #1306
     return any(("stream:%s" % n) in names for n in recognized)
 
 
@@ -2659,6 +2660,11 @@ def _stream_owner_of(labels):
         if profile != "full" and any(("stream:%s" % n) in names
                                       for n in _stream_rename_equivalents(user)):
             return user
+    # #1306: a retired stream (accounts deleted) still owns its labelled
+    # tickets — foreign to every box, never core work for the gatekeeper.
+    for name in sorted(airuleset.RETIRED_STREAM_LABELS):
+        if "stream:%s" % name in names:
+            return name
     return ""
 
 

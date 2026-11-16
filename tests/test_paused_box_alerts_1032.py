@@ -54,7 +54,7 @@ class TestBoxIsPaused(unittest.TestCase):
         self.assertTrue(cli_fleet.box_is_paused("simap1", hostname="subdev"))
 
     def test_non_paused_subdev_stream_false(self):
-        self.assertFalse(cli_fleet.box_is_paused("montalu1", hostname="subdev"))
+        self.assertFalse(cli_fleet.box_is_paused("miva1", hostname="subdev"))
 
     def test_unknown_or_empty_user_not_paused(self):
         self.assertFalse(cli_fleet.box_is_paused("nobody", hostname="x"))
@@ -77,7 +77,7 @@ class TestBoxIsPaused(unittest.TestCase):
         r = cli_fleet.box_paused_reason("simap1", hostname="subdev")
         self.assertIn("simap", r)
         self.assertEqual(
-            cli_fleet.box_paused_reason("montalu1", hostname="subdev"), "")
+            cli_fleet.box_paused_reason("miva1", hostname="subdev"), "")
         # never None (safe to format)
         self.assertEqual(cli_fleet.box_paused_reason("nobody"), "")
 

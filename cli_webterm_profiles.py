@@ -474,14 +474,14 @@ def marek_inventory():
 # --------------------------------------------------------------------------- #
 
 # dominika's gateway runs AS this account on subdev. Unlike marek she has NO
-# local attach — she is a PURE OBSERVER of two OTHER streams, so BOTH her tabs
-# are loopback ssh (montalu5@subdev + miva1@subdev), always via the dedicated
-# dominika key.
+# local attach — she is a PURE OBSERVER of another stream, so her tab is
+# loopback ssh (miva1@subdev; montalu5 left with #1306), always via the
+# dedicated dominika key.
 DOMINIKA_GATEWAY_USER = "dominika"
 
 # Dedicated key for the dominika lane's ssh tabs — the WEBTERM_DAVID_IDENTITY /
-# WEBTERM_MAREK_IDENTITY shape: authorized ONLY on the two targets below
-# (montalu5@subdev + miva1@subdev over loopback), NEVER the fleet gatekeeper key
+# WEBTERM_MAREK_IDENTITY shape: authorized ONLY on the target below
+# (miva1@subdev over loopback), NEVER the fleet gatekeeper key
 # (`~/.secrets/gatekeeper_access_ed25519`, which reaches every stream — a
 # cross-stream escalation). The key + its authorized_keys distribution is a
 # provisioning step (owner-action, see _DOMINIKA_GO_LIVE in
@@ -491,15 +491,11 @@ WEBTERM_DOMINIKA_IDENTITY = "~/.secrets/webterm_dominika_ed25519"
 
 
 def dominika_inventory():
-    """dominika's SCOPED session set (#867, owner request 2026-09-04) — TWO
-    entries, in the owner-defined tab order (WEBTERM_DASHBOARD_TABS["dominika"]):
+    """dominika's SCOPED session set (#867, owner request 2026-09-04) — ONE
+    entry (WEBTERM_DASHBOARD_TABS["dominika"]); her montalu5 observe tab left
+    with the deleted montalu5 account (#1306, owner 16.11.2026):
 
-      1. montalu5-subdev — an OBSERVE tab: marek's own montalu-family stream,
-         ssh over loopback with the dedicated key. CROSS-TENANT (NO u_tenant):
-         montalu5 is not dominika's own account (she operates nothing), so she
-         merely watches it — reading its tickets-status would be a cross-tenant
-         read, the same boundary marek's observe tabs keep by omitting the field;
-      2. miva1-subdev — an OBSERVE tab: a SEPARATE external sub-dev stream
+      1. miva1-subdev — an OBSERVE tab: a SEPARATE external sub-dev stream
          (cli_fleet "5th sub-dev stream", notify-routed to the OWNER), ssh over
          loopback with the dedicated key. Also CROSS-TENANT (NO u_tenant).
 
@@ -508,22 +504,10 @@ def dominika_inventory():
     owner-realm box, and no other person's account can ever be present. Every ssh
     entry carries WEBTERM_DOMINIKA_IDENTITY explicitly, so the connect child never
     takes the sshpass shared-password branch and never touches the gatekeeper key.
-    Neither entry is `u_tenant` (both cross-tenant OBSERVE), so
+    The entry is not `u_tenant` (cross-tenant OBSERVE), so
     ``u_tenant_entries("dominika")`` is empty — her lane collector reads nothing."""
     host = _subdev_target_host("dominika")
     return [
-        {
-            "id": "montalu5-subdev",
-            "label": "montalu5@subdev",
-            "kind": "stream",
-            "local": False,
-            "host": host,
-            "user": "montalu5",
-            "identity": WEBTERM_DOMINIKA_IDENTITY,
-            "preferred": "montalu5",
-            # #867: OBSERVE-only, CROSS-TENANT — NO u_tenant (montalu5 is not
-            # dominika's own account; she watches it, never a within-tenant read).
-        },
         {
             "id": "miva1-subdev",
             "label": "miva1@subdev",

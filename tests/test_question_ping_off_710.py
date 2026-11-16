@@ -63,10 +63,10 @@ class TestQuestionPingOffPredicate(unittest.TestCase):
         self.assertFalse(notify.question_ping_off("david2"))
 
     def test_stream_personas_routing_into_claude_zbynek_are_off(self):
-        # montalu5/montalu1/simap1 route to claude-zbynek via STREAM_NOTIFY_OWNER,
-        # so their question pings land in zbynek's thread -> suppressed too.
-        self.assertTrue(notify.question_ping_off("montalu5"))
-        self.assertTrue(notify.question_ping_off("montalu1"))
+        # miva1/simap1 route to claude-zbynek via STREAM_NOTIFY_OWNER (the
+        # montalu rows left with #1306), so their question pings land in
+        # zbynek's thread -> suppressed too.
+        self.assertTrue(notify.question_ping_off("miva1"))
         self.assertTrue(notify.question_ping_off("simap1"))
 
     def test_unknown_never_off_empty_is_the_shared_channel(self):

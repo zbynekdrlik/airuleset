@@ -1,6 +1,6 @@
 # Client Board Tasks — Questions, Answers & Mixed Communication (#1102)
 
-Topic companion of `client-board-tasks.md` (CORE). Auto-loads on a `project.task` question (`needs-answer` / Potrebuje ujasniť) or a ❓ about a board task. These rules govern asking the client a question and routing every answer.
+Topic companion of `client-board-tasks.md` (CORE). Auto-loads on a `project.task` question (`needs-answer` / the profile's question stage) or a ❓ about a board task. These rules govern asking the client a question and routing every answer.
 
 ---
 
@@ -8,7 +8,7 @@ Topic companion of `client-board-tasks.md` (CORE). Auto-loads on a `project.task
 
 When a task needs clarification FROM the client:
 
-1. Move it to the profile's question stage (**Potrebuje ujasniť**).
+1. Move it to the profile's question stage (miva: **Požadujú sa zmeny**).
 2. Post a chatter note with the question. Mention text is derived from
    `res.partner.name` by `data-oe-id`, never a literal name typed by hand
    (`handover-compose.md` mention-anchor rule).

@@ -30,11 +30,11 @@ import cli_quals  # noqa: E402,F401
 
 SLUG = "zbynekdrlik/odoo-erp"
 ROOT = "/tmp/does-not-matter-1009"
-STREAM = "montalu"
+STREAM = "david"
 # An own-account 3-qual slice: len(quals) != 1, so the shared-account
 # `_last_origin_owner` recovery is skipped — only the label/timeline/released
 # path drives `handed`, exactly the path under test.
-QUALS = ["assignee:@me", "author:@me", "label:stream:montalu"]
+QUALS = ["assignee:@me", "author:@me", "label:stream:david"]
 
 
 def _row(number, labels=()):
@@ -50,7 +50,7 @@ def _drive(number, labels=(), *, merged_oid=None, released=True,
     `git merge-base --is-ancestor` (rc 0 = released, rc 1 = not).
 
     `head_stream` (default STREAM): the stream name the merged PR's head branch
-    carries — set it to a RENAME ALIAS (e.g. montalu's branch under montalu1) to
+    carries — set it to a RENAME ALIAS (e.g. david's branch under david1) to
     exercise the #537 alias expansion."""
     timeline = timeline or []
     branch_stream = head_stream or STREAM
@@ -116,16 +116,16 @@ class MergedReleasedLeavesI(unittest.TestCase):
 
 
 class RenamedStreamBranchStillDetected(unittest.TestCase):
-    """#537 rename: the stream box resolves to `montalu` but a ticket's immutable
-    merged PR branch may carry the renamed `montalu1` (or vice versa). The
+    """#537 rename: the stream box resolves to `david` but a ticket's immutable
+    merged PR branch may carry the renamed `david1` (or vice versa). The
     released detection must expand via `_stream_rename_equivalents`, so a
     merged+released PR on the OTHER alias name still marks the ticket done —
-    exactly the incident streams (montalu/david/simap are all renamed)."""
+    exactly the incident streams (montalu/david/simap were all renamed)."""
 
     def test_pr_branch_on_rename_alias_is_still_released(self):
-        # box stream = "montalu"; merged PR head branch = "montalu1/6942-fix".
+        # box stream = "david"; merged PR head branch = "david1/6942-fix".
         _rows, handed, _workable, unhandled, gk = _drive(
-            6942, labels=[], merged_oid="abc1234", head_stream="montalu1")
+            6942, labels=[], merged_oid="abc1234", head_stream="david1")
         self.assertNotIn(6942, unhandled,
                          "a released PR on the rename alias must leave I")
         self.assertEqual(handed.get(6942), "released")
@@ -172,7 +172,7 @@ class ListTagsReleasedRows(unittest.TestCase):
         import contextlib
         with m.patch.object(airuleset, "resolve_authority", return_value="branch-merge"), \
              m.patch.object(airuleset, "_current_user", return_value=STREAM), \
-             m.patch.object(airuleset, "_slice_quals", return_value=["label:stream:montalu"]), \
+             m.patch.object(airuleset, "_slice_quals", return_value=["label:stream:david"]), \
              m.patch.object(airuleset, "_repo_slug", return_value=SLUG), \
              m.patch.object(airuleset, "_repo_root", return_value=ROOT), \
              m.patch.object(airuleset, "_slice_mine_and_handed",

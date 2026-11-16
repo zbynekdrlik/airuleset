@@ -194,8 +194,8 @@ class TestExistingLanesByteIdentical(unittest.TestCase):
     def test_representative_generated_lanes_unchanged(self):
         self.assertEqual(self.lanes[("dev1", "newlevel")].host,
                          "drop-dev1.newlevel.media")
-        self.assertEqual(self.lanes[("subdev", "montalu1")].host,
-                         "drop-subdev-montalu1.newlevel.media")
+        self.assertEqual(self.lanes[("subdev", "miva1")].host,
+                         "drop-subdev-miva1.newlevel.media")
 
     def test_all_ports_unique_fleet_wide(self):
         ports = [ln.port for ln in self.lanes.values()]

@@ -17,11 +17,10 @@ class TestAuthorityResolution(TestCase):
         # marek — DEV STREAM cancelled (#882) but webterm OBSERVER lane
         # survives; fork-no-merge (least-privilege, dominika model #867).
         self.assertEqual(airuleset.AUTHORITY_BY_USER["marek"], "fork-no-merge")
-        # montalu1 (was montalu; #537 live rename 2026-08-19): same
-        # branch-merge profile as the base. The OLD unix name's row left the
-        # map with the OS account (runbook-537 step 8, live in-place usermod).
-        self.assertEqual(airuleset.AUTHORITY_BY_USER["montalu1"], "branch-merge")
-        self.assertNotIn("montalu", airuleset.AUTHORITY_BY_USER)
+        # montalu/montalu1..8: accounts deleted (#1306, owner 16.11.2026) —
+        # no row may survive (a stale branch-merge row would re-grant it).
+        for u in ["montalu"] + ["montalu%d" % i for i in range(1, 9)]:
+            self.assertNotIn(u, airuleset.AUTHORITY_BY_USER)
         # simap1 (was simap, airuleset#143; #537 live rename 2026-08-18):
         # phase-1 demo stream that merges NOWHERE — fork-no-merge is the
         # existing lowest profile, already correct. The OLD unix name's row
@@ -33,28 +32,21 @@ class TestAuthorityResolution(TestCase):
         # the montalu mould" — own branch → own PR into develop → hand-off.
         self.assertEqual(airuleset.AUTHORITY_BY_USER["miva1"], "branch-merge")
 
-    def test_montalu_family_streams_map_to_branch_merge(self):
-        # airuleset#251: montalu2/3/4 are full parallel montalu streams
-        # ("zhodné s dnešným montalu") — same authority as montalu itself.
-        for u in ("montalu2", "montalu3", "montalu4"):
-            self.assertEqual(airuleset.AUTHORITY_BY_USER[u], "branch-merge", u)
-
     def test_david_family_streams_map_to_fork_no_merge(self):
         # airuleset#326: david2/david3/david4 are three MORE clones of the
         # david external-developer fork stream — same authority as david.
         for u in ("david2", "david3", "david4"):
             self.assertEqual(airuleset.AUTHORITY_BY_USER[u], "fork-no-merge", u)
 
-    def test_montalu5_8_streams_map_to_branch_merge(self):
-        # airuleset#378, odoo-erp#3642: montalu5/6/7/8 are FOUR MORE full
-        # parallel montalu streams — same authority as montalu/montalu2/3/4.
-        for u in ("montalu5", "montalu6", "montalu7", "montalu8"):
-            self.assertEqual(airuleset.AUTHORITY_BY_USER[u], "branch-merge", u)
-
-    def test_resolve_uses_the_map_for_montalu5_8(self):
-        for u in ("montalu5", "montalu6", "montalu7", "montalu8"):
+    def test_deleted_montalu_accounts_fail_safe_to_fork_no_merge(self):
+        # #1306 (inverted from the montalu5-8 branch-merge locks): with the
+        # rows gone a leftover montalu process resolves least-privilege.
+        import tempfile
+        d = tempfile.mkdtemp()
+        for u in ["montalu%d" % i for i in range(1, 9)]:
             with m.patch.object(airuleset, "_current_user", return_value=u):
-                self.assertEqual(airuleset.resolve_authority(), "branch-merge", u)
+                self.assertEqual(airuleset.resolve_authority(cwd=d),
+                                 "fork-no-merge", u)
 
     def test_resolve_uses_the_map_for_simap(self):
         # #537 live rename: the box now runs as simap1; the old unix name
@@ -186,8 +178,8 @@ class TestAuthorityResolution(TestCase):
         # `--stream-label` early-return branches would silently hijack this test
         # unless pinned False (the established `m.Mock(...)`-args gotcha this
         # repo's own dev rules already document for exactly this shape).
-        # marek removed #882; use montalu1 (branch-merge) instead
-        with m.patch.object(airuleset, "_current_user", return_value="montalu1"):
+        # marek removed #882; montalu1 deleted #1306; use miva1 (branch-merge)
+        with m.patch.object(airuleset, "_current_user", return_value="miva1"):
             with m.patch("builtins.print") as p:
                 airuleset.cmd_authority(
                     m.Mock(explain=False, maintainer_login=False,
@@ -273,31 +265,31 @@ class TestAuthorityResolution(TestCase):
         with m.patch.object(cli_quals, "resolve_authority",
                             return_value="branch-merge"):
             with m.patch.object(airuleset, "_current_user",
-                                return_value="montalu3"):
+                                return_value="miva1"):
                 with m.patch("builtins.print") as p:
                     airuleset.cmd_authority(
                         m.Mock(explain=False, maintainer_login=False,
                                self_login=False, stream_label=True, app_bot_login=False))
-        p.assert_any_call("stream:montalu3")
+        p.assert_any_call("stream:miva1")
 
     def test_cli_stream_label_emits_rename_equivalents(self):
-        # #564: on a box whose base stream was RENAMED (montalu -> montalu1),
+        # #564: on a box whose base stream was RENAMED (david -> david1),
         # `authority --stream-label` must emit BOTH the current label AND the
         # legacy one, so the close-guard hook still recognizes THIS stream's
-        # OWN tickets that still carry the old `stream:montalu` label during the
-        # transition. RED before the fix (only `stream:montalu1` is printed).
+        # OWN tickets that still carry the old `stream:david` label during the
+        # transition. RED before the fix (only `stream:david1` is printed).
         import cli_quals
         with m.patch.object(cli_quals, "resolve_authority",
                             return_value="branch-merge"):
             with m.patch.object(airuleset, "_current_user",
-                                return_value="montalu1"):
+                                return_value="david1"):
                 with m.patch("builtins.print") as p:
                     airuleset.cmd_authority(
                         m.Mock(explain=False, maintainer_login=False,
                                self_login=False, stream_label=True, app_bot_login=False))
         printed = [str(c.args[0]) for c in p.call_args_list if c.args]
-        self.assertIn("stream:montalu1", printed, printed)
-        self.assertIn("stream:montalu", printed, printed)
+        self.assertIn("stream:david1", printed, printed)
+        self.assertIn("stream:david", printed, printed)
 
     def test_cli_stream_label_empty_under_full_authority(self):
         # #533: on a full-authority box the flag prints NOTHING (the hook's
@@ -405,8 +397,8 @@ class TestBoxAuthorityFailSafe(TestCase):
 
     def test_box_authority_reduced_stream_uses_the_map(self):
         import watchdog as wd
-        # marek removed #882; use montalu1 (branch-merge) instead
-        with m.patch.object(airuleset, "_current_user", return_value="montalu1"):
+        # marek removed #882; montalu1 deleted #1306; use miva1 (branch-merge)
+        with m.patch.object(airuleset, "_current_user", return_value="miva1"):
             self.assertEqual(wd._box_authority(), "branch-merge")
 
 

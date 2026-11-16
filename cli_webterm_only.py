@@ -590,14 +590,6 @@ def render_subdev_accounts_conf():
 # all"). This MUST include dominika (#869) and match the rendered conf.
 # Test-locked: hardcoded == rendered.
 SUBDEV_ACCOUNTS_FALLBACK = {
-    "montalu1": "default",
-    "montalu2": "default",
-    "montalu3": "default",
-    "montalu4": "default",
-    "montalu5": "default",
-    "montalu6": "default",
-    "montalu7": "default",
-    "montalu8": "default",
     "marek": "gatekeeper_access_ed25519",
     "david1": "gatekeeper_access_ed25519",
     "david2": "gatekeeper_access_ed25519",

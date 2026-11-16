@@ -380,19 +380,19 @@ class OwnedClosedFilter(unittest.TestCase):
                          "only the OWN (stream:montalu) ticket survives")
 
     def test_reduced_authority_matches_own_legacy_stream_label(self):
-        # #564: a RENAMED box (montalu1) must still recognize a merged ticket
-        # whose temporally-last origin label is the LEGACY stream:montalu — its
+        # #564: a RENAMED box (david1) must still recognize a merged ticket
+        # whose temporally-last origin label is the LEGACY stream:david — its
         # OWN card/report reconciliation, not a foreign ticket. Routed through
         # the SAME _stream_rename_equivalents primitive as item 2. RED before the
-        # fix (owners.get(n)="montalu" != me="montalu1" -> dropped -> None), so a
-        # montalu1 box silently skipped its own legacy-labeled merged tickets.
+        # fix (owners.get(n)="david" != me="david1" -> dropped -> None), so a
+        # david1 box silently skipped its own legacy-labeled merged tickets.
         owned = cards.make_owned_closed_filter(
-            current_user_fn=lambda: "montalu1",
+            current_user_fn=lambda: "david1",
             authority_fn=lambda root: "branch-merge",
-            owner_fn=lambda root, nums: {4373: "miva1", 4379: "montalu"})
+            owner_fn=lambda root, nums: {4373: "miva1", 4379: "david"})
         closed = {4373: 1000.0, 4379: 2000.0}
         self.assertEqual({4379: 2000.0}, owned("/r", closed),
-                         "the box's own legacy stream:montalu ticket survives")
+                         "the box's own legacy stream:david ticket survives")
 
     def test_reduced_authority_undeterminable_owner_returns_none(self):
         owned = cards.make_owned_closed_filter(

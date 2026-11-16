@@ -336,7 +336,7 @@ class TestBounceBackstopSweepBudget(unittest.TestCase):
 
 class TestBounceQuals(unittest.TestCase):
     """Scoping is derived from the PANE's home dir, not the watchdog user:
-    a stream's claude session's cwd (e.g. /home/montalu1/... after the #537
+    a stream's claude session's cwd (e.g. /home/david1/... after the #537
     rename) names the stream, and the stream LABEL (the #1599
     convention) scopes the query; @me is useless (gh identity is the same
     zbynekdrlik account across boxes)."""
@@ -349,20 +349,17 @@ class TestBounceQuals(unittest.TestCase):
         # about its own old-labeled bounce tickets. #537: david's live rename
         # landed (2026-08-21), so /home/david1 is its home and _REDUCED_STREAM_
         # USERS carries david1 (not david) — david1 expands to david1 + david.
-        self.assertIn("montalu1", wd._REDUCED_STREAM_USERS)
-        self.assertNotIn("montalu", wd._REDUCED_STREAM_USERS)
+        # (#1306: the montalu1 example left with the montalu client.)
         self.assertIn("david1", wd._REDUCED_STREAM_USERS)
         self.assertNotIn("david", wd._REDUCED_STREAM_USERS)
-        self.assertEqual(wd._bounce_quals("/home/montalu1/devel/odoo-erp"),
-                         ["label:stream:montalu1", "label:stream:montalu"])
         self.assertEqual(wd._bounce_quals("/home/david1/devel/x"),
                          ["label:stream:david1", "label:stream:david"])
 
-    def test_montalu_family_home_scopes_by_own_label(self):
-        # airuleset#251: montalu2/3/4 work on odoo-erp (a _CROSS_STREAM_REPOS
-        # member) — each pane must scope to ITS OWN stream:<user> label, not
-        # fall through to the full-authority exclude-all branch.
-        for u in ("montalu2", "montalu3", "montalu4"):
+    def test_branch_merge_stream_home_scopes_by_own_label(self):
+        # airuleset#251: a branch-merge stream on odoo-erp (a _CROSS_STREAM_REPOS
+        # member) must scope to ITS OWN stream:<user> label, not fall through to
+        # the full-authority exclude-all branch (montalu2/3/4 until #1306).
+        for u in ("miva1",):
             self.assertEqual(wd._bounce_quals("/home/%s/devel/odoo-erp" % u),
                              ["label:stream:%s" % u], u)
 
@@ -400,9 +397,11 @@ class TestBounceQuals(unittest.TestCase):
 
     def test_live_reduced_streams_are_registered(self):
         # #564: the exact live streams the issue-561 audit found missing.
-        for u in ("simap1", "montalu5", "montalu6", "montalu7", "montalu8",
-                  "miva1", "david1"):
+        for u in ("simap1", "miva1", "david1", "david2", "david3", "david4"):
             self.assertIn(u, wd._REDUCED_STREAM_USERS, u)
+        # #1306: the deleted montalu accounts are no bounce participants.
+        self.assertFalse(set(wd._REDUCED_STREAM_USERS)
+                         & airuleset.RETIRED_STREAM_LABELS)
 
     def test_new_reduced_stream_home_scopes_by_own_label(self):
         # #564: a formerly-omitted reduced stream now scopes to its OWN label
@@ -413,8 +412,6 @@ class TestBounceQuals(unittest.TestCase):
                          ["label:stream:simap1", "label:stream:simap"])
         self.assertEqual(wd._bounce_quals("/home/miva1/devel/odoo-erp"),
                          ["label:stream:miva1"])
-        self.assertEqual(wd._bounce_quals("/home/montalu5/devel/odoo-erp"),
-                         ["label:stream:montalu5"])
 
     def test_full_authority_home_excludes_subdev_streams(self):
         # Live dry-run finding (2026-07-19): an unscoped full-box query picked
@@ -423,10 +420,12 @@ class TestBounceQuals(unittest.TestCase):
         # Full authority = the core slice (same exclusions as tickets-status).
         quals = wd._bounce_quals("/home/newlevel/devel/demo")
         self.assertEqual(len(quals), 1)
-        # marek removed #882 (decommissioned)
-        for u in ("david1", "montalu1", "montalu2", "montalu3",
+        # marek removed #882 (decommissioned); the retired montalu labels
+        # stay excluded via RETIRED_STREAM_LABELS (#1306).
+        toks = quals[0].split()
+        for u in ("david1", "montalu", "montalu1", "montalu2", "montalu3",
                   "montalu4", "david2", "david3", "david4"):
-            self.assertIn("-label:stream:%s" % u, quals[0])
+            self.assertIn("-label:stream:%s" % u, toks)
 
     def test_david_family_pane_is_not_a_gkreq_supervisor_root(self):
         # airuleset#326 (adversarial-review MAJOR finding, live-triggered):
@@ -440,11 +439,11 @@ class TestBounceQuals(unittest.TestCase):
         self.assertTrue(wd._gkreq_supervisor_root("/home/newlevel/devel/odoo-erp"))
 
     def test_new_reduced_stream_pane_is_not_a_gkreq_supervisor_root(self):
-        # #564: a formerly-omitted reduced stream (simap1/miva1/montalu5-8/david1)
+        # #564: a formerly-omitted reduced stream (simap1/miva1/david1)
         # must NOT be mis-classified as the gatekeeper/supervisor (the #326
         # class). RED before the fix (missing from _REDUCED_STREAM_USERS ->
         # _gkreq_supervisor_root returned True for its own HOME).
-        for u in ("simap1", "miva1", "montalu5", "montalu8", "david1"):
+        for u in ("simap1", "miva1", "david1"):
             self.assertFalse(
                 wd._gkreq_supervisor_root("/home/%s/devel/odoo-erp" % u), u)
 
@@ -455,8 +454,7 @@ class TestBounceQuals(unittest.TestCase):
         # wrong person. RED before the fix.
         quals = wd._bounce_quals("/home/newlevel/devel/demo")
         self.assertEqual(len(quals), 1)
-        for u in ("simap1", "simap", "miva1", "montalu5", "montalu8",
-                  "david1"):
+        for u in ("simap1", "simap", "miva1", "david1", "david4"):
             self.assertIn("-label:stream:%s" % u, quals[0], u)
 
 

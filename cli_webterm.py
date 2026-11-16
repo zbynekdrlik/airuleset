@@ -630,7 +630,7 @@ def _html_escape(s):
 
 def _short_alias(entry):
     """A Windows-Terminal-style SHORT tab alias mirroring the owner's own tab
-    names (dev1, dev2, gk, m1..m8 for montalu, miva, d1..d4 for david); an
+    names (dev1, dev2, gk, miva, d1..d4 for david); an
     unrecognized session gets a sensible short form. The FULL id/label stays as
     the tab's `title` tooltip, so a short alias is never ambiguous (#579).
 
@@ -730,13 +730,13 @@ WEBTERM_DASHBOARD_TABS = {
     # for "david" would filter to -- exercised by the tests).
     "david": ["david1-subdev", "david2-subdev", "david3-subdev", "david4-subdev"],
     # dominika.newlevel.media -- dominika's OBSERVE set (owner request 2026-09-04,
-    # #867): TWO tabs only, the two subdev streams she watches — montalu5 (m5) then
-    # miva1 (miva). The ids are the DOMINIKA LANE inventory ids
+    # #867): ONE tab, miva1 (miva); her montalu5 tab left with the deleted
+    # account (#1306). The id is the DOMINIKA LANE inventory id
     # (cli_webterm_profiles.dominika_inventory), which her lane render consumes via
-    # LaneSpec.dashboard_human="dominika" (order + exclusivity). Both are OBSERVE
-    # tabs (loopback ssh into montalu5/miva1's own tmux group via the dedicated
-    # dominika key) — no local attach, no other stream, no owner-realm box.
-    "dominika": ["montalu5-subdev", "miva1-subdev"],
+    # LaneSpec.dashboard_human="dominika" (order + exclusivity). It is an OBSERVE
+    # tab (loopback ssh into miva1's own tmux group via the dedicated dominika
+    # key) — no local attach, no other stream, no owner-realm box.
+    "dominika": ["miva1-subdev"],
     # timo.newlevel.media -- #1183 (owner 2026-09-29): ONE tab, the fohmixer@dev1
     # project account; fohmixer is also on the owner's and marek's lists (#1184).
     "timo": ["fohmixer"],

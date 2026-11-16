@@ -115,7 +115,7 @@ class TestEveryFleetAccountHasALane(unittest.TestCase):
         for key in [("dev1", "newlevel"), ("dev2", "newlevel"),
                     ("airuleset", "claudy"), ("forestshop-dev", "admin"),
                     ("forestshop-dev", "stepan"), ("subdev", "miva1"),
-                    ("subdev", "montalu1"), ("subdev", "montalu8")]:
+                    ]:  # #1306: montalu1..8 left with their deleted accounts
             self.assertIn(key, lanes, "%s should now have a lane" % (key,))
 
 
@@ -141,7 +141,7 @@ class TestGeneratedLaneFields(unittest.TestCase):
         self.lanes = dg.build_drop_lanes(cli_fleet.REMOTE_HOSTS)
 
     def test_subdev_generated_lane_rides_controller_tunnel(self):
-        lane = self.lanes[("subdev", "montalu1")]
+        lane = self.lanes[("subdev", "miva1")]
         self.assertEqual(lane.topology, "controller")
         self.assertEqual(lane.origin_host, "100.118.174.27")
         self.assertEqual(lane.tunnel_uuid, dg._CONTROLLER_TUNNEL_UUID)
@@ -150,8 +150,8 @@ class TestGeneratedLaneFields(unittest.TestCase):
 
     def test_shared_box_hostname_carries_the_account(self):
         # subdev + forestshop-dev host >1 account -> drop-<box>-<user>.
-        self.assertEqual(self.lanes[("subdev", "montalu1")].host,
-                         "drop-subdev-montalu1.newlevel.media")
+        self.assertEqual(self.lanes[("subdev", "miva1")].host,
+                         "drop-subdev-miva1.newlevel.media")
         self.assertEqual(self.lanes[("forestshop-dev", "admin")].host,
                          "drop-forestshop-dev-admin.newlevel.media")
 

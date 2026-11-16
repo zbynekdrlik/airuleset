@@ -140,7 +140,7 @@ class MVetoRemoved(unittest.TestCase):
                                  merged=True), "M")
 
     def test_foreign_question_on_a_slice_box_merged_is_M(self):
-        row = _row(1, "needs-answer", "stream:montalu1")
+        row = _row(1, "needs-answer", "stream:miva1")
         self.assertEqual(_bucket(row, _SLICE), "I")          # #654
         self.assertEqual(_bucket(row, _SLICE, merged=True), "M")
 
@@ -158,7 +158,7 @@ class Bucketize(unittest.TestCase):
     def test_every_row_lands_in_exactly_one_bucket(self):
         rows = {n: _row(n, *labels) for n, labels in enumerate((
             ("bug",), ("needs-answer",), ("ops-wait",), ("ready-for-review",),
-            ("prio:bounce",), ("needs-answer", "stream:montalu1"),
+            ("prio:bounce",), ("needs-answer", "stream:miva1"),
             ("verify-on-copy",), ("bug",), ("bug",), ("bug",)), start=1)}
         facts = ts.TicketFacts(merged=frozenset({8}), pipeline=frozenset({9}),
                                on_main={10: ts.DEPLOYED, 3: ts.PENDING})

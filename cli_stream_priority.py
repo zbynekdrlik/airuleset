@@ -1,8 +1,9 @@
 """cli_stream_priority.py — the owner-controlled stream-priority registry (#1138).
 
-The owner marks a stream FAMILY `high` or `normal` (default `normal`) once;
-montalu (montalu1…N) is `high`. ONE data file, `stream-priority.json` in the
-airuleset repo root (`{"montalu": "high"}`), is the single source of truth for
+The owner marks a stream FAMILY `high` or `normal` (default `normal`) once
+(montalu was `high` until its accounts left, #1306). ONE data file,
+`stream-priority.json` in the airuleset repo root (`{"<family>": "high"}`),
+is the single source of truth for
 two consumers:
 
 - in-repo: `cli_quals_cmd._row_sort_key` (and its dep-wait mirror in

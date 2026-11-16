@@ -49,15 +49,15 @@ class TestWebtermReadersOnDropLanes1115(unittest.TestCase):
         # his reader leaves those drop lanes with them.
         self.assertIn("drlik.marek@gmail.com", g.DROP_ACCESS_APPS[
             "drop-subdev-miva1.newlevel.media"]["allowed_emails"])
-        for n in (1, 2, 4):
-            host = "drop-subdev-montalu%d.newlevel.media" % n
-            self.assertNotIn("drlik.marek@gmail.com",
-                             g.DROP_ACCESS_APPS[host]["allowed_emails"], host)
+        # #1306: the montalu accounts (and so their drop lanes) are gone.
+        for n in range(1, 9):
+            self.assertNotIn("drop-subdev-montalu%d.newlevel.media" % n,
+                             g.DROP_ACCESS_APPS)
 
     def test_no_reader_lands_on_an_account_the_webterm_does_not_open(self):
-        # montalu7/8 are on no programmer's dashboard: owner only.
-        for host in ("drop-subdev-montalu7.newlevel.media",
-                     "drop-subdev-montalu8.newlevel.media"):
+        # stepan@forestshop-dev is on no programmer's dashboard: owner only
+        # (#1306: was montalu7/8, whose accounts are gone).
+        for host in ("drop-forestshop-dev-stepan.newlevel.media",):
             self.assertEqual(g.DROP_ACCESS_APPS[host]["allowed_emails"],
                              ["drlik.zbynek@gmail.com"], host)
 

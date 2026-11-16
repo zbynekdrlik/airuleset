@@ -212,11 +212,10 @@ class TestMivaStagesCompanion(TestCase):
             "rule 3 must enumerate Čaká alongside Verifikácia / Na overenie")
 
     def test_rule14_table_has_board_mapping_caveat(self):
-        # the montalu-worded event→phase table carries a caveat mapping to each
-        # board's own stages, so a miva stream is not sent to a non-existent one
-        self.assertTrue(
-            self._line_with("montalu vocabulary"),
-            "rule 14's table needs the board-vocabulary mapping caveat (#1093)")
+        # the event→phase table names miva's stages (#1306) + a mapping caveat
+        self.assertTrue(self._line_with("phase names below are the miva stages",
+                                        "maps them to its own profile row"),
+                        "rule 14's table needs the mapping caveat (#1093)")
 
     def test_stage_rules_still_exactly_once_in_stages(self):
         # union lock, focused on the file this lane edits: rules 3/5/6 live in

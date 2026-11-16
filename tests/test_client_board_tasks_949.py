@@ -60,10 +60,11 @@ class TestClientBoardTasksDoctrine949(TestCase):
     def test_per_board_profiles_section(self):
         self.assertIn("Per-board profiles", self.body)
 
-    def test_montalu_profile_stages(self):
-        for stage in ("ToDo", "Potrebuje ujasniť", "Realizácia",
-                      "Verifikácia", "Hotovo"):
-            self.assertIn(stage, self.body)
+    def test_miva_profile_stages(self):  # #1306: the montalu row is gone
+        row = next(ln for ln in self.body.splitlines() if ln.startswith("| **miva**"))
+        for stage in ("Nové", "Požadujú sa zmeny", "V riešení", "Čaká", "Hotové", "Zrušené"):
+            self.assertIn(stage, row)
+        self.assertNotIn("| **montalu**", self.body)
 
     def test_slovnormal_profile_has_no_board(self):
         # #1258 (owner 24.10.2026) reverses #1018: the slovnormal client does not
@@ -73,7 +74,7 @@ class TestClientBoardTasksDoctrine949(TestCase):
         self.assertIn("project.task", row)
         self.assertNotIn("Dávid Greňa", row)
 
-    # Rule 5: no assignee on miva (montalu assigns the addressee, owner 28.9.2026, #1166)
+    # Rule 5: no assignee on miva (the montalu addressee rule left with #1306)
     def test_miva_no_assignee(self):
         self.assertIn("NO assignee", self.normed)
         self.assertIn("`user_ids` empty", self.body)
@@ -137,9 +138,9 @@ class TestClientBoardTasksDoctrine949(TestCase):
         self.assertIn("#606 U flow", self.body)
 
     def test_objection_routes_to_realizacia_plus_bounce(self):
-        # a client objection on a delivered task goes back to Realizácia + a ticket
+        # a client objection on a delivered task goes back to V riešení + a ticket
         self.assertIn("Výhrada k dodanému", self.body)
-        self.assertIn("Realizácia + ticket (bounce)", self.body)
+        self.assertIn("V riešení + ticket (bounce)", self.body)
 
 
 if __name__ == "__main__":

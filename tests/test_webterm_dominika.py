@@ -4,9 +4,10 @@ david + marek.
 
 The SECURITY-CRITICAL boundary this pins (owner request 2026-09-04: a new webterm
 user `dominika` / nika.sarikova@gmail.com with OBSERVE access to montalu5 + miva1):
-  * dominika's connect allowlist is PHYSICALLY her TWO-member set {montalu5-subdev,
-    miva1-subdev} — her ttyd cannot resolve any OTHER fleet id (a bare gk/
-    montalu1-4,6-8/simap/stepan/admin-forestshop-dev/spinbike/dev1/dev2), NOR any
+  * dominika's connect allowlist is PHYSICALLY her ONE-member set {miva1-subdev}
+    (#1306: montalu5 left with its deleted account) — her ttyd cannot resolve any
+    OTHER fleet id (a bare gk/montalu*/simap/stepan/admin-forestshop-dev/spinbike/
+    dev1/dev2), NOR any
     DAVID id (david1..4/codex-bridge), NOR any MAREK id (marek-subdev/forestshop)
     → refused, never execed;
   * every entry uses the DEDICATED WEBTERM_DOMINIKA_IDENTITY key (never the fleet
@@ -68,27 +69,15 @@ class TestProfileForHostAccountAware(unittest.TestCase):
 
 
 class TestDominikaInventory(unittest.TestCase):
-    def test_two_member_set_in_owner_order(self):
+    def test_one_member_set(self):
+        # #1306: the montalu5 tab left with its deleted account.
         inv = p.dominika_inventory()
-        self.assertEqual([e["id"] for e in inv],
-                         ["montalu5-subdev", "miva1-subdev"])
-
-    def test_montalu5_entry_is_ssh_observe_no_u_tenant(self):
-        e = next(x for x in p.dominika_inventory() if x["id"] == "montalu5-subdev")
-        self.assertFalse(e["local"])
-        # #870 F4c: host is LANE_HOST-aware — tailscale on controller, loopback
-        # on subdev. With LANE_HOST["dominika"]=="controller", expect tailscale.
-        self.assertEqual(e["host"], p.SUBDEV_TAILSCALE_HOST)
-        self.assertEqual(e["user"], "montalu5")
-        self.assertEqual(e["identity"], p.WEBTERM_DOMINIKA_IDENTITY)
-        self.assertEqual(e["preferred"], "montalu5")
-        # OBSERVE-only, CROSS-TENANT: never a within-tenant read.
-        self.assertIsNot(e.get("u_tenant"), True)
+        self.assertEqual([e["id"] for e in inv], ["miva1-subdev"])
 
     def test_miva1_entry_is_ssh_observe_no_u_tenant(self):
         e = next(x for x in p.dominika_inventory() if x["id"] == "miva1-subdev")
         self.assertFalse(e["local"])
-        # #870 F4c: same LANE_HOST-aware host as montalu5.
+        # #870 F4c: host is LANE_HOST-aware — tailscale on controller.
         self.assertEqual(e["host"], p.SUBDEV_TAILSCALE_HOST)
         self.assertEqual(e["user"], "miva1")
         self.assertEqual(e["identity"], p.WEBTERM_DOMINIKA_IDENTITY)
@@ -123,7 +112,7 @@ class TestDominikaInventory(unittest.TestCase):
 
 class TestDominikaConnectAllowlistScoped(unittest.TestCase):
     """The heart of the boundary: dominika's ttyd child reads her inventory, so
-    connect_main can ONLY resolve her own two-member set — never another stream's,
+    connect_main can ONLY resolve her own one-member set — never another stream's,
     another person's, a david id, a marek id, or an owner-realm box."""
 
     def _dominika_inv_file(self):
@@ -134,7 +123,7 @@ class TestDominikaConnectAllowlistScoped(unittest.TestCase):
 
     def test_foreign_ids_are_refused_against_dominika_inventory(self):
         f = self._dominika_inv_file()
-        for foreign in ("gk", "gatekeeper", "montalu-subdev", "montalu2-subdev",
+        for foreign in ("gk", "gatekeeper", "montalu5-subdev", "montalu2-subdev",
                         "montalu4-subdev", "montalu6-subdev", "simap1-subdev",
                         "spinbike-vps", "dev1", "dev2", "forestshop",
                         "marek-subdev", "stepan-forestshop-dev",
@@ -146,19 +135,6 @@ class TestDominikaConnectAllowlistScoped(unittest.TestCase):
                 rc = w.connect_main([foreign])
             self.assertEqual(rc, 2, "foreign id %r must be refused" % foreign)
             ex.assert_not_called()
-
-    def test_montalu5_id_execs_ssh_with_dedicated_key_to_montalu5_group(self):
-        f = self._dominika_inv_file()
-        with m.patch.dict(os.environ, {"WEBTERM_INVENTORY": str(f)}), \
-                m.patch.object(w.os, "execvp") as ex:
-            w.connect_main(["montalu5-subdev"])
-        ex.assert_called_once()
-        argv = ex.call_args[0][1]
-        self.assertEqual(argv[0], "ssh")
-        self.assertIn("-i", argv)
-        self.assertIn(os.path.expanduser(p.WEBTERM_DOMINIKA_IDENTITY), argv)
-        self.assertNotIn("sshpass", argv)          # never the shared password
-        self.assertIn("P=montalu5; ", " ".join(argv))
 
     def test_miva1_id_execs_ssh_with_dedicated_key(self):
         f = self._dominika_inv_file()
@@ -172,9 +148,9 @@ class TestDominikaConnectAllowlistScoped(unittest.TestCase):
         self.assertNotIn("sshpass", argv)
         self.assertIn("P=miva1; ", " ".join(argv))
 
-    def test_dominika_allowed_ids_are_exactly_her_two(self):
+    def test_dominika_allowed_ids_are_exactly_her_one(self):
         ids = p.allowed_ids(p.DOMINIKA, [])
-        self.assertEqual(ids, {"montalu5-subdev", "miva1-subdev"})
+        self.assertEqual(ids, {"miva1-subdev"})
         for foreign in ("gatekeeper", "marek-subdev", "david1", "codex-bridge",
                         "dev1", "dev2", "forestshop"):
             self.assertNotIn(foreign, ids)
@@ -215,7 +191,7 @@ class TestDominikaObserverExclusions(unittest.TestCase):
     def test_is_webterm_observer_and_subset_of_authority(self):
         import cli_fleet
         self.assertTrue(cli_fleet.is_webterm_observer("dominika"))
-        self.assertFalse(cli_fleet.is_webterm_observer("montalu5"))
+        self.assertFalse(cli_fleet.is_webterm_observer("miva1"))
         # A strict SUBSET of AUTHORITY_BY_USER — an observer is a classified
         # reduced account minus stream provisioning, never a third authority tier.
         self.assertLessEqual(set(cli_fleet.WEBTERM_OBSERVER_USERS),
@@ -242,27 +218,27 @@ class TestDominikaObserverExclusions(unittest.TestCase):
         import cli_bashrc_appliers as ba
         self.assertFalse(ba.is_single_session_box_user("dominika"))
         # non-vacuous: a real reduced stream on the same box IS one.
-        self.assertTrue(ba.is_single_session_box_user("montalu5"))
+        self.assertTrue(ba.is_single_session_box_user("miva1"))
 
     def test_excluded_from_reduced_stream_sweep(self):
         import watchdog
         self.assertNotIn("dominika", watchdog._REDUCED_STREAM_USERS)
-        self.assertIn("montalu5", watchdog._REDUCED_STREAM_USERS)  # non-vacuous
+        self.assertIn("miva1", watchdog._REDUCED_STREAM_USERS)  # non-vacuous
 
     def test_soniox_key_not_delivered_to_observer(self):
         import airuleset
         import cli_remote
         by_name = {h["name"]: h for h in airuleset.REMOTE_HOSTS}
-        hosts = [by_name["dominika@subdev"], by_name["montalu5@subdev"]]
+        hosts = [by_name["dominika@subdev"], by_name["miva1@subdev"]]
         # Missing source → every TARGETED host is reported failed. So the failure
-        # set names exactly the targets: montalu5 (a real stream) IN, dominika
+        # set names exactly the targets: miva1 (a real stream) IN, dominika
         # (observer) OUT. run is never reached (source read fails first).
         failures = cli_remote.provision_subdev_soniox_key(
             hosts=hosts, run=lambda *a, **k: (_ for _ in ()).throw(
                 AssertionError("must not ssh — source is missing")),
             source=Path("/nonexistent/soniox.env"))
         failed_names = {name for name, _reason in failures}
-        self.assertIn("montalu5@subdev", failed_names)     # targeted (non-vacuous)
+        self.assertIn("miva1@subdev", failed_names)     # targeted (non-vacuous)
         self.assertNotIn("dominika@subdev", failed_names)  # observer excluded
 
 
@@ -370,7 +346,7 @@ class TestDominikaPrerequisiteGate(unittest.TestCase):
         self.assertIsNone(dn._spec().identity_key)
 
     def test_setup_is_a_safe_noop_when_not_ready(self):
-        with m.patch.object(fw, "_whoami", lambda: "montalu5"), \
+        with m.patch.object(fw, "_whoami", lambda: "miva1"), \
                 m.patch.object(fw, "_run_systemctl",
                                side_effect=AssertionError("must not touch systemd")):
             self.assertFalse(dn.setup_webterm_dominika_service())
@@ -417,9 +393,8 @@ class TestDominikaArtifactsWrite(unittest.TestCase):
             dn._write_dominika_artifacts()
             inv = json.loads((claude / "webterm-dominika-inventory.json")
                              .read_text(encoding="utf-8"))
-            # The written connect allowlist is exactly the two-member observe set.
-            self.assertEqual([e["id"] for e in inv],
-                             ["montalu5-subdev", "miva1-subdev"])
+            # The written connect allowlist is exactly the one-member observe set.
+            self.assertEqual([e["id"] for e in inv], ["miva1-subdev"])
             launcher = (claude / "airuleset-webterm-dominika-ttyd.sh").read_text(
                 encoding="utf-8")
             self.assertIn("export WEBTERM_INVENTORY=", launcher)
@@ -427,12 +402,12 @@ class TestDominikaArtifactsWrite(unittest.TestCase):
             self.assertNotIn("--inventory", launcher)
             self.assertIn(dn.WEBTERM_DOMINIKA_TTYD_SOCK_BASENAME, launcher)
             self.assertIn('-i "$SOCK"', launcher)
-            # The dashboard lists exactly m5 + miva (the #592 alias source).
+            # The dashboard lists exactly miva (the #592 alias source; #1306: no m5).
             html = (claude / "webterm-dominika-dash" / "index.html").read_text(
                 encoding="utf-8")
             import re
             self.assertEqual(re.findall(r'<span class="al">([^<]+)</span>', html),
-                             ["m5", "miva"])
+                             ["miva"])
             # #703 parity: write_artifacts enables the PER-TENANT lane poll
             # (lane_u_status=True), so the WRITTEN dash polls its OWN gateway's
             # /u-status — never the owner-only cross-tenant --u-collect (locked in

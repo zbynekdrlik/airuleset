@@ -296,14 +296,14 @@ class TestSliceQualsRefusesRatherThanGuessing(TestCase):
         def gh(*a, **k):
             j = " ".join(str(x) for x in a)
             if a and a[0] == "label":
-                return '[{"name": "stream:montalu"}]'
+                return '[{"name": "stream:miva1"}]'
             if "sort:created-desc" in j:
                 return '[{"number": 999}]'   # search demonstrably answers
             return "[]"
 
         buf = io.StringIO()
         with mk.patch.object(airuleset, "_gh_login", return_value="zbynekdrlik"):
-            with mk.patch.object(airuleset, "_current_user", return_value="montalu1"):
+            with mk.patch.object(airuleset, "_current_user", return_value="miva1"):
                 with mk.patch.object(airuleset, "_gh_out", side_effect=gh):
                     with contextlib.redirect_stdout(buf):
                         airuleset.cmd_slice_quals(
@@ -645,12 +645,12 @@ class TestSliceQualsRefusesAnUnresolvableIdentity(TestCase):
         import unittest.mock as mk
 
         with mk.patch.object(airuleset, "_gh_login", return_value="zbynekdrlik"):
-            # #537: montalu is a base-stream rename target, so its shared-account
-            # slice now carries BOTH the old and the new stream label (the
-            # transition alias). The BRANCH selection (shared-account -> label
-            # only) is unchanged; only the label set expanded.
-            self.assertEqual(airuleset._slice_quals("montalu"),
-                             ["label:stream:montalu", "label:stream:montalu1"])
+            # #537: simap is a base-stream rename target (montalu's alias left
+            # with #1306), so its shared-account slice carries BOTH the old and
+            # the new stream label (the transition alias). The BRANCH selection
+            # (shared-account -> label only) is unchanged.
+            self.assertEqual(airuleset._slice_quals("simap"),
+                             ["label:stream:simap", "label:stream:simap1"])
         with mk.patch.object(airuleset, "_gh_login", return_value="kvaskodev"):
             # #537: david's own-account slice keeps assignee/author + BOTH the
             # old and new stream label (david + david1) -> 4 quals, not 3.
@@ -759,11 +759,11 @@ class TestSliceQualsHandlesAppTokenBoxes(TestCase):
             with mk.patch.dict(os.environ, {"GH_APP_TOKEN_DIR": str(missing)}):
                 with mk.patch.object(airuleset, "_gh_login",
                                      return_value="zbynekdrlik"):
-                    # #537: the base-stream rename alias expands montalu's
+                    # #537: the base-stream rename alias expands simap's
                     # shared-account slice to both labels; the App-token
                     # branch selection this test guards is still unaffected.
-                    self.assertEqual(airuleset._slice_quals("montalu"),
-                                     ["label:stream:montalu", "label:stream:montalu1"])
+                    self.assertEqual(airuleset._slice_quals("simap"),
+                                     ["label:stream:simap", "label:stream:simap1"])
                 with mk.patch.object(airuleset, "_gh_login",
                                      return_value="kvaskodev"):
                     self.assertEqual(len(airuleset._slice_quals("david")), 4)

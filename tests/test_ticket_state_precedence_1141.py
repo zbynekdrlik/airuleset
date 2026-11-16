@@ -29,7 +29,7 @@ import cli_quals  # noqa: E402
 import cli_ticket_state  # noqa: E402
 
 GK = cli_ticket_state.Box()                       # full authority
-MONTALU = cli_ticket_state.Box(own_stream="montalu1")
+MIVA = cli_ticket_state.Box(own_stream="miva1")
 DAVID = cli_ticket_state.Box(own_stream="david1")
 HANDOFFS = ("gk-processing", "ready-for-review", "needs-gatekeeper")
 QUESTIONS = ("needs-answer", "needs-decision", "needs-owner-action")
@@ -52,27 +52,27 @@ def _where(number, parts):
 class OwnerQuestionBeatsHandoff(unittest.TestCase):
     """Rule 1: the question is decided before any hand-off label."""
 
-    def test_8058_shape_is_U_on_the_montalu_box(self):
-        row = _row("stream:montalu", "needs-answer", "gk-processing")
-        bucket, reason = cli_ticket_state.classify(row, None, MONTALU)
+    def test_8058_shape_is_U_on_the_miva_box(self):
+        row = _row("stream:miva1", "needs-answer", "gk-processing")
+        bucket, reason = cli_ticket_state.classify(row, None, MIVA)
         self.assertEqual(bucket, "U")
         self.assertEqual(
             _where(1, airuleset._partition_workable({1: row},
-                                                    own_stream="montalu1")),
+                                                    own_stream="miva1")),
             ["U"])
         # a handed-off row parked on the owner is never counted in gk
         self.assertEqual(cli_ticket_state.classify(
-            row, cli_ticket_state.Facts(handed=True), MONTALU)[0], "U")
+            row, cli_ticket_state.Facts(handed=True), MIVA)[0], "U")
 
     def test_unsent_acceptance_with_a_handoff_is_U_on_the_owning_box(self):
         for handoff in HANDOFFS:
-            own = _row("stream:montalu", "needs-acceptance", handoff)
-            bucket, reason = cli_ticket_state.classify(own, None, MONTALU)
+            own = _row("stream:miva1", "needs-acceptance", handoff)
+            bucket, reason = cli_ticket_state.classify(own, None, MIVA)
             self.assertEqual(bucket, "U", handoff)
             self.assertIn("#1141", reason)
             self.assertIn(handoff, reason)
             self.assertEqual(_where(1, airuleset._partition_workable(
-                {1: own}, own_stream="montalu1")), ["U"], handoff)
+                {1: own}, own_stream="miva1")), ["U"], handoff)
             # the gk box's own tickets (bare / stream:core) — U on gk
             for extra in ((), ("stream:core",)):
                 core = _row("needs-acceptance", handoff, *extra)
@@ -87,7 +87,7 @@ class OwnerQuestionBeatsHandoff(unittest.TestCase):
                 self.assertEqual(_bucket(_row(q, handoff), GK), "U",
                                  (q, handoff))
                 self.assertEqual(
-                    _bucket(_row("stream:montalu", q, handoff), MONTALU),
+                    _bucket(_row("stream:miva1", q, handoff), MIVA),
                     "U", (q, handoff))
 
     def test_sent_acceptance_keeps_its_slice1_route(self):
@@ -104,8 +104,8 @@ class OwnerQuestionBeatsHandoff(unittest.TestCase):
         # a bounce is the stream's own rework, not a hand-off label
         for extra in ((), ("gk-processing",), ("ops-wait",)):
             self.assertEqual(
-                _bucket(_row("stream:montalu", "needs-acceptance",
-                             "prio:bounce", *extra), MONTALU),
+                _bucket(_row("stream:miva1", "needs-acceptance",
+                             "prio:bounce", *extra), MIVA),
                 "I", extra)
 
 
@@ -115,9 +115,9 @@ class ReviewRound1(unittest.TestCase):
 
     def test_owner_action_beats_a_sent_acceptance(self):
         for extra in ((),) + tuple((h,) for h in HANDOFFS):
-            own = _row("stream:montalu", "needs-owner-action",
+            own = _row("stream:miva1", "needs-owner-action",
                        "needs-acceptance", "ops-wait", *extra)
-            bucket, reason = cli_ticket_state.classify(own, None, MONTALU)
+            bucket, reason = cli_ticket_state.classify(own, None, MIVA)
             self.assertEqual(bucket, "U", extra)
             self.assertIn("needs-owner-action", reason)
             self.assertEqual(_bucket(own, GK), cli_ticket_state.HIDDEN,
@@ -127,24 +127,24 @@ class ReviewRound1(unittest.TestCase):
             self.assertEqual(_bucket(core, GK), "U", extra)
 
     def test_bounce_reason_names_the_bounce(self):
-        row = _row("stream:montalu", "needs-acceptance", "prio:bounce",
+        row = _row("stream:miva1", "needs-acceptance", "prio:bounce",
                    "gk-processing")
-        bucket, reason = cli_ticket_state.classify(row, None, MONTALU)
+        bucket, reason = cli_ticket_state.classify(row, None, MIVA)
         self.assertEqual(bucket, "I")
         self.assertIn("prio:bounce", reason)
         self.assertNotIn("overridden by gk-processing", reason)
 
     def test_a_foreign_question_of_a_stream_without_a_live_box_stays_U(self):
         import cli_fleet
-        row = _row("stream:montalu", "needs-answer", "gk-processing")
+        row = _row("stream:miva1", "needs-answer", "gk-processing")
         paused = [dict(h, paused="test: host paused")
-                  if h.get("user") == "montalu1" else h
+                  if h.get("user") == "miva1" else h
                   for h in cli_fleet.REMOTE_HOSTS]
         with mock.patch.object(cli_fleet, "REMOTE_HOSTS", paused):
             bucket, reason = cli_ticket_state.classify(row, None, GK)
         self.assertEqual(bucket, "U")
-        self.assertIn("montalu1", reason)
-        observers = cli_fleet.WEBTERM_OBSERVER_USERS | {"montalu1"}
+        self.assertIn("miva1", reason)
+        observers = cli_fleet.WEBTERM_OBSERVER_USERS | {"miva1"}
         with mock.patch.object(cli_fleet, "WEBTERM_OBSERVER_USERS",
                                observers):
             self.assertEqual(_bucket(row, GK), "U")
@@ -203,7 +203,7 @@ class ReviewRound2(unittest.TestCase):
         import statusbar
         rows = {
             7: {"state": "OPEN", "title": "own", "createdAt": "",
-                "labels": [{"name": "stream:montalu"},
+                "labels": [{"name": "stream:miva1"},
                            {"name": "needs-answer"}]},
             8: {"state": "OPEN", "title": "foreign", "createdAt": "",
                 "labels": [{"name": "stream:david1"},
@@ -216,19 +216,19 @@ class ReviewRound2(unittest.TestCase):
         with mock.patch.object(statusbar, "question_map_ticket_refs",
                                return_value={7, 8}), \
                 mock.patch.object(airuleset, "_current_user",
-                                  return_value="montalu1"):
+                                  return_value="miva1"):
             got = cli_quals._question_map_u_supplement({}, "/r", runner)
         self.assertEqual(set(got), {7})
 
     def test_a_stream_with_no_live_host_entry_is_not_live(self):
         import cli_fleet
-        row = _row("stream:montalu", "needs-answer", "gk-processing")
+        row = _row("stream:miva1", "needs-answer", "gk-processing")
         hosts = [h for h in cli_fleet.REMOTE_HOSTS
-                 if h.get("user") != "montalu1"]
+                 if h.get("user") != "miva1"]
         with mock.patch.object(cli_fleet, "REMOTE_HOSTS", hosts):
             self.assertEqual(_bucket(row, GK), "U")
         two = list(cli_fleet.REMOTE_HOSTS) + [
-            {"user": "montalu1", "host": "x", "paused": "test: old host"}]
+            {"user": "miva1", "host": "x", "paused": "test: old host"}]
         with mock.patch.object(cli_fleet, "REMOTE_HOSTS", two):
             self.assertEqual(_bucket(row, GK), cli_ticket_state.HIDDEN,
                              "one live entry is enough")
@@ -238,11 +238,11 @@ class ForeignQuestionHiddenOnGk(unittest.TestCase):
     """Rule 2: a foreign stream's owner question is not the gk box's I or U."""
 
     def test_8058_shape_is_hidden_on_the_gk_box(self):
-        row = _row("stream:montalu", "needs-answer", "gk-processing")
+        row = _row("stream:miva1", "needs-answer", "gk-processing")
         bucket, reason = cli_ticket_state.classify(row, None, GK)
         self.assertEqual(bucket, cli_ticket_state.HIDDEN)
         self.assertNotIn(bucket, cli_ticket_state.BUCKETS)
-        self.assertIn("montalu1", reason)
+        self.assertIn("miva1", reason)
         self.assertIn("#1141", reason)
         self.assertEqual(_where(1, airuleset._partition_workable({1: row})),
                          [])
@@ -250,7 +250,7 @@ class ForeignQuestionHiddenOnGk(unittest.TestCase):
     def test_every_foreign_question_is_hidden_on_gk(self):
         for q in QUESTIONS + ("needs-acceptance",):
             for extra in ((),) + tuple((h,) for h in HANDOFFS):
-                row = _row("stream:montalu", q, *extra)
+                row = _row("stream:miva1", q, *extra)
                 self.assertEqual(_bucket(row, GK), cli_ticket_state.HIDDEN,
                                  (q, extra))
                 # the M and gk facts never resurrect it
@@ -262,7 +262,7 @@ class ForeignQuestionHiddenOnGk(unittest.TestCase):
 
     def test_a_foreign_handoff_without_a_question_stays_gk_I(self):
         for handoff in HANDOFFS:
-            row = _row("stream:montalu", handoff)
+            row = _row("stream:miva1", handoff)
             bucket, reason = cli_ticket_state.classify(row, None, GK)
             self.assertEqual(bucket, "I", handoff)
             self.assertEqual(
@@ -270,13 +270,13 @@ class ForeignQuestionHiddenOnGk(unittest.TestCase):
 
     def test_a_foreign_sent_acceptance_is_not_a_question(self):
         self.assertEqual(
-            _bucket(_row("stream:montalu", "needs-acceptance", "ops-wait"),
+            _bucket(_row("stream:miva1", "needs-acceptance", "ops-wait"),
                     GK), "W")
 
     def test_the_reduced_authority_box_keeps_its_slice1_route(self):
         # rule 2 is scoped to the full-authority box; a foreign question on a
         # slice box keeps the #654 action-only route of slice 1
-        row = _row("stream:montalu", "needs-answer")
+        row = _row("stream:miva1", "needs-answer")
         self.assertEqual(_bucket(row, DAVID), "I")
 
 
@@ -291,7 +291,7 @@ class ExplainPrintsTheMovedRows(unittest.TestCase):
                 "labels": [{"name": "needs-acceptance"},
                            {"name": "gk-processing"}]},
             8: {"number": 8, "title": "foreign q",
-                "labels": [{"name": "stream:montalu"},
+                "labels": [{"name": "stream:miva1"},
                            {"name": "needs-answer"},
                            {"name": "gk-processing"}]},
         }
@@ -307,7 +307,7 @@ class ExplainPrintsTheMovedRows(unittest.TestCase):
         row8 = [ln for ln in printed if ln.startswith("8\t")]
         self.assertEqual(len(row8), 1, printed)
         self.assertEqual(row8[0].split("\t")[1], "hidden")
-        self.assertIn("montalu1", row8[0].split("\t")[2])
+        self.assertIn("miva1", row8[0].split("\t")[2])
         row5 = [ln for ln in printed if ln.startswith("5\t")]
         self.assertEqual(row5[0].split("\t")[1], "U")
         self.assertIn("#1141", row5[0].split("\t")[2])
@@ -348,10 +348,10 @@ class CoreQualsCli(unittest.TestCase):
     _ROWS = json.dumps([
         {"number": 1, "title": "plain", "labels": [{"name": "bug"}]},
         {"number": 2, "title": "foreign q",
-         "labels": [{"name": "stream:montalu"}, {"name": "needs-answer"},
+         "labels": [{"name": "stream:miva1"}, {"name": "needs-answer"},
                     {"name": "gk-processing"}]},
         {"number": 3, "title": "foreign hand-off",
-         "labels": [{"name": "stream:montalu"}, {"name": "gk-processing"}]},
+         "labels": [{"name": "stream:miva1"}, {"name": "gk-processing"}]},
     ])
 
     def _run(self, *argv, rows=None):

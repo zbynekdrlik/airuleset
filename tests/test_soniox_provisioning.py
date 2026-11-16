@@ -480,10 +480,9 @@ class TestSonioxFlaggedNonSubdevHost(TestCase):
         # dev2's real user@host -- the account this ticket exists to fix
         self.assertIn("newlevel@100.82.64.27", joined)
         # a couple of subdev stream accounts still contacted (no regression).
-        # #537: montalu was renamed to montalu1 (live 2026-08-19) — the
-        # numbered account is the real deployable target now.
-        self.assertIn("montalu1@100.118.174.27", joined)
-        self.assertIn("montalu2@100.118.174.27", joined)
+        # (#1306: montalu1..8 are gone; miva1 + david1 are live streams.)
+        self.assertIn("miva1@100.118.174.27", joined)
+        self.assertIn("david1@100.118.174.27", joined)
 
 
 # ---------------------------------------------------------------------------

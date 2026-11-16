@@ -40,6 +40,7 @@ sys.path.insert(0, str(REPO))
 import airuleset             # noqa: E402
 import cli_bashrc_appliers   # noqa: E402
 import cli_claude_scripts    # noqa: E402
+import cli_fleet             # noqa: E402
 import cli_session_cwd       # noqa: E402
 import cli_webterm           # noqa: E402
 import cli_webterm_only      # noqa: E402
@@ -48,6 +49,35 @@ M1 = "devel/odoo/odoo-slovnormal"
 ERP = "devel/odoo/odoo-erp"
 KEY = "ssh-ed25519 AAAA testkey"
 
+# #1306: montalu1 (the only stream with a NON-default declared cwd) was
+# deleted, so the registry rows these locks need are installed for this module
+# only: slov1 declares odoo-slovnormal (a chain would pick odoo-erp), slov2 is
+# a stream with no declared window.
+_FIXTURE_HOSTS = [
+    {"name": "slov1@subdev", "host": "100.118.174.27", "user": "slov1",
+     "repo_path": "~/devel/airuleset",
+     "windows": [{"name": "s1", "cwd": "~/" + M1, "role": None}]},
+    {"name": "slov2@subdev", "host": "100.118.174.27", "user": "slov2",
+     "repo_path": "~/devel/airuleset"},
+]
+_patches = []
+
+
+def setUpModule():
+    hosts = airuleset.REMOTE_HOSTS + _FIXTURE_HOSTS
+    auth = dict(airuleset.AUTHORITY_BY_USER, slov1="branch-merge",
+                slov2="branch-merge")
+    for mod in (airuleset, cli_fleet):
+        _patches.extend([m.patch.object(mod, "REMOTE_HOSTS", hosts),
+                         m.patch.object(mod, "AUTHORITY_BY_USER", auth)])
+    for p in _patches:
+        p.start()
+
+
+def tearDownModule():
+    while _patches:
+        _patches.pop().stop()
+
 
 def _tmpdir(tc, prefix):
     d = Path(tempfile.mkdtemp(prefix=prefix))
@@ -55,8 +85,8 @@ def _tmpdir(tc, prefix):
     return d
 
 
-def _montalu1_home(tc, erp_checkout=True):
-    """montalu1's real layout + an odoo-erp checkout so a CHAIN would win it:
+def _declared_home(tc, erp_checkout=True):
+    """slov1's layout (montalu1's, #1202) + an odoo-erp checkout so a CHAIN would win it:
     only the declared window can pick odoo-slovnormal."""
     home = _tmpdir(tc, "airuleset-1202-home-")
     (home / M1 / ".git").mkdir(parents=True)
@@ -70,8 +100,8 @@ def _montalu1_home(tc, erp_checkout=True):
 # 1. the declared window is read from the fleet table.
 # --------------------------------------------------------------------------- #
 class TestDeclaredWindowSource(unittest.TestCase):
-    def test_montalu1_primary_declared_cwd(self):
-        self.assertEqual(cli_session_cwd.primary_declared_rel("montalu1"), M1)
+    def test_slov1_primary_declared_cwd(self):
+        self.assertEqual(cli_session_cwd.primary_declared_rel("slov1"), M1)
 
     def test_gk_declares_all_its_window_cwds(self):
         rels = cli_session_cwd.declared_window_rels("gatekeeper")
@@ -79,7 +109,7 @@ class TestDeclaredWindowSource(unittest.TestCase):
         self.assertIn("devel/odoo/odoo-erp-infra", rels)
 
     def test_undeclared_account_has_none(self):
-        for user in ("newlevel", "airuleset", "montalu2", "", None):
+        for user in ("newlevel", "airuleset", "slov2", "", None):
             self.assertIsNone(cli_session_cwd.primary_declared_rel(user), user)
         self.assertEqual(cli_session_cwd.declared_window_rels("newlevel"), ())
 
@@ -114,7 +144,7 @@ def _fake_bin(d, whoami):
 
 
 class TestAttachBlockUsesDeclaredCwd(unittest.TestCase):
-    def _run_block(self, block, home, whoami="montalu1"):
+    def _run_block(self, block, home, whoami="slov1"):
         d = _tmpdir(self, "airuleset-1202-bash-")
         b = _fake_bin(d, whoami)
         log = d / "tmux.log"
@@ -125,16 +155,16 @@ class TestAttachBlockUsesDeclaredCwd(unittest.TestCase):
                            stdin=subprocess.DEVNULL)
         return (log.read_text() if log.exists() else ""), r
 
-    def test_montalu1_block_lands_in_declared_cwd_not_chain_winner(self):
-        home = _montalu1_home(self)
-        block = cli_bashrc_appliers._ssh_attach_block_for_user("montalu1")
+    def test_slov1_block_lands_in_declared_cwd_not_chain_winner(self):
+        home = _declared_home(self)
+        block = cli_bashrc_appliers._ssh_attach_block_for_user("slov1")
         log, _ = self._run_block(block, home)
-        self.assertIn("new-session -A -s montalu1 -c %s/%s\n" % (home, M1), log)
+        self.assertIn("new-session -A -s slov1 -c %s/%s\n" % (home, M1), log)
 
     def test_declared_dir_without_git_is_still_used_never_a_parent(self):
         home = _tmpdir(self, "airuleset-1202-home-")
         (home / M1).mkdir(parents=True)          # declared, not cloned yet
-        block = cli_bashrc_appliers._ssh_attach_block_for_user("montalu1")
+        block = cli_bashrc_appliers._ssh_attach_block_for_user("slov1")
         log, r = self._run_block(block, home)
         self.assertIn("-c %s/%s\n" % (home, M1), log)
         self.assertIn("no git checkout found", r.stderr)
@@ -143,17 +173,17 @@ class TestAttachBlockUsesDeclaredCwd(unittest.TestCase):
         home = _tmpdir(self, "airuleset-1202-home-")
         (home / M1).mkdir(parents=True)          # plain, no .git anywhere
         log, _ = self._run_block(cli_bashrc_appliers.STREAM_SSH_ATTACH_BLOCK,
-                                 home, whoami="montalu2")
-        self.assertIn("new-session -A -s montalu2 -c %s\n" % home, log)
+                                 home, whoami="slov2")
+        self.assertIn("new-session -A -s slov2 -c %s\n" % home, log)
         self.assertNotIn("-c %s/devel/odoo\n" % home, log)
 
-    def test_apply_writes_the_declared_block_for_montalu1(self):
+    def test_apply_writes_the_declared_block_for_slov1(self):
         d = _tmpdir(self, "airuleset-1202-rc-")
         rc = d / ".bashrc"
         rc.write_text("# existing\n")
         with m.patch.object(airuleset, "AUTHORITY_BY_USER",
-                            dict(airuleset.AUTHORITY_BY_USER, montalu1="full")):
-            cli_bashrc_appliers.apply_stream_ssh_attach(rc, user="montalu1")
+                            dict(airuleset.AUTHORITY_BY_USER, slov1="full")):
+            cli_bashrc_appliers.apply_stream_ssh_attach(rc, user="slov1")
         text = rc.read_text()
         self.assertIn("for __airuleset_rel in %s; do" % M1, text)
         self.assertNotIn("for __airuleset_rel in %s" % ERP, text)
@@ -161,20 +191,20 @@ class TestAttachBlockUsesDeclaredCwd(unittest.TestCase):
 
 class TestPythonBootstrapUsesDeclaredCwd(unittest.TestCase):
     def test_resolver_prefers_declared_over_chain(self):
-        home = _montalu1_home(self)
+        home = _declared_home(self)
         chosen, no_repo = cli_bashrc_appliers.resolve_stream_cwd(
-            home, user="montalu1")
+            home, user="slov1")
         self.assertEqual(chosen, home / M1)
         self.assertFalse(no_repo)
 
     def test_stream_session_cwd_takes_the_user(self):
-        home = _montalu1_home(self)
+        home = _declared_home(self)
         with m.patch.object(Path, "home", return_value=home):
-            self.assertEqual(airuleset._stream_session_cwd("montalu1"),
+            self.assertEqual(airuleset._stream_session_cwd("slov1"),
                              home / M1)
 
     def test_bootstrap_creates_the_session_in_declared_cwd(self):
-        home = _montalu1_home(self)
+        home = _declared_home(self)
         calls = []
 
         def run(argv):
@@ -185,7 +215,7 @@ class TestPythonBootstrapUsesDeclaredCwd(unittest.TestCase):
         sentinel = _tmpdir(self, "airuleset-1202-sent-") / "sentinel"
         with m.patch.object(Path, "home", return_value=home):
             airuleset.ensure_stream_tmux_session(
-                user="montalu1", run=run, launch_script=Path("/x/launch"),
+                user="slov1", run=run, launch_script=Path("/x/launch"),
                 sentinel_path=sentinel)
         created = [c for c in calls if c[1] == "new-session"]
         self.assertEqual(created[0][-2:], ["-c", str(home / M1)])
@@ -200,36 +230,36 @@ class TestWebtermUsesDeclaredCwd(unittest.TestCase):
         return r.stdout.strip().split("RESULT=", 1)[1]
 
     def test_remote_command_resolves_declared_cwd(self):
-        home = _montalu1_home(self)
-        cmd = cli_webterm._remote_command("montalu1", user="montalu1")
+        home = _declared_home(self)
+        cmd = cli_webterm._remote_command("slov1", user="slov1")
         self.assertEqual(self._eval(cmd, home), str(home / M1))
 
     def test_baked_forced_command_carries_the_declared_cwd(self):
         # the #1202 creator: the authorized_keys forced command
-        line = cli_webterm_only._controller_lane_key_line("montalu1", KEY)
+        line = cli_webterm_only._controller_lane_key_line("slov1", KEY)
         self.assertIn(M1, line)
         self.assertNotIn(ERP, line)
 
     def test_build_connect_argv_passes_the_target_user(self):
-        entry = {"id": "m1", "local": True, "host": None, "user": "montalu1",
-                 "preferred": "montalu1"}
+        entry = {"id": "m1", "local": True, "host": None, "user": "slov1",
+                 "preferred": "slov1"}
         argv = cli_webterm.build_connect_argv(entry)
         self.assertIn("for __r in %s;" % M1, argv[-1])
 
     def test_default_chain_never_resolves_a_bare_parent(self):
         home = _tmpdir(self, "airuleset-1202-home-")
         (home / M1).mkdir(parents=True)          # plain, no .git anywhere
-        cmd = cli_webterm._remote_command("montalu2")
+        cmd = cli_webterm._remote_command("slov2")
         self.assertEqual(self._eval(cmd, home), str(home))
 
     def test_default_chain_picks_the_checkout(self):
         home = _tmpdir(self, "airuleset-1202-home-")
         (home / M1 / ".git").mkdir(parents=True)
-        cmd = cli_webterm._remote_command("montalu2")
+        cmd = cli_webterm._remote_command("slov2")
         self.assertEqual(self._eval(cmd, home), str(home / M1))
 
     def test_forced_command_stays_single_line(self):
-        line = cli_webterm_only._controller_lane_key_line("montalu1", KEY)
+        line = cli_webterm_only._controller_lane_key_line("slov1", KEY)
         self.assertNotIn("\n", line)
 
 
@@ -241,7 +271,7 @@ _FAKE_CLAUDE = "#!/usr/bin/env bash\necho \"CLAUDE_RAN $*\"\n"
 
 class TestLauncherResumeGuard(unittest.TestCase):
     def _launch(self, declared, cwd_rel, *args, env_extra=None, home=None):
-        home = home or _montalu1_home(self, erp_checkout=False)
+        home = home or _declared_home(self, erp_checkout=False)
         (home / "devel" / "odoo").mkdir(parents=True, exist_ok=True)
         lb = home / ".local" / "bin"
         lb.mkdir(parents=True, exist_ok=True)
@@ -257,7 +287,7 @@ class TestLauncherResumeGuard(unittest.TestCase):
                            env=env, capture_output=True, text=True, timeout=15)
         return r
 
-    def _declared(self, user="montalu1"):
+    def _declared(self, user="slov1"):
         return cli_session_cwd.launch_guard_cwds(user)
 
     def test_refuses_continue_from_the_parent_and_prints_the_fix(self):
@@ -326,7 +356,7 @@ class TestLauncherResumeGuard(unittest.TestCase):
                   popup_script_path=paths["popup"],
                   impl_script_path=paths["impl"],
                   impl_prompt_path=paths["prompt"])
-        cli_bashrc_appliers.apply_ultracode_launcher(user="montalu1", **kw)
+        cli_bashrc_appliers.apply_ultracode_launcher(user="slov1", **kw)
         self.assertIn("_declared_cwds=(%s)" % M1, paths["script"].read_text())
         cli_bashrc_appliers.apply_ultracode_launcher(user="newlevel", **kw)
         self.assertNotIn("_cwd_guard", paths["script"].read_text())
@@ -337,35 +367,35 @@ class TestLauncherResumeGuard(unittest.TestCase):
 # --------------------------------------------------------------------------- #
 class TestStatusPaneCwdCheck(unittest.TestCase):
     def test_parent_dir_is_a_mismatch(self):
-        home = _montalu1_home(self)
+        home = _declared_home(self)
         ok, line = cli_session_cwd.pane_cwd_status(
-            "montalu1", home, str(home / "devel" / "odoo"))
+            "slov1", home, str(home / "devel" / "odoo"))
         self.assertIs(ok, False)
         self.assertIn("MISMATCH", line)
         self.assertIn(M1, line)
 
     def test_declared_dir_and_subdir_are_ok(self):
-        home = _montalu1_home(self)
+        home = _declared_home(self)
         for pane in (home / M1, home / M1 / ".git"):
-            ok, _ = cli_session_cwd.pane_cwd_status("montalu1", home, str(pane))
+            ok, _ = cli_session_cwd.pane_cwd_status("slov1", home, str(pane))
             self.assertIs(ok, True, pane)
 
     def test_sibling_checkout_is_a_mismatch(self):
-        home = _montalu1_home(self)
-        ok, _ = cli_session_cwd.pane_cwd_status("montalu1", home, str(home / ERP))
+        home = _declared_home(self)
+        ok, _ = cli_session_cwd.pane_cwd_status("slov1", home, str(home / ERP))
         self.assertIs(ok, False)
 
     def test_unknown_pane_is_inconclusive_and_undeclared_is_skipped(self):
-        home = _montalu1_home(self)
-        ok, line = cli_session_cwd.pane_cwd_status("montalu1", home, None)
+        home = _declared_home(self)
+        ok, line = cli_session_cwd.pane_cwd_status("slov1", home, None)
         self.assertIsNone(ok)
         self.assertIn("inconclusive", line)
         self.assertIsNone(cli_session_cwd.pane_cwd_status("newlevel", home, "/x"))
 
     def test_cmd_status_prints_the_mismatch(self):
-        home = _montalu1_home(self)
+        home = _declared_home(self)
         out = io.StringIO()
-        with m.patch.object(airuleset, "_current_user", return_value="montalu1"), \
+        with m.patch.object(airuleset, "_current_user", return_value="slov1"), \
                 m.patch.object(airuleset, "_tmux_session_pane_cwd",
                                return_value=str(home / "devel" / "odoo")), \
                 m.patch.object(Path, "home", return_value=home), \

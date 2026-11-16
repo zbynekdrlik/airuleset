@@ -1,6 +1,7 @@
 """authority_handoff_cards tests split out of the former monolithic `tests/test_authority_profiles.py`
 (#830). Moved VERBATIM; shared helpers live in `tests/authority_testlib.py`."""
 from unittest import TestCase, main
+from unittest import mock as m
 from authority_testlib import (  # noqa: E402
     airuleset,
     read,
@@ -302,9 +303,8 @@ class TestPerBoxSkillScoping(TestCase):
         self.assertIn("playbook-review", names)
 
     def test_subdev_also_loses_deploy_ssh(self):
-        for user in ("david1", "marek", "montalu1", "montalu2", "montalu3",
-                     "montalu4", "montalu5", "montalu6", "montalu7",
-                     "montalu8"):
+        for user in ("david1", "marek", "miva1", "simap1", "dominika",
+                     "david2", "david3", "david4"):
             names = airuleset.skill_names_for_user(user)
             self.assertNotIn("deploy-ssh", names, user)
             self.assertNotIn("mdreview", names, user)
@@ -329,23 +329,23 @@ class TestPerBoxSkillScoping(TestCase):
 
     def test_per_user_extras_regrant_a_scoped_skill_where_relevant(self):
         # 2026-07-14 incident: aacd29e classified meeting-analysis maintainer-only
-        # and the push PRUNED it off montalu — but the user analyzes montalu
-        # meeting recordings IN that stream's session. Per-user extras re-grant a
-        # scoped-away skill on exactly the boxes where it IS relevant.
-        self.assertIn("meeting-analysis",
-                      airuleset.skill_names_for_user("montalu1"))
-        # airuleset#251: montalu2/3/4 are full parallel montalu streams —
-        # same working style, same meeting-recordings-in-session rationale.
-        # airuleset#378: montalu5/6/7/8 are FOUR MORE, same rationale.
-        for user in ("montalu2", "montalu3", "montalu4", "montalu5",
-                     "montalu6", "montalu7", "montalu8"):
+        # and the push PRUNED it off montalu, whose user analyzed meetings in
+        # that stream. Per-user extras re-grant a scoped-away skill on exactly
+        # the boxes where it IS relevant. #1306: the montalu re-grants left with
+        # the client, so the MECHANISM is locked on a patched registry.
+        self.assertEqual(airuleset.SKILLS_EXTRA_BY_USER, {})
+        self.assertNotIn("meeting-analysis",
+                         airuleset.skill_names_for_user("montalu1"))
+        with m.patch.object(airuleset, "SKILLS_EXTRA_BY_USER",
+                            {"miva1": {"meeting-analysis"}}):
             self.assertIn("meeting-analysis",
-                          airuleset.skill_names_for_user(user), user)
-        for user in ("david", "marek", "gatekeeper"):
-            self.assertNotIn("meeting-analysis",
-                             airuleset.skill_names_for_user(user), user)
-        # extras never leak anything beyond the named skill
-        self.assertNotIn("mdreview", airuleset.skill_names_for_user("montalu1"))
+                          airuleset.skill_names_for_user("miva1"))
+            for user in ("david1", "marek", "gatekeeper"):
+                self.assertNotIn("meeting-analysis",
+                                 airuleset.skill_names_for_user(user), user)
+            # extras never leak anything beyond the named skill
+            self.assertNotIn("mdreview", airuleset.skill_names_for_user("miva1"))
+        self.assertNotIn("meeting-analysis", airuleset.skill_names_for_user("miva1"))
         # every extras entry must name real skills (typo guard)
         for user, extras in airuleset.SKILLS_EXTRA_BY_USER.items():
             for n in extras:

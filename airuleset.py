@@ -380,24 +380,9 @@ SKILLS_MAINTAINER_ONLY = {"mdreview", "rules-audit", "meeting-analysis",
 SKILLS_FULL_AUTHORITY_ONLY = {"deploy-ssh", "process-subdev", "autopilot-master"}
 MAINTAINER_USERS = {"newlevel", "airuleset"}
 # Per-user re-grants: a scoped-away skill that IS relevant on one specific box
-# (montalu meeting recordings get analyzed IN that stream's session — the
-# 2026-07-14 incident where the scoping prune took /meeting-analysis off montalu).
-# montalu2/3/4 (airuleset#251): three MORE full parallel montalu streams,
-# same working style — same re-grant.
-SKILLS_EXTRA_BY_USER = {
-    # montalu1 is the renamed base montalu stream (#537, live 2026-08-19) —
-    # it keeps the meeting-analysis re-grant the base montalu had.
-    "montalu1": {"meeting-analysis"},
-    "montalu2": {"meeting-analysis"},
-    "montalu3": {"meeting-analysis"},
-    "montalu4": {"meeting-analysis"},
-    # montalu5/6/7/8 (airuleset#378): four MORE full parallel montalu
-    # streams, same re-grant.
-    "montalu5": {"meeting-analysis"},
-    "montalu6": {"meeting-analysis"},
-    "montalu7": {"meeting-analysis"},
-    "montalu8": {"meeting-analysis"},
-}
+# (`{"<user>": {"<skill>"}}`). Empty since the montalu1..8 meeting-analysis
+# re-grants left with the montalu client (#1306).
+SKILLS_EXTRA_BY_USER = {}
 
 # --- #433 cluster L-A: skill_names_for_user (the per-box skill SUBSET
 # selector) moved to cli_deployer_glue.py — re-exported at the L-A facade
@@ -8360,6 +8345,7 @@ from cli_fleet import (  # noqa: E402, F401
     _is_github_ci_runner as _is_github_ci_runner,
     _github_ci_runner_source as _github_ci_runner_source,
     STREAM_RENAME_ALIASES as STREAM_RENAME_ALIASES,
+    RETIRED_STREAM_LABELS as RETIRED_STREAM_LABELS,
     SHARED_STREAM_GUARD_HOSTS as SHARED_STREAM_GUARD_HOSTS,
     DISK_GUARD_ROOT_HOSTS as DISK_GUARD_ROOT_HOSTS,
 )

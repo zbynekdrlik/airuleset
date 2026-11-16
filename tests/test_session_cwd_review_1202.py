@@ -46,27 +46,27 @@ class TestStaleForcedCommand(unittest.TestCase):
         return cli_webterm_only.WEBTERM_CONTROLLER_LANE_PUBKEYS["zbynek"]
 
     def test_old_baked_line_is_stale(self):
-        old = 'restrict,pty,command="P=montalu1; C=\\"$HOME\\"" %s' % self._pub()
-        stale = cli_session_cwd.stale_forced_commands("montalu1", old + "\n")
+        old = 'restrict,pty,command="P=david1; C=\\"$HOME\\"" %s' % self._pub()
+        stale = cli_session_cwd.stale_forced_commands("david1", old + "\n")
         self.assertEqual(len(stale), 1)
 
     def test_current_line_is_not_stale(self):
-        cur = cli_webterm_only._controller_lane_key_line("montalu1", self._pub())
+        cur = cli_webterm_only._controller_lane_key_line("david1", self._pub())
         self.assertEqual(
-            cli_session_cwd.stale_forced_commands("montalu1", cur + "\n"), [])
+            cli_session_cwd.stale_forced_commands("david1", cur + "\n"), [])
 
     def test_foreign_and_plain_keys_are_ignored(self):
         text = "%s\nssh-ed25519 AAAAforeign someone\n# comment\n\n" % KEY
-        self.assertEqual(cli_session_cwd.stale_forced_commands("montalu1", text), [])
+        self.assertEqual(cli_session_cwd.stale_forced_commands("david1", text), [])
 
     def test_status_prints_the_stale_line(self):
         home = _home(self)
         (home / ".ssh").mkdir()
         (home / ".ssh" / "authorized_keys").write_text(
-            'restrict,pty,command="P=montalu1" %s\n' % self._pub())
+            'restrict,pty,command="P=david1" %s\n' % self._pub())
         out = io.StringIO()
         with m.patch("sys.stdout", out):
-            cli_session_cwd.print_status("montalu1", home, lambda s: None)
+            cli_session_cwd.print_status("david1", home, lambda s: None)
         self.assertIn("forced command: STALE", out.getvalue())
         self.assertIn("append_controller_lane_pubkey_command", out.getvalue())
 
@@ -105,7 +105,8 @@ class TestHostScopedLocalLookup(unittest.TestCase):
 
     def test_unique_stream_user_resolves_without_hostname_match(self):
         self.assertEqual(
-            cli_session_cwd.launch_guard_cwds("montalu1", hostname="elsewhere"), M1)
+            cli_session_cwd.launch_guard_cwds("david1", hostname="elsewhere"),
+            "devel/odoo/odoo-erp")
 
 
 class TestGuardLetsNonSessionCommandsThrough(unittest.TestCase):
@@ -134,7 +135,7 @@ class TestStatusNeverRaises(unittest.TestCase):
             raise RuntimeError("tmux exploded")
         out = io.StringIO()
         with m.patch("sys.stdout", out):
-            cli_session_cwd.print_status("montalu1", _home(self), boom)
+            cli_session_cwd.print_status("david1", _home(self), boom)
         self.assertIn("session cwd: check failed", out.getvalue())
         self.assertIn("tmux exploded", out.getvalue())
 
