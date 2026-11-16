@@ -959,8 +959,9 @@ def _clear_stranded_truncated_goal(sid, cwd, captured, tpath, pid, run, state,
     #617-review 🔴, and the #372 CRITICAL-1 "content alone can't prove
     ownership for /goal" because of the documented manual paste-the-template
     arm flow). The WHOLE box content is reconstructed from every wrapped row
-    and must be a whitespace-normalised prefix of the template, at least
-    `GOAL_STRANDED_MIN_MATCH` chars and NOT the complete text (a complete own
+    and must be a prefix of the template with all whitespace removed (#1303:
+    a hard-broken token), at least `GOAL_STRANDED_MIN_MATCH` non-space chars
+    and NOT the complete text (a complete own
     draft is `_submit_stranded_own_goal`'s job). A user would have to paste
     the exact first 200+ chars of the ~3.8k template with zero edits -- and
     the recent-human gate still VETOES if they just did.
@@ -996,15 +997,20 @@ def _clear_stranded_truncated_goal(sid, cwd, captured, tpath, pid, run, state,
     text, _auth = (rearm_fn or _default_rearm_fn)(cwd)
     if not text:
         return [], False
-    # #737 -- the SAME head-first whole-box reconstruction `_goal_box_kind` uses
-    # (single-sourced in `_box_norm_from_capture`, never a second inline copy).
+    # #737 -- the head-first whole-box reconstruction (single-sourced in
+    # `_box_norm_from_capture`, never a second inline copy).
     box_norm = watchdog._box_norm_from_capture(captured)
     if not box_norm:
         return [], False
-    text_norm = " ".join(text.split())
-    if not (len(box_norm) >= GOAL_STRANDED_MIN_MATCH
-            and len(box_norm) < len(text_norm)
-            and text_norm.startswith(box_norm)):
+    # #1303 -- compared with ALL whitespace removed: CC hard-breaks a token
+    # longer than a row (a pane under ~67 cols) and the row join then inserts a
+    # space inside it. Still a byte-exact contiguous prefix of the non-space
+    # characters, so an edited paste never matches.
+    box_ns = "".join(box_norm.split())
+    text_ns = "".join(text.split())
+    if not (len(box_ns) >= GOAL_STRANDED_MIN_MATCH
+            and len(box_ns) < len(text_ns)
+            and text_ns.startswith(box_ns)):
         return [], False
     # PROVEN a stranded truncated own /goal. The give-up rec is keyed on the
     # content signature so a DIFFERENT/gone draft starts a fresh episode.
@@ -1179,8 +1185,8 @@ def _goal_cap_drop(sid, cwd, text, dl_fails, request_ts, run,
     same guard core (`_recovery_pane_ready`) + a CLEAN idle input-boundary check
     (#731-review: never Escape/clear a live turn's render) + the same
     `_janitor_recover` driver the #566 livelock resolver uses. It clears ONLY our
-    OWN leftover (proven by `_goal_box_kind` -- own-shape / #35 stash slot / #617
-    frozen-text match); a FOREIGN draft is left completely untouched. The
+    OWN leftover (proven by `_goal_box_kind` -- own-shape / #35 stash slot / the
+    shared `_box_is_own_leftover` proof); a FOREIGN draft is left completely untouched. The
     `leftover` word is READ BACK from the janitor's own verdict (#731-review /
     #134/#726 honesty bar -- never asserted "cleared" for a box the janitor
     actually left untouched or failed to clear). Never types a NEW /goal."""
