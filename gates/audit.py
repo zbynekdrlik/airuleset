@@ -108,7 +108,7 @@ CLI_BYPASS_LOGS = (
     ("prod-write-budget-bypasses.log", ()),
     ("stream-merge-bypasses.log", ()),
     ("subdev-ssh-bypasses.log", ()),
-    ("vault-store-reads.log", ()),
+    ("vault-store-reads.log", ()), ("utc-time-bypasses.log", ()),  # (#1343)
     ("script-check-bypasses.log", ()), ("handover-bypasses.log", ()),  # (#1180)
 )
 
