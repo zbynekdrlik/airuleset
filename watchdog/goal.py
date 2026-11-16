@@ -279,7 +279,7 @@ _GOAL_USER_CALLBACK_ORIGINS = (_GOAL_SELF_CALLBACK_ORIGIN,)
 # sight reverse-scan) on the next dark_watch sweep, so a marker the old parser
 # skipped-past (its incremental offset already advanced beyond it) is re-read by
 # the new recognizer instead of the stale value persisting forever (#618 class).
-_GOAL_MARK_PARSER_VERSION = 2
+_GOAL_MARK_PARSER_VERSION = 3   # 3: #1309 goal_status end record
 
 
 def record_goal_request(session, cwd, text, authority, now=None, path=None,
@@ -1966,8 +1966,9 @@ def goal_sweep(now, run=None, dry_run=False, projects_dir=None,
 # --------------------------------------------------------------------------- #
 # DARK-WATCH -- job 20's new body. Cross-checks each session's transcript
 # marker (INTENT) against CC's own footer indicator (REALITY). A goal that is
-# LOST -- an auth clear, or a dark footer CONFIRMED by the #524 run -- is only
-# JOURNALLED, once per episode (`goal-lost:<why> ... NOT re-armed`), plus ONE
+# LOST -- an auth clear, a CC `failed` end, or a dark footer CONFIRMED by the #524
+# run -- is only JOURNALLED, once per episode (`goal-lost:<why> ... NOT re-armed`;
+# a CC `met` end logs `goal-ended:met`, #1309), plus ONE
 # keystroke-free #459 report for the dark case. #1324 (owner 14.11.2026): the
 # watchdog NEVER re-arms a goal; "no goal visible" = autopilot off, and the
 # owner re-arms with `/autopilot`. Also runs the shared janitor recovery (#372)
@@ -2584,13 +2585,13 @@ def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
         armed = watchdog.pane_goal_armed(captured)
 
         if mark is None or mark.get("state") != "set":
-            # #675/#1324 -- CC cleared the goal on an auth failure: JOURNAL it
-            # once, never re-arm (the owner re-arms with /autopilot). A USER
-            # `/goal clear` or a non-auth `error` clear just ends the episode.
-            if (mark is not None and mark.get("state") == "cleared"
-                    and mark.get("clear_kind") == "auth"):
-                logs += _goal_lost_line(sid, loc, mark.get("ts"), "auth-clear",
-                                        latch=lost_state)
+            # #675/#1309/#1324 -- CC ended the goal itself (auth clear, met, failed):
+            # JOURNAL it once, never re-arm (the owner re-arms with /autopilot). A
+            # USER `/goal clear` or a non-auth `error` clear just ends the episode.
+            from watchdog import goal_status_mark as _gsm
+            _end = _gsm.cc_end_lines(sid, loc, mark, lost_state, _goal_lost_line)
+            if _end is not None:
+                logs += _end
             else:
                 lost_state.pop(sid, None)
             seen_state.pop(sid, None)
