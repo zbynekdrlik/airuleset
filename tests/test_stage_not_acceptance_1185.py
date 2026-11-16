@@ -240,7 +240,8 @@ class TestDoctrine(TestCase):
             "A Hotovo/Hotové a STREAM account set is never acceptance evidence",
             "a client message or reaction (`msg <id>`)",
             "the owner's own move after a confirmation",
-            "the odoo-erp#8507 auto-close note",
+            # #1306: the montalu-only odoo-erp#8507 auto-close note left the
+            # doctrine with its client; the gate still accepts a cited msg id
             # ROZHODNUTÉ issuecomment-5894541407: the owner-ruling exit joins msg <id>
             "the close gate rejects an `Acceptance-cited:` with no `msg <id>`, "
             "`meeting <recording id>`, owner `issuecomment-<id>` or Discord message "

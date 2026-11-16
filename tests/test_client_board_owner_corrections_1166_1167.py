@@ -1,18 +1,15 @@
-"""#1166 + #1167 — content locks for the montalu owner corrections of 28.9.2026.
+"""#1166 + #1167 — content locks for the owner corrections of 28.9.2026.
 
 #1166 (1), every profile: a handover lists only what the reader can use NOW,
 plus changes to things they ALREADY used. Internal rework history and the
 removal of a never-delivered feature stay out. Owner, verbatim: „preco spamujes
 so zrusenym nahravanim cenika ved to nedostal nikdy tak preco ma vediet ze si
 to zrusil?".
-#1166 (2), montalu only: the addressed person is @mentioned in the handover
-message AND set as the task's `user_ids` assignee. Owner, verbatim: „a musi byt
-oznaceny v spravach a taskoch patrik". miva stays with NO assignee.
-#1167, montalu only: the odoo-erp#8507 auto-close path. One reminder after 14
-days without a reaction, then Hotovo at >= 21 days and >= 7 days after the
-reminder. A reaction cancels the countdown. The GitHub ticket closes with the
-exact `Acceptance-cited:` line from the ticket body, plus the chatter message
-id of the auto-close note. Owner-only Done stays on miva.
+#1166 (2) and #1167 were montalu only (the addressee assignee and the
+odoo-erp#8507 auto-close). The montalu client is gone (owner 11.11.2026), and
+#1306 removed that profile from the client-board doctrine, so those locks are
+now INVERSE locks: the montalu row, the auto-close paragraph and the compose
+carve-out stay gone, and miva keeps NO assignee + an owner-only Done.
 
 Each lock pins an OPERATIVE statement inside the rule's own section, not a bare
 noun anywhere in the file. Negations are locked as whole phrases, so an
@@ -27,10 +24,10 @@ ROOT = Path(__file__).resolve().parent.parent
 MSG = ROOT / "skills" / "odoo-client-messaging"
 CORE = MSG / "client-board-tasks.md"
 STAGES = MSG / "client-board-stages.md"
+QUESTIONS = MSG / "client-board-questions.md"
+ATTACHMENTS = MSG / "client-board-attachments.md"
 COMPOSE = MSG / "handover-compose.md"
 HISTORY = MSG / "client-board-tasks-history.md"
-MSG_SKILL = MSG / "SKILL.md"
-LEGACY_SKILL = ROOT / "skills" / "odoo-discuss-xmlrpc" / "SKILL.md"
 
 RULE3 = "### 3. Handover chatter note"
 RULE5 = "### 5. Assignee"
@@ -38,11 +35,6 @@ RULE6 = '### 6. "Done" stage'
 
 QUOTE_1166_CONTENT = ("preco spamujes so zrusenym nahravanim cenika ved to "
                       "nedostal nikdy tak preco ma vediet ze si to zrusil?")
-QUOTE_1166_TAG = "a musi byt oznaceny v spravach a taskoch patrik"
-QUOTE_1167 = ("Pochopil som, ze klient odmieta prechadzat tasky vo odo na "
-              "verifikaciu takze budeme musiet zvolit nejaky autoclose rezim.")
-ACC_LINE = ("Acceptance-cited: auto-close after 21 days without reaction "
-            "(owner ROZHODNUTÉ 28.9., odoo-erp#8507)")
 
 
 def _norm(text):
@@ -104,18 +96,13 @@ class TestHandoverContentRule1166(TestCase):
         self.assertIn("no never-delivered removals", self.compose)
         self.assertIn("`client-board-stages.md` rule 3", self.compose)
 
-    def test_compose_closure_carve_out_for_montalu(self):
-        # the #799 tacit closure must not run beside the #8507 auto-close
-        self.assertIn("Montalu úlohy: NAHRÁDZA ho odoo-erp#8507 auto-close",
-                      self.compose)
-
     def test_compose_keeps_the_already_live_lock(self):
         self.assertIn("Announce ONLY functions that are ALREADY LIVE on the "
                       "client's PROD", self.compose)
 
 
-class TestMontaluAddresseeTagged1166(TestCase):
-    """#1166 (2): montalu = @mention + `user_ids` assignee; miva unchanged."""
+class TestMivaAssignee(TestCase):
+    """Rule 5: miva carries NO assignee; rule 3's note carries no anchor."""
 
     @classmethod
     def setUpClass(cls):
@@ -123,100 +110,72 @@ class TestMontaluAddresseeTagged1166(TestCase):
         cls.rule3 = _section(stages, RULE3)
         cls.rule5 = _section(stages, RULE5)
         cls.core = _read(CORE)
-        cls.history = _norm(_read(HISTORY))
-
-    def test_montalu_no_longer_grouped_with_miva_as_no_assignee(self):
-        self.assertNotIn("On the **montalu** and **miva** profiles a client "
-                         "task carries **NO assignee**", self.rule5)
 
     def test_miva_still_carries_no_assignee(self):
         self.assertIn("On the **miva** profile a client task carries "
                       "**NO assignee** (`user_ids` empty)", self.rule5)
 
-    def test_montalu_addressee_mentioned_and_assigned_at_handover(self):
-        self.assertIn("On the **montalu** profile the person the handover "
-                      "addresses is @mentioned in the message AND set as the "
-                      "task's assignee (`user_ids`)", self.rule5)
+    def test_no_assignee_a_profile_does_not_name(self):
+        self.assertIn("Never add an assignee a profile does not name",
+                      self.rule5)
 
-    def test_rule5_dated_and_owner_quote_in_history(self):
-        self.assertIn("owner 28.9.2026, #1166", self.rule5)
-        self.assertIn(QUOTE_1166_TAG, self.history)
-
-    def test_rule3_note_mentions_the_montalu_addressee(self):
-        # rule 3 used to ban every @-mention anchor in the note; montalu now
-        # needs one for the addressed person (rule 5).
-        self.assertIn("on **montalu** ONE mention anchor for the addressed "
-                      "person (rule 5)", self.rule3)
-        # ...while the base negation for every other profile stays
-        self.assertIn("no `@`-mention anchors", self.rule3)
-
-    def test_montalu_addressee_is_defined(self):
-        self.assertIn("the employee the note is written for", self.rule5)
-
-    def test_core_montalu_row_names_the_assignee(self):
-        row = _profile_row(self.core, "montalu")
-        self.assertTrue(row, "montalu profile row missing")
-        self.assertNotIn("NONE", row)
-        self.assertIn("the handover addressee", row)
+    def test_rule3_note_has_no_mention_anchor_on_any_profile(self):
+        self.assertIn("no `@`-mention anchors, no `partner_ids`);", self.rule3)
+        self.assertNotIn("ONE mention anchor", self.rule3)
 
     def test_core_miva_row_unchanged_no_assignee(self):
         row = _profile_row(self.core, "miva")
         self.assertIn("NONE — `user_ids` empty", row)
         self.assertIn("a question: ONLY ONE person (rule 4)", row)
-        self.assertNotIn("as montalu", row,
-                         "miva must not inherit the new montalu addressee")
-
-    def test_pointer_lines_no_longer_say_no_assignee(self):
-        for path in (MSG_SKILL, LEGACY_SKILL):
-            self.assertNotIn("no assignee", _read(path),
-                             f"{path.name}: stale 'no assignee' pointer")
 
 
-class TestMontaluAutoClose1167(TestCase):
-    """#1167: the odoo-erp#8507 auto-close path, montalu only."""
+class TestMivaDone(TestCase):
+    """Rule 6: Done only after the client confirms; the OWNER moves it."""
 
     @classmethod
     def setUpClass(cls):
         cls.rule6 = _section(_read(STAGES), RULE6)
         cls.core = _read(CORE)
-        cls.history = _norm(_read(HISTORY))
 
     def test_client_confirmation_rule_kept(self):
         self.assertIn("ONLY after the client confirms", self.rule6)
 
-    def test_owner_still_moves_on_miva(self):
-        self.assertIn("the **OWNER** on miva", self.rule6)
-
-    def test_montalu_auto_close_path(self):
-        self.assertIn("On **montalu** a task in Verifikácia also reaches "
-                      "Hotovo by the odoo-erp#8507 auto-close", self.rule6)
-
-    def test_auto_close_timing(self):
-        self.assertIn("ONE reminder after 14 days without a reaction", self.rule6)
-        self.assertIn("at ≥ 21 days and ≥ 7 days after the reminder", self.rule6)
-        # odoo-erp#8507 rule 5: a reaction is a chatter message from anyone
-        # but the streams/OdooBot, or a move out of Verifikácia (not an emoji)
-        self.assertIn("any non-stream chatter message or a move out of "
-                      "Verifikácia cancels the countdown", self.rule6)
-
-    def test_stream_never_moves_to_hotovo_itself(self):
-        self.assertIn("never the stream by hand", self.rule6)
-
-    def test_acceptance_cited_line_exact_plus_message_id(self):
-        self.assertIn(ACC_LINE + " msg <auto-close note id> task <task_id>",
-                      self.rule6)
-
-    def test_rule6_dated_and_quote_in_history(self):
-        self.assertIn("owner ROZHODNUTÉ 28.9.2026", self.rule6)
-        self.assertIn(QUOTE_1167, self.history)
-
-    def test_core_montalu_done_column_names_auto_close(self):
-        row = _profile_row(self.core, "montalu")
-        self.assertIn("or the odoo-erp#8507 auto-close (rule 6)", row)
+    def test_never_on_the_streams_own_judgment(self):
+        self.assertIn("never on the stream's own judgment. WHO moves it: the "
+                      "**OWNER** on miva.", self.rule6)
 
     def test_core_miva_done_column_owner_only(self):
         row = _profile_row(self.core, "miva")
         self.assertIn("the OWNER only, after client confirmation", row)
+
+
+class TestMontaluProfileRemoved1306(TestCase):
+    """#1306: the montalu client is gone; its profile left the doctrine."""
+
+    def test_no_montalu_profile_row(self):
+        self.assertEqual(_profile_row(_read(CORE), "montalu"), "")
+
+    def test_injected_files_never_name_montalu(self):
+        for path in (CORE, STAGES, QUESTIONS, ATTACHMENTS):
+            with self.subTest(path=path.name):
+                self.assertNotIn("montalu", _read(path).lower())
+
+    def test_no_auto_close_path(self):
+        for path in (CORE, STAGES):
+            with self.subTest(path=path.name):
+                text = _read(path)
+                self.assertNotIn("8507", text)
+                self.assertNotIn("auto-close", text)
+
+    def test_no_montalu_assignee_rule(self):
+        rule5 = _section(_read(STAGES), RULE5)
+        self.assertNotIn("the employee the note is written for", rule5)
+        self.assertNotIn("set as the task's assignee", rule5)
+
+    def test_compose_has_no_auto_close_carve_out(self):
+        compose = _norm(_read(COMPOSE))
+        self.assertNotIn("Montalu úlohy", compose)
+        self.assertNotIn("8507", compose)
 
 
 if __name__ == "__main__":

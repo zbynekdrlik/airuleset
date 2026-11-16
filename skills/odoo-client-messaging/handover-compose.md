@@ -190,8 +190,7 @@ owner-approved BEFORE posting.
   okno beží → reaguj (#625); potvrdzuje → #755, NOVÁ téma → #728 redirect.
   **STANDING template grant:** finálna pripomienka + closing nóta citujú
   `airuleset:owner-approved template:final-reminder` / `template:closing-note`;
-  nesankcionovaný `template:<iný>` NEudelí — hook #628/#799. Montalu úlohy:
-  NAHRÁDZA ho odoo-erp#8507 auto-close (`client-board-stages.md` rule 6).
+  nesankcionovaný `template:<iný>` NEudelí — hook #628/#799.
 - **Prod-transfer gate (#1105) — NEPOSIELAJ akceptačnú/odovzdávaciu správu, kým
   je ktorákoľvek `Prod-transfer:` položka `pending`.** Vývojárom dodané erp-test
   vstupy musia byť na PROD odškrtnuté (`Prod-transfer-status:` =

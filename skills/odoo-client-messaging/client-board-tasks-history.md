@@ -95,6 +95,8 @@ Review notes (#1156):
 
 ## Rules 3, 5, 6 — owner quotes of 28.9.2026 (montalu, #1166, #1167)
 
+The montalu profile (row, assignee, auto-close) was removed 16.11.2026, #1306.
+
 Task 1102 handover draft announced a removed feature the client never had.
 Owner: „preco spamujes so zrusenym nahravanim cenika ved to nedostal nikdy tak
 preco ma vediet ze si to zrusil?" (rule 3) — „a musi byt oznaceny v spravach a
