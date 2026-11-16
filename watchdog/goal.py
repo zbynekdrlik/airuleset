@@ -960,11 +960,10 @@ def _clear_stranded_truncated_goal(sid, cwd, captured, tpath, pid, run, state,
     ownership for /goal" because of the documented manual paste-the-template
     arm flow). The WHOLE box content is reconstructed from every wrapped row
     and must be a prefix of the template with all whitespace removed (#1303:
-    a hard-broken token), at least `GOAL_STRANDED_MIN_MATCH` non-space chars
-    and NOT the complete text (a complete own
-    draft is `_submit_stranded_own_goal`'s job). A user would have to paste
-    the exact first 200+ chars of the ~3.8k template with zero edits -- and
-    the recent-human gate still VETOES if they just did.
+    a hard-broken token), >= `GOAL_STRANDED_MIN_MATCH` non-space chars and NOT
+    the complete text (a complete own draft is `_submit_stranded_own_goal`'s
+    job). A user would have to paste the exact first 200+ chars of the ~3.8k
+    template with zero edits -- and the recent-human gate still VETOES then.
 
     Gates, all required: a CLEAN idle input boundary (`_classify_boundary`
     == "input" -- never Escape a spinner / dialog / non-boundary); the
@@ -1002,10 +1001,8 @@ def _clear_stranded_truncated_goal(sid, cwd, captured, tpath, pid, run, state,
     box_norm = watchdog._box_norm_from_capture(captured)
     if not box_norm:
         return [], False
-    # #1303 -- compared with ALL whitespace removed: CC hard-breaks a token
-    # longer than a row (a pane under ~67 cols) and the row join then inserts a
-    # space inside it. Still a byte-exact contiguous prefix of the non-space
-    # characters, so an edited paste never matches.
+    # #1303 -- no whitespace: a row join inside a CC hard-broken token adds a
+    # space; a non-space prefix is still byte-exact, so an edited paste fails.
     box_ns = "".join(box_norm.split())
     text_ns = "".join(text.split())
     if not (len(box_ns) >= GOAL_STRANDED_MIN_MATCH
@@ -1102,13 +1099,9 @@ def _goal_box_kind(captured, text):
         return "empty"
     if occupied or watchdog._looks_like_own_stuck_content(head):
         return "ours"
-    # #737/#1303 -- the frozen-text proof is the ONE shared
-    # `_box_is_own_leftover` (the arm-confirm cleanup and the janitor use it
-    # too): a >= GOAL_ARM_LEFTOVER_MIN_SUBSTR contiguous run of `text` (exact,
-    # prefix, or a SCROLLED mid-payload window), or a whitespace-stripped run of
-    # a shipped template variant -- the only proof that survives CC
-    # hard-breaking a token longer than a row (a pane under ~67 cols, the
-    # 13.11. gk `box=other`). A short or foreign draft never matches.
+    # #737/#1303 -- the ONE shared proof (arm-confirm cleanup + janitor use it
+    # too); its template branch survives a CC hard-broken token (a pane under
+    # ~67 cols, the 13.11. gk `box=other`). A short/foreign draft never matches.
     if watchdog._box_is_own_leftover(captured, text,
                                      watchdog.GOAL_ARM_LEFTOVER_MIN_SUBSTR,
                                      match_templates=True):
@@ -1185,8 +1178,8 @@ def _goal_cap_drop(sid, cwd, text, dl_fails, request_ts, run,
     same guard core (`_recovery_pane_ready`) + a CLEAN idle input-boundary check
     (#731-review: never Escape/clear a live turn's render) + the same
     `_janitor_recover` driver the #566 livelock resolver uses. It clears ONLY our
-    OWN leftover (proven by `_goal_box_kind` -- own-shape / #35 stash slot / the
-    shared `_box_is_own_leftover` proof); a FOREIGN draft is left completely untouched. The
+    OWN leftover (proven by `_goal_box_kind` -- own-shape / #35 stash slot /
+    `_box_is_own_leftover`); a FOREIGN draft is left completely untouched. The
     `leftover` word is READ BACK from the janitor's own verdict (#731-review /
     #134/#726 honesty bar -- never asserted "cleared" for a box the janitor
     actually left untouched or failed to clear). Never types a NEW /goal."""
