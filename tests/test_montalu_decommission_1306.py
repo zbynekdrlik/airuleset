@@ -97,6 +97,13 @@ class TestRetiredLabelsStayOutOfTheCore(unittest.TestCase):
     def test_retired_set_is_exactly_the_montalu_family(self):
         self.assertEqual(set(airuleset.RETIRED_STREAM_LABELS), set(STREAMS))
 
+    def test_watchdog_full_authority_bounce_query_excludes_them(self):
+        import watchdog as wd
+        quals = wd._bounce_quals("/home/newlevel/devel/demo")
+        for name in STREAMS:
+            with self.subTest(name=name):
+                self.assertIn("-label:stream:%s" % name, quals[0].split())
+
     def test_a_live_stream_is_not_retired(self):
         self.assertFalse(set(airuleset.RETIRED_STREAM_LABELS)
                          & set(airuleset.AUTHORITY_BY_USER))
