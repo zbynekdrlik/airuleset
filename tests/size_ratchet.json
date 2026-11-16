@@ -692,7 +692,7 @@
     "watchdog/goal_scan.py": 690,
     "watchdog/handoff_alarm.py": 235,
     "watchdog/healthz_probe.py": 209,
-    "watchdog/janitor.py": 703,
+    "watchdog/janitor.py": 650,
     "watchdog/lane_reconcile.py": 168,
     "watchdog/long_turn.py": 390,
     "watchdog/mdreview_cadence.py": 298,

@@ -13,7 +13,8 @@ rows, where the footer renders it -- the signal `notify-discord-pending.sh
 goal_armed` and the watchdog read; `ND_FAKE_PANE_CAPTURE` is the shared test
 seam); the per-cwd footer cache (`statusbar.cwd_key`, the file the footer
 renders) is fresh, not carried forward over a failed refresh (`stale_since`),
-and its owed count `open + done` (I + C, `statusbar.obligation_count`) is > 0.
+and its owed count `open + done` (I + C, `statusbar.obligation_count`), minus
+the asked ticket while it is still counted there (#1342, `_asked_in_i`), is > 0.
 
 Honest limit: the Stop path has no dispatchable count (`slice-quals
 --count-dispatchable` takes ~20 s against the hook's 5 s budget), so `I` -- a
@@ -43,6 +44,9 @@ CACHE_MAX_AGE_S = 15 * 60
 _NEEDS_YOU_RE = re.compile(r"❓\s*\**\s*NEEDS\s+YOU\s*\**\s*:", re.IGNORECASE)
 _DISPATCHABLE_0_RE = re.compile(r"(?mi)^[ \t*>-]*Dispatchable:\s*0\b")
 _FOOTER_ROWS = 6   # the footer/statusline rows at the bottom of the pane
+_QUESTION_HEAD_RE = re.compile(r"Ot[áa]zka\s*[—–-]\s*projekt", re.IGNORECASE)
+# a same-repo `#N`: not glued to a repo slug (`owner/repo#N`) or a word.
+_BARE_REF_RE = re.compile(r"(?<![\w/.-])#(\d{1,6})\b")
 
 
 def _log(home, msg):
@@ -88,6 +92,36 @@ def _workable(cwd, home, now):
     return n, ""
 
 
+def _asked_in_i(msg, cwd, home):
+    """#1342: 1 when the asked ticket is still counted in I + C, else 0. The
+    asked refs are the bare same-repo `#N` on the final `❓ NEEDS YOU` line, else
+    on the last `**Otázka — projekt` heading line (never the briefing or the
+    options, which may name other work; a decision line naming two counted
+    tickets still subtracts one, the accepted residual); one counts when
+    the cache lists it in `open_numbers` (I, written by
+    `cli_ticket_route.record`) or `done_numbers` (C), the exact rows the owed
+    count sums. At most one: one question, one decision. A cache without
+    `open_numbers` (written before #1342) or any odd shape subtracts nothing,
+    so the gate never weakens on data it cannot read."""
+    try:
+        import statusbar
+        cache = statusbar._load(statusbar.cache_dir(home) /
+                                (statusbar.cwd_key(cwd) + ".json"))
+        if not isinstance(cache, dict) or not isinstance(cache.get("open_numbers"), list):
+            return 0
+        owed = {n for key in ("open_numbers", "done_numbers")
+                for n in (cache.get(key) or []) if type(n) is int}
+        lines = [ln for ln in msg.splitlines() if ln.strip()]
+        heads = [ln for ln in lines if _QUESTION_HEAD_RE.search(ln)]
+        refs = {int(n) for n in _BARE_REF_RE.findall(lines[-1])}
+        if not refs and heads:          # the decision line names none
+            refs = {int(n) for n in _BARE_REF_RE.findall(heads[-1])}
+        return 1 if refs & owed else 0
+    except Exception as e:  # noqa: BLE001 -- a Stop gate fails toward today's count
+        _log(home, "asked-ticket read failed (%s): no subtraction" % type(e).__name__)
+        return 0
+
+
 def decide(payload, capture=None, home=None, now=None):
     """Return `(block, reason)` for the Stop payload (JSON text)."""
     msg = gates.field_of(payload, "last_assistant_message", "") or ""
@@ -108,11 +142,13 @@ def decide(payload, capture=None, home=None, now=None):
     if n is None:
         _log(home, "allow %s: %s" % (cwd, why))
         return False, ""
+    n -= _asked_in_i(msg, cwd, home)
     if n <= 0:
         return False, ""
     return True, (
         "Tvoj ťah končí na `❓ NEEDS YOU:` v zapnutej /goal slučke, ale footer "
-        "hlási I %d (workable tickety). `❓ NEEDS YOU` znamená „nič iné sa nedá "
+        "hlási I %d (workable tickety okrem toho, na ktorý sa pýtaš). "
+        "`❓ NEEDS YOU` znamená „nič iné sa nedá "
         "robiť\" a ukončí slučku. Poradie priorít určuje PORADIE, nikdy ROZSAH: "
         "keď je hlava poradia zablokovaná, začni ďalší workable ticket v tomto "
         "ťahu. Otázku polož ako ASK-AND-CONTINUE: `❓ ASKED: <otázka>` v tele "
