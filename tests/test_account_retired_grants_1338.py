@@ -47,6 +47,9 @@ def _run(step, tmp):
     stubs = "".join(
         '%s() { printf "%%s\\n" "%s $*" >> "%s"; %s }\n'
         % (t, t, log, 'echo dev0;' if t == "nmcli" else ":;") for t in _TOOLS)
+    # the test user owns the fake tree; the real one is root's
+    stubs += ('stat() { if [ "$2" = "%U %a" ]; then echo "root $(command stat -c %a "$3")"; '
+              'else command stat "$@"; fi; }\n')
     r = subprocess.run(["bash", "-c", "set -euo pipefail\n" + stubs + body],
                        capture_output=True, text=True)
     if r.returncode:
@@ -59,6 +62,7 @@ def _grant(dirs, account, devices=("kvm",), conn="lan0"):
     (dirs["apparmor.d"] / ("airuleset-userns-" + account)).write_text(
         hardening.userns_profile(account))
     (dirs["userns"] / account).mkdir()
+    (dirs["userns"] / account).chmod(0o750)
     (dirs["userns"] / account / "unshare").write_bytes(b"copy")
     (dirs["limits.d"] / ("90-%s-rtprio.conf" % account)).write_text(
         "%s - rtprio 20\n" % account)
@@ -87,15 +91,21 @@ class TestRender(unittest.TestCase):
                 hardening.render_retired_grants_step(bad)
 
     def test_wired_into_the_full_script_with_the_host_set(self):
-        script = bootstrap.render_root_bootstrap("dcontroller")
-        self.assertIn("# 3d-rg.", script)
-        self.assertLess(script.index("# 3d-hw."), script.index("# 3d-rg."))
-        self.assertLess(script.index("# 3d-rg."), script.index("/.ssh/authorized_keys"))
-        on_dev1 = sorted(a for a in bootstrap.SERVICE_ACCOUNTS
-                         if bootstrap.account_spec(a)["host"] == "dev1")
-        self.assertIn(hardening.render_retired_grants_step(on_dev1), script)
-        # an account of another host is not "declared here"
-        self.assertNotIn(" varos ", hardening.render_retired_grants_step(on_dev1))
+        for account, host, foreign in (("dcontroller", "dev1", " varos "),
+                                       ("varos", "dev2", " fohmixer ")):
+            script = bootstrap.render_root_bootstrap(account)
+            # before the account's own grant steps, so it can never undo them
+            self.assertLess(script.index("# 3d-rg."), script.index("# 3d-rt."))
+            self.assertLess(script.index("# 3d-rg."), script.index("/.ssh/authorized_keys"))
+            here = sorted(a for a in bootstrap.SERVICE_ACCOUNTS
+                          if bootstrap.account_spec(a)["host"] == host)
+            self.assertIn(account, here)
+            step = hardening.render_retired_grants_step(here)
+            self.assertIn(step, script)
+            self.assertNotIn(foreign, step)
+
+    def test_one_name_rule(self):
+        self.assertIs(bootstrap._ACCOUNT_RE, hardening.ACCOUNT_RE)
 
 
 class TestSweep(unittest.TestCase):
@@ -104,7 +114,7 @@ class TestSweep(unittest.TestCase):
         step = hardening.render_retired_grants_step(["keep"])
         with tempfile.TemporaryDirectory() as tmp:
             dirs = _world(tmp)
-            _grant(dirs, "keep")
+            _grant(dirs, "keep", conn="lan9")     # its own link (shared: below)
             _grant(dirs, "gone-acct", devices=("kvm", "cpu_dma_latency"))
             out, log = _run(step, tmp)
             for p in _paths(dirs, "gone-acct"):
@@ -124,6 +134,24 @@ class TestSweep(unittest.TestCase):
             out, log2 = _run(step, tmp)
             self.assertEqual(log2, log)
             self.assertIn("retired-grants: none", out)
+
+    def test_a_name_is_matched_whole_never_as_a_substring(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dirs = _world(tmp)
+            _grant(dirs, "keep")
+            _run(hardening.render_retired_grants_step(["keep-old", "kee"]), tmp)
+            for p in _paths(dirs, "keep"):
+                self.assertFalse(p.exists(), p)
+
+    def test_a_shared_connection_keeps_its_qdisc(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dirs = _world(tmp)
+            _grant(dirs, "keep")
+            _grant(dirs, "gone")
+            out, log = _run(hardening.render_retired_grants_step(["keep"]), tmp)
+            self.assertFalse((dirs["dispatcher.d"] / "90-gone-noqueue").exists())
+            self.assertNotIn("tc qdisc del dev dev0 root", log)
+            self.assertIn("lan0 stays", out)
 
     def test_nothing_retired_is_a_quiet_none(self):
         step = hardening.render_retired_grants_step(["keep"])
@@ -147,9 +175,19 @@ class TestSweep(unittest.TestCase):
                     'KERNEL=="kvm", GROUP="kvm"\n',
                 dirs["dispatcher.d"] / "90-admin-noqueue": "#!/bin/sh\nexit 0\n",
                 dirs["apparmor.d"] / "airuleset-userns-admin": "profile x /bin/true {}\n",
+                dirs["limits.d"] / "90-tail-rtprio.conf": "tail - rtprio 20\nextra",
+                dirs["limits.d"] / "90-two-rtprio.conf": "two - rtprio 20\n\n",
             }
             for p, text in foreign.items():
                 p.write_text(text)
+            # undeclared dirs that are not our 0750 dir holding an unshare copy
+            for name, mode, copy in (("open", 0o755, True), ("empty", 0o750, False)):
+                d = dirs["userns"] / name
+                d.mkdir()
+                d.chmod(mode)
+                if copy:
+                    (d / "unshare").write_text("x")
+                foreign[d] = ""
             out, log = _run(step, tmp)
             for p in foreign:
                 self.assertTrue(p.exists(), p)
@@ -162,7 +200,9 @@ class TestSweep(unittest.TestCase):
             dirs = _world(tmp)
             target = Path(tmp, "precious")
             target.mkdir()
+            target.chmod(0o750)     # looks like ours: only the symlink check guards it
             (target / "f").write_text("x")
+            (target / "unshare").write_text("x")
             (dirs["userns"] / "linked").symlink_to(target)
             (dirs["limits.d"] / "90-linked-rtprio.conf").symlink_to(target / "f")
             bad = [dirs["limits.d"] / ("90-%s-rtprio.conf" % n)

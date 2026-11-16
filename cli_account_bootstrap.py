@@ -55,7 +55,7 @@ _PACKAGE_NAME_RE = re.compile(r"[a-z0-9][a-z0-9.+\-]+")
 # script is validated against one of these first, ALWAYS with `fullmatch` (a
 # `$` anchor would accept a trailing newline and split an authorized_keys or
 # sudoers line).
-_ACCOUNT_RE = re.compile(r"[a-z_][a-z0-9_-]{1,31}")
+_ACCOUNT_RE = hardening.ACCOUNT_RE
 _TOKEN_RE = policy.TOKEN_RE
 _SESSION_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")   # tmux rewrites '.'
 _REPO_RE = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
@@ -844,7 +844,7 @@ def render_root_bootstrap(account):
     script += hardening.render_sudo_step(account, spec)
     script += hardening.render_reach_teardown_step(account)
     script += hardening.render_lockout_step()
-    script += hardening.render_isolation_check_step() + hardening.render_rtprio_step(account, spec) + hardening.render_userns_step(account, spec) + hardening.render_host_grants_step(account, spec) + hardening.render_retired_grants_step(a for a in SERVICE_ACCOUNTS if account_spec(a)["host"] == host)
+    script += hardening.render_isolation_check_step() + hardening.render_retired_grants_step(a for a in SERVICE_ACCOUNTS if account_spec(a)["host"] == host) + hardening.render_rtprio_step(account, spec) + hardening.render_userns_step(account, spec) + hardening.render_host_grants_step(account, spec)
     # 4-7: keys + dirs (4 space-indented template → dedent)
     script += "\n" + textwrap.dedent(_KEYS_TEMPLATE).format(ak_content=ak_content)
     # 8. System packages — only when the account declares them (#973)
