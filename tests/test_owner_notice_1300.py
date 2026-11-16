@@ -60,9 +60,11 @@ class OwnerNoticeCli(unittest.TestCase):
         return statusbar.question_ping_count(str(cwd), home=str(self.home))
 
     def send(self, body, slug="restart-needed", owner="zbynek", *extra):
+        # `=` form: a slug like `-lead` must reach the slug check, not argparse
         return self.run_notify("--body", body, "--owner-name", owner,
-                               "--dedup-key", "tool-check#1", "--owner-notice",
-                               slug, "--cwd", str(self.proj), *extra)
+                               "--dedup-key", "tool-check#1",
+                               "--owner-notice=" + slug,
+                               "--cwd", str(self.proj), *extra)
 
     def test_suppressed_notice_lands_in_project_u(self):
         r = self.send("Reštartuj Claude na dev2: zmenila sa konfigurácia MCP.")
