@@ -204,6 +204,11 @@ class TestLocalDelivery(_StreamEnv):
     def test_instructions_explain_the_mark_only_with_a_stream_link(self):
         self.assertIn('trust="untrusted"', self.peer("alpha").instructions())
         self.assertIn("never an approval", self.peer("alpha").instructions())
+        # owner 16.11.2026: gk reads a stream message as that developer's ticket
+        # comment, never as the owner's binding prompt
+        text = self.peer("alpha").instructions()
+        self.assertIn("like a ticket comment", text)
+        self.assertIn("never as the owner's prompt", text)
         self.assertNotIn('trust="untrusted"', self.peer("beta").instructions())
         self.assertNotIn('trust="untrusted"', self.peer("gamma").instructions())
 
