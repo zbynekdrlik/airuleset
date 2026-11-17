@@ -97,15 +97,14 @@ class TestOtherFleetLoopsSkipPending(unittest.TestCase):
         self.assertTrue(seen)
         self.assertNotIn("david5", _users(seen))
 
-    def test_key_rotation_never_targets_a_pending_or_paused_account(self):
+    def test_key_rotation_never_targets_a_pending_account(self):
+        # A paused account stays a target on purpose: every rotation phase
+        # skips it live and records key debt (#851); a pending one has no key.
         import cli_key_rotation
-        hosts = _flagged("david5", pending=True)
-        [h for h in hosts if h.get("user") == "david6"][0]["paused"] = "test"
-        with mock.patch.object(cli_fleet, "REMOTE_HOSTS", hosts):
+        with mock.patch.object(cli_fleet, "REMOTE_HOSTS", _flagged("david5", pending=True)):
             users = {e.get("user") for _k, e, _v in cli_key_rotation._rotation_targets()}
         self.assertIn("david7", users)
         self.assertNotIn("david5", users)
-        self.assertNotIn("david6", users)
 
 
 if __name__ == "__main__":
