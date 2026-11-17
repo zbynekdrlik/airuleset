@@ -253,10 +253,12 @@ def without_unreachable(entries):
     """``entries`` minus every ssh target whose ``(user, host)`` is pending or
     paused in REMOTE_HOSTS (``cli_fleet.unreachable_accounts``); a local entry
     always stays. #1341: ssh to a not-yet-created account gets the controller
-    banned by subdev fail2ban."""
+    banned by subdev fail2ban. A lane hosted ON subdev reaches its accounts
+    at loopback, so ``SUBDEV_LOCAL`` is matched as the subdev address."""
     skip = cli_fleet.unreachable_accounts()
-    return [e for e in entries
-            if e.get("local") or (e.get("user"), e.get("host")) not in skip]
+    alias = {profiles.SUBDEV_LOCAL: profiles.SUBDEV_TAILSCALE_HOST}
+    return [e for e in entries if e.get("local") or (
+        e.get("user"), alias.get(e.get("host"), e.get("host"))) not in skip]
 
 
 # --------------------------------------------------------------------------- #

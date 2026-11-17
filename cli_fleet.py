@@ -542,16 +542,21 @@ def paused_reason(remote):
     return remote.get("paused") or ""
 
 
+def is_unreachable(remote):
+    """True for a `pending` entry (the OS account does not exist yet) or a
+    `paused` one (#851) -- THE predicate every unattended ssh loop over
+    REMOTE_HOSTS honours (`cli_remote._deployable_hosts`, `nudges --fleet`)."""
+    return bool(remote.get("pending")) or is_paused(remote)
+
+
 def unreachable_accounts():
-    """`(user, host)` of every REMOTE_HOSTS entry that is `pending` (the OS
-    account does not exist yet) or `paused` (#851, never contacted) -- the
-    accounts NO ssh path may touch. Read from `REMOTE_HOSTS` at call time so a
-    test's patch is honoured. Consumers that hold their own declarative target
-    list (the webterm inventories) filter through this (#1341: pending
-    david5-8 tabs made the U collectors ssh missing users, fail2ban banned the
-    controller)."""
+    """`(user, host)` of every `is_unreachable` REMOTE_HOSTS entry, read at
+    call time so a test's patch is honoured. A consumer with its own
+    declarative target list (the webterm inventories) filters through this
+    (#1341: pending david5-8 tabs made the U collectors ssh missing users and
+    subdev fail2ban banned the controller)."""
     return frozenset((r.get("user"), r.get("host")) for r in REMOTE_HOSTS
-                     if r.get("pending") or is_paused(r))
+                     if is_unreachable(r))
 
 
 def _box_self_entry(user, hostname=None):

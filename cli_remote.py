@@ -176,8 +176,7 @@ def _deployable_hosts(hosts=None):
     # ssh dev1->dev1 with the controller-only push identity.
     me = platform.node()
     return [h for h in src
-            if not h.get("pending") and not cli_fleet.is_paused(h)
-            and h.get("name") != me]
+            if not cli_fleet.is_unreachable(h) and h.get("name") != me]
 
 
 def provision_subdev_soniox_key(hosts=None, run=None, source: Path = None,
