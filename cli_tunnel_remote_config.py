@@ -69,7 +69,12 @@ ACCOUNT_ID = wa.WEBTERM_ACCESS_ACCOUNT_ID
 # seconds means "this process will not": it registered as locally managed.
 APPLY_WAIT_S = 30
 POLL_S = 1.0
-_UPDATED_RE = re.compile(r"Updated to new configuration\b.*\bversion=(\d+)\s*$")
+_UPDATED = "Updated to new configuration"
+# The LAST `version=` on the line: zerolog sorts fields, so it follows the
+# config JSON. journald splits a line past LineMax (48K; ~60 rules today are
+# ~7K), which would hide it; that reads as "not applied" and never restarts a
+# connector that already ran remote config (`_ran_remote`).
+_VERSION_RE = re.compile(r"\bversion=(\d+)")
 
 
 class TunnelConfigClient(wa.AccessClient):
@@ -96,7 +101,8 @@ def load_client(token_file=TOKEN_FILE):
     path = Path(os.path.expanduser(token_file))
     if not path.exists():
         return None
-    return TunnelConfigClient(ACCOUNT_ID, token=path.read_text(encoding="utf-8").strip())
+    token = wa._load_token(str(path))
+    return TunnelConfigClient(ACCOUNT_ID, token=token) if token else None
 
 
 def remote_ingress(rules):
@@ -119,15 +125,16 @@ def remote_ingress(rules):
 
 
 def _ingress_key(ingress):
-    """Order-sensitive comparison key; Cloudflare echoes `originRequest: {}`
-    on every rule, which is the same as absent."""
+    """Order-sensitive comparison key. Cloudflare echoes `originRequest: {}`
+    (and may echo an empty `path`) on a rule; an empty value is the same as an
+    absent one, else every install would PUT a new version."""
+    empty = ({}, "", None, [])
     key = []
     for r in ingress or []:
         extra = {k: v for k, v in r.items()
-                 if k not in ("hostname", "path", "service")
-                 and not (k == "originRequest" and v == {})}
-        key.append((r.get("hostname"), r.get("path"), r.get("service"),
-                    json.dumps(extra, sort_keys=True)))
+                 if k not in ("hostname", "path", "service") and v not in empty}
+        key.append((r.get("hostname") or None, r.get("path") or None,
+                    r.get("service"), json.dumps(extra, sort_keys=True)))
     return key
 
 
@@ -146,12 +153,17 @@ def sync_ingress(client, tunnel_id, ingress):
         cur = c.get("result") or {}
         if remote and _ingress_key((cur.get("config") or {}).get("ingress")) \
                 == _ingress_key(ingress):
-            return True, cur.get("version"), "unchanged", ""
-        st, p = client.put_config(tunnel_id, ingress)
-        if not wa._ok(st, p):
-            return False, None, "", "PUT config (HTTP %s): %s" % (st, wa._first_err(p))
-        return (True, (p.get("result") or {}).get("version"),
-                "updated" if remote else "converted", "")
+            version, action = cur.get("version"), "unchanged"
+        else:
+            st, p = client.put_config(tunnel_id, ingress)
+            if not wa._ok(st, p):
+                return False, None, "", "PUT config (HTTP %s): %s" % (st, wa._first_err(p))
+            version = (p.get("result") or {}).get("version")
+            action = "updated" if remote else "converted"
+        if not isinstance(version, int) or isinstance(version, bool):
+            # Unconfirmable: it must never reach the restart branch (#1347 review).
+            return False, None, "", "%s reply carries no version: %r" % (action, version)
+        return True, version, action, ""
     except Exception as e:  # noqa: BLE001 — returned LOUD by the caller
         return False, None, "", repr(e)
 
@@ -170,9 +182,9 @@ def applied_version(journal_text):
     """The newest `Updated to new configuration … version=N`, or None."""
     found = None
     for line in (journal_text or "").splitlines():
-        m = _UPDATED_RE.search(line)
-        if m:
-            found = int(m.group(1))
+        versions = _VERSION_RE.findall(line) if _UPDATED in line else []
+        if versions:
+            found = int(versions[-1])
     return found
 
 
@@ -218,6 +230,18 @@ def _wait_applied(systemctl, service_name, version, config_path, sleep, clock):
         sleep(POLL_S)
 
 
+def _ran_remote(systemctl, service_name, config_path):
+    """True when the running main process has EVER applied remote config: a
+    stamp for its pid, or any `Updated to new configuration` line of its own.
+    Only a process with neither registered as locally managed (the cutover)."""
+    pid = cli_tunnel_apply._main_pid(systemctl, service_name)
+    if pid <= 0:
+        return False
+    stamp = applied_stamp(config_path)
+    return (stamp is not None and stamp[0] == pid) \
+        or applied_version(read_journal(pid)) is not None
+
+
 def apply_remote_tunnel(client, tunnel_id, ingress, *, provision, service_name,
                         config_path, systemctl, sleep=time.sleep,
                         clock=time.monotonic, lane="(controller)"):
@@ -243,6 +267,14 @@ def apply_remote_tunnel(client, tunnel_id, ingress, *, provision, service_name,
     if pid:
         _write_stamp(config_path, pid, version, lane)
         return True
+    if _ran_remote(systemctl, service_name, config_path):
+        # This process already took remote config: the push is lagging, it is
+        # not the cutover. A restart would drop every tab for nothing.
+        print("  webterm%s: LOUD — %s has not confirmed remote version %s within "
+              "%ds; it already runs remote config, so NO restart — the next "
+              "install re-checks (#1347)." % (lane, service_name, version, APPLY_WAIT_S),
+              file=sys.stderr)
+        return False
     print("  webterm%s: LOUD — %s has not applied remote version %s (it registered "
           "while the tunnel was locally managed): ONE overlap restart, open "
           "tabs reconnect once (#1347 cutover)." % (lane, service_name, version),
