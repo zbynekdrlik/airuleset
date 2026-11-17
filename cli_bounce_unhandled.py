@@ -37,6 +37,7 @@ FAIL-OPEN, in two distinct shapes (#1066 review R1):
     unreadable bounce stays invisible to the Stop gate) is surfaced by the
     stderr log, never silent.
 """
+import re
 import sys
 
 
@@ -117,9 +118,15 @@ def unhandled_from_fetch(numbers, *, fetch, gk_login, self_login,
     PR-head lookup is spent on the hot refresh path."""
     import cli_gk_watch
     entries, read_ok, unreadable = [], False, []
+    read = {}
+
+    def _fetch(n):                           # one gh read per member (#1354)
+        if n not in read:
+            read[n] = fetch(n)
+        return read[n]
     for n in sorted({int(x) for x in (numbers or [])}):
         st = cli_gk_watch.watch_issue(
-            n, fetch=fetch, gk_login=gk_login, self_login=self_login,
+            n, fetch=_fetch, gk_login=gk_login, self_login=self_login,
             head_ts_fn=None, now=now, is_own_login=is_own_login)
         state = st.get("state") if isinstance(st, dict) else None
         if state == "unknown" or state is None:
@@ -128,8 +135,34 @@ def unhandled_from_fetch(numbers, *, fetch, gk_login, self_login,
         read_ok = True
         if state == "bounce-unanswered":
             gl = st.get("gk_latest") or {}
-            entries.append({"number": n, "verdict_ts": gl.get("created_at")})
+            vts = gl.get("created_at")
+            if _rework_started(read.get(n), vts, self_login, is_own_login):
+                continue
+            entries.append({"number": n, "verdict_ts": vts})
     return entries, read_ok, unreadable
+
+
+_REWORK_LINE_RE = re.compile(r"^\s*(?:Anchors-confirmed:|LANE-[A-Z]+)", re.MULTILINE)
+
+
+def _rework_started(rows, verdict_ts, self_login, is_own_login=None):
+    """#1354: True when the stream itself wrote a rework-lane line
+    (`Anchors-confirmed:` / `LANE-*`) on the ticket AFTER the BOUNCE -- the
+    exit the Stop gate's own message names. The label gate (`watch_issue`)
+    still waits for the RFR; only the Stop nag stops."""
+    import cli_gk_watch
+    if not rows or not isinstance(verdict_ts, (int, float)) or not self_login:
+        return False
+    match = is_own_login or cli_gk_watch._exact_match
+    for c in rows:
+        if not isinstance(c, dict):
+            continue
+        ts = cli_gk_watch._parse_iso(c.get("created_at"))
+        if (ts is not None and ts > verdict_ts
+                and match(c.get("login") or "", self_login)
+                and _REWORK_LINE_RE.search(c.get("body") or "")):
+            return True
+    return False
 
 
 def derive_numbers(numbers, *, cwd, slug, now=None, fetch=None, gk_login=None,
