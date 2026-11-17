@@ -17,7 +17,7 @@
     "cli_concurrency.py": 186,
     "cli_config.py": 795,
     "cli_context_baseline.py": 737,
-    "cli_controller_tunnel.py": 116,
+    "cli_controller_tunnel.py": 152,
     "cli_deployer_glue.py": 416,
     "cli_design_record.py": 321,
     "cli_disk_guard_root.py": 1649,

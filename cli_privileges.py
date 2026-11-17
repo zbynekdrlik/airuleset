@@ -252,6 +252,18 @@ PRIVILEGES: List[Privilege] = [
         used_by=("cli_webterm_access.py:50",),
     ),
     Privilege(
+        name="cloudflare-tunnel-config",
+        kind=KIND_API_TOKEN,
+        local_path="~/.secrets/cloudflare-tunnel-config",
+        reach="Cloudflare newlevel.media account token, Cloudflare Tunnel: Edit "
+              "only (`airuleset-tunnel-config · claude`): PUTs the controller "
+              "tunnel's remotely managed ingress (#1347). Absent = local YAML.",
+        rotation="Minted from the account-tokens token at the #1347 cutover; "
+                 "rotate by re-minting with the same single permission.",
+        must_move=False,
+        used_by=("cli_tunnel_remote_config.py (TOKEN_FILE)",),
+    ),
+    Privilege(
         name="webterm_credential",
         kind=KIND_API_TOKEN,
         local_path="~/.secrets/webterm_credential",
