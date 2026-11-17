@@ -20,6 +20,9 @@ the hand-made entries stay and the tailnet is guaranteed. `known/` inside
 append must sit in the jail sections, never in `[DEFAULT]`.
 """
 import ipaddress
+import os
+import subprocess
+import tempfile
 import re
 import sys
 import unittest
@@ -140,6 +143,42 @@ class TestFail2banControllerLock(unittest.TestCase):
         rb = s[s.index("fail=0"):]
         self.assertIn("fail2ban-client get sshd ignoreip", rb)
         self.assertIn("*100.64.0.0/10*", rb)
+
+    def _run_step(self, t_rc, ignore_out):
+        """Execute the real step + read-back in bash with a stub
+        fail2ban-client and a recording _install; return (fail, log)."""
+        with tempfile.TemporaryDirectory() as d:
+            stub = os.path.join(d, "fail2ban-client")
+            with open(stub, "w") as f:
+                f.write('#!/bin/bash\necho "$*" >> "%s/calls"\n'
+                        'case "$1" in -t) exit %d;; get) printf "%%s\\n" "%s";; esac\n'
+                        'exit 0\n' % (d, t_rc, ignore_out))
+            os.chmod(stub, 0o755)
+            script = ('_install() { cat > /dev/null; echo "$1" >> "%s/installed"; }\n'
+                      'fail=0\n%s\n%s\necho "fail=$fail"\n'
+                      % (d, g.build_fail2ban_step("EOF_MARK").replace(
+                          "rm -f ", "echo removed "),
+                         g.build_fail2ban_readback()))
+            env = dict(os.environ, PATH=d + ":" + os.environ["PATH"])
+            p = subprocess.run(["bash", "-c", script], capture_output=True,
+                               text=True, env=env, timeout=30)
+            calls = open(os.path.join(d, "calls")).read()
+            return p.stdout, calls
+
+    def test_step_runs_reload_and_passes_when_effective(self):
+        out, calls = self._run_step(0, "|- 127.0.0.0/8\n|- 100.64.0.0/10")
+        self.assertIn("fail=0", out)
+        self.assertIn("reload", calls)
+
+    def test_step_refuses_a_config_fail2ban_rejects(self):
+        out, calls = self._run_step(255, "|- 100.64.0.0/10")
+        self.assertIn("fail=1", out)
+        self.assertIn("removed %s" % g.FAIL2BAN_JAIL_LOCAL_PATH, out)
+        self.assertNotIn("reload", calls)
+
+    def test_readback_fails_when_the_tailnet_is_not_effective(self):
+        out, _calls = self._run_step(0, "|- 127.0.0.0/8\n`- 100.104.8.125")
+        self.assertIn("fail=1", out)
 
     def test_not_in_the_always_install_list(self):
         paths = [p for (p, _c, _m) in g.guard_files()]
