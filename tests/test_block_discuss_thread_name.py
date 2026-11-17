@@ -858,7 +858,8 @@ class TestHookPassesApproval(_HookBase):
 # MarekAI post AND ACCEPTED the wrong-identity ZbynekAI post (live PROD
 # contradiction, montalu thread 291 msg 1731669). #609's mechanical teeth stay
 # intact in BOTH directions: the wrong identity must keep BLOCKING for a marek
-# stream AND for a zbynek stream.
+# stream AND for a zbynek stream. #1306: fixtures use david4 (montalu retired);
+# since #882 ANY stream signs ZbynekAI and the MarekAI fixtures are WRONG.
 # --------------------------------------------------------------------------- #
 
 # a montalu4 (marek-owned) message_post signed with the CORRECT MarekAI identity
@@ -873,9 +874,8 @@ MAREK_MP_APPROVED = MAREK_MP_MARKEAI + "  # " + APPROVAL_EVID + "  " + BINDING_E
 
 
 class TestSignatureWord(TestCase):
-    def test_marek_stream_signs_zbynekai_after_882(self):
-        # montalu4 was marek's stream; #882 decommissioned marek, so montalu4
-        # now routes to zbynek and signs ZbynekAI (the default).
+    def test_stream4_signs_zbynekai_after_882(self):
+        # any stream 4 signs ZbynekAI (default; #882 removed the marek override).
         self.assertEqual(g.signature_word("david4"), "ZbynekAI")
 
     def test_zbynek_streams_sign_zbynekai(self):
@@ -909,18 +909,18 @@ class TestSignaturePresentIdentityAware(TestCase):
 
 class TestEvaluateMessagePostIdentity(TestCase):
     def test_stream4_expected_is_zbynekai_after_882(self):
-        # montalu4 was marek's; #882 decommissioned marek -> ZbynekAI default
+        # stream 4 signs the ZbynekAI default (#882 removed the marek override)
         v = g.evaluate_message_post(UNSIGNED_MP, "david4")
         self.assertIsNotNone(v)
         self.assertEqual(v.number, "4")
         self.assertEqual(v.expected, "ZbynekAI 4")
 
     def test_stream4_correct_zbynekai_passes_after_882(self):
-        # montalu4 now expects ZbynekAI (not MarekAI) after #882
+        # stream 4 expects ZbynekAI (not MarekAI) after #882
         self.assertIsNone(g.evaluate_message_post(MAREK_MP_WRONG_ZBYNEK, "david4"))
 
     def test_stream4_wrong_marekai_is_a_violation_after_882(self):
-        # MarekAI is now WRONG for montalu4 (expects ZbynekAI post-#882)
+        # MarekAI is WRONG for stream 4 (expects ZbynekAI post-#882)
         v = g.evaluate_message_post(MAREK_MP_MARKEAI, "david4")
         self.assertIsNotNone(v)
         self.assertEqual(v.expected, "ZbynekAI 4")
@@ -939,7 +939,7 @@ class TestEvaluateMessagePostIdentity(TestCase):
 
 class TestHookSignatureIdentity(_HookBase):
     def test_stream4_wrong_marekai_blocked_after_882(self):
-        # Post-#882: montalu4 expects ZbynekAI, so MarekAI is WRONG now
+        # Post-#882: stream 4 expects ZbynekAI, so MarekAI is WRONG
         r = self.run_hook(command="python3 -c '" + MAREK_MP_MARKEAI + "'",
                           user="david4")
         self.assertEqual(r.returncode, 2, r.stderr)
@@ -951,7 +951,7 @@ class TestHookSignatureIdentity(_HookBase):
         self.assertIn("ZbynekAI 4", r.stderr)
 
     def test_stream4_zbynekai_signed_and_approved_passes_after_882(self):
-        # Post-#882: montalu4 now uses ZbynekAI + needs approval evidence
+        # Post-#882: stream 4 uses ZbynekAI + needs approval evidence
         approved = MAREK_MP_WRONG_ZBYNEK + "  # " + APPROVAL_EVID + "  " + BINDING_EVID
         cmd = "python3 -c '" + approved + "'"
         self.assertEqual(self.run_hook(command=cmd, user="david4").returncode, 0)
