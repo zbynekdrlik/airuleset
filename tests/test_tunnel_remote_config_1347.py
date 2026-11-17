@@ -20,6 +20,7 @@ import contextlib
 import io
 import os
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -33,6 +34,8 @@ SVC = "webterm-controller-tunnel.service"
 RULES_A = [("zbynek.newlevel.media", "unix:/run/user/1000/z.sock"),
            ("drop-x.newlevel.media", "^/s/", "http://100.64.0.1:8870")]
 RULES_B = RULES_A + [("svc.newlevel.media", "http://100.64.0.2:9000")]
+LANES = [(h, None, types.SimpleNamespace(gateway_service_name="webterm-%s-gateway.service" % h))
+         for h in ("a", "b")]
 
 
 class FakeCF:
@@ -285,6 +288,54 @@ class TestApplyRemoteTunnel(unittest.TestCase):
         _ok, _calls, _err = _apply(fake, conn, RULES_A, cfg=cfg)
         self.assertEqual(conn.restarts, [SVC])
 
+    def test_slow_apply_on_a_remote_pid_never_restarts(self):
+        """This pid already ran remote config (an older version line): a push
+        that does not show within the wait is lag, not the cutover. LOUD
+        False, no restart (every tab would drop for nothing)."""
+        fake = FakeCF(remote=True, ingress=rc.remote_ingress(RULES_A))
+        conn = FakeConnector(applies=False, applied_version=7)
+        ok, _calls, err = _apply(fake, conn, RULES_B)
+        self.assertFalse(ok)
+        self.assertEqual(conn.restarts, [])
+        self.assertIn("LOUD", err)
+
+    def test_slow_apply_with_this_pids_stamp_never_restarts(self):
+        cfg = self._cfg()
+        rc.applied_stamp_path(cfg).write_text("100 7")
+        fake = FakeCF(remote=True, ingress=rc.remote_ingress(RULES_A))
+        conn = FakeConnector(applies=False)         # journal rotated, push lags
+        ok, _calls, _err = _apply(fake, conn, RULES_B, cfg=cfg)
+        self.assertFalse(ok)
+        self.assertEqual(conn.restarts, [])
+
+    def test_missing_version_is_a_sync_failure(self):
+        """A reply without a version could never be confirmed: that must fail
+        the sync, never fall into the restart branch on every install."""
+        fake = FakeCF(remote=True, ingress=rc.remote_ingress(RULES_A))
+        orig = fake.__call__
+
+        def no_version(method, path, body):
+            st, d = orig(method, path, body)
+            if method == "PUT":
+                d["result"].pop("version")
+            return st, d
+        ok, version, _a, err = rc.sync_ingress(_client(no_version), TID,
+                                               rc.remote_ingress(RULES_B))
+        self.assertFalse(ok)
+        self.assertIsNone(version)
+        self.assertIn("version", err)
+
+    def test_echoed_empty_fields_compare_equal(self):
+        """Cloudflare may echo empty `path`/`originRequest` on a rule; that must
+        not read as a change (a PUT + version bump on every install)."""
+        echoed = [dict(r, path=r.get("path", ""), originRequest={})
+                  for r in rc.remote_ingress(RULES_A)]
+        fake = FakeCF(remote=True, ingress=echoed)
+        ok, _v, action, _e = rc.sync_ingress(_client(fake), TID,
+                                             rc.remote_ingress(RULES_A))
+        self.assertEqual((ok, action), (True, "unchanged"))
+        self.assertEqual(fake.puts(), [])
+
     def test_applied_version_reads_only_the_newest_line(self):
         text = ('INF Starting tunnel\n'
                 'INF Updated to new configuration config="{\\"a\\":1}" version=3\n'
@@ -297,7 +348,7 @@ class TestControllerApplyTunnel(unittest.TestCase):
     """The controller render: in remote mode a route change leaves the files
     the connector RUNS byte-identical, so the #1189 gate never restarts it."""
 
-    def _render(self, rules, remote):
+    def _render(self, rules, remote, lanes=()):
         captured = {}
 
         def fake_provision(creds, bin_, cfg_path, config_text, unit_path,
@@ -313,7 +364,8 @@ class TestControllerApplyTunnel(unittest.TestCase):
                                   side_effect=fake_provision), \
                 mock.patch.object(rc, "apply_remote_tunnel",
                                   side_effect=fake_remote):
-            ok = ct.apply_tunnel([], remote_client=object() if remote else None)
+            ok = ct.apply_tunnel(list(lanes),
+                                 remote_client=object() if remote else None)
         self.assertTrue(ok)
         return captured
 
@@ -328,12 +380,24 @@ class TestControllerApplyTunnel(unittest.TestCase):
         self.assertIn("credentials-file: ", a["config"])
 
     def test_local_mode_unchanged(self):
-        """No token: the full local YAML exactly as before (#1238/#1131)."""
-        a = self._render(RULES_A, remote=False)
+        """No token: the full local YAML and the lane-ordered unit exactly as
+        before (#1238/#1131/#870 F4a)."""
+        a = self._render(RULES_A, remote=False, lanes=LANES)
+        cloudflared = Path.home() / ".cloudflared"
         self.assertEqual(a["config"], tun.render_cloudflared_multi_ingress_config(
-            TID, a["config"].split("credentials-file: ")[1].split("\n")[0],
-            RULES_A))
+            TID, str(cloudflared / "controller-webterm.json"), RULES_A))
+        self.assertEqual(a["unit"], tun.render_cloudflared_tunnel_unit(
+            "airuleset webterm controller tunnel (multi-ingress, #870 F4a)",
+            str(cloudflared / "controller-webterm.yml"),
+            str(Path.home() / ".local" / "bin" / "cloudflared"),
+            after="network-online.target webterm-a-gateway.service "
+                  "webterm-b-gateway.service"))
         self.assertNotIn("ingress", a)
+
+    def test_remote_mode_unit_ignores_lanes(self):
+        """A new lane must not change the unit (its `After=`) in remote mode."""
+        self.assertEqual(self._render(RULES_A, remote=True)["unit"],
+                         self._render(RULES_A, remote=True, lanes=LANES)["unit"])
 
     def test_under_pytest_the_live_token_is_never_used(self):
         with mock.patch.object(rc, "load_client",
@@ -345,6 +409,13 @@ class TestLoadClient(unittest.TestCase):
     def test_absent_token_is_none(self):
         with tempfile.TemporaryDirectory() as d:
             self.assertIsNone(rc.load_client(os.path.join(d, "nope")))
+
+    def test_empty_token_is_none(self):
+        """An empty file must not yield a client that fails every install."""
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "tok"
+            p.write_text("\n")
+            self.assertIsNone(rc.load_client(str(p)))
 
     def test_token_is_stripped(self):
         with tempfile.TemporaryDirectory() as d:
