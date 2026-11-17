@@ -1038,8 +1038,7 @@ class TestShortAlias(unittest.TestCase):
         self.assertEqual(w._short_alias(self._e(id="dev1", local=True, user=None)), "dev1")
         self.assertEqual(w._short_alias(self._e(id="dev2", user="newlevel")), "dev2")
         self.assertEqual(w._short_alias(self._e(id="gatekeeper", user="gatekeeper")), "gk")
-        self.assertEqual(w._short_alias(self._e(id="montalu3-subdev", user="montalu3")), "m3")
-        self.assertEqual(w._short_alias(self._e(id="montalu8-subdev", user="montalu8")), "m8")
+        self.assertEqual(w._short_alias(self._e(id="miva2-subdev", user="miva2")), "mv2")
         self.assertEqual(w._short_alias(self._e(id="miva1-subdev", user="miva1")), "miva")
         self.assertEqual(w._short_alias(self._e(id="david-subdev", user="david")), "d1")
         self.assertEqual(w._short_alias(self._e(id="david4-subdev", user="david4")), "d4")
@@ -1051,28 +1050,27 @@ class TestShortAlias(unittest.TestCase):
         self.assertNotIn("@", a)
 
     def test_tab_order_stable(self):
-        # dev1, dev2, gk, m1.., miva, d*, then the rest alphabetically.
+        # dev1, dev2, gk, miva, d*, then the rest alphabetically. The montalu
+        # m<N> rank left with the accounts (#1306): "m1" sorts as any other.
         aliases = ["d2", "m3", "gk", "dev2", "miva", "dev1", "m1", "zzz", "d1", "aaa"]
         ordered = sorted(aliases, key=w._tab_order_key)
         self.assertEqual(
-            ordered, ["dev1", "dev2", "gk", "m1", "m3", "miva", "d1", "d2", "aaa", "zzz"])
+            ordered, ["dev1", "dev2", "gk", "miva", "d1", "d2", "aaa", "m1", "m3", "zzz"])
 
     def test_tab_sessions_end_to_end_order(self):
         # The FULL pipeline (alias derivation -> sort) over a realistic
         # inventory produces the owner's stable Windows-Terminal tab order.
         inv = [
-            {"id": "montalu3-subdev", "label": "montalu3@subdev", "user": "montalu3"},
             {"id": "dev2", "label": "dev2", "user": "newlevel"},
             {"id": "david-subdev", "label": "david@subdev", "user": "david"},
             {"id": "dev1", "label": "dev1 (localhost)", "user": None, "local": True},
             {"id": "gatekeeper", "label": "gatekeeper", "user": "gatekeeper"},
-            {"id": "montalu1-subdev", "label": "montalu1@subdev", "user": "montalu1"},
             {"id": "miva1-subdev", "label": "miva1@subdev", "user": "miva1"},
             {"id": "admin-forestshop-dev", "label": "admin@forestshop-dev", "user": "admin"},
         ]
         aliases = [t["alias"] for t in w._tab_sessions(inv)]
         self.assertEqual(
-            aliases, ["dev1", "dev2", "gk", "m1", "m3", "miva", "d1", "admin"])
+            aliases, ["dev1", "dev2", "gk", "miva", "d1", "admin"])
 
 
 class TestSetupWiring(unittest.TestCase):

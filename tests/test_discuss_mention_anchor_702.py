@@ -138,17 +138,17 @@ class TestMentionBypassMarker(unittest.TestCase):
 
 class TestEvaluateMessagePostMention(unittest.TestCase):
     def test_partner_ids_without_anchor_is_a_violation(self):
-        v = g.evaluate_message_post_mention(NOANCHOR_MP, "montalu2")
+        v = g.evaluate_message_post_mention(NOANCHOR_MP, "david2")
         self.assertIsNotNone(v)
         self.assertEqual(v.number, "2")
 
     def test_anchored_post_passes(self):
-        self.assertIsNone(g.evaluate_message_post_mention(ANCHORED_MP, "montalu2"))
+        self.assertIsNone(g.evaluate_message_post_mention(ANCHORED_MP, "david2"))
 
     def test_no_visible_partner_ids_fails_open(self):
         # addressees unmeasurable from the payload -> the family's
         # unmeasurable->allow bias (the delivery-half mandate stays doctrine's)
-        self.assertIsNone(g.evaluate_message_post_mention(NOPIDS_MP, "montalu2"))
+        self.assertIsNone(g.evaluate_message_post_mention(NOPIDS_MP, "david2"))
 
     def test_non_stream_user_is_silent(self):
         self.assertIsNone(g.evaluate_message_post_mention(NOANCHOR_MP, "newlevel"))
@@ -156,11 +156,11 @@ class TestEvaluateMessagePostMention(unittest.TestCase):
     def test_non_message_post_op_is_silent(self):
         create = ("env['discuss.channel'].create({'name': 'Oprava 2', "
                   "'partner_ids': [7]})")
-        self.assertIsNone(g.evaluate_message_post_mention(create, "montalu2"))
+        self.assertIsNone(g.evaluate_message_post_mention(create, "david2"))
 
 
 class _HookBase(unittest.TestCase):
-    def run_hook(self, *, command, user="montalu2"):
+    def run_hook(self, *, command, user="david2"):
         payload = {"tool_input": {"command": command}, "cwd": "/some/repo",
                    "session_id": "p702-sess"}
         env = hermetic_hook_env(self)

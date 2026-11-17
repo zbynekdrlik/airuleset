@@ -2013,9 +2013,9 @@ def apply_stream_tmux_window_name(tmux_conf_path=None, user=None, host=None,
     MULTI-PROJECT box (dev1/dev2): one fixed name + `automatic-rename off` froze
     every project window to `dev1` and destroyed navigation (the #592
     regression). The window name = the box's short TARGET ALIAS
-    (`cli_aliases.short_target_alias(user, host)` -- gatekeeper->gk, montaluN->
-    mN, davidN->dN, ...), the SAME single source the webterm dashboard tabs draw
-    on, never a parallel map. `host` defaults to the box's hostname
+    (`cli_aliases.short_target_alias(user, host)` -- gatekeeper->gk,
+    davidN->dN, miva2->mv2, ...), the SAME single source the webterm dashboard
+    tabs draw on, never a parallel map. `host` defaults to the box's hostname
     (`os.uname().nodename`). The block is stripped when a box is NOT
     eligible OR yields no SAFE alias (an alias failing
     `_SAFE_STREAM_NAME_RE`, the injection guard).

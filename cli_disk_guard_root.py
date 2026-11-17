@@ -54,6 +54,12 @@ from cli_logrotate_owner import (  # noqa: F401
     LOGROTATE_BTMP_PATH, LOGROTATE_LOGS, LOGROTATE_ROTATE, LOGROTATE_WTMP_PATH,
     build_logrotate_readback, build_logrotate_step, render_logrotate_btmp,
     render_logrotate_wtmp)
+# The #841/#1306 fail2ban hardening renderers live in their own leaf; the
+# names stay importable from here (tests + the apply script below).
+from cli_fail2ban import (  # noqa: F401
+    FAIL2BAN_BANTIME, FAIL2BAN_IGNOREIP, FAIL2BAN_IGNOREIP_JAILS,
+    FAIL2BAN_JAIL_LOCAL_PATH, FAIL2BAN_JAIL_PATH, build_fail2ban_readback,
+    build_fail2ban_step, render_fail2ban_hardening, render_fail2ban_ignoreip_local)
 
 
 # ---------------------------------------------------------------------------
@@ -61,7 +67,6 @@ from cli_logrotate_owner import (  # noqa: F401
 # `50-airuleset-*` prefix (the btmp/wtmp pair: cli_logrotate_owner).
 # ---------------------------------------------------------------------------
 JOURNALD_CAP_PATH = "/etc/systemd/journald.conf.d/50-airuleset-journal-cap.conf"
-FAIL2BAN_JAIL_PATH = "/etc/fail2ban/jail.d/50-airuleset-hardening.conf"
 # #982: owner break-glass ignoreip — controller-only, separate from the
 # fleet-wide hardening. The `60-` prefix loads AFTER the `50-` fleet default.
 # NOTE: fail2ban [DEFAULT] ignoreip is LAST-WRITER-WINS — the 60- file
@@ -127,10 +132,6 @@ CACHE_MAX_AGE_DAYS = 7
 
 # The numeric/text policy. One source, shared by the renderers + the read-back.
 JOURNAL_MAX_USE = "200M"           # journald's own SystemMaxUse rotation cap
-FAIL2BAN_BANTIME = "1d"            # was 600 s — reduces auth.log growth at source
-# loopback + tailscale (100.64.0.0/10) so a recidive misfire never locks out an
-# admin session on the fleet's own tailnet (Fable-flagged).
-FAIL2BAN_IGNOREIP = "127.0.0.1/8 ::1 100.64.0.0/10"
 REPORTER_TIMEOUT_S = 120           # the reporter is `du`-heavy; never hang the push
 
 
@@ -145,27 +146,6 @@ def render_journald_cap(max_use=None):
         "# drop older journal history (ROTATION by owner rule).\n"
         "[Journal]\n"
         "SystemMaxUse=%s\n" % (max_use or JOURNAL_MAX_USE)
-    )
-
-
-def render_fail2ban_hardening():
-    """fail2ban ``jail.d`` hardening — a longer ban + a ``recidive`` jail cut
-    the brute-force churn that GROWS auth.log/btmp (~600M per rotation cycle on
-    gk). ``ignoreip`` carries the fleet tailnet so a recidive misfire never
-    locks out an admin session."""
-    return (
-        "# Managed by airuleset (#841) — reduce auth.log/btmp GROWTH at the\n"
-        "# source: a longer ban + a recidive jail against the public-box\n"
-        "# brute-force stream (11 010 failed logins / 1 672 bans on gk).\n"
-        "# ignoreip carries loopback + the tailscale range so a recidive\n"
-        "# misfire never locks out an admin session on the fleet's own tailnet.\n"
-        "[DEFAULT]\n"
-        "bantime = %s\n"
-        "ignoreip = %s\n"
-        "\n"
-        "[recidive]\n"
-        "enabled = true\n"
-        % (FAIL2BAN_BANTIME, FAIL2BAN_IGNOREIP)
     )
 
 
@@ -581,17 +561,7 @@ def build_apply_script(drain=True, journal_max=None):
     parts.append("")
     # fail2ban hardening ONLY where fail2ban is installed (a box without it is
     # left clean, and the read-back below never fails for its absence).
-    parts.append(
-        'if command -v fail2ban-client >/dev/null 2>&1; then\n'
-        "    _install %s 0644 <<'%s'\n%s%s\n"
-        '    fail2ban-client reload >/dev/null 2>&1 '
-        '|| echo "  ⚠ disk-guard-root: fail2ban reload failed (non-fatal)"\n'
-        'else\n'
-        '    echo "  disk-guard-root: fail2ban not present — hardening skipped"\n'
-        'fi'
-        % (shlex.quote(FAIL2BAN_JAIL_PATH), _HEREDOC_MARK,
-           render_fail2ban_hardening().rstrip("\n") + "\n", _HEREDOC_MARK)
-    )
+    parts.append(build_fail2ban_step(_HEREDOC_MARK))
     parts.append("")
     # Create the world-readable report dir now (tmpfiles.d covers subsequent
     # boots) and reload systemd so it re-reads the journald cap + the new units.
@@ -651,6 +621,8 @@ def build_apply_script(drain=True, journal_max=None):
     # 2. logrotate's own `--debug` parse (never rotates): no duplicate entry,
     #    and every managed log still rotated by a stanza it reads (#1244).
     parts.append(build_logrotate_readback(managed_logs))
+    # 2b. (#1306) fail2ban step outcome + the effective sshd ignoreip.
+    parts.append(build_fail2ban_readback())
     # 3. the daily report timer is enabled.
     parts.append(
         'if ! systemctl is-enabled airuleset-disk-guard-root.timer '

@@ -147,19 +147,19 @@ class TestBindingPresent(unittest.TestCase):
 
 class TestEvaluateMessagePostBinding(unittest.TestCase):
     def test_unbound_stream_post_is_a_violation(self):
-        v = g.evaluate_message_post_binding(NO_BIND, "montalu2")
+        v = g.evaluate_message_post_binding(NO_BIND, "david2")
         self.assertIsNotNone(v)
         self.assertEqual(v.number, "2")
 
     def test_bound_stream_post_passes(self):
-        self.assertIsNone(g.evaluate_message_post_binding(FULL_OK, "montalu2"))
+        self.assertIsNone(g.evaluate_message_post_binding(FULL_OK, "david2"))
 
     def test_non_stream_user_is_silent(self):
         self.assertIsNone(g.evaluate_message_post_binding(NO_BIND, "newlevel"))
 
     def test_non_message_post_op_is_silent(self):
         create = "env['discuss.channel'].create({'name': 'Oprava filtra 2'})"
-        self.assertIsNone(g.evaluate_message_post_binding(create, "montalu2"))
+        self.assertIsNone(g.evaluate_message_post_binding(create, "david2"))
 
     def test_bind_bypass_marker_helper(self):
         self.assertTrue(g.has_bind_bypass_marker("x airuleset:discuss-bind-ok y"))
@@ -167,7 +167,7 @@ class TestEvaluateMessagePostBinding(unittest.TestCase):
 
 
 class _HookBase(unittest.TestCase):
-    def run_hook(self, *, command, user="montalu2"):
+    def run_hook(self, *, command, user="david2"):
         payload = {"tool_input": {"command": command}, "cwd": "/some/repo",
                    "session_id": "b695-sess"}
         env = hermetic_hook_env(self)

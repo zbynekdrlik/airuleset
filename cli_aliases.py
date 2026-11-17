@@ -31,7 +31,7 @@ def short_target_alias(user, box_name):
 
     dev1/dev2 share the `newlevel` unix user, so the BOX NAME disambiguates
     those (and any other owner box on the shared `newlevel` account); every
-    stream family (montalu/david/miva/simap) and the gk account key off the
+    stream family (david/miva/simap) and the gk account key off the
     USER. An unrecognized box gets a sensible short form (never empty for a
     non-empty input). Behaviour is byte-identical to the pre-#592
     cli_webterm._short_alias for every input the webterm inventory produces
@@ -72,9 +72,6 @@ def short_target_alias(user, box_name):
         return "gk"
     if user == "mikrotik-pz":
         return "mt-pz"   # #1310: the 8-char cut "mikrotik" reads as the SNV project
-    mo = re.match(r"^montalu(\d+)$", user)
-    if mo:
-        return "m" + mo.group(1)
     mo = re.match(r"^david(\d*)$", user)
     if mo:
         return "d" + (mo.group(1) or "1")   # base `david` == d1
@@ -108,8 +105,9 @@ def short_target_alias(user, box_name):
 # thread name) their client threads. `marek` (no client handovers), `gatekeeper`
 # and the owner account (`newlevel`) are deliberately ABSENT -- they are not
 # numbered client-handover streams. Same family stems as `short_target_alias`
-# above (montalu/david/simap/miva); a `\d*` (not `\d+`) so a base stream matches.
-_STREAM_FAMILY_RE = re.compile(r"^(?:montalu|david|simap|miva)(\d*)$")
+# above (david/simap/miva); a `\d*` (not `\d+`) so a base stream matches.
+# montalu left the families with its accounts (#1306, owner 16.11.2026).
+_STREAM_FAMILY_RE = re.compile(r"^(?:david|simap|miva)(\d*)$")
 
 
 def stream_number(user):
@@ -119,11 +117,11 @@ def stream_number(user):
     guard -- materializing into one testable function the derivation that until
     now lived only as prose in `handover-compose.md`.
 
-    A NUMBERED stream user carries its number as trailing digits: montalu2 ->
-    "2", david4 -> "4", miva2 -> "2". By construction this equals the trailing
+    A NUMBERED stream user carries its number as trailing digits: david4 ->
+    "4", miva2 -> "2". By construction this equals the trailing
     digits of `short_target_alias(user, "")` for every numbered stream (the two
     reuse the same family stems and cannot drift). An UNNUMBERED base stream
-    (montalu / david / simap / miva) maps to "1" -- the #532/#537 convention's
+    (david / simap / miva) maps to "1" -- the #532/#537 convention's
     own mapping (base streams are a mistake being renamed to <name>1), which is
     NOT derivable from the `\\d+` family regex (short_target_alias drops the
     digit for miva -> "miva"), so it is supplied here explicitly. Any non-stream
@@ -137,13 +135,12 @@ def stream_number(user):
 
 
 # The erp-test deploy user per stream FAMILY (#964): david-model boxes have
-# `ddeploy`, montalu/miva-model boxes have `mdeploy`.  simap is PAUSED (#851)
+# `ddeploy`, miva-model boxes have `mdeploy`.  simap is PAUSED (#851)
 # and has no erp-test box, so it returns None.  Non-stream users return None.
 # Keyed on the SAME _STREAM_FAMILY_RE stems so the mapping never drifts from
 # the stream classifier.
 _ERP_TEST_DEPLOY_USER_BY_FAMILY = {
     "david": "ddeploy",
-    "montalu": "mdeploy",
     "miva": "mdeploy",
     # simap deliberately absent — paused, no erp-test box
 }
@@ -152,7 +149,7 @@ _ERP_TEST_DEPLOY_USER_BY_FAMILY = {
 def erp_test_deploy_user(user):
     """The deploy user for the stream's erp-test shadow box, or None.
 
-    ``david*`` -> ``"ddeploy"``, ``montalu*``/``miva*`` -> ``"mdeploy"``,
+    ``david*`` -> ``"ddeploy"``, ``miva*`` -> ``"mdeploy"``,
     everything else (non-stream, simap) -> ``None``.  THE single source for
     the erp-test ssh config provisioning (#964) — never a second mapping.
     """

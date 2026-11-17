@@ -41,9 +41,9 @@ from _hook_state_cleanup import hermetic_hook_env  # noqa: E402  (#1046 hermetic
 # --------------------------------------------------------------------------- #
 
 class TestStreamNumber(TestCase):
-    def test_numbered_montalu_family(self):
-        self.assertEqual(cli_aliases.stream_number("montalu2"), "2")
-        self.assertEqual(cli_aliases.stream_number("montalu8"), "8")
+    def test_numbered_david_family(self):
+        self.assertEqual(cli_aliases.stream_number("david2"), "2")
+        self.assertEqual(cli_aliases.stream_number("david8"), "8")
 
     def test_numbered_other_families(self):
         self.assertEqual(cli_aliases.stream_number("david4"), "4")
@@ -54,7 +54,7 @@ class TestStreamNumber(TestCase):
         # #532/#537 convention -- base streams are renamed to <name>1; the suffix
         # is "1". NOT derivable from the \d+ family regexes, so it's the one case
         # short_target_alias's trailing digit cannot supply (miva -> "miva").
-        self.assertEqual(cli_aliases.stream_number("montalu"), "1")
+        self.assertEqual(cli_aliases.stream_number("david"), "1")
         self.assertEqual(cli_aliases.stream_number("david"), "1")
         self.assertEqual(cli_aliases.stream_number("simap"), "1")
         self.assertEqual(cli_aliases.stream_number("miva"), "1")
@@ -69,7 +69,7 @@ class TestStreamNumber(TestCase):
         # same family map and can never diverge. (miva1/base excepted: the alias
         # drops the digit, which is exactly why base->1 is a separate convention.)
         import re
-        for u in ("montalu2", "montalu8", "david4", "simap1", "miva2"):
+        for u in ("david2", "david8", "david4", "simap1", "miva2"):
             alias = cli_aliases.short_target_alias(u, "")
             m = re.search(r"(\d+)$", alias)
             self.assertIsNotNone(m, "alias %r has no trailing digit" % alias)
@@ -207,23 +207,23 @@ class TestSuggestName(TestCase):
 class TestEvaluate(TestCase):
     def test_incident_montalu2_bad_name_is_a_violation(self):
         content = RPC_CREATE % "Viditeľnosť leadov pre obchodníkov"
-        v = g.evaluate(content, "montalu2")
+        v = g.evaluate(content, "david2")
         self.assertIsNotNone(v)
         self.assertEqual(v.number, "2")
         self.assertTrue(v.suggestion.endswith(" 2"))
 
     def test_over_length_named_create_is_a_violation(self):
         content = PARENT_CREATE % "Viditeľnosť leadov pre obchodníkov 2"
-        self.assertIsNotNone(g.evaluate(content, "montalu2"))
+        self.assertIsNotNone(g.evaluate(content, "david2"))
 
     def test_compliant_create_passes(self):
-        self.assertIsNone(g.evaluate(RPC_CREATE % "Oprava filtra 2", "montalu2"))
+        self.assertIsNone(g.evaluate(RPC_CREATE % "Oprava filtra 2", "david2"))
 
     def test_message_post_passes(self):
-        self.assertIsNone(g.evaluate(MESSAGE_POST, "montalu2"))
+        self.assertIsNone(g.evaluate(MESSAGE_POST, "david2"))
 
     def test_write_rename_passes(self):
-        self.assertIsNone(g.evaluate(CHANNEL_WRITE % "Zlé meno", "montalu2"))
+        self.assertIsNone(g.evaluate(CHANNEL_WRITE % "Zlé meno", "david2"))
 
     def test_non_stream_user_is_silent(self):
         content = RPC_CREATE % "Zlé meno bez čísla"
@@ -237,11 +237,11 @@ class TestEvaluate(TestCase):
         # fleet's unmeasurable->allow bias, documented residual.
         content = ('vals = build_vals()\n'
                    'execute_kw(d,u,k,"discuss.channel","create",[vals])')
-        self.assertIsNone(g.evaluate(content, "montalu2"))
+        self.assertIsNone(g.evaluate(content, "david2"))
 
     def test_base_stream_requires_1(self):
-        self.assertIsNotNone(g.evaluate(RPC_CREATE % "Niečo bez čísla", "montalu"))
-        self.assertIsNone(g.evaluate(RPC_CREATE % "Niečo 1", "montalu"))
+        self.assertIsNotNone(g.evaluate(RPC_CREATE % "Niečo bez čísla", "david"))
+        self.assertIsNone(g.evaluate(RPC_CREATE % "Niečo 1", "david"))
 
 
 class TestBypassMarker(TestCase):
@@ -281,7 +281,7 @@ class TestReDoSAndBounds(TestCase):
 
 class _HookBase(TestCase):
     def run_hook(self, *, command=None, content=None, new_string=None,
-                 user="montalu2"):
+                 user="david2"):
         tool_input = {}
         if command is not None:
             tool_input["command"] = command
@@ -400,7 +400,7 @@ class TestReviewFixMajorA_OrmChain(TestCase):
 
     def test_sudo_chain_bad_name_evaluates_to_violation(self):
         v = g.evaluate("env['discuss.channel'].sudo().create({'name':'Zle bez cisla'})",
-                       "montalu2")
+                       "david2")
         self.assertIsNotNone(v)
 
 
@@ -412,12 +412,12 @@ class TestReviewFixMajorB_WriteWithParentNotCreate(TestCase):
         content = ('execute_kw(d,u,k,"discuss.channel","write",[[cid]],'
                    '{"name":"Zle dlhe meno bez cisla","parent_channel_id":5})')
         self.assertFalse(g.is_channel_create(content))
-        self.assertIsNone(g.evaluate(content, "montalu2"))
+        self.assertIsNone(g.evaluate(content, "david2"))
 
     def test_genuine_create_with_parent_is_still_caught(self):
         content = ('execute_kw(d,u,k,"discuss.channel","create",'
                    '[{"name":"Zle bez cisla","parent_channel_id":5}])')
-        self.assertIsNotNone(g.evaluate(content, "montalu2"))
+        self.assertIsNotNone(g.evaluate(content, "david2"))
 
 
 class TestReviewFixMajorC_JsonRpc(TestCase):
@@ -430,7 +430,7 @@ class TestReviewFixMajorC_JsonRpc(TestCase):
     def test_jsonrpc_create_bad_name_is_a_violation(self):
         v = g.evaluate(
             '{"model":"discuss.channel","method":"create","args":[[{"name":"Zle bez cisla"}]]}',
-            "montalu2")
+            "david2")
         self.assertIsNotNone(v)
 
     def test_jsonrpc_write_is_not_a_create(self):
@@ -456,12 +456,12 @@ class TestReviewFixMultiNameAnySemantics(TestCase):
         content = ('execute_kw(d,u,k,"res.partner","create",[{"name":"Firma 2"}]); '
                    'execute_kw(d,u,k,"discuss.channel","create",[{"name":"Zle bez cisla"}])')
         # `any(compliant)` -> "Firma 2" is compliant -> allow. `all` would block.
-        self.assertIsNone(g.evaluate(content, "montalu2"))
+        self.assertIsNone(g.evaluate(content, "david2"))
 
     def test_all_names_non_compliant_still_blocks(self):
         content = ('execute_kw(d,u,k,"res.partner","create",[{"name":"Firma bez"}]); '
                    'execute_kw(d,u,k,"discuss.channel","create",[{"name":"Zle bez cisla"}])')
-        self.assertIsNotNone(g.evaluate(content, "montalu2"))
+        self.assertIsNotNone(g.evaluate(content, "david2"))
 
 
 class TestReviewFixHookEndToEnd(_HookBase):
@@ -558,24 +558,24 @@ class TestSignaturePresent(TestCase):
 
 class TestEvaluateMessagePost(TestCase):
     def test_incident_unsigned_post_is_a_violation(self):
-        v = g.evaluate_message_post(UNSIGNED_MP, "montalu6")
+        v = g.evaluate_message_post(UNSIGNED_MP, "david6")
         self.assertIsNotNone(v)
         self.assertEqual(v.number, "6")
         self.assertEqual(v.expected, "ZbynekAI 6")
 
     def test_signed_post_passes(self):
-        self.assertIsNone(g.evaluate_message_post(SIGNED_MP, "montalu2"))
+        self.assertIsNone(g.evaluate_message_post(SIGNED_MP, "david2"))
 
     def test_wrong_number_signature_is_a_violation(self):
         wrong = ('execute_kw(d,u,k,"discuss.channel","message_post",[cid],'
                  '{"body":"Ahoj ZbynekAI 3"})')
-        self.assertIsNotNone(g.evaluate_message_post(wrong, "montalu6"))
+        self.assertIsNotNone(g.evaluate_message_post(wrong, "david6"))
 
     def test_create_is_not_a_message_post_violation(self):
-        self.assertIsNone(g.evaluate_message_post(RPC_CREATE % "Zle bez cisla", "montalu2"))
+        self.assertIsNone(g.evaluate_message_post(RPC_CREATE % "Zle bez cisla", "david2"))
 
     def test_write_rename_is_not_a_message_post_violation(self):
-        self.assertIsNone(g.evaluate_message_post(CHANNEL_WRITE % "Zle", "montalu2"))
+        self.assertIsNone(g.evaluate_message_post(CHANNEL_WRITE % "Zle", "david2"))
 
     def test_non_stream_user_is_silent(self):
         for u in ("newlevel", "marek", "gatekeeper", "", None):
@@ -585,13 +585,13 @@ class TestEvaluateMessagePost(TestCase):
         # the body is a variable but the signature literal is in the same script
         script = ('body = "<p>Hotovo</p><p>ZbynekAI 2</p>"\n'
                   'execute_kw(d,u,k,"discuss.channel","message_post",[cid],{"body":body})')
-        self.assertIsNone(g.evaluate_message_post(script, "montalu2"))
+        self.assertIsNone(g.evaluate_message_post(script, "david2"))
 
     def test_base_stream_requires_signature_1(self):
-        self.assertIsNotNone(g.evaluate_message_post(UNSIGNED_MP, "montalu"))
+        self.assertIsNotNone(g.evaluate_message_post(UNSIGNED_MP, "david"))
         signed1 = ('execute_kw(d,u,k,"discuss.channel","message_post",[cid],'
                    '{"body":"Ahoj ZbynekAI 1"})')
-        self.assertIsNone(g.evaluate_message_post(signed1, "montalu"))
+        self.assertIsNone(g.evaluate_message_post(signed1, "david"))
 
 
 class TestMessagePostReDoSAndBounds(TestCase):
@@ -607,24 +607,24 @@ class TestMessagePostReDoSAndBounds(TestCase):
 
 class TestHookBlocksSignature(_HookBase):
     def test_unsigned_message_post_by_stream_is_blocked(self):
-        r = self.run_hook(command="python3 -c '" + UNSIGNED_MP + "'", user="montalu6")
+        r = self.run_hook(command="python3 -c '" + UNSIGNED_MP + "'", user="david6")
         self.assertEqual(r.returncode, 2, r.stderr)
         self.assertIn("598", r.stderr)
         self.assertIn("ZbynekAI 6", r.stderr)
 
     def test_unsigned_message_post_write_script_blocked(self):
         script = "import xmlrpc.client\n" + UNSIGNED_MP + "\n"
-        r = self.run_hook(content=script, user="montalu6")
+        r = self.run_hook(content=script, user="david6")
         self.assertEqual(r.returncode, 2, r.stderr)
 
     def test_unsigned_message_post_edit_insert_blocked(self):
-        r = self.run_hook(new_string=UNSIGNED_MP, user="montalu6")
+        r = self.run_hook(new_string=UNSIGNED_MP, user="david6")
         self.assertEqual(r.returncode, 2, r.stderr)
 
     def test_wrong_number_signature_blocked(self):
         wrong = ('execute_kw(d,u,k,"discuss.channel","message_post",[cid],'
                  '{"body":"Ahoj ZbynekAI 3"})')
-        r = self.run_hook(command="python3 -c '" + wrong + "'", user="montalu6")
+        r = self.run_hook(command="python3 -c '" + wrong + "'", user="david6")
         self.assertEqual(r.returncode, 2, r.stderr)
 
     def test_name_bypass_does_not_waive_signature(self):
@@ -633,7 +633,7 @@ class TestHookBlocksSignature(_HookBase):
         # blocks. Pins the load-bearing hook control-flow (a refactor making the
         # name-bypass short-circuit the sig check would otherwise pass silently).
         cmd = ("python3 -c '" + UNSIGNED_MP + "'  # airuleset:discuss-name-ok legacy")
-        r = self.run_hook(command=cmd, user="montalu6")
+        r = self.run_hook(command=cmd, user="david6")
         self.assertEqual(r.returncode, 2, r.stderr)
         self.assertIn("ZbynekAI 6", r.stderr)
 
@@ -656,20 +656,20 @@ class TestHookPassesSignature(_HookBase):
         cmd = ("python3 -c '" + UNSIGNED_MP + "'  # airuleset:discuss-sig-ok "
                "airuleset:discuss-approval-ok airuleset:discuss-bind-ok "
                "internal channel")
-        self.assertEqual(self.run_hook(command=cmd, user="montalu6").returncode, 0)
+        self.assertEqual(self.run_hook(command=cmd, user="david6").returncode, 0)
 
     def test_non_discuss_message_post_passes(self):
         cmd = ('python3 -c \'execute_kw(d,u,k,"sale.order","message_post",'
                '[oid],{"body":"internal log"})\'')
-        self.assertEqual(self.run_hook(command=cmd, user="montalu6").returncode, 0)
+        self.assertEqual(self.run_hook(command=cmd, user="david6").returncode, 0)
 
     def test_create_still_blocks_bad_name_alongside_signature_gate(self):
         cmd = "python3 -c '" + (RPC_CREATE % "Viditeľnosť leadov pre obchodníkov") + "'"
-        self.assertEqual(self.run_hook(command=cmd, user="montalu2").returncode, 2)
+        self.assertEqual(self.run_hook(command=cmd, user="david2").returncode, 2)
 
     def test_compliant_create_still_passes(self):
         cmd = "python3 -c '" + (RPC_CREATE % "Oprava filtra 2") + "'"
-        self.assertEqual(self.run_hook(command=cmd, user="montalu2").returncode, 0)
+        self.assertEqual(self.run_hook(command=cmd, user="david2").returncode, 0)
 
 
 # --------------------------------------------------------------------------- #
@@ -727,39 +727,39 @@ class TestApprovalBypassMarker(TestCase):
 class TestEvaluateMessagePostApproval(TestCase):
     def test_signed_unapproved_post_is_a_violation(self):
         # signature present but NO owner-approval evidence -> a violation
-        v = g.evaluate_message_post_approval(SIGNED_MP, "montalu2")
+        v = g.evaluate_message_post_approval(SIGNED_MP, "david2")
         self.assertIsNotNone(v)
         self.assertEqual(v.number, "2")
 
     def test_incident_unapproved_post_is_a_violation(self):
-        v = g.evaluate_message_post_approval(UNSIGNED_MP, "montalu6")
+        v = g.evaluate_message_post_approval(UNSIGNED_MP, "david6")
         self.assertIsNotNone(v)
         self.assertEqual(v.number, "6")
 
     def test_approved_post_passes(self):
-        self.assertIsNone(g.evaluate_message_post_approval(APPROVED_MP, "montalu2"))
+        self.assertIsNone(g.evaluate_message_post_approval(APPROVED_MP, "david2"))
 
     def test_create_is_not_a_message_post_approval_violation(self):
         self.assertIsNone(
-            g.evaluate_message_post_approval(RPC_CREATE % "Zle bez cisla", "montalu2"))
+            g.evaluate_message_post_approval(RPC_CREATE % "Zle bez cisla", "david2"))
 
     def test_write_rename_is_not_a_message_post_approval_violation(self):
         self.assertIsNone(
-            g.evaluate_message_post_approval(CHANNEL_WRITE % "Zle", "montalu2"))
+            g.evaluate_message_post_approval(CHANNEL_WRITE % "Zle", "david2"))
 
     def test_non_stream_user_is_silent(self):
         for u in ("newlevel", "marek", "gatekeeper", "", None):
             self.assertIsNone(g.evaluate_message_post_approval(SIGNED_MP, u), u)
 
     def test_base_stream_requires_approval(self):
-        self.assertIsNotNone(g.evaluate_message_post_approval(SIGNED_MP, "montalu"))
+        self.assertIsNotNone(g.evaluate_message_post_approval(SIGNED_MP, "david"))
         approved = SIGNED_MP + "  # airuleset:owner-approved ok"
-        self.assertIsNone(g.evaluate_message_post_approval(approved, "montalu"))
+        self.assertIsNone(g.evaluate_message_post_approval(approved, "david"))
 
     def test_approval_evidence_as_variable_elsewhere_passes(self):
         # the marker can live in a comment/variable anywhere in the content
         script = ("# airuleset:owner-approved owner ok 2026-08-22\n" + SIGNED_MP)
-        self.assertIsNone(g.evaluate_message_post_approval(script, "montalu2"))
+        self.assertIsNone(g.evaluate_message_post_approval(script, "david2"))
 
 
 class TestApprovalReDoSAndBounds(TestCase):
@@ -776,7 +776,7 @@ class TestApprovalReDoSAndBounds(TestCase):
 class TestHookBlocksApproval(_HookBase):
     def test_signed_but_unapproved_message_post_is_blocked(self):
         # #628: a SIGNED post with no owner-approval evidence is blocked
-        r = self.run_hook(command="python3 -c '" + SIGNED_MP + "'", user="montalu2")
+        r = self.run_hook(command="python3 -c '" + SIGNED_MP + "'", user="david2")
         self.assertEqual(r.returncode, 2, r.stderr)
         self.assertIn("628", r.stderr)
 
@@ -786,24 +786,24 @@ class TestHookBlocksApproval(_HookBase):
         # the reference has to be on the marker's own line, never smuggled from
         # the call below it.
         script = "# airuleset:owner-approved\n" + SIGNED_MP + "\n"
-        r = self.run_hook(content=script, user="montalu2")
+        r = self.run_hook(content=script, user="david2")
         self.assertEqual(r.returncode, 2, r.stderr)
         self.assertIn("628", r.stderr)
 
     def test_signed_but_unapproved_write_script_blocked(self):
         script = "import xmlrpc.client\n" + SIGNED_MP + "\n"
-        r = self.run_hook(content=script, user="montalu2")
+        r = self.run_hook(content=script, user="david2")
         self.assertEqual(r.returncode, 2, r.stderr)
 
     def test_signed_but_unapproved_edit_insert_blocked(self):
-        r = self.run_hook(new_string=SIGNED_MP, user="montalu2")
+        r = self.run_hook(new_string=SIGNED_MP, user="david2")
         self.assertEqual(r.returncode, 2, r.stderr)
 
     def test_unsigned_unapproved_blocks_for_signature_first(self):
         # precedence: an UNSIGNED + UNAPPROVED post blocks for the SIGNATURE
         # first (the #609 gate runs before the #628 gate), so #609 behaviour is
         # preserved unchanged.
-        r = self.run_hook(command="python3 -c '" + UNSIGNED_MP + "'", user="montalu6")
+        r = self.run_hook(command="python3 -c '" + UNSIGNED_MP + "'", user="david6")
         self.assertEqual(r.returncode, 2, r.stderr)
         self.assertIn("598", r.stderr)
 
@@ -811,7 +811,7 @@ class TestHookBlocksApproval(_HookBase):
         # a sig bypass must NOT waive the owner-approval check -- an UNSIGNED
         # post carrying ONLY the sig bypass still blocks for approval (#628).
         cmd = ("python3 -c '" + UNSIGNED_MP + "'  # airuleset:discuss-sig-ok internal")
-        r = self.run_hook(command=cmd, user="montalu6")
+        r = self.run_hook(command=cmd, user="david6")
         self.assertEqual(r.returncode, 2, r.stderr)
         self.assertIn("628", r.stderr)
 
@@ -819,7 +819,7 @@ class TestHookBlocksApproval(_HookBase):
         # a name bypass must NOT waive the owner-approval check -- a SIGNED
         # (sig-passing) post carrying only the name bypass still blocks (#628).
         cmd = ("python3 -c '" + SIGNED_MP + "'  # airuleset:discuss-name-ok legacy")
-        r = self.run_hook(command=cmd, user="montalu2")
+        r = self.run_hook(command=cmd, user="david2")
         self.assertEqual(r.returncode, 2, r.stderr)
         self.assertIn("628", r.stderr)
 
@@ -827,7 +827,7 @@ class TestHookBlocksApproval(_HookBase):
 class TestHookPassesApproval(_HookBase):
     def test_signed_and_approved_passes(self):
         cmd = "python3 -c '" + APPROVED_MP + "'"
-        self.assertEqual(self.run_hook(command=cmd, user="montalu2").returncode, 0)
+        self.assertEqual(self.run_hook(command=cmd, user="david2").returncode, 0)
 
     def test_approval_bypass_marker_passes(self):
         # a genuine internal post: unsigned + all THREE bypass markers (#695
@@ -835,7 +835,7 @@ class TestHookPassesApproval(_HookBase):
         cmd = ("python3 -c '" + UNSIGNED_MP + "'  # airuleset:discuss-sig-ok "
                "airuleset:discuss-approval-ok airuleset:discuss-bind-ok "
                "internal channel")
-        self.assertEqual(self.run_hook(command=cmd, user="montalu6").returncode, 0)
+        self.assertEqual(self.run_hook(command=cmd, user="david6").returncode, 0)
 
     def test_non_stream_user_unapproved_passes(self):
         cmd = "python3 -c '" + SIGNED_MP + "'"
@@ -844,7 +844,7 @@ class TestHookPassesApproval(_HookBase):
     def test_non_discuss_message_post_passes(self):
         cmd = ('python3 -c \'execute_kw(d,u,k,"sale.order","message_post",'
                '[oid],{"body":"internal log"})\'')
-        self.assertEqual(self.run_hook(command=cmd, user="montalu6").returncode, 0)
+        self.assertEqual(self.run_hook(command=cmd, user="david6").returncode, 0)
 
 
 # --------------------------------------------------------------------------- #
@@ -858,7 +858,8 @@ class TestHookPassesApproval(_HookBase):
 # MarekAI post AND ACCEPTED the wrong-identity ZbynekAI post (live PROD
 # contradiction, montalu thread 291 msg 1731669). #609's mechanical teeth stay
 # intact in BOTH directions: the wrong identity must keep BLOCKING for a marek
-# stream AND for a zbynek stream.
+# stream AND for a zbynek stream. #1306: fixtures use david4 (montalu retired);
+# since #882 ANY stream signs ZbynekAI and the MarekAI fixtures are WRONG.
 # --------------------------------------------------------------------------- #
 
 # a montalu4 (marek-owned) message_post signed with the CORRECT MarekAI identity
@@ -873,13 +874,12 @@ MAREK_MP_APPROVED = MAREK_MP_MARKEAI + "  # " + APPROVAL_EVID + "  " + BINDING_E
 
 
 class TestSignatureWord(TestCase):
-    def test_marek_stream_signs_zbynekai_after_882(self):
-        # montalu4 was marek's stream; #882 decommissioned marek, so montalu4
-        # now routes to zbynek and signs ZbynekAI (the default).
-        self.assertEqual(g.signature_word("montalu4"), "ZbynekAI")
+    def test_stream4_signs_zbynekai_after_882(self):
+        # any stream 4 signs ZbynekAI (default; #882 removed the marek override).
+        self.assertEqual(g.signature_word("david4"), "ZbynekAI")
 
     def test_zbynek_streams_sign_zbynekai(self):
-        for u in ("montalu2", "montalu6", "montalu"):
+        for u in ("david2", "david6", "david"):
             self.assertEqual(g.signature_word(u), "ZbynekAI", u)
 
     def test_default_owner_signs_zbynekai(self):
@@ -908,20 +908,20 @@ class TestSignaturePresentIdentityAware(TestCase):
 
 
 class TestEvaluateMessagePostIdentity(TestCase):
-    def test_montalu4_expected_is_zbynekai_after_882(self):
-        # montalu4 was marek's; #882 decommissioned marek -> ZbynekAI default
-        v = g.evaluate_message_post(UNSIGNED_MP, "montalu4")
+    def test_stream4_expected_is_zbynekai_after_882(self):
+        # stream 4 signs the ZbynekAI default (#882 removed the marek override)
+        v = g.evaluate_message_post(UNSIGNED_MP, "david4")
         self.assertIsNotNone(v)
         self.assertEqual(v.number, "4")
         self.assertEqual(v.expected, "ZbynekAI 4")
 
-    def test_montalu4_correct_zbynekai_passes_after_882(self):
-        # montalu4 now expects ZbynekAI (not MarekAI) after #882
-        self.assertIsNone(g.evaluate_message_post(MAREK_MP_WRONG_ZBYNEK, "montalu4"))
+    def test_stream4_correct_zbynekai_passes_after_882(self):
+        # stream 4 expects ZbynekAI (not MarekAI) after #882
+        self.assertIsNone(g.evaluate_message_post(MAREK_MP_WRONG_ZBYNEK, "david4"))
 
-    def test_montalu4_wrong_marekai_is_a_violation_after_882(self):
-        # MarekAI is now WRONG for montalu4 (expects ZbynekAI post-#882)
-        v = g.evaluate_message_post(MAREK_MP_MARKEAI, "montalu4")
+    def test_stream4_wrong_marekai_is_a_violation_after_882(self):
+        # MarekAI is WRONG for stream 4 (expects ZbynekAI post-#882)
+        v = g.evaluate_message_post(MAREK_MP_MARKEAI, "david4")
         self.assertIsNotNone(v)
         self.assertEqual(v.expected, "ZbynekAI 4")
 
@@ -929,32 +929,32 @@ class TestEvaluateMessagePostIdentity(TestCase):
         # the REVERSE direction: a zbynek stream signing MarekAI must still BLOCK
         v = g.evaluate_message_post(
             'execute_kw(d,u,k,"discuss.channel","message_post",'
-            '[cid],{"body":"Ahoj MarekAI 2"})', "montalu2")
+            '[cid],{"body":"Ahoj MarekAI 2"})', "david2")
         self.assertIsNotNone(v)
         self.assertEqual(v.expected, "ZbynekAI 2")
 
     def test_zbynek_stream_correct_zbynekai_still_passes(self):
-        self.assertIsNone(g.evaluate_message_post(SIGNED_MP, "montalu2"))
+        self.assertIsNone(g.evaluate_message_post(SIGNED_MP, "david2"))
 
 
 class TestHookSignatureIdentity(_HookBase):
-    def test_montalu4_wrong_marekai_blocked_after_882(self):
-        # Post-#882: montalu4 expects ZbynekAI, so MarekAI is WRONG now
+    def test_stream4_wrong_marekai_blocked_after_882(self):
+        # Post-#882: stream 4 expects ZbynekAI, so MarekAI is WRONG
         r = self.run_hook(command="python3 -c '" + MAREK_MP_MARKEAI + "'",
-                          user="montalu4")
+                          user="david4")
         self.assertEqual(r.returncode, 2, r.stderr)
         self.assertIn("ZbynekAI 4", r.stderr)
 
-    def test_montalu4_unsigned_blocked_with_zbynekai_expected_after_882(self):
-        r = self.run_hook(command="python3 -c '" + UNSIGNED_MP + "'", user="montalu4")
+    def test_stream4_unsigned_blocked_with_zbynekai_expected_after_882(self):
+        r = self.run_hook(command="python3 -c '" + UNSIGNED_MP + "'", user="david4")
         self.assertEqual(r.returncode, 2, r.stderr)
         self.assertIn("ZbynekAI 4", r.stderr)
 
-    def test_montalu4_zbynekai_signed_and_approved_passes_after_882(self):
-        # Post-#882: montalu4 now uses ZbynekAI + needs approval evidence
+    def test_stream4_zbynekai_signed_and_approved_passes_after_882(self):
+        # Post-#882: stream 4 uses ZbynekAI + needs approval evidence
         approved = MAREK_MP_WRONG_ZBYNEK + "  # " + APPROVAL_EVID + "  " + BINDING_EVID
         cmd = "python3 -c '" + approved + "'"
-        self.assertEqual(self.run_hook(command=cmd, user="montalu4").returncode, 0)
+        self.assertEqual(self.run_hook(command=cmd, user="david4").returncode, 0)
 
 
 if __name__ == "__main__":

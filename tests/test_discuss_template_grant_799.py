@@ -116,11 +116,11 @@ class TestFreeFormApprovalUnchanged(unittest.TestCase):
 class TestEvaluateEndToEnd(unittest.TestCase):
     def test_message_post_with_sanctioned_template_passes(self):
         self.assertIsNone(g.evaluate_message_post_approval(
-            _mp(WORD + " template:closing-note ref"), "montalu2"))
+            _mp(WORD + " template:closing-note ref"), "david2"))
 
     def test_message_post_with_unsanctioned_template_is_a_violation(self):
         v = g.evaluate_message_post_approval(
-            _mp(WORD + " template:new-feature ref"), "montalu2")
+            _mp(WORD + " template:new-feature ref"), "david2")
         self.assertIsNotNone(v)
         self.assertEqual(v.number, "2")
 

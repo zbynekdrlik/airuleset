@@ -4,7 +4,7 @@ set -euo pipefail
 # Hook: PreToolUse(Bash|Write|Edit) -- #596 + #597 client Discuss thread naming,
 # AND #609 client Discuss message SIGNATURE.
 #
-# A sub-dev stream (montaluN / davidN / simapN / mivaN) creating a client Odoo
+# A sub-dev stream (davidN / simapN / mivaN) creating a client Odoo
 # `discuss.channel` (a top-level channel or a `parent_channel_id` sub-thread)
 # MUST name it so the name ENDS with the stream number ("... N", #596) and is
 # <= 30 CHARACTERS incl. that number (#597, so it isn't truncated behind the
