@@ -95,7 +95,7 @@ def _asks_about(msg, n):
                for ln in (msg or "").splitlines())
 
 
-def _stale_acks(cwd, home, now, acked, live):
+def _stale_acks(cwd, home, now, acked, live, running=0, report=True):
     """#1329: the ACKed bounces whose FIRST ACK for the SAME verdict is older
     than the grace while the verdict is still unhandled -- a bare re-ACK there
     adds nothing (no stream comment since the verdict: no LANE/Anchors/RFR, no
@@ -127,12 +127,18 @@ def _stale_acks(cwd, home, now, acked, live):
             first = state.setdefault("ask:" + key, now)
         if not (isinstance(first, (int, float)) and now - first > grace):
             continue
-        # #1345: one repeat block per verdict per grace window, never every stop
+        # #1345: a running task (a rework lane) holds the nag off, but only up to
+        # twice the grace -- a task that never ends must not silence it forever
+        if running and now - first < 2 * grace:
+            continue
+        # #1345: one repeat block per verdict per grace window, never every stop;
+        # a repeat an overdue block hides (report=False) keeps its window
         last = state.get("block:" + key)
         if isinstance(last, (int, float)) and now - last < grace:
             continue
-        state["block:" + key] = now
-        stale.append(n)
+        if report:
+            state["block:" + key] = now
+            stale.append(n)
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         tmp = "%s.%d.tmp" % (path, os.getpid())
@@ -188,8 +194,9 @@ def decide(payload, now=None, home=None):
         else:
             acked.append((n, "%d:%s" % (n, vts), _asks_about(msg, n)))
     # #1345: a running background task (a rework lane) is progress the ticket
-    # cannot show yet -- the repeat-ACK nag waits for it (the no-ACK branch stays)
-    repeat = [] if _running_tasks(payload) else _stale_acks(cwd, home, now, acked, live)
+    # cannot show yet -- the repeat-ACK nag waits for it, up to 2x the grace
+    repeat = _stale_acks(cwd, home, now, acked, live,
+                         running=_running_tasks(payload), report=not overdue)
     if repeat and not overdue:
         listed = ", ".join("#%d" % n for n in sorted(repeat))
         return True, (
