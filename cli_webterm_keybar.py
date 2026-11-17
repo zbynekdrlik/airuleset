@@ -132,7 +132,8 @@ function keybarFitViewport() {
 // too, for an app without mouse mode). Finger down = older content = wheel up.
 // A tap, a long press (selection), a sideways move and two fingers are left alone.
 const KEYBAR_SWIPE_SLOP = 10;        // px of vertical travel before it is a swipe
-const KEYBAR_SWIPE_HOLD_MS = 400;    // a longer hold before moving is a long press
+const KEYBAR_SWIPE_HOLD_MS = 400;    // standing this long before moving is a long press
+const KEYBAR_SWIPE_STILL = 3;        // px: a move this small is still standing (finger jitter)
 const KEYBAR_SWIPE_MAX = 30;         // wheel ticks per move event at most
 function keybarRowHeight(win) {      // child-document px; the parent transform never enters
   const sc = win.document.querySelector('.xterm-screen');
@@ -141,7 +142,8 @@ function keybarRowHeight(win) {      // child-document px; the parent transform 
 }
 function keybarWheel(win, x, y, up) {
   const WE = win.WheelEvent || WheelEvent;    // the iframe's own realm
-  const t = win.document.elementFromPoint(x, y) || win.term.element;
+  let t = win.document.elementFromPoint(x, y);   // the touch keeps its target, the point may leave the xterm
+  if (!t || !win.term.element.contains(t)) t = win.document.querySelector('.xterm-screen') || win.term.element;
   t.dispatchEvent(new WE('wheel', { bubbles: true, cancelable: true, view: win,
     clientX: x, clientY: y, deltaMode: 1, deltaY: up ? -1 : 1 }));
 }
@@ -153,7 +155,7 @@ function keybarAttachSwipe(win) {    // idempotent: once per terminal, touch-onl
   let s = null;
   el.addEventListener('touchstart', (e) => {
     const p = e.touches.length === 1 ? e.touches[0] : null;
-    s = p ? { x: p.clientX, y: p.clientY, at: Date.now(), on: false } : null;
+    s = p ? { x: p.clientX, y: p.clientY, lx: p.clientX, ly: p.clientY, at: Date.now(), on: false } : null;
   }, { capture: true, passive: true });
   el.addEventListener('touchmove', (e) => {
     if (!s || e.touches.length !== 1) { s = null; return; }
@@ -161,16 +163,19 @@ function keybarAttachSwipe(win) {    // idempotent: once per terminal, touch-onl
     if (!s.on) {
       const dx = Math.abs(p.clientX - s.x), dy = Math.abs(p.clientY - s.y);
       if (dx >= KEYBAR_SWIPE_SLOP && dx >= dy) { s = null; return; }   // sideways: not ours
+      if (Date.now() - s.at > KEYBAR_SWIPE_HOLD_MS) { s = null; return; }   // stood still: a long press
+      if (Math.abs(p.clientX - s.lx) + Math.abs(p.clientY - s.ly) >= KEYBAR_SWIPE_STILL) {
+        s.lx = p.clientX; s.ly = p.clientY; s.at = Date.now();             // a slow drag keeps moving
+      }
       if (dy < KEYBAR_SWIPE_SLOP) return;
-      if (Date.now() - s.at > KEYBAR_SWIPE_HOLD_MS) { s = null; return; }
       s.on = true;
     }
-    e.preventDefault();               // no page pan, no xterm touch scroll
+    if (e.cancelable) e.preventDefault();   // no page pan, no xterm touch scroll (never a warning)
     e.stopPropagation();
     try {
       const h = keybarRowHeight(win), n = Math.trunc((p.clientY - s.y) / h);
       if (!n) return;
-      s.y += n * h;
+      s.y += n * h;                   // past the cap the rest of this move is dropped, never queued
       for (let i = 0; i < Math.min(Math.abs(n), KEYBAR_SWIPE_MAX); i++) keybarWheel(win, p.clientX, p.clientY, n > 0);
     } catch (err) { /* iframe realm gone: drop the swipe */ }
   }, { capture: true, passive: false });
