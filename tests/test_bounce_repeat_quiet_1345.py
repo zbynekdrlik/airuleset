@@ -61,5 +61,36 @@ class TestRepeatAckQuiet(unittest.TestCase):
         self.assertIn("10226", reason)
 
 
+class TestRepeatAckReview(TestRepeatAckQuiet):
+    """#1345 review: a hidden repeat must not use up the window, and a session
+    that always has some task running is still nagged after twice the grace."""
+
+    def _two(self):
+        path = bgate._cache_path(self.cwd, self.home)
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump({"bounce_unhandled": [{"number": 10226, "verdict_ts": self.vts},
+                                            {"number": 10300, "verdict_ts": self.vts}]}, fh)
+
+    def test_a_repeat_hidden_by_an_overdue_block_is_not_consumed(self):
+        self._two()
+        t0 = time.time()
+        self._decide(t0)                                    # first ACK of 10226
+        t1 = t0 + self.grace + 60
+        block, reason = self._decide(t1)                    # 10300 overdue wins
+        self.assertTrue(block)
+        self.assertIn("10300", reason)
+        both = "BOUNCE-ACK: #10226\nBOUNCE-ACK: #10300\n⏳ WORKING: x"
+        block, reason = self._decide(t1 + 30, msg=both)
+        self.assertTrue(block)
+        self.assertIn("10226", reason)
+
+    def test_a_task_running_forever_still_gets_a_nag_after_twice_the_grace(self):
+        t0 = time.time()
+        self._decide(t0)
+        running = [{"id": "w", "status": "running"}]
+        self.assertFalse(self._decide(t0 + self.grace + 60, running)[0])
+        self.assertTrue(self._decide(t0 + 2 * self.grace + 60, running)[0])
+
+
 if __name__ == "__main__":
     unittest.main()
