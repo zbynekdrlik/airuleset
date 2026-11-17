@@ -34,7 +34,10 @@ Two facts shape the flow:
 The RUNNING process's applied version is read from its own journal lines
 (`journalctl --user _PID=<MainPID>`: `INF Updated to new configuration …
 version=N`). This is proof that THIS process took the config, which the API
-cannot give.
+cannot give. A confirmed apply is stamped `<pid> <version>` in
+`<config>.remote-applied`. When a connector has run for weeks and its old
+journal lines are rotated away, an unchanged install trusts that stamp for the
+same pid and does not restart it.
 
 Prerequisite-gated on `TOKEN_FILE` (an account token with Cloudflare Tunnel:
 Edit): without it the controller keeps the local YAML path byte-for-byte. After
@@ -173,15 +176,45 @@ def applied_version(journal_text):
     return found
 
 
-def _wait_applied(systemctl, service_name, version, sleep, clock):
+def applied_stamp_path(config_path):
+    """`<config>.remote-applied`: "<pid> <version>" of the last CONFIRMED apply."""
+    return Path(config_path).with_suffix(".remote-applied")
+
+
+def applied_stamp(config_path):
+    """(pid, version) from the stamp, or None (absent / unreadable / garbage)."""
+    try:
+        pid, version = Path(applied_stamp_path(config_path)).read_text().split()
+        return int(pid), int(version)
+    except (OSError, ValueError):
+        return None
+
+
+def _write_stamp(config_path, pid, version, lane):
+    try:
+        applied_stamp_path(config_path).write_text("%d %d" % (pid, version))
+    except OSError as e:
+        print("  webterm%s: LOUD — could not write the remote-applied stamp (%r); "
+              "the next install re-reads the journal (#1347)." % (lane, e),
+              file=sys.stderr)
+
+
+def _wait_applied(systemctl, service_name, version, config_path, sleep, clock):
+    """The main PID once it has applied `version`, else 0 after APPLY_WAIT_S.
+    Proof is its own journal line, or (a long-running process whose old lines
+    were rotated away) the stamp of THIS pid at >= that version."""
     deadline = clock() + APPLY_WAIT_S
+    stamp = applied_stamp(config_path)
     while True:
         pid = cli_tunnel_apply._main_pid(systemctl, service_name)
-        got = applied_version(read_journal(pid)) if pid > 0 else None
-        if got is not None and version is not None and got >= version:
-            return True
+        if pid > 0 and version is not None:
+            if stamp is not None and stamp[0] == pid and stamp[1] >= version:
+                return pid
+            got = applied_version(read_journal(pid))
+            if got is not None and got >= version:
+                return pid
         if clock() >= deadline:
-            return False
+            return 0
         sleep(POLL_S)
 
 
@@ -206,7 +239,9 @@ def apply_remote_tunnel(client, tunnel_id, ingress, *, provision, service_name,
         print("  webterm%s: LOUD — bootstrap config/unit apply failed (#1347)." % lane,
               file=sys.stderr)
         return False
-    if _wait_applied(systemctl, service_name, version, sleep, clock):
+    pid = _wait_applied(systemctl, service_name, version, config_path, sleep, clock)
+    if pid:
+        _write_stamp(config_path, pid, version, lane)
         return True
     print("  webterm%s: LOUD — %s has not applied remote version %s (it registered "
           "while the tunnel was locally managed): ONE overlap restart, open "
@@ -214,7 +249,10 @@ def apply_remote_tunnel(client, tunnel_id, ingress, *, provision, service_name,
           file=sys.stderr)
     ok, shape = cli_tunnel_apply.overlap_restart(
         systemctl, service_name, config_path, sleep=sleep, clock=clock, lane=lane)
-    if ok and _wait_applied(systemctl, service_name, version, sleep, clock):
+    pid = ok and _wait_applied(systemctl, service_name, version, config_path,
+                               sleep, clock)
+    if pid:
+        _write_stamp(config_path, pid, version, lane)
         print("  webterm%s: %s now applies remote config (%s, #1347)."
               % (lane, service_name, shape), file=sys.stderr)
         return True
