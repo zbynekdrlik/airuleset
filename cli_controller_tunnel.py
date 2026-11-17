@@ -54,8 +54,8 @@ def hosted_lanes():
 def _rules_for(lanes):
     """The ordered ingress rules: one per hosted lane (hostname -> its gateway
     UNIX socket), then the controller-topology drop lanes from the filedrop-port
-    cache (#931/#1114/#1238), the declared service routes (#1131) and claudy
-    (#983). The catch-all 404 is added by each renderer."""
+    cache (#931/#1114/#1238), service routes (#1131), claudy (#983), then the
+    public routes (#1290). The catch-all 404 is added by each renderer."""
     import cli_drop_gateway as dg
     import cli_drop_lanes as dl
     import cli_webterm as w
@@ -64,7 +64,7 @@ def _rules_for(lanes):
              for _human, _mod, spec in lanes]
     rules.extend(dg.drop_ingress_rules_for_controller()
                  + dl.controller_service_ingress_rules())
-    rules.append(CLAUDY_INGRESS)
+    rules += [CLAUDY_INGRESS] + dl.controller_public_ingress_rules()  # #1290
     return rules
 
 

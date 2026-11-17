@@ -603,8 +603,8 @@ def parse_filedrop_port(text):
 # #1131: the service route table lives in its own leaf.
 from cli_service_routes import (  # noqa: E402,F401
     CONTROLLER_SERVICE_ROUTES, DROP_ACCESS_SESSION,
-    controller_service_ingress_rules, service_route_access_spec,
-    service_route_complete)
+    controller_public_ingress_rules, controller_service_ingress_rules,
+    service_route_access_spec, service_route_complete)
 
 
 def _lane_go_live_eligible(lane, access_specs):

@@ -108,3 +108,42 @@ def controller_service_ingress_rules(routes=None):
         seen[host] = origin
         rules.append((host, origin))
     return rules
+
+
+# ---------------------------------------------------------------------------
+# #1290: PUBLIC controller routes — no Cloudflare Access, because the clients
+# cannot pass it (native Bitwarden apps). Kept OUT of CONTROLLER_SERVICE_ROUTES
+# so the Access/DNS go-live reconcile never touches them: DNS is switched by the
+# owner-approved cutover, and only the ingress is declared here. Each row is
+# ``{hostname, origin, name, blocked_paths, why_public}``; every blocked path is
+# answered 404 at the edge BEFORE the origin rule.
+# ---------------------------------------------------------------------------
+PUBLIC_SERVICE_ROUTES = (
+    # Vaultwarden for 17 users (owner 17.11.2026: cut over 18.11. after the
+    # 03:30 nightly). /admin is also disabled inside Vaultwarden.
+    {"hostname": "bw.newlevel.media",
+     "origin": "http://127.0.0.1:8095",
+     "name": "Vaultwarden",
+     "blocked_paths": ["^/admin"],
+     "why_public": "native Bitwarden apps cannot pass Cloudflare Access"},
+)
+
+
+def controller_public_ingress_rules(routes=None):
+    """Ingress tuples for every complete PUBLIC route (#1290): one
+    ``(host, path, "http_status:404")`` per blocked path, then
+    ``(host, origin)``. A row without a host, an http(s) origin, a name or a
+    ``why_public`` reason gets no rule (fail-closed)."""
+    rules = []
+    for route in (PUBLIC_SERVICE_ROUTES if routes is None else routes):
+        if not isinstance(route, dict):
+            continue
+        host, origin = route.get("hostname"), route.get("origin")
+        if not (host and _SERVICE_ROUTE_HOST_RE.fullmatch(str(host))
+                and str(origin or "").startswith(("http://", "https://"))
+                and route.get("name") and route.get("why_public")):
+            continue
+        for path in route.get("blocked_paths") or ():
+            rules.append((host, path, "http_status:404"))
+        rules.append((host, origin))
+    return rules
