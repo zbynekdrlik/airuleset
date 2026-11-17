@@ -58,8 +58,8 @@ from cli_logrotate_owner import (  # noqa: F401
 # names stay importable from here (tests + the apply script below).
 from cli_fail2ban import (  # noqa: F401
     FAIL2BAN_BANTIME, FAIL2BAN_IGNOREIP, FAIL2BAN_IGNOREIP_JAILS,
-    FAIL2BAN_JAIL_LOCAL_PATH, FAIL2BAN_JAIL_PATH, render_fail2ban_hardening,
-    render_fail2ban_ignoreip_local)
+    FAIL2BAN_JAIL_LOCAL_PATH, FAIL2BAN_JAIL_PATH, build_fail2ban_readback,
+    build_fail2ban_step, render_fail2ban_hardening, render_fail2ban_ignoreip_local)
 
 
 # ---------------------------------------------------------------------------
@@ -561,20 +561,7 @@ def build_apply_script(drain=True, journal_max=None):
     parts.append("")
     # fail2ban hardening ONLY where fail2ban is installed (a box without it is
     # left clean, and the read-back below never fails for its absence).
-    parts.append(
-        'if command -v fail2ban-client >/dev/null 2>&1; then\n'
-        "    _install %s 0644 <<'%s'\n%s%s\n"
-        "    _install %s 0644 <<'%s'\n%s%s\n"
-        '    fail2ban-client reload >/dev/null 2>&1 '
-        '|| echo "  ⚠ disk-guard-root: fail2ban reload failed (non-fatal)"\n'
-        'else\n'
-        '    echo "  disk-guard-root: fail2ban not present — hardening skipped"\n'
-        'fi'
-        % (shlex.quote(FAIL2BAN_JAIL_PATH), _HEREDOC_MARK,
-           render_fail2ban_hardening().rstrip("\n") + "\n", _HEREDOC_MARK,
-           shlex.quote(FAIL2BAN_JAIL_LOCAL_PATH), _HEREDOC_MARK,
-           render_fail2ban_ignoreip_local().rstrip("\n") + "\n", _HEREDOC_MARK)
-    )
+    parts.append(build_fail2ban_step(_HEREDOC_MARK))
     parts.append("")
     # Create the world-readable report dir now (tmpfiles.d covers subsequent
     # boots) and reload systemd so it re-reads the journald cap + the new units.
@@ -634,6 +621,8 @@ def build_apply_script(drain=True, journal_max=None):
     # 2. logrotate's own `--debug` parse (never rotates): no duplicate entry,
     #    and every managed log still rotated by a stanza it reads (#1244).
     parts.append(build_logrotate_readback(managed_logs))
+    # 2b. (#1306) fail2ban step outcome + the effective sshd ignoreip.
+    parts.append(build_fail2ban_readback())
     # 3. the daily report timer is enabled.
     parts.append(
         'if ! systemctl is-enabled airuleset-disk-guard-root.timer '

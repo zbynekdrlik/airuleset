@@ -12,6 +12,7 @@ A zero-import leaf: `cli_disk_guard_root.build_apply_script` writes both files
     banned three times on 16.11.2026. The .local loads after jail.local and
     wins, while ``%(known/ignoreip)s`` keeps the hand-made entries.
 """
+import shlex
 
 FAIL2BAN_JAIL_PATH = "/etc/fail2ban/jail.d/50-airuleset-hardening.conf"
 FAIL2BAN_JAIL_LOCAL_PATH = "/etc/fail2ban/jail.d/50-airuleset-hardening.local"
@@ -61,4 +62,56 @@ def render_fail2ban_ignoreip_local():
         "# hand-made jail.local can never drop the fleet tailnet (the\n"
         "# controller) from the ignore list. Appends per jail; keeps the rest.\n"
         + body
+    )
+
+
+def build_fail2ban_step(heredoc_mark):
+    """The apply-script step (#841, #1306): only where fail2ban is installed,
+    write both drop-ins through the script's ``_install``, then let
+    ``fail2ban-client -t`` gate the reload. A config fail2ban refuses never
+    reaches a reload (it would only bite at the next restart, with sshd then
+    unprotected): the .local is removed again, the reload skipped, and
+    ``F2B_FAIL`` makes the read-back fail. A failed reload is loud too."""
+    local = shlex.quote(FAIL2BAN_JAIL_LOCAL_PATH)
+    return (
+        'F2B_FAIL=""\n'
+        'if command -v fail2ban-client >/dev/null 2>&1; then\n'
+        "    _install %s 0644 <<'%s'\n%s%s\n"
+        "    _install %s 0644 <<'%s'\n%s%s\n"
+        '    if fail2ban-client -t >/dev/null 2>&1; then\n'
+        '        fail2ban-client reload >/dev/null 2>&1 || { echo "  ⚠ '
+        'DISK-GUARD-ROOT: fail2ban reload failed" >&2; F2B_FAIL=1; }\n'
+        '    else\n'
+        '        rm -f %s\n'
+        '        echo "  ⚠ DISK-GUARD-ROOT: fail2ban config test failed — '
+        '%s removed, reload skipped" >&2\n'
+        '        F2B_FAIL=1\n'
+        '    fi\n'
+        'else\n'
+        '    echo "  disk-guard-root: fail2ban not present — hardening skipped"\n'
+        'fi'
+        % (shlex.quote(FAIL2BAN_JAIL_PATH), heredoc_mark,
+           render_fail2ban_hardening().rstrip("\n") + "\n", heredoc_mark,
+           local, heredoc_mark,
+           render_fail2ban_ignoreip_local().rstrip("\n") + "\n", heredoc_mark,
+           local, FAIL2BAN_JAIL_LOCAL_PATH)
+    )
+
+
+def build_fail2ban_readback():
+    """Read-back (#1306): a failed step fails the apply, and where the sshd
+    jail runs its EFFECTIVE ignore list must carry the tailnet (deployed is
+    not effective: a later hand-made file could still shadow it). The tailnet
+    entry is checked by its CIDR, which fail2ban prints as written."""
+    tailnet = FAIL2BAN_IGNOREIP.split()[-1]
+    return (
+        'if [ -n "$F2B_FAIL" ]; then fail=1; fi\n'
+        'if command -v fail2ban-client >/dev/null 2>&1 '
+        '&& fail2ban-client status sshd >/dev/null 2>&1; then\n'
+        '    case "$(fail2ban-client get sshd ignoreip 2>/dev/null)" in\n'
+        '        *%s*) ;;\n'
+        '        *) echo "  ⚠ DISK-GUARD-ROOT VERIFY FAIL: sshd ignoreip lacks '
+        '%s" >&2; fail=1 ;;\n'
+        '    esac\n'
+        'fi' % (tailnet, tailnet)
     )
