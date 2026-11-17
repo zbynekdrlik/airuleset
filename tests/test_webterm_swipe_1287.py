@@ -85,17 +85,22 @@ _NODE = r"""
 const vm = require('vm');
 const fs = require('fs');
 const src = fs.readFileSync(process.argv[2], 'utf8');
-function mkWin(rows, screenH) {
-  const ls = {}, wheels = [], win = {};
-  const el = { addEventListener(t, f, o) { (ls[t] = ls[t] || []).push([f, o]); } };
+function mkWin(rows, screenH, hit) {
+  const ls = {}, wheels = [], targets = [], win = {};
+  const node = (name, inside) => ({ inside, dispatchEvent: (e) => {
+    targets.push(name); wheels.push([e.deltaY, e.deltaMode, e.clientX, e.clientY, e.bubbles]); return true; } });
+  const el = Object.assign(node('el', true), { addEventListener(t, f, o) { (ls[t] = ls[t] || []).push([f, o]); },
+    contains: (t) => !!(t && t.inside) });
+  const screen = Object.assign(node('screen', true), { getBoundingClientRect: () => ({ height: screenH }) });
+  const pick = { in: node('hit', true), out: node('out', false), null: null };
   class WE { constructor(type, init) { Object.assign(this, init, { type }); } }
   win.WheelEvent = WE;
   win.term = { rows, element: el };
   win.document = {
-    querySelector: (q) => q === '.xterm-screen' ? { getBoundingClientRect: () => ({ height: screenH }) } : null,
-    elementFromPoint: () => ({ dispatchEvent: (e) => { wheels.push([e.deltaY, e.deltaMode, e.clientX, e.clientY, e.bubbles]); return true; } }),
+    querySelector: (q) => q === '.xterm-screen' ? screen : null,
+    elementFromPoint: () => pick[hit || 'in'],
   };
-  return { win, ls, wheels };
+  return { win, ls, wheels, targets };
 }
 let now = 1000;
 const ctx = { console, Date: { now: () => now }, Math, document: { getElementById: () => null },
@@ -103,24 +108,27 @@ const ctx = { console, Date: { now: () => now }, Math, document: { getElementByI
 ctx.window = { matchMedia: (q) => ({ matches: ctx.touch && q === '(pointer: coarse) and (hover: none) and (not (any-hover: hover))' }) };
 vm.createContext(ctx);
 vm.runInContext(src, ctx);
-function fire(s, type, pts) {
-  const ev = { touches: pts.map(([x, y]) => ({ clientX: x, clientY: y })), prevented: 0, stopped: 0,
-    preventDefault() { this.prevented++; }, stopPropagation() { this.stopped++; } };
+function fire(s, type, pts, nc) {
+  const ev = { touches: pts.map(([x, y]) => ({ clientX: x, clientY: y })), prevented: 0, stopped: 0, cancelable: !nc,
+    preventDefault() { if (this.cancelable) this.prevented++; else this.ignored = true; },
+    stopPropagation() { this.stopped++; } };
   (s.ls[type] || []).forEach(([f]) => f(ev));
   return ev;
 }
 // rows 50 over a 1000 px screen: one row = 20 px of finger travel
-function run(name, steps) {
-  const s = mkWin(50, 1000);
+function run(name, steps, hit) {
+  const s = mkWin(50, 1000, hit);
   ctx.keybarAttachSwipe(s.win);
   ctx.keybarAttachSwipe(s.win);              // idempotent
   const prevented = [];
+  let ignored = false;
   for (const st of steps) {
     if (st.wait) { now += st.wait; continue; }
-    const ev = fire(s, st.t, st.p || []);
+    const ev = fire(s, st.t, st.p || [], st.nc);
     if (st.t === 'touchmove') prevented.push(ev.prevented);
+    if (ev.ignored) ignored = true;
   }
-  return { wheels: s.wheels, prevented, nStart: (s.ls.touchstart || []).length,
+  return { wheels: s.wheels, targets: s.targets, prevented, ignored, nStart: (s.ls.touchstart || []).length,
     opts: Object.fromEntries(Object.entries(s.ls).map(([k, v]) => [k, v[0][1]])) };
 }
 const out = {};
@@ -137,6 +145,16 @@ out.two = run('two', [{ t: 'touchstart', p: [[100, 100], [200, 100]] }, { t: 'to
 out.big = run('big', [{ t: 'touchstart', p: [[100, 0]] }, { t: 'touchmove', p: [[100, 5000]] }, { t: 'touchend' }]);
 out.after = run('after', [{ t: 'touchstart', p: [[100, 100]] }, { t: 'touchmove', p: [[100, 145]] }, { t: 'touchend' },
   { t: 'touchmove', p: [[100, 300]] }]);
+const swipe = [{ t: 'touchstart', p: [[100, 100]] }, { t: 'touchmove', p: [[100, 145]] }, { t: 'touchend' }];
+out.out = run('out', swipe, 'out');
+out.none = run('none', swipe, 'null');
+out.cancel = run('cancel', [{ t: 'touchstart', p: [[100, 100]] }, { t: 'touchcancel' }, { t: 'touchmove', p: [[100, 200]] }]);
+out.creep = run('creep', [{ t: 'touchstart', p: [[100, 100]] }, { wait: 200 }, { t: 'touchmove', p: [[100, 103]] },
+  { wait: 200 }, { t: 'touchmove', p: [[100, 106]] }, { wait: 200 }, { t: 'touchmove', p: [[100, 109]] },
+  { wait: 200 }, { t: 'touchmove', p: [[100, 140]] }, { t: 'touchend' }]);
+out.jitter = run('jitter', [{ t: 'touchstart', p: [[100, 100]] }, { wait: 300 }, { t: 'touchmove', p: [[100, 101]] },
+  { wait: 300 }, { t: 'touchmove', p: [[100, 150]] }, { t: 'touchend' }]);
+out.nc = run('nc', [{ t: 'touchstart', p: [[100, 100]] }, { t: 'touchmove', p: [[100, 145]], nc: true }, { t: 'touchend' }]);
 ctx.touch = false;
 out.desktop = run('desktop', [{ t: 'touchstart', p: [[100, 100]] }, { t: 'touchmove', p: [[100, 200]] }]);
 out.noTerm = (() => { try { ctx.keybarAttachSwipe({}); ctx.keybarAttachSwipe(null); return 'ok'; } catch (e) { return String(e); } })();
@@ -180,6 +198,25 @@ class TestSwipeNode1287(unittest.TestCase):
         for k in ("horiz", "hold", "two"):
             self.assertEqual(self.out[k]["wheels"], [], k)
             self.assertEqual(sum(self.out[k]["prevented"]), 0, k)
+
+    def test_a_tick_off_the_terminal_lands_on_the_screen(self):
+        # the touch keeps its target, but the point may leave the xterm box
+        self.assertEqual(self.out["out"]["targets"], ["screen", "screen"])
+        self.assertEqual(self.out["none"]["targets"], ["screen", "screen"])
+        self.assertEqual(self.out["down"]["targets"], ["hit"] * 3)
+
+    def test_a_cancelled_touch_stops_the_swipe(self):
+        self.assertEqual(self.out["cancel"]["wheels"], [])
+
+    def test_a_slow_drag_is_a_swipe_but_a_still_hold_is_not(self):
+        self.assertEqual(len(self.out["creep"]["wheels"]), 2)
+        self.assertEqual(self.out["jitter"]["wheels"], [])
+
+    def test_a_non_cancelable_move_is_never_cancelled(self):
+        # Chrome warns ("Ignored attempt to cancel a touchmove") on such a call
+        self.assertEqual(len(self.out["nc"]["wheels"]), 2)
+        self.assertEqual(self.out["nc"]["prevented"], [0])
+        self.assertFalse(self.out["nc"]["ignored"])
 
     def test_one_move_is_capped(self):
         self.assertEqual(len(self.out["big"]["wheels"]), 30)
