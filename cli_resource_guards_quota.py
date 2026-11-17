@@ -61,6 +61,10 @@ QUOTA_CEILING_TIMER_PATH = "/etc/systemd/system/airuleset-quota-ceiling.timer"
 # disk guard stays the backstop). #1315: the share is split equally over the
 # shared-stream homes, so it bounds the SUM of all accounts' headroom.
 QUOTA_FS_AVAIL_BOUND_PCT = 50
+# subdev 17.11.2026: 15 homes on 51G free left ~1.7G each and david3 hit its
+# quota at 65 % disk. Every account keeps at least min(5 GiB, 10 % of free).
+QUOTA_FS_MIN_ROOM_PCT = 10
+QUOTA_FS_MIN_ROOM_KIB = 5 * 1024 * 1024
 
 
 def render_quota_unit():
@@ -338,6 +342,11 @@ def _render_quota_limits_block() -> str:
     as zero usage -- both cases print a LOUD warning and skip setquota for
     that user, so a transient repquota failure can never silently apply a
     blind (possibly too-low) limit."""
+    # subdev 17.11.2026: a floor of min(QUOTA_FS_MIN_ROOM_KIB, PCT % of free)
+    room = ('fs_room_kib=$(( fs_avail_kib * %d / 100 ))\n'
+            '    [ "$fs_room_kib" -le %d ] || fs_room_kib=%d\n'
+            '    [ "$fs_bound_kib" -ge "$fs_room_kib" ] || fs_bound_kib=$fs_room_kib'
+            % (QUOTA_FS_MIN_ROOM_PCT, QUOTA_FS_MIN_ROOM_KIB, QUOTA_FS_MIN_ROOM_KIB))
     return (
         '# --- #950: per-user usage-aware quota limits ---\n'
         'qfail=0; expected=""\n'
@@ -363,6 +372,7 @@ def _render_quota_limits_block() -> str:
         '    done\n'
         '    [ "$fs_share_n" -ge 1 ] || fs_share_n=1\n'
         '    fs_bound_kib=$(( fs_avail_kib * %d / 100 / fs_share_n ))\n'
+        '    @@ROOM_FLOOR@@\n'
         'else\n'
         '    df_err=$(df --output=avail -k / 2>&1 >/dev/null || true)\n'
         '    echo "  ⚠ quota: df gave no free space for / (rc=$df_rc out=$df_out'
@@ -474,7 +484,7 @@ def _render_quota_limits_block() -> str:
            QUOTA_SOFT_KIB, QUOTA_HARD_KIB,
            QUOTA_FS_AVAIL_BOUND_PCT,
            QUOTA_GRACE_S)
-    )
+    ).replace("@@ROOM_FLOOR@@", room)
 
 
 def _render_quota_timer_enable_block(timer: str, label: str) -> str:
