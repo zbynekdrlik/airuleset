@@ -171,7 +171,7 @@ class FakeConnector:
         return True, "overlap"
 
 
-def _apply(fake_cf, conn, rules, provision=None):
+def _apply(fake_cf, conn, rules, provision=None, cfg=None):
     clock = _Clock()
     put_hook = fake_cf.__call__
 
@@ -193,7 +193,7 @@ def _apply(fake_cf, conn, rules, provision=None):
         ok = rc.apply_remote_tunnel(
             _client(transport), TID, rc.remote_ingress(rules),
             provision=provision or _provision, service_name=SVC,
-            config_path=Path("/nonexistent/controller-webterm.yml"),
+            config_path=cfg or Path("/nonexistent/controller-webterm.yml"),
             systemctl=conn.systemctl, sleep=clock.sleep, clock=clock.now)
     return ok, calls, err.getvalue()
 
@@ -251,6 +251,39 @@ class TestApplyRemoteTunnel(unittest.TestCase):
         self.assertFalse(ok)
         self.assertEqual(conn.restarts, [SVC], "exactly one restart, never a loop")
         self.assertIn("LOUD", err)
+
+    def _cfg(self):
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        return Path(d.name) / "controller-webterm.yml"
+
+    def test_confirmed_apply_is_stamped_with_pid_and_version(self):
+        cfg = self._cfg()
+        fake = FakeCF(remote=True, ingress=rc.remote_ingress(RULES_A))
+        conn = FakeConnector(applies=True, applied_version=7)
+        ok, _calls, _err = _apply(fake, conn, RULES_B, cfg=cfg)
+        self.assertTrue(ok)
+        self.assertEqual(rc.applied_stamp(cfg), (100, 8))
+
+    def test_rotated_journal_with_matching_stamp_never_restarts(self):
+        """A connector that runs for weeks loses its old journal lines; an
+        unchanged install must not read that as "not applied" and drop every
+        tab. The stamp of THIS pid + version is the proof then."""
+        cfg = self._cfg()
+        rc.applied_stamp_path(cfg).write_text("100 7")
+        fake = FakeCF(remote=True, ingress=rc.remote_ingress(RULES_A))
+        conn = FakeConnector(applies=True)          # journal empty (rotated)
+        ok, _calls, _err = _apply(fake, conn, RULES_A, cfg=cfg)
+        self.assertTrue(ok)
+        self.assertEqual(conn.restarts, [])
+
+    def test_stamp_of_another_pid_is_not_trusted(self):
+        cfg = self._cfg()
+        rc.applied_stamp_path(cfg).write_text("99 7")
+        fake = FakeCF(remote=True, ingress=rc.remote_ingress(RULES_A))
+        conn = FakeConnector(applies=False)
+        _ok, _calls, _err = _apply(fake, conn, RULES_A, cfg=cfg)
+        self.assertEqual(conn.restarts, [SVC])
 
     def test_applied_version_reads_only_the_newest_line(self):
         text = ('INF Starting tunnel\n'
