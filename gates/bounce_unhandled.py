@@ -95,6 +95,21 @@ def _asks_about(msg, n):
                for ln in (msg or "").splitlines())
 
 
+def _prior_acks(cwd, home=None):
+    """#1354: the `N:verdict_ts` keys ACKed in an earlier turn (the first-ACK
+    records of the ack state, never the "ask:"/"block:" ones). Unreadable
+    state -> empty set (a never-ACKed bounce keeps blocking)."""
+    import json
+    try:
+        with open(_ack_state_path(cwd, home), encoding="utf-8") as fh:
+            state = json.load(fh)
+    except (OSError, ValueError):
+        return set()
+    if not isinstance(state, dict):
+        return set()
+    return {k for k in state if ":" in k and not k.startswith(("ask:", "block:"))}
+
+
 def _stale_acks(cwd, home, now, acked, live, running=0, report=True):
     """#1329: the ACKed bounces whose FIRST ACK for the SAME verdict is older
     than the grace while the verdict is still unhandled -- a bare re-ACK there
@@ -175,6 +190,7 @@ def decide(payload, now=None, home=None):
     if not bu:
         return False, ""                     # no cache / absent / empty -> allow
     grace = _grace_seconds()
+    prior = _prior_acks(cwd, home)
     overdue, acked, live = [], [], set()
     for e in bu:
         if not isinstance(e, dict):
@@ -190,7 +206,12 @@ def decide(payload, now=None, home=None):
         if (now - vts) < grace:
             continue                         # within grace -> not yet blockable
         if not _acked(msg, n):
-            overdue.append(n)
+            # #1354: an ACK given in an earlier turn for the SAME verdict carries;
+            # the repeat path below still nags it once per grace window
+            if "%d:%s" % (n, vts) in prior:
+                acked.append((n, "%d:%s" % (n, vts), False))
+            else:
+                overdue.append(n)
         else:
             acked.append((n, "%d:%s" % (n, vts), _asks_about(msg, n)))
     # #1345: a running background task (a rework lane) is progress the ticket
