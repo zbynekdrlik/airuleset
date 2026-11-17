@@ -114,15 +114,25 @@ def _stale_acks(cwd, home, now, acked, live):
         state = state if isinstance(state, dict) else {}
     except (OSError, ValueError):
         state = {}
-    state = {k: v for k, v in state.items()
-             if k.rpartition("ask:")[2] in live}
+    def _verdict(k):                         # "ask:"/"block:" prefixes -> N:ts
+        for pre in ("block:", "ask:"):
+            k = k[len(pre):] if k.startswith(pre) else k
+        return k
+    state = {k: v for k, v in state.items() if _verdict(k) in live}
     stale = []
+    grace = _grace_seconds()
     for n, key, asks in acked:
         first = state.setdefault(key, now)
         if asks:
             first = state.setdefault("ask:" + key, now)
-        if isinstance(first, (int, float)) and now - first > _grace_seconds():
-            stale.append(n)
+        if not (isinstance(first, (int, float)) and now - first > grace):
+            continue
+        # #1345: one repeat block per verdict per grace window, never every stop
+        last = state.get("block:" + key)
+        if isinstance(last, (int, float)) and now - last < grace:
+            continue
+        state["block:" + key] = now
+        stale.append(n)
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         tmp = "%s.%d.tmp" % (path, os.getpid())
@@ -132,6 +142,18 @@ def _stale_acks(cwd, home, now, acked, live):
     except OSError:
         pass  # airuleset:script-ok an unwritable state only loses the memory
     return stale
+
+
+def _running_tasks(payload):
+    """#1345: count of `background_tasks` with status "running", read like the
+    #1007 / #120 Stop hooks (absent key or any parse error -> 0)."""
+    import json
+    try:
+        data = json.loads(payload) if isinstance(payload, str) else payload
+        tasks = data.get("background_tasks") or []
+        return sum(1 for t in tasks if isinstance(t, dict) and t.get("status") == "running")
+    except (ValueError, AttributeError, TypeError):
+        return 0
 
 
 def decide(payload, now=None, home=None):
@@ -165,7 +187,9 @@ def decide(payload, now=None, home=None):
             overdue.append(n)
         else:
             acked.append((n, "%d:%s" % (n, vts), _asks_about(msg, n)))
-    repeat = _stale_acks(cwd, home, now, acked, live)
+    # #1345: a running background task (a rework lane) is progress the ticket
+    # cannot show yet -- the repeat-ACK nag waits for it (the no-ACK branch stays)
+    repeat = [] if _running_tasks(payload) else _stale_acks(cwd, home, now, acked, live)
     if repeat and not overdue:
         listed = ", ".join("#%d" % n for n in sorted(repeat))
         return True, (
