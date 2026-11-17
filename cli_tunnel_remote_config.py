@@ -238,8 +238,9 @@ def _ran_remote(systemctl, service_name, config_path):
     if pid <= 0:
         return False
     stamp = applied_stamp(config_path)
-    return (stamp is not None and stamp[0] == pid) \
-        or applied_version(read_journal(pid)) is not None
+    # The marker alone, not a parsed version: a journald-split line keeps the
+    # marker in its first piece but loses `version=` (review round 2).
+    return (stamp is not None and stamp[0] == pid) or _UPDATED in read_journal(pid)
 
 
 def apply_remote_tunnel(client, tunnel_id, ingress, *, provision, service_name,
