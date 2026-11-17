@@ -308,6 +308,16 @@ class TestApplyRemoteTunnel(unittest.TestCase):
         self.assertFalse(ok)
         self.assertEqual(conn.restarts, [])
 
+    def test_split_journal_line_still_counts_as_remote(self):
+        """journald splits a line past LineMax: the first piece has the marker
+        but no `version=`. Such a process DID run remote config; no restart."""
+        fake = FakeCF(remote=True, ingress=rc.remote_ingress(RULES_A))
+        conn = FakeConnector(applies=False)
+        conn.journal[100] = ['INF Updated to new configuration config="{\\"ingress\\":[']
+        ok, _calls, _err = _apply(fake, conn, RULES_B)
+        self.assertFalse(ok)
+        self.assertEqual(conn.restarts, [])
+
     def test_missing_version_is_a_sync_failure(self):
         """A reply without a version could never be confirmed: that must fail
         the sync, never fall into the restart branch on every install."""
