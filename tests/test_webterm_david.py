@@ -216,7 +216,7 @@ class TestDavidArtifactsWrite(unittest.TestCase):
             inv = json.loads((claude / "webterm-david-inventory.json")
                              .read_text(encoding="utf-8"))
             ids = [e["id"] for e in inv]
-            self.assertEqual(ids, ["david1", "david2", "david3", "david4",
+            self.assertEqual(ids, ["david1", "david2", "david3", "david4", "david5", "david6", "david7", "david8",
                                    "codex-bridge"])
             # The scoped inventory carries NO owner-fleet id.
             self.assertNotIn("dev1", ids)

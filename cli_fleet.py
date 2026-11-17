@@ -256,6 +256,19 @@ REMOTE_HOSTS = [
              "role": None},
         ],
     },
+    # david5@subdev, david6@subdev, david7@subdev, david8@subdev (#1341): the
+    # david2-4 shape. Gatekeeper's `/new-subdev` created the accounts on
+    # 17.11.2026 (odoo-erp#10214); the controller key was verified on each.
+    *({"name": "%s@subdev" % _u,
+        "host": "100.118.174.27",
+        "user": _u,
+        "repo_path": "~/devel/airuleset",
+        "identity": "~/.secrets/gatekeeper_access_ed25519",
+        "windows": [
+            {"name": "d" + _u[5:], "cwd": "~/devel/odoo/odoo-erp",
+             "role": None},
+        ],
+    } for _u in ("david5", "david6", "david7", "david8")),
     {
         # forestshop-dev (airuleset#406, 2026-08-12): owner-dedicated Hetzner
         # Nbg1 cx23 box for zbynekdrlik/forestshop-app. No tailscale -- the
@@ -880,6 +893,11 @@ AUTHORITY_BY_USER = {
     "david2": "fork-no-merge",
     "david3": "fork-no-merge",
     "david4": "fork-no-merge",
+    # david5-david8 (#1341): four more clones of the same family.
+    "david5": "fork-no-merge",
+    "david6": "fork-no-merge",
+    "david7": "fork-no-merge",
+    "david8": "fork-no-merge",
     # david1/simap1 (#537): the NUMBERED names for the base-stream rename
     # (owner directive on #532 — david->david1, simap->simap1; marek was
     # un-renamed but is now decommissioned #882). Both renames are LIVE
@@ -987,6 +1005,7 @@ WEBTERM_OBSERVER_USERS = frozenset({"dominika", "marek"})
 # Test-locked: subset of subdev REMOTE_HOSTS users.
 WEBTERM_ONLY_USERS = frozenset({
     "david1", "david2", "david3", "david4", "dominika",
+    "david5", "david6", "david7", "david8",   # #1341
 })
 
 

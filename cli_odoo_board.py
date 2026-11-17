@@ -11,7 +11,8 @@ Job 49 task-hygiene overseer were removed with the montalu client (#1306).
 """
 import os
 
-NO_BOARD_USERS = frozenset({"david1", "david2", "david3", "david4"})
+NO_BOARD_USERS = frozenset({"david1", "david2", "david3", "david4",
+                            "david5", "david6", "david7", "david8"})  # #1341
 BOARD_MARKER = "airuleset-client-board"
 
 

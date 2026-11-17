@@ -103,7 +103,7 @@ PRIVILEGES: List[Privilege] = [
         kind=KIND_SSH_KEY,
         local_path="~/.secrets/gatekeeper_access_ed25519",
         reach="fleet operator ssh key — gatekeeper@gk + the identity-pinned "
-              "subdev streams (marek/miva1/david1-4/simap1) AND root@subdev "
+              "subdev streams (marek/miva1/david1-8/simap1) AND root@subdev "
               "(SHARED_STREAM_GUARD_HOSTS, admin_user=root)",
         rotation="F1 DONE: replaced by airuleset_push_ed25519 (ADD+VERIFY "
                  "22/22, 2026-09-05). REMOVE pending — owner deferred "
@@ -157,10 +157,10 @@ PRIVILEGES: List[Privilege] = [
         name="webterm_david_ed25519",
         kind=KIND_SSH_KEY,
         local_path="~/.secrets/webterm_david_ed25519",
-        reach="dedicated webterm-provisioning ssh key for david1-4@subdev "
+        reach="dedicated webterm-provisioning ssh key for david1-8@subdev "
               "(never the gatekeeper key — cli_webterm_profiles doctrine)",
         rotation="F4b DONE: generated on the controller (2026-09-06), "
-                 "distributed to david1-4@subdev via fleet push.",
+                 "distributed to david1-8@subdev via fleet push.",
         must_move=True,
         used_by=("cli_webterm_profiles.py:96 (WEBTERM_DAVID_IDENTITY)",),
     ),

@@ -4,7 +4,7 @@ Owner directive (2026-09-04, present, verbatim): "priamy pristup cez ssh bude
 uz len fallback pre mna a mareka, david a dominika nech vedia robit len cez
 webterm!!"
 
-Manages ``~/.ssh/authorized_keys`` for WEBTERM_ONLY_USERS (david1-4, dominika)
+Manages ``~/.ssh/authorized_keys`` for WEBTERM_ONLY_USERS (david1-8, dominika)
 DECLARATIVELY — the desired-state key set is rendered on every install/push,
 foreign keys are quarantined (never destroyed), and a structural lockout guard
 refuses to write ANY set that lacks the fleet push pubkey.
@@ -58,7 +58,7 @@ FLEET_PUSH_PUBKEYS = (
 FLEET_PUSH_PUBKEY = FLEET_PUSH_PUBKEYS[0]
 
 # The webterm david lane pubkey — the key the webterm david gateway uses to
-# loopback-ssh between david1-4 accounts on subdev.  Read from subdev's
+# loopback-ssh between david1-8 accounts on subdev.  Read from subdev's
 # ``~david1/.ssh/authorized_keys`` (the ``webterm_david@subdev #612`` entry,
 # manual go-live 2026-09-04; fingerprint verified 2026-09-05).
 WEBTERM_DAVID_LANE_PUBKEY = (
@@ -99,13 +99,16 @@ WEBTERM_CONTROLLER_LANE_PUBKEYS = {
 
 # #870 incident 2 fix: which webterm-only user accounts each human's
 # controller connects to.  Derived from WEBTERM_DASHBOARD_TABS — zbynek's
-# dashboard has david1-4 tabs (#934); david's has david1-4; marek and
-# dominika have no webterm-only targets.  Test-locked against
+# dashboard has david1-8 tabs (#934, #1341); david's has david1-8; marek
+# has david3 + david5-8 (owner 11.11. / 16.11.2026); dominika has none.  Test-locked against
 # WEBTERM_DASHBOARD_TABS drift.
 _CONTROLLER_LANE_WEBTERM_ONLY_TARGETS = {
-    "zbynek": frozenset({"david1", "david2", "david3", "david4"}),
-    "david": frozenset({"david1", "david2", "david3", "david4"}),
-    "marek": frozenset({"david3"}),  # owner 11.11.2026
+    "zbynek": frozenset({"david1", "david2", "david3", "david4",
+                         "david5", "david6", "david7", "david8"}),  # #1341
+    "david": frozenset({"david1", "david2", "david3", "david4",
+                        "david5", "david6", "david7", "david8"}),  # #1341
+    # david3: owner 11.11.2026; david5-8: owner 16.11.2026 (#1341)
+    "marek": frozenset({"david3", "david5", "david6", "david7", "david8"}),
     "dominika": frozenset(),
 }
 
@@ -188,7 +191,7 @@ def _fingerprint(line, run=None):
 
 def _webterm_only_user_to_human(user):
     """Map a webterm-only account name to its human's lane key.
-    david1-4 -> "david", dominika -> "dominika", else None."""
+    david1-8 -> "david", dominika -> "dominika", else None."""
     if user.startswith("david") and user[5:].isdigit():
         return "david"
     if user == "dominika":
@@ -225,7 +228,7 @@ def desired_keys_for_user(user):
     keys = list(FLEET_PUSH_PUBKEYS)
     keys.extend(OWNER_PUBKEYS)
 
-    # david1-4 get the subdev lane key
+    # david1-8 get the subdev lane key
     if user.startswith("david") and user[5:].isdigit():
         keys.append(WEBTERM_DAVID_LANE_PUBKEY)
 
@@ -595,6 +598,10 @@ SUBDEV_ACCOUNTS_FALLBACK = {
     "david2": "gatekeeper_access_ed25519",
     "david3": "gatekeeper_access_ed25519",
     "david4": "gatekeeper_access_ed25519",
+    "david5": "gatekeeper_access_ed25519",
+    "david6": "gatekeeper_access_ed25519",
+    "david7": "gatekeeper_access_ed25519",
+    "david8": "gatekeeper_access_ed25519",
     "dominika": "gatekeeper_access_ed25519",
     "simap1": "gatekeeper_access_ed25519",
     "miva1": "gatekeeper_access_ed25519",
