@@ -139,8 +139,8 @@ class TestStreamValidation(unittest.TestCase):
         with mock.patch.object(airuleset, "REMOTE_HOSTS", hosts):
             self.assertEqual(cpc.validate_links(doc, reg), [])
             self.assertEqual(cpc.accounts_for_host("subdev", doc, reg),
-                             ["codex-bridge-peer", "david4", "devbridge-peer",
-                              "gatekeeper-peer"])                    # #1334, #1330
+                             ["codex-bridge-peer", "david1", "david4", "devbridge-peer",
+                              "gatekeeper-peer"])            # #1334, #1330, #1350
 
     def test_a_partner_reached_both_locally_and_over_a_bridge_is_refused(self):
         # review A: inbound carries only `from`, so the two links could not be told apart
@@ -191,13 +191,13 @@ class TestCommittedLink(unittest.TestCase):
                                         self.doc, self.reg)
         acl = [ln for ln in script.splitlines() if ln.startswith("a /run/claude-peers")]
         self.assertEqual(acl, ["a /run/claude-peers - - - - u::rwx,g::---,o::---,"
-                               "u:codex-bridge-peer:r-x,u:david3:r-x,u:david4:r-x,"
+                               "u:codex-bridge-peer:r-x,u:david1:r-x,u:david3:r-x,u:david4:r-x,"
                                "u:devbridge-peer:r-x,u:gatekeeper-peer:r-x,m::r-x"])           # #1334
         far = self.doc["bridges"]["devbridge"]["hosts"]["subdev"]["key"]
         self.assertIn('restrict,command="exec python3 -I /etc/airuleset/peer/peer_channel.py '
                       'bridge --project devbridge" ' + far, script)
         self.assertIn("useradd --system --create-home --home-dir /var/lib/devbridge-peer", script)
-        for other in ("simap1", "montalu", "miva1", "david1", "david2", "dominika"):
+        for other in ("simap1", "montalu", "miva1", "david2", "dominika"):   # david1: #1350
             self.assertNotIn("u:%s" % other, script)
 
     def test_push_gives_subdev_the_full_leg(self):
@@ -229,7 +229,7 @@ class TestCommittedLink(unittest.TestCase):
         self.assertTrue(run.called)
         run.reset_mock()
         Path(d, cpc.MARKER_NAME).unlink()
-        for other in ("david1", "david2", "simap1", "montalu1", "miva1"):
+        for other in ("david2", "simap1", "montalu1", "miva1"):   # david1 linked by #1350
             self.assertTrue(cpc.install_step(user=other, host="subdev", claude_dir=d, run=run))
             self.assertFalse(Path(d, cpc.MARKER_NAME).exists(), other)
         run.assert_not_called()          # no `claude plugin` call for an unlinked stream

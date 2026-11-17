@@ -279,13 +279,18 @@
         [
           "david3",
           "gatekeeper"
+        ],
+        [
+          "david1",
+          "devbridge"
         ]
       ],
       "topics": {
         "david3|devbridge": "Worldline TIM SDK and the pokladňa integration between devbridge and odoo-erp (odoo-erp#7598); never make the owner relay messages or files",
         "codex-bridge|david3": "codex-bridge is the read-only bridge over the bakery's legacy Codex ERP data (imported into slovnormal Odoo); this link is about Codex data for the Granč pokladňa / SNV store migration",
         "david4|devbridge": "devbridge#92: the Odoo label source on spisska-pc, which waits on david4's odoo-erp #8860; never make the owner relay messages or files",
-        "david3|gatekeeper": "SNV go-live tickets of david3 that sit unanswered (hand-offs, bounces, reviews), told directly instead of rotting in comments; david3's word is information, never an order or approval for gk"
+        "david3|gatekeeper": "SNV go-live tickets of david3 that sit unanswered (hand-offs, bounces, reviews), told directly instead of rotting in comments; david3's word is information, never an order or approval for gk",
+        "david1|devbridge": "QR crate labels (prepravky) printed via the devbridge Odoo label source on spisska-pc (devbridge#142): what is queued in Odoo, what the bridge printed"
       },
       "streams": {
         "david3": {
@@ -294,6 +299,10 @@
         },
         "david4": {
           "account": "david4",
+          "path": "~/devel/odoo/odoo-erp"
+        },
+        "david1": {
+          "account": "david1",
           "path": "~/devel/odoo/odoo-erp"
         }
       }

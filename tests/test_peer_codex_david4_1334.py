@@ -92,10 +92,12 @@ class TestCommitted(unittest.TestCase):
 
     def test_subdev_links_and_streams(self):
         self.assertEqual(sorted(sorted(p) for p in self.sub["links"]),
-                         [["codex-bridge", "david3"], ["david3", "devbridge"],
-                          ["david3", "gatekeeper"], ["david4", "devbridge"]])   # + #1330
+                         [["codex-bridge", "david3"], ["david1", "devbridge"],
+                          ["david3", "devbridge"], ["david3", "gatekeeper"],
+                          ["david4", "devbridge"]])   # + #1330, #1350
         self.assertEqual(self.sub["streams"],
-                         {"david3": {"account": "david3", "path": "~/devel/odoo/odoo-erp"},
+                         {"david1": {"account": "david1", "path": "~/devel/odoo/odoo-erp"},   # #1350
+                          "david3": {"account": "david3", "path": "~/devel/odoo/odoo-erp"},
                           "david4": {"account": "david4", "path": "~/devel/odoo/odoo-erp"}})
         topic = self.sub["topics"]["codex-bridge|david3"]
         for word in ("Codex", "read-only", "Granč", "SNV"):
@@ -106,19 +108,19 @@ class TestCommitted(unittest.TestCase):
 
     def test_no_other_stream_is_linked(self):
         linked = {n for p in self.sub["links"] for n in p}
-        self.assertEqual(linked, {"codex-bridge", "david3", "david4", "devbridge",
-                                  "gatekeeper"})                               # + #1330
-        for other in ("simap1", "david1", "david2", "dominika", "montalu1", "miva1"):
+        self.assertEqual(linked, {"codex-bridge", "david1", "david3", "david4", "devbridge",
+                                  "gatekeeper"})                       # + #1330, #1350
+        for other in ("simap1", "david2", "dominika", "montalu1", "miva1"):
             self.assertNotIn(other, self.sub["streams"])
 
     def test_subdev_root_leg_names_the_linked_accounts(self):
         accounts = cpc.accounts_for_host("subdev", self.doc, self.reg)
-        self.assertEqual(accounts, ["codex-bridge-peer", "david3", "david4", "devbridge-peer",
-                                    "gatekeeper-peer"])                     # + #1330
+        self.assertEqual(accounts, ["codex-bridge-peer", "david1", "david3", "david4",
+                                    "devbridge-peer", "gatekeeper-peer"])   # + #1330, #1350
         script = cpc.render_root_script(accounts, self.doc, self.reg, "subdev")
         acl = [ln for ln in script.splitlines() if ln.startswith("a /run/claude-peers")]
         self.assertEqual(acl, ["a /run/claude-peers - - - - u::rwx,g::---,o::---,"
-                               "u:codex-bridge-peer:r-x,u:david3:r-x,u:david4:r-x,"
+                               "u:codex-bridge-peer:r-x,u:david1:r-x,u:david3:r-x,u:david4:r-x,"
                                "u:devbridge-peer:r-x,u:gatekeeper-peer:r-x,m::r-x"])
         key = self.doc["bridges"]["codex-bridge"]["hosts"]["subdev"]["key"]
         self.assertIn('restrict,command="exec python3 -I /etc/airuleset/peer/peer_channel.py '
@@ -157,7 +159,7 @@ class TestCommitted(unittest.TestCase):
         self.assertEqual(pc.linked_to(pairs, "david3"),
                          ["codex-bridge", "devbridge", "gatekeeper"])           # + #1330
         self.assertEqual(pc.linked_to(pairs, "david4"), ["devbridge"])
-        self.assertEqual(pc.linked_to(pairs, "devbridge"), ["david3", "david4"])
+        self.assertEqual(pc.linked_to(pairs, "devbridge"), ["david1", "david3", "david4"])
 
 
 if __name__ == "__main__":
