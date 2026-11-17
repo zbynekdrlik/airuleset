@@ -24,7 +24,10 @@ STUBS = {
     "systemctl": 'echo "systemctl $*" >> "$LOG"; exit 0\n',
     "journalctl": 'echo "journalctl $*" >> "$LOG"; exit 0\n',
     "systemd-tmpfiles": "exit 0\n",
-    "fail2ban-client": "exit 0\n",
+    # #1306: the apply reads the RUNNING sshd ignoreip back; a real fail2ban
+    # prints its list, so the stub must too (empty output = verify FAIL).
+    "fail2ban-client": ('case "$*" in "get sshd ignoreip") '
+                        'echo "127.0.0.0/8 100.64.0.0/10" ;; esac; exit 0\n'),
     "du": 'for a; do case "$a" in -*) ;; *) printf "0\\t%s\\n" "$a" ;; esac; done\n',
     "ionice": 'echo "ionice $*" >> "$LOG"; shift; shift; exec "$@"\n',
     # #1244: a real `logrotate --debug` names every log some read stanza rotates
