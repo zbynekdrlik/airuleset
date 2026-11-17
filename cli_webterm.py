@@ -52,6 +52,7 @@ import time
 from pathlib import Path
 
 import cli_aliases  # #592: the shared fleet target-alias derivation (stdlib-only)
+import cli_fleet  # #1341: pending/paused accounts (a zero-import data leaf)
 import cli_ssh_password  # #1236: the sshpass password FILE (stdlib-only)
 import cli_webterm_profiles as profiles  # #612: doména -> session set + auth realm
 from cli_tmux_revive import TMUX_REVIVE_SH  # #1256: revive before create
@@ -230,21 +231,32 @@ def webterm_inventory(profile=profiles.OWNER):
     fleet-derived path; on the controller that produced entries with
     ``identity=None`` (sshpass → ValueError) and legacy members
     (montalu7/8/stepan). Now routes to ``zbynek_inventory()`` — symmetric
-    with ``profile_inventory()`` in cli_webterm_profiles.py."""
-    if profile == profiles.DAVID:
-        return profiles.david_inventory()
-    if profile == profiles.MAREK:
-        return profiles.marek_inventory()
-    if profile == profiles.DOMINIKA:
-        return profiles.dominika_inventory()
-    if profile == profiles.TIMO:
-        return profiles.timo_inventory()
-    if profile == profiles.OWNER:
-        return profiles.zbynek_inventory()
+    with ``profile_inventory()`` in cli_webterm_profiles.py.
+
+    #1341: an entry whose account is ``pending``/``paused`` in REMOTE_HOSTS is
+    dropped here, so no tab, connect allowlist or U collector ever ssh-es a
+    missing or frozen account (the leaves never read REMOTE_HOSTS)."""
+    leaves = {profiles.DAVID: profiles.david_inventory,
+              profiles.MAREK: profiles.marek_inventory,
+              profiles.DOMINIKA: profiles.dominika_inventory,
+              profiles.TIMO: profiles.timo_inventory,
+              profiles.OWNER: profiles.zbynek_inventory}
+    if profile in leaves:
+        return without_unreachable(leaves[profile]())
     raise ValueError(
         "unknown webterm profile %r — every known profile routes to a "
         "declarative *_inventory() leaf; a silent fleet-derived fallback "
         "would re-introduce the #870 incident" % (profile,))
+
+
+def without_unreachable(entries):
+    """``entries`` minus every ssh target whose ``(user, host)`` is pending or
+    paused in REMOTE_HOSTS (``cli_fleet.unreachable_accounts``); a local entry
+    always stays. #1341: ssh to a not-yet-created account gets the controller
+    banned by subdev fail2ban."""
+    skip = cli_fleet.unreachable_accounts()
+    return [e for e in entries
+            if e.get("local") or (e.get("user"), e.get("host")) not in skip]
 
 
 # --------------------------------------------------------------------------- #
@@ -1004,7 +1016,8 @@ def cmd_webterm_u_collect(argv):
                              "(fail-closed, #703)\n" % lane_profile)
             return 0
     try:                                    # #677 review 🔵: the whole collect is
-        entries = (profiles.u_tenant_entries(lane_profile) if lane_profile
+        entries = (without_unreachable(profiles.u_tenant_entries(lane_profile))
+                   if lane_profile
                    else _owner_u_entries())  # guarded, so "always 0" holds even
         u = collect_fleet_u(entries)         # for a malformed entry.
     except Exception as e:

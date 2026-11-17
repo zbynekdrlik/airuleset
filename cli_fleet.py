@@ -542,6 +542,18 @@ def paused_reason(remote):
     return remote.get("paused") or ""
 
 
+def unreachable_accounts():
+    """`(user, host)` of every REMOTE_HOSTS entry that is `pending` (the OS
+    account does not exist yet) or `paused` (#851, never contacted) -- the
+    accounts NO ssh path may touch. Read from `REMOTE_HOSTS` at call time so a
+    test's patch is honoured. Consumers that hold their own declarative target
+    list (the webterm inventories) filter through this (#1341: pending
+    david5-8 tabs made the U collectors ssh missing users, fail2ban banned the
+    controller)."""
+    return frozenset((r.get("user"), r.get("host")) for r in REMOTE_HOSTS
+                     if r.get("pending") or is_paused(r))
+
+
 def _box_self_entry(user, hostname=None):
     """The REMOTE_HOSTS entry for the box THIS process runs on -- matched by
     unix account ``user`` AND this box's own name (#1032). Sibling of
