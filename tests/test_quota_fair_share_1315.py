@@ -109,6 +109,27 @@ class TestFairShareCeiling(unittest.TestCase):
                                         (20 * G * 120 + 99) // 100))
             self.assertEqual(lim["b"], (8 * G, 10 * G))
 
+    def test_many_accounts_still_get_a_working_room(self):
+        """subdev 17.11.: 15 stream homes on 51G free gave each ~1.7G, so the
+        busiest (david3, 37.7G) hit its quota while the disk was at 65 %. Each
+        account gets at least min(5G, 10 % of free) on top of its usage."""
+        used = {"u%02d" % i: 1 * G for i in range(14)}
+        used["david3"] = 37 * G
+        avail = 51 * G
+        with tempfile.TemporaryDirectory() as td:
+            r, lim = self._setup(td, used, avail)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertEqual(lim["david3"][1], 37 * G + 5 * G)
+
+    def test_the_room_floor_shrinks_with_little_free_space(self):
+        """At 6G free the floor is 10 % (0.6G), never more than the disk can hold."""
+        used = {"u%02d" % i: 20 * G for i in range(15)}
+        avail = 6 * G
+        with tempfile.TemporaryDirectory() as td:
+            r, lim = self._setup(td, used, avail)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertEqual(lim["u00"][1], 20 * G + avail * 10 // 100)
+
     def test_only_shared_stream_homes_count(self):
         """A home without the shared-stream marker is neither capped nor a
         share holder (root's / a workstation account's space is not quota'd)."""
