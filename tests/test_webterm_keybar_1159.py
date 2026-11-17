@@ -52,15 +52,15 @@ REPO = Path(__file__).resolve().parent.parent
 
 # The owner-facing key order + labels (design issuecomment-5844841632).
 KEY_ORDER = ["esc", "tab", "up", "down", "left", "right", "ctrlc",
-             "sessions", "windows", "prevwin", "nextwin", "scroll"]
+             "sessions", "windows", "prevwin", "nextwin"]
 LABELS = ["Esc", "Tab", "\u2191", "\u2193", "\u2190", "\u2192", "^C",
-          "sessions", "windows", "\u25c0 win", "win \u25b6", "scroll"]
+          "sessions", "windows", "\u25c0 win", "win \u25b6"]
 # Exact bytes. Arrows: (normal cursor mode CSI, application cursor mode SS3).
 ARROWS = {"up": ("\x1b[A", "\x1bOA"), "down": ("\x1b[B", "\x1bOB"),
           "right": ("\x1b[C", "\x1bOC"), "left": ("\x1b[D", "\x1bOD")}
 PLAIN = {"esc": "\x1b", "tab": "\t", "ctrlc": "\x03",
          "sessions": "\x02s", "windows": "\x02w", "prevwin": "\x02p",
-         "nextwin": "\x02n", "scroll": "\x02["}
+         "nextwin": "\x02n"}
 
 
 def expected(k, app_cursor=False):

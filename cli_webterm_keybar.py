@@ -24,6 +24,12 @@ template carries two sentinels for it — `@@KEYBAR_CSS@@` inside its head
 `<style>` and `@@KEYBAR_HTML@@` after its main `<script>` (the bar's script
 reads the main script's `made` / `current` / `focusTerminal`) — substituted in
 the same single pass by `cli_webterm.render_dashboard_html`.
+
+#1287 round 3: the same script carries `keybarAttachSwipe`, which the main
+script's `applyFixedGrid` attaches to every terminal (a guarded forward
+reference): on a touch-only device a vertical swipe becomes mouse-wheel events,
+so Claude Code's fullscreen view scrolls as under the PC wheel. The tmux
+copy-mode `scroll` key was removed: a fullscreen Claude pane has no tmux history.
 """
 
 # #1164: the ONE touch-only gate (CSS + keybarFitViewport). A coarse primary
@@ -67,7 +73,6 @@ KEYBAR_HTML = r"""<div id="keybar">
 <button type="button" data-k="windows">windows</button>
 <button type="button" data-k="prevwin" aria-label="previous window">&#9664; win</button>
 <button type="button" data-k="nextwin" aria-label="next window">win &#9654;</button>
-<button type="button" data-k="scroll">scroll</button>
 </div>
 <script>
 const KEYBAR_MEDIA = '""" + KEYBAR_MEDIA + r"""';
@@ -75,7 +80,7 @@ const KEYBAR_MEDIA = '""" + KEYBAR_MEDIA + r"""';
 // the tmux group is the prefix Ctrl+B (0x02) + the command key.
 const KEYBAR_KEYS = {
   esc: '\x1b', tab: '\x09', ctrlc: '\x03',
-  sessions: '\x02s', windows: '\x02w', prevwin: '\x02p', nextwin: '\x02n', scroll: '\x02[',
+  sessions: '\x02s', windows: '\x02w', prevwin: '\x02p', nextwin: '\x02n',
 };
 // Arrows: the final byte only; the introducer depends on the cursor mode.
 const KEYBAR_ARROWS = { up: 'A', down: 'B', right: 'C', left: 'D' };
@@ -117,6 +122,66 @@ function keybarFitViewport() {
   const h = Math.round(vv.height);
   const keyboard = touch && Math.abs(vv.scale - 1) < 0.01 && h < window.innerHeight - 1;
   document.body.style.height = keyboard ? h + 'px' : '';
+}
+// #1287 round 3: a one-finger vertical swipe over a terminal scrolls like the PC
+// mouse wheel. Claude runs fullscreen (alternate screen, no tmux history) and
+// turns on SGR mouse tracking; a wheel over the xterm becomes `ESC[<64/65;x;yM`,
+// tmux `mouse on` hands it to Claude and Claude scrolls its own view (measured).
+// So each row of finger travel dispatches one WheelEvent at the finger's point
+// and xterm encodes it exactly as for a real wheel (its own arrow-key fallback
+// too, for an app without mouse mode). Finger down = older content = wheel up.
+// A tap, a long press (selection), a sideways move and two fingers are left alone.
+const KEYBAR_SWIPE_SLOP = 10;        // px of vertical travel before it is a swipe
+const KEYBAR_SWIPE_HOLD_MS = 400;    // standing this long before moving is a long press
+const KEYBAR_SWIPE_STILL = 3;        // px: a move this small is still standing (finger jitter)
+const KEYBAR_SWIPE_MAX = 30;         // wheel ticks per move event at most
+function keybarRowHeight(win) {      // child-document px; the parent transform never enters
+  const sc = win.document.querySelector('.xterm-screen');
+  const h = sc && win.term.rows ? sc.getBoundingClientRect().height / win.term.rows : 0;
+  return h > 0 ? h : 16;
+}
+function keybarWheel(win, x, y, up) {
+  const WE = win.WheelEvent || WheelEvent;    // the iframe's own realm
+  let t = win.document.elementFromPoint(x, y);   // the touch keeps its target, the point may leave the xterm
+  if (!t || !win.term.element.contains(t)) t = win.document.querySelector('.xterm-screen') || win.term.element;
+  t.dispatchEvent(new WE('wheel', { bubbles: true, cancelable: true, view: win,
+    clientX: x, clientY: y, deltaMode: 1, deltaY: up ? -1 : 1 }));
+}
+function keybarAttachSwipe(win) {    // idempotent: once per terminal, touch-only
+  const term = win && win.term, el = term && term.element;
+  if (!el || !el.addEventListener || term.__wtSwipe) return;
+  if (!(window.matchMedia && window.matchMedia(KEYBAR_MEDIA).matches)) return;
+  term.__wtSwipe = true;
+  let s = null;
+  el.addEventListener('touchstart', (e) => {
+    const p = e.touches.length === 1 ? e.touches[0] : null;
+    s = p ? { x: p.clientX, y: p.clientY, lx: p.clientX, ly: p.clientY, at: Date.now(), on: false } : null;
+  }, { capture: true, passive: true });
+  el.addEventListener('touchmove', (e) => {
+    if (!s || e.touches.length !== 1) { s = null; return; }
+    const p = e.touches[0];
+    if (!s.on) {
+      const dx = Math.abs(p.clientX - s.x), dy = Math.abs(p.clientY - s.y);
+      if (dx >= KEYBAR_SWIPE_SLOP && dx >= dy) { s = null; return; }   // sideways: not ours
+      if (Date.now() - s.at > KEYBAR_SWIPE_HOLD_MS) { s = null; return; }   // stood still: a long press
+      if (Math.abs(p.clientX - s.lx) + Math.abs(p.clientY - s.ly) >= KEYBAR_SWIPE_STILL) {
+        s.lx = p.clientX; s.ly = p.clientY; s.at = Date.now();             // a slow drag keeps moving
+      }
+      if (dy < KEYBAR_SWIPE_SLOP) return;
+      s.on = true;
+    }
+    if (e.cancelable) e.preventDefault();   // no page pan, no xterm touch scroll (never a warning)
+    e.stopPropagation();
+    try {
+      const h = keybarRowHeight(win), n = Math.trunc((p.clientY - s.y) / h);
+      if (!n) return;
+      s.y += n * h;                   // past the cap the rest of this move is dropped, never queued
+      for (let i = 0; i < Math.min(Math.abs(n), KEYBAR_SWIPE_MAX); i++) keybarWheel(win, p.clientX, p.clientY, n > 0);
+    } catch (err) { /* iframe realm gone: drop the swipe */ }
+  }, { capture: true, passive: false });
+  const end = () => { s = null; };
+  el.addEventListener('touchend', end, { capture: true, passive: true });
+  el.addEventListener('touchcancel', end, { capture: true, passive: true });
 }
 (function () {
   const bar = document.getElementById('keybar');

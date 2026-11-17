@@ -774,7 +774,7 @@ function applyFixedGrid(f) {                     // poll for window.term, attach
   const poll = () => {
     themeTerminal(win.term);                     // #643: Campbell palette + font, once term exists
     attachClipboard(win);                        // #671: OSC 52 + copy-on-select -> browser clipboard
-    attachBlockSelect(win);                      // #1016: plain Alt+drag -> column (block) selection
+    attachBlockSelect(win); if (typeof keybarAttachSwipe === 'function') keybarAttachSwipe(win);  // #1016 Alt+drag block select; #1287 phone swipe = wheel
     watchShown(f);                               // #1164: the show signal
     if (fitShown(f) && f.__wtShowIO !== undefined) {
       if (!win.__wtResize) {                       // re-fit + re-fill on window resize
