@@ -67,10 +67,45 @@ class TestPendingAccountLeavesWebterm(unittest.TestCase):
         self.assertTrue(seen)
         self.assertNotIn("david8", _users(seen))
 
-    def test_live_accounts_are_untouched(self):
-        # No flag anywhere for david1-8 today: the filter is a no-op.
-        inv = w.webterm_inventory(p.OWNER)
-        self.assertEqual(inv, p.zbynek_inventory())
+    def test_unflagged_accounts_are_untouched(self):
+        # Review: hermetic, a REMOTE_HOSTS copy with every flag stripped.
+        clean = [{k: v for k, v in h.items() if k not in ("pending", "paused")}
+                 for h in cli_fleet.REMOTE_HOSTS]
+        with mock.patch.object(cli_fleet, "REMOTE_HOSTS", clean):
+            self.assertEqual(w.webterm_inventory(p.OWNER), p.zbynek_inventory())
+
+    def test_lane_on_subdev_uses_loopback_and_still_filters(self):
+        # Review: a lane hosted ON subdev reaches its accounts at 127.0.0.1,
+        # never the REMOTE_HOSTS tailscale address.
+        lanes = dict(p.LANE_HOST, david="subdev")
+        with mock.patch.object(p, "LANE_HOST", lanes), \
+                mock.patch.object(cli_fleet, "REMOTE_HOSTS", _flagged("david5", pending=True)):
+            inv = w.webterm_inventory(p.DAVID)
+        self.assertEqual({e["host"] for e in inv if e.get("user") == "david6"},
+                         {p.SUBDEV_LOCAL})
+        self.assertNotIn("david5", _users(inv))
+
+
+class TestOtherFleetLoopsSkipPending(unittest.TestCase):
+    """Review: the hand-run fleet loops that walk REMOTE_HOSTS themselves."""
+
+    def test_nudges_fleet_never_runs_on_a_pending_account(self):
+        import airuleset
+        seen = []
+        with mock.patch.object(cli_fleet, "REMOTE_HOSTS", _flagged("david5", pending=True)):
+            airuleset._nudges_fleet("status", runner=lambda e: seen.append(e) or ("", 1))
+        self.assertTrue(seen)
+        self.assertNotIn("david5", _users(seen))
+
+    def test_key_rotation_never_targets_a_pending_or_paused_account(self):
+        import cli_key_rotation
+        hosts = _flagged("david5", pending=True)
+        [h for h in hosts if h.get("user") == "david6"][0]["paused"] = "test"
+        with mock.patch.object(cli_fleet, "REMOTE_HOSTS", hosts):
+            users = {e.get("user") for _k, e, _v in cli_key_rotation._rotation_targets()}
+        self.assertIn("david7", users)
+        self.assertNotIn("david5", users)
+        self.assertNotIn("david6", users)
 
 
 if __name__ == "__main__":
