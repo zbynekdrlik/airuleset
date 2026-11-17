@@ -34,3 +34,9 @@ paths:
 ### stream slice caps (#1321)
 
 - **A managed systemd drop-in can lose to a foreign one that sorts later, and a read-back right after `set-property` cannot see it.** subdev's hand-made gatekeeper `user-.slice.d/50-fairness.conf` (8.8.2026) sorted after `50-airuleset-resource-guard.conf`, so every later `daemon-reload` restored CPUQuota 300 %, CPUWeight 100, TasksMax 8192: the managed CPU/task caps were never live, while the apply's verify (taken right after the runtime `set-property`) reported them as applied. Check `systemctl show -p DropInPaths user-<uid>.slice` for foreign files before trusting a verify. The apply now removes that file by its line-1 marker (`cli_resource_guards_conflicts.py`, backup in /root). Size a per-slice cap from `memory.peak`, `memory.events high` and `pids.peak` of the busiest stream, not from the box total: 12 % (~1.9 GB) sat below one Claude session with subagents.
+
+### fail2ban hardening precedence (#1306)
+
+- **A `jail.d/*.conf` loses to any hand-made `jail.local`.** fail2ban reads jail.conf → jail.d/*.conf → jail.local → jail.d/*.local. subdev's jail.local overrode the #841 `[DEFAULT] ignoreip`, so the controller got banned 3× on 16.11. The managed fix is `jail.d/50-airuleset-hardening.local` (`cli_fail2ban`). It appends PER JAIL with `ignoreip = %(known/ignoreip)s …`, which keeps the hand-made entries. Never put `known/` in `[DEFAULT]`: fail2ban 1.0.2 then refuses the WHOLE config ("Recursion limit exceeded").
+- **Measure fail2ban precedence offline, never from memory.** Copy `/etc/fail2ban` to a scratch dir, add the candidate files, run `fail2ban-client -c <dir> -d | grep addignoreip` (the effective per-jail list). `-c <dir> -t` exits 255 on a refused config.
+- **The apply runs `-t` before `reload`.** A refused config removes the .local and fails the apply. The read-back requires the tailnet CIDR in the RUNNING `fail2ban-client get sshd ignoreip`, because deployed ≠ effective.
