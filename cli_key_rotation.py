@@ -139,7 +139,7 @@ def _rotation_targets(include_dev1: bool = False,
     seen = set()
     for entry in cli_fleet.REMOTE_HOSTS:
         hk = _host_key(entry)
-        if hk in seen:
+        if entry.get("pending") or hk in seen:   # #1341: no account, no key yet
             continue
         seen.add(hk)
         # dev1 exclusion

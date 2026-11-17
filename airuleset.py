@@ -10814,8 +10814,8 @@ def _nudges_fleet(verb, runner=None):
     runner = runner or _default_runner
     results = []
     for entry in cli_fleet.REMOTE_HOSTS:
-        if cli_fleet.is_paused(entry):
-            continue          # paused (e.g. simap1) — never ssh'd
+        if cli_fleet.is_unreachable(entry):
+            continue          # paused (e.g. simap1) or pending — never ssh'd
         name = entry.get("name", entry.get("host", "unknown"))
         stdout, rc = runner(entry)
         if rc != 0:

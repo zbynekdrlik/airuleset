@@ -25,9 +25,9 @@ set -euo pipefail
 # from ITS OWN box as root, via a locally-deployed ~/.ssh/config `Host
 # subdev` stanza — not something dev1 ever pushes to.
 #   - marek@<subdev>     — ONLY with -i .../gatekeeper_access_ed25519.
-#   - david[1234]@<subdev> — ONLY with -i .../gatekeeper_access_ed25519
+#   - david[1-8]@<subdev> — ONLY with -i .../gatekeeper_access_ed25519
 #                          (david1 is the renamed base (#537, was `david` —
-#                          the OS account `david` is GONE), david2/3/4 are its
+#                          the OS account `david` is GONE), david2-8 are its
 #                          family, airuleset#326 — three MORE parallel david
 #                          streams, additional capacity for the same external
 #                          developer, so they share the same operator
@@ -49,9 +49,9 @@ set -euo pipefail
 # BLOCK everything else, in particular:
 #   - no user at all UNLESS the local ~/.ssh/config resolves it to the
 #     sanctioned root+subdev_admin case above.
-#   - any user other than marek/david[1234]/simap1/miva1/dominika/root
+#   - any user other than marek/david[1-8]/simap1/miva1/dominika/root
 #     (newlevel, gatekeeper,...).
-#   - marek/david[1234]/simap1/miva1 WITHOUT the gatekeeper_access_ed25519 identity.
+#   - marek/david[1-8]/simap1/miva1 WITHOUT the gatekeeper_access_ed25519 identity.
 #   - root WITHOUT the subdev_admin identity.
 #
 # A non-subdev target (dev2, gatekeeper, anything else) is completely
@@ -159,6 +159,10 @@ _SUBDEV_ACCOUNTS_HARDCODED = {
     "david2": "gatekeeper_access_ed25519",
     "david3": "gatekeeper_access_ed25519",
     "david4": "gatekeeper_access_ed25519",
+    "david5": "gatekeeper_access_ed25519",
+    "david6": "gatekeeper_access_ed25519",
+    "david7": "gatekeeper_access_ed25519",
+    "david8": "gatekeeper_access_ed25519",
     "dominika": "gatekeeper_access_ed25519",
     "simap1": "gatekeeper_access_ed25519",
     "miva1": "gatekeeper_access_ed25519",
@@ -412,7 +416,7 @@ def check_target(user, host, tokens, label):
     # #869: derive the allow-list from the conf (or hardcoded fallback)
     if user not in _SUBDEV_ACCOUNTS:
         return "%s as unauthorized user '%s'@subdev" % (label, user)
-    # Every subdev account requires the gatekeeper key (marek/david1-4/
+    # Every subdev account requires the gatekeeper key (marek/david1-8/
     # dominika/simap1/miva1); the default-key montalu family left with #1306.
     if has_gatekeeper_key(tokens):
         return None
@@ -490,7 +494,7 @@ if [ "$RC" -eq 2 ]; then
     echo "  Allowed identities (per airuleset.py REMOTE_HOSTS — the single" >&2
     echo "  source of truth, read it before any ad-hoc subdev ssh):" >&2
     echo "    marek@subdev  -i ~/.secrets/gatekeeper_access_ed25519" >&2
-    echo "    david[1234]@subdev  -i ~/.secrets/gatekeeper_access_ed25519" >&2
+    echo "    david[1-8]@subdev  -i ~/.secrets/gatekeeper_access_ed25519" >&2
     echo "    simap1@subdev  -i ~/.secrets/gatekeeper_access_ed25519" >&2
     echo "    miva1@subdev  -i ~/.secrets/gatekeeper_access_ed25519" >&2
     echo "    root@subdev   -i ~/.ssh/subdev_admin (gatekeeper VPS only," >&2

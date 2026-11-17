@@ -153,8 +153,8 @@ def _deployable_hosts(hosts=None):
     per-run `--skip` invocation option. EVERY ssh path that iterates
     REMOTE_HOSTS — `_deploy_to_all_remotes()`, `provision_subdev_soniox_key()`,
     the hourly fleet-burn collector (`_watchdog_fleet_fetch`, watchdog job
-    16), `cmd_burn --host`, and `webterm_inventory()` (cli_webterm.py) —
-    filters through here, so a pending OR paused target is NEVER contacted:
+    16), `cmd_burn --host` — filters here (`webterm_inventory()` via `cli_fleet.
+    unreachable_accounts`, #1341), so a pending OR paused target is NEVER contacted:
     a password/pubkey attempt against a non-existent (pending) or
     deliberately-off-limits (paused) account is exactly the fail2ban/
     unwanted-heal risk both flags exist to prevent (an identity-less host
@@ -176,8 +176,7 @@ def _deployable_hosts(hosts=None):
     # ssh dev1->dev1 with the controller-only push identity.
     me = platform.node()
     return [h for h in src
-            if not h.get("pending") and not cli_fleet.is_paused(h)
-            and h.get("name") != me]
+            if not cli_fleet.is_unreachable(h) and h.get("name") != me]
 
 
 def provision_subdev_soniox_key(hosts=None, run=None, source: Path = None,

@@ -52,6 +52,7 @@ import time
 from pathlib import Path
 
 import cli_aliases  # #592: the shared fleet target-alias derivation (stdlib-only)
+import cli_fleet  # #1341: pending/paused accounts (a zero-import data leaf)
 import cli_ssh_password  # #1236: the sshpass password FILE (stdlib-only)
 import cli_webterm_profiles as profiles  # #612: doména -> session set + auth realm
 from cli_tmux_revive import TMUX_REVIVE_SH  # #1256: revive before create
@@ -230,21 +231,34 @@ def webterm_inventory(profile=profiles.OWNER):
     fleet-derived path; on the controller that produced entries with
     ``identity=None`` (sshpass → ValueError) and legacy members
     (montalu7/8/stepan). Now routes to ``zbynek_inventory()`` — symmetric
-    with ``profile_inventory()`` in cli_webterm_profiles.py."""
-    if profile == profiles.DAVID:
-        return profiles.david_inventory()
-    if profile == profiles.MAREK:
-        return profiles.marek_inventory()
-    if profile == profiles.DOMINIKA:
-        return profiles.dominika_inventory()
-    if profile == profiles.TIMO:
-        return profiles.timo_inventory()
-    if profile == profiles.OWNER:
-        return profiles.zbynek_inventory()
+    with ``profile_inventory()`` in cli_webterm_profiles.py.
+
+    #1341: an entry whose account is ``pending``/``paused`` in REMOTE_HOSTS is
+    dropped here, so no tab, connect allowlist or U collector ever ssh-es a
+    missing or frozen account (the leaves never read REMOTE_HOSTS)."""
+    leaves = {profiles.DAVID: profiles.david_inventory,
+              profiles.MAREK: profiles.marek_inventory,
+              profiles.DOMINIKA: profiles.dominika_inventory,
+              profiles.TIMO: profiles.timo_inventory,
+              profiles.OWNER: profiles.zbynek_inventory}
+    if profile in leaves:
+        return without_unreachable(leaves[profile]())
     raise ValueError(
         "unknown webterm profile %r — every known profile routes to a "
         "declarative *_inventory() leaf; a silent fleet-derived fallback "
         "would re-introduce the #870 incident" % (profile,))
+
+
+def without_unreachable(entries):
+    """``entries`` minus every ssh target whose ``(user, host)`` is pending or
+    paused in REMOTE_HOSTS (``cli_fleet.unreachable_accounts``); a local entry
+    always stays. #1341: ssh to a not-yet-created account gets the controller
+    banned by subdev fail2ban. A lane hosted ON subdev reaches its accounts
+    at loopback, so ``SUBDEV_LOCAL`` is matched as the subdev address."""
+    skip = cli_fleet.unreachable_accounts()
+    alias = {profiles.SUBDEV_LOCAL: profiles.SUBDEV_TAILSCALE_HOST}
+    return [e for e in entries if e.get("local") or (
+        e.get("user"), alias.get(e.get("host"), e.get("host"))) not in skip]
 
 
 # --------------------------------------------------------------------------- #
@@ -689,13 +703,14 @@ def _tab_order_key(alias):
 # owner gateway (WEBTERM_LOGIN_USER, zbynek.newlevel.media), "david"/"marek" for
 # theirs. A human with no list, or a render with human=None (the david gateway
 # path, whose scoped cli_webterm_profiles.david_inventory is ALREADY exactly
-# david1-4 + codex-bridge), is not filtered here. The ids are the sanitized fleet
+# david1-8 + codex-bridge), is not filtered here. The ids are the sanitized fleet
 # inventory ids (_sanitize_id: marek@subdev -> marek-subdev).
 WEBTERM_DASHBOARD_TABS = {
     # zbynek.newlevel.media -- owner ROZHODNUTÉ 2026-08-24, EXACT order (verbatim
     # "dev1, dev2, gk, m1..m6, d1, d2, miva, sb"); david3 (d3) added after d2 per
     # owner request 2026-08-26 (#719); david4 (d4) added after d3 per owner
-    # request 2026-09-07 (#934); ar (controller local tab) added as first entry
+    # request 2026-09-07 (#934); david5-8 (d5..d8) after d4 per owner request
+    # 2026-11-16 (#1341); ar (controller local tab) added as first entry
     # per #938 (was in zbynek_inventory since #870 F4a but missing here).
     # EXCLUDES montalu7/8, simap1, marek@subdev, stepan@forestshop-dev,
     # admin@forestshop-dev. #1302 (owner 11.11.2026): montalu1-6 (m1..m6)
@@ -704,6 +719,7 @@ WEBTERM_DASHBOARD_TABS = {
         "ar", "claudy", "fohmixer", "varos", "wall-bridge", "songplayer",  # #1220, #1267
         "dstack", "dasio", "iemmixer", "dcontroller", "dsync", "intercom", "obs", "shading", "vstack", "nlch-finances", "tuke", "mikrotik-pz", "devbridge", "fleet-backup", "dev1", "dev2", "gatekeeper",  # #1270, #1295, #1296, #1310, #1320, #1339
         "david1-subdev", "david2-subdev", "david3-subdev", "david4-subdev",
+        "david5-subdev", "david6-subdev", "david7-subdev", "david8-subdev",  # #1341
         "miva1-subdev", "spinbike-vps",
     ],
     # marek.newlevel.media -- Marek's OBSERVER set (#882 scope correction
@@ -718,15 +734,17 @@ WEBTERM_DASHBOARD_TABS = {
     # (its Claude ran in newlevel@dev2's marek group before the migration).
     "marek": [
         "miva1-subdev", "david3-subdev",  # david3: owner 11.11.2026
+        "david5-subdev", "david6-subdev", "david7-subdev", "david8-subdev",  # #1341, owner 16.11.2026
         "ar", "claudy", "fohmixer", "varos", "wall-bridge", "songplayer",  # #1267
         "dstack", "dasio", "iemmixer", "dcontroller", "dsync", "intercom", "obs", "shading", "vstack", "nlch-finances", "tuke", "mikrotik-pz", "devbridge", "fleet-backup", "dev1", "dev2", "gatekeeper", "forestshop",  # #1270, #1295, #1296, #1310, #1320, #1339
     ],
     # david.newlevel.media -- David's working accounts. The david GATEWAY renders
     # its own physically-scoped inventory (cli_webterm_profiles.david_inventory,
-    # ids david1..4 + codex-bridge) and does NOT consume this list; this records
+    # ids david1..8 + codex-bridge) and does NOT consume this list; this records
     # the same per-domain policy declaratively (and is what a full-fleet render
     # for "david" would filter to -- exercised by the tests).
-    "david": ["david1-subdev", "david2-subdev", "david3-subdev", "david4-subdev"],
+    "david": ["david1-subdev", "david2-subdev", "david3-subdev", "david4-subdev",
+              "david5-subdev", "david6-subdev", "david7-subdev", "david8-subdev"],  # #1341
     # dominika.newlevel.media -- dominika's OBSERVE set (owner request 2026-09-04,
     # #867): ONE tab, miva1 (miva); her montalu5 tab left with the deleted
     # account (#1306). The id is the DOMINIKA LANE inventory id
@@ -1000,7 +1018,8 @@ def cmd_webterm_u_collect(argv):
                              "(fail-closed, #703)\n" % lane_profile)
             return 0
     try:                                    # #677 review 🔵: the whole collect is
-        entries = (profiles.u_tenant_entries(lane_profile) if lane_profile
+        entries = (without_unreachable(profiles.u_tenant_entries(lane_profile))
+                   if lane_profile
                    else _owner_u_entries())  # guarded, so "always 0" holds even
         u = collect_fleet_u(entries)         # for a malformed entry.
     except Exception as e:

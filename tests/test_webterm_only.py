@@ -85,7 +85,7 @@ class TestWebtermOnlyRegistry(unittest.TestCase):
     def test_expected_members(self):
         self.assertEqual(
             WEBTERM_ONLY_USERS,
-            frozenset({"david1", "david2", "david3", "david4", "dominika"}),
+            frozenset({"david1", "david2", "david3", "david4", "david5", "david6", "david7", "david8", "dominika"}),
         )
 
     def test_each_member_has_gatekeeper_identity(self):
@@ -462,7 +462,7 @@ class TestSubdevAccountsConf(unittest.TestCase):
             if user.startswith("montalu"):
                 self.assertEqual(key_basename, "default",
                                  "%s should have default key" % user)
-            elif user in ("marek", "david1", "david2", "david3", "david4",
+            elif user in ("marek", "david1", "david2", "david3", "david4", "david5", "david6", "david7", "david8",
                           "dominika", "simap1", "miva1"):
                 self.assertEqual(key_basename, "gatekeeper_access_ed25519",
                                  "%s should have gatekeeper key" % user)
