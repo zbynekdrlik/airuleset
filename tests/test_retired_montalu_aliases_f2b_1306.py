@@ -124,6 +124,23 @@ class TestFail2banControllerLock(unittest.TestCase):
         self.assertLess(block.index(g.FAIL2BAN_JAIL_LOCAL_PATH),
                         block.index("fail2ban-client reload"))
 
+    def test_config_test_gates_the_reload(self):
+        # a config fail2ban refuses must never reach a reload (and the next
+        # restart would then leave sshd unprotected): -t first, a failure
+        # removes the .local, skips the reload and fails the read-back.
+        s = g.build_apply_script()
+        block = s[s.index("if command -v fail2ban-client"):]
+        t = block.index("fail2ban-client -t")
+        self.assertLess(t, block.index("fail2ban-client reload"))
+        self.assertIn("rm -f %s" % g.FAIL2BAN_JAIL_LOCAL_PATH, block[t:])
+        self.assertIn('if [ -n "$F2B_FAIL" ]; then fail=1; fi', s)
+
+    def test_readback_checks_the_effective_sshd_ignoreip(self):
+        s = g.build_apply_script()
+        rb = s[s.index("fail=0"):]
+        self.assertIn("fail2ban-client get sshd ignoreip", rb)
+        self.assertIn("*100.64.0.0/10*", rb)
+
     def test_not_in_the_always_install_list(self):
         paths = [p for (p, _c, _m) in g.guard_files()]
         self.assertNotIn(g.FAIL2BAN_JAIL_LOCAL_PATH, paths)
