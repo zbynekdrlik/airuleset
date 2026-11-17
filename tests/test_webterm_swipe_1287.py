@@ -163,9 +163,9 @@ class TestSwipeNode1287(unittest.TestCase):
 
     def test_finger_down_scrolls_back_one_wheel_tick_per_row(self):
         # 65 px of travel at 20 px per row = 3 ticks, wheel UP (older content),
-        # line mode, at the finger's point, bubbling like a real wheel
+        # line mode, at the finger's point when each tick was earned, bubbling
         self.assertEqual(self.out["down"]["wheels"],
-                         [[-1, 1, 101, 165, True]] * 3)
+                         [[-1, 1, 101, 130, True]] + [[-1, 1, 101, 165, True]] * 2)
         self.assertEqual(self.out["down"]["prevented"], [1, 1])
 
     def test_finger_up_scrolls_forward(self):
