@@ -417,6 +417,16 @@ SERVICE_ACCOUNTS = {
         "project_dir": "devel/fleet-backup", "tmux_session": "fleet-backup",
         "webterm_sessions": {h: {"preferred": "fleet-backup", "start_dir_chain": ["devel/fleet-backup"]} for h in ("zbynek", "marek")},
     },
+    # #1363 (owner 18.11.): the Companion module updater (bkshading-simple deploys to
+    # the SNV and PP Companions) leaves `newlevel`; only it holds the rigs' root pass.
+    "companion-updater": {
+        "host": "dev1", "sudo": False,
+        "repo": "zbynekdrlik/companion-updater",   # public
+        "github_app": True, "repo_secrets": [],
+        "secrets": ["companion-pass"],   # COMPANION_PASS for module/deploy.sh, via the vault
+        "project_dir": "devel/companion-updater", "tmux_session": "companion-updater",
+        "webterm_sessions": {h: {"preferred": "companion-updater", "start_dir_chain": ["devel/companion-updater"]} for h in ("zbynek", "marek")},
+    },
     "iemmixer": {
         "host": "dev1",
         "sudo": False,
