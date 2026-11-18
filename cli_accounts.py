@@ -47,7 +47,7 @@ LEGACY_FREEZE_DATE = "2026-09-29"
 # declared project account: the 24 `newlevel` rows + odoo-erp in `gatekeeper`).
 # It must EQUAL the live count (test-locked), so a migration lowers it in the
 # same change; raising it is a visible, reviewable edit that the freeze forbids.
-LEGACY_CEILING = 20
+LEGACY_CEILING = 21  # +1 18.11.2026: companion-updater (pre-freeze, never registered) — #1363 migrates it and lowers this back
 
 # `--legacy-ok` must name the ticket that carries the migration bookkeeping:
 # `#N` or `owner/repo#N` (a bare number is ambiguous — refused).
