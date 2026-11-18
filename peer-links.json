@@ -1,5 +1,5 @@
 {
-  "_doc": "Peer channel allowlist (#1266). Per host: undirected pairs of projects-registry.json project names whose Claude sessions may message each other over the peer@airuleset channel, each with a required topic (#1270): the one subject that pair talks about, told to both sessions at every start. A pair not listed here is refused by both ends. Accounts named by a link get the shared-dir ACL, the plugin and the launcher --channels flag on that host. The owner names the links.",
+  "_doc": "Peer channel allowlist (#1266). Per host: undirected pairs of projects-registry.json project names whose Claude sessions may message each other over the peer@airuleset channel, each with a required topic (#1270): the one subject that pair talks about, told to both sessions at every start. A pair not listed here is refused by both ends. Accounts named by a link get the shared-dir ACL, the plugin and the launcher --channels flag on that host. The owner names the links. #1365: hosts.<host>.locals names more checkouts of one full fleet account without a registry row (gk and gk-infra in gatekeeper); a box whose hostname differs from its fleet name maps through peer_channel.FLEET_HOST.",
   "hosts": {
     "dev1": {
       "links": [
@@ -319,6 +319,27 @@
         "david1": {
           "account": "david1",
           "path": "~/devel/odoo/odoo-erp"
+        }
+      }
+    },
+    "gatekeeper": {
+      "links": [
+        [
+          "gatekeeper",
+          "gk-infra"
+        ]
+      ],
+      "topics": {
+        "gatekeeper|gk-infra": "infra findings from gk's review and release work (gate, CI, hand-off machinery breakage) go to gk-infra, which fixes them and reports the fix back"
+      },
+      "locals": {
+        "gatekeeper": {
+          "account": "gatekeeper",
+          "path": "~/devel/odoo/odoo-erp"
+        },
+        "gk-infra": {
+          "account": "gatekeeper",
+          "path": "~/devel/odoo/odoo-erp-infra"
         }
       }
     }
