@@ -88,6 +88,7 @@ _GENERATED_DROP_PORTS = {
     ("dev1", "mikrotik-pz"): 8908,   # #1310
     ("dev1", "devbridge"): 8909,   # #1320
     ("dev1", "fleet-backup"): 8910,   # #1339
+    ("dev1", "companion-updater"): 8915,   # #1363
     ("subdev", "david5"): 8911, ("subdev", "david6"): 8912,   # #1341 (ss -ltn: free)
     ("subdev", "david7"): 8913, ("subdev", "david8"): 8914,
 }

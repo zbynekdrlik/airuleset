@@ -210,6 +210,10 @@
         [
           "companion-updater",
           "shading"
+        ],
+        [
+          "airuleset",
+          "companion-updater"
         ]
       ],
       "topics": {
@@ -264,6 +268,7 @@
         "dstack|mikrotik": "one NIC per production PC (dstack #155): Dante VLAN 70 plus a LAN VLAN, CRS310 port tagging, .lan records to LAN addresses; dstack coordinates, mikrotik owns switch and router config",
         "camera-box|fohmixer": "the FOH mix and the camera-box rig: the FOH audio that reaches the stream and OBS, and tests or windows on the SNV show rig that touch the FOH mixer; a Dante question still goes to dstack",
         "airuleset|fleet-backup": "airuleset infra: accounts, permissions, peer links, tooling. Ask or report here; airuleset decides and a ticket alone wakes no session",
+        "airuleset|companion-updater": "airuleset infra: accounts, permissions, peer links, tooling. Ask or report here; airuleset decides and a ticket alone wakes no session",
         "companion-updater|shading": "the bkshading-simple Companion module: shading's Stream Deck camera-shading controls (aperture steps) and their deploy to the SNV and PP Companions"
       }
     },
