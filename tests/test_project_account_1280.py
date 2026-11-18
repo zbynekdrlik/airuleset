@@ -43,10 +43,12 @@ class TestDsyncAccount(unittest.TestCase):
         self.assertEqual(drop._GENERATED_DROP_PORTS[("dev1", "obs")], 8903)
         self.assertEqual(bootstrap.validate_account("obs", bootstrap.account_spec("obs")), [])
 
-    def test_shading_reaches_only_camera_box_and_airuleset(self):
+    def test_shading_reaches_only_its_named_peers(self):
+        # companion-updater added 18.11.2026 by owner decision (#1363)
         hosts = json.loads((ROOT / "peer-links.json").read_text(encoding="utf-8"))["hosts"]
         pairs = sorted(sorted(p) for p in hosts["dev1"]["links"] if "shading" in p)
-        self.assertEqual(pairs, [["airuleset", "shading"], ["camera-box", "shading"]])
+        self.assertEqual(pairs, [["airuleset", "shading"], ["camera-box", "shading"],
+                                 ["companion-updater", "shading"]])
         self.assertEqual(drop._GENERATED_DROP_PORTS[("dev1", "shading")], 8904)
         self.assertEqual(bootstrap.validate_account("shading", bootstrap.account_spec("shading")), [])
 
