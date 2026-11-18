@@ -214,6 +214,10 @@
         [
           "airuleset",
           "companion-updater"
+        ],
+        [
+          "camera-box",
+          "dcontroller"
         ]
       ],
       "topics": {
@@ -269,7 +273,8 @@
         "camera-box|fohmixer": "the FOH mix and the camera-box rig: the FOH audio that reaches the stream and OBS, and tests or windows on the SNV show rig that touch the FOH mixer; a Dante question still goes to dstack",
         "airuleset|fleet-backup": "airuleset infra: accounts, permissions, peer links, tooling. Ask or report here; airuleset decides and a ticket alone wakes no session",
         "airuleset|companion-updater": "airuleset infra: accounts, permissions, peer links, tooling. Ask or report here; airuleset decides and a ticket alone wakes no session",
-        "companion-updater|shading": "the bkshading-simple Companion module: shading's Stream Deck camera-shading controls (aperture steps) and their deploy to the SNV and PP Companions"
+        "companion-updater|shading": "the bkshading-simple Companion module: shading's Stream Deck camera-shading controls (aperture steps) and their deploy to the SNV and PP Companions",
+        "camera-box|dcontroller": "the Dante controller (dcontroller) on the companion/presenter PCs at SNV and PP: its install, its web UI, and how camera-box's PP rig work uses it (camera-box#1536, dstack#407)"
       }
     },
     "subdev": {
