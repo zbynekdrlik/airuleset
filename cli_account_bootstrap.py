@@ -331,7 +331,7 @@ SERVICE_ACCOUNTS = {
         "sudo": False,
         "repo": "zbynekdrlik/shading",   # public: camera-box pins it keyless
         "github_app": True, "repo_secrets": [],
-        "tools": ["rust-toolchain:1.98.1"],
+        "tools": ["rust-toolchain:1.98.1", "playwright:pinned/webkit"],   # #1369 (Safari review)
         "project_dir": "devel/shading",
         "tmux_session": "shading",
         "handover": "docs/HANDOVER.md",
