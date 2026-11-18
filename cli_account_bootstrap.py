@@ -270,7 +270,7 @@ SERVICE_ACCOUNTS = {
         "repo": "zbynekdrlik/dcontroller",   # public: site facts stay out of git
         "github_app": True, "repo_secrets": [],
         "tools": ["rust-toolchain:1.98.1", "rust-target:wasm32-unknown-unknown", "cargo:trunk",
-                  "playwright:1.64.1/chromium"], "secrets": ["cloudflared-dcontroller-token"],
+                  "playwright:1.64.1/chromium"], "secrets": ["cloudflared-dcontroller-token", "cloudflared-dcontroller-pp-token"],   # #1366
         "project_dir": "devel/dcontroller", "tmux_session": "dcontroller",
         "userns": True,   # #1337: E2E inside a private user+net namespace (dcontroller #95); dev1's sysctl stays 1
         "handover": "docs/HANDOVER.md",
