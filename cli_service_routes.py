@@ -33,14 +33,8 @@ CONTROLLER_SERVICE_ROUTES = (
      "name": "fleet-backup dashboard",
      "allowed_emails": ["drlik.zbynek@gmail.com"],
      "session_duration": DROP_ACCESS_SESSION},
-    # Vaultwarden restore copy on this box (rootless Podman under the bw account,
-    # #1290). Owner-only while it is a test copy. Native Bitwarden apps cannot
-    # pass Access, so the final bw.newlevel.media needs a route without it.
-    {"hostname": "bwnew.newlevel.media",
-     "origin": "http://127.0.0.1:8095",
-     "name": "Vaultwarden restore copy",
-     "allowed_emails": ["drlik.zbynek@gmail.com"],
-     "session_duration": DROP_ACCESS_SESSION},
+    # bwnew.newlevel.media (the #1290 restore copy) retired 18.11.2026 after
+    # the cutover: bw.newlevel.media is now PUBLIC_SERVICE_ROUTES.
 )
 
 _SERVICE_ROUTE_KEYS = ("hostname", "origin", "name", "allowed_emails",
