@@ -333,7 +333,18 @@ class TestPublishApp(unittest.TestCase):
         self.assertEqual(rc, 0, log)
         posted = [b for m, p, b in fake.writes if p.endswith("/policies")]
         self.assertEqual(len(posted), 1)
+        self.assertEqual(posted[0]["precedence"], 1)
         self.assertEqual([i["ip"]["ip"] for i in posted[0]["include"]], [SNV, PP])
+
+    def test_new_app_with_bypass_puts_allow_second_and_bypass_first(self):
+        fake = FakeCF(SOURCES)
+        rc, log = self._publish("shading.newlevel.media", fake, dry_run=False,
+                                venue_bypass=True)
+        self.assertEqual(rc, 0, log)
+        app = fake.writes[0][2]
+        self.assertEqual(app["policies"][0]["precedence"], 2)
+        posted = [b for m, p, b in fake.writes if p.endswith("/policies")]
+        self.assertEqual([b["precedence"] for b in posted], [1])
 
     def test_locally_managed_tunnel_is_refused_and_dns_never_runs(self):
         fake = FakeCF(SOURCES, tunnel_remote=False)

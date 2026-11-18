@@ -68,9 +68,11 @@ def validate(host, tunnel_id, origin, zone=ZONE):
     return None
 
 
-def access_payload(host):
+def access_payload(host, allow_precedence=1):
+    """The new app with its allow policy inline. With a venue bypass to follow,
+    the allow takes precedence 2 so the bypass gets 1 (like the live apps)."""
     allow = {"name": table.PUBLISH_ALLOW_POLICY_NAME, "decision": "allow",
-             "precedence": 1,
+             "precedence": allow_precedence,
              "include": [{"email": {"email": e}} for e in table.PUBLISH_ALLOWED_EMAILS]}
     return {"name": "app — %s" % host, "domain": host, "type": "self_hosted",
             "session_duration": table.PUBLISH_SESSION_DURATION,
@@ -108,7 +110,7 @@ def plan_ingress(ingress, rule):
 # Steps (each returns True on ok and prints its line)
 # --------------------------------------------------------------------------- #
 
-def step_access(client, host, *, dry_run, out):
+def step_access(client, host, *, dry_run, out, allow_precedence=1):
     app, (st, body) = client.find_app_by_domain(host)
     if st != 200:
         print("  [ERROR] access: cannot read Access apps (HTTP %s): %s"
@@ -127,7 +129,7 @@ def step_access(client, host, *, dry_run, out):
         print("  [would] access: create app %s (730h, allow %s)"
               % (host, ", ".join(table.PUBLISH_ALLOWED_EMAILS)), file=out)
         return True, None
-    st, body = client.create_app(access_payload(host))
+    st, body = client.create_app(access_payload(host, allow_precedence))
     if not wa._ok(st, body):
         print("  [ERROR] access: create app FAILED (HTTP %s): %s"
               % (st, wa._first_err(body)), file=out)
@@ -239,7 +241,8 @@ def publish(host, tunnel_id, origin, *, origin_server_name=None, venue_bypass=Fa
         return 2
     print("publish-app %s [%s]" % (host, "DRY-RUN (no writes)" if dry_run else "APPLY"),
           file=out)
-    ok, app = step_access(access_client, host, dry_run=dry_run, out=out)
+    ok, app = step_access(access_client, host, dry_run=dry_run, out=out,
+                          allow_precedence=2 if venue_bypass else 1)
     if ok and venue_bypass:
         ok = step_bypass(access_client, host, app, dry_run=dry_run, out=out)
     if ok:
