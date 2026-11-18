@@ -159,10 +159,12 @@ class TestChannelArmed(unittest.TestCase):
         p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"] + list(extra))
         self.addCleanup(p.wait)
         self.addCleanup(p.kill)      # LIFO: kill first, then reap
-        # /proc/<pid>/cmdline reads empty for a moment right after exec; a real
+        # /proc/<pid>/cmdline reads empty, or still the forking parent's (pytest's)
+        # argv, for a moment before exec; wait for the child's own argv. A real
         # parent claude has long been running when its MCP server starts.
         deadline = time.monotonic() + 5
-        while not Path("/proc/%d/cmdline" % p.pid).read_bytes() and time.monotonic() < deadline:
+        while (b"time.sleep(30)" not in Path("/proc/%d/cmdline" % p.pid).read_bytes()
+               and time.monotonic() < deadline):
             time.sleep(0.01)
         return p.pid
 
