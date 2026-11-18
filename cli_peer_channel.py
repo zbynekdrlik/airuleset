@@ -88,9 +88,10 @@ def load_registry(path=None):
 CONTROLLER_HOME = "airuleset"    # the controller's hostname: home of its own bridge (#1293)
 # #1293/#1330: a bridge ``home`` is the box's SOCKET HOSTNAME (install and the runtime match
 # it); this one table gives its fleet name for validation and the root leg. gk's node is
-# ``odoo-gatekeeper`` (measured 15.11.2026), its fleet name ``gatekeeper``.
-HOME_FLEET = {"dev1": "dev1", "dev2": "dev2", CONTROLLER_HOME: CONTROLLER_HOME,
-              "odoo-gatekeeper": "gatekeeper"}
+# ``odoo-gatekeeper`` (measured 15.11.2026), its fleet name ``gatekeeper``. #1365: the
+# hostname -> fleet half is ``peer_channel.FLEET_HOST``, which the runtime reads too.
+HOME_FLEET = dict({"dev1": "dev1", "dev2": "dev2", CONTROLLER_HOME: CONTROLLER_HOME},
+                  **peer_channel.FLEET_HOST)
 HOME_HOSTS = set(HOME_FLEET)
 
 
@@ -112,6 +113,41 @@ def stream_users(host):
             and airuleset.AUTHORITY_BY_USER.get(r["user"], "full") != "full"}
 
 
+def host_users(host):
+    """#1365: the ``REMOTE_HOSTS`` users of root host ``host`` (by its ip)."""
+    import airuleset  # L-E: via the facade
+    ip = {h.get("name"): h.get("host") for h in airuleset.DISK_GUARD_ROOT_HOSTS}.get(host)
+    return {r["user"] for r in airuleset.REMOTE_HOSTS
+            if ip and r.get("host") == ip and isinstance(r.get("user"), str)}
+
+
+def _local_errors(host, entry, registry, links_doc, users, streams):
+    """#1365: ``locals`` name more checkouts of a full (non-stream) fleet account of the host,
+    without a registry row (gk + gk-infra share ``gatekeeper``), never shadowing another name."""
+    raw = entry.get("locals", {})
+    if not isinstance(raw, dict):
+        return ["%s: 'locals' must be an object" % host]
+    taken = (set(peer_channel.host_projects(registry, host))
+             | set(peer_channel.bridge_rows(links_doc, host))
+             | set(peer_channel.stream_rows(links_doc, host)))
+    errors = []
+    for name, spec in sorted(raw.items()):
+        acct = spec.get("account") if isinstance(spec, dict) else None
+        path = spec.get("path") if isinstance(spec, dict) else None
+        if not (isinstance(acct, str) and peer_channel.PROJECT_RE.match(name)
+                and peer_channel.PROJECT_RE.match(acct)):
+            errors.append("%s: local %r must be {account, path}" % (host, name))
+        elif acct not in users(host) or acct in streams(host):
+            errors.append("%s: local %s account %s is not a full fleet user of %s"
+                          % (host, name, acct, host))
+        elif not (isinstance(path, str) and path.startswith("~/") and len(path) > 2
+                  and ".." not in path.split("/")):
+            errors.append("%s: local %s path %r must be under ~/" % (host, name, path))
+        elif name in taken:
+            errors.append("%s: local %s collides with a project" % (host, name))
+    return errors
+
+
 def idle_users():
     """#1320: fleet users that no unattended job may name (#851 paused, pending)."""
     import airuleset  # L-E: via the facade
@@ -125,7 +161,8 @@ def _stream_errors(host, entry, registry, links_doc, users):
     if not isinstance(raw, dict):
         return ["%s: 'streams' must be an object" % host]
     taken = set(peer_channel.host_projects(registry, host)) | set(
-        peer_channel.bridge_rows(links_doc, host))
+        peer_channel.bridge_rows(links_doc, host)) | set(
+        peer_channel.stream_rows(links_doc, host, "locals"))
     errors = []
     for name, spec in sorted(raw.items()):
         path = spec.get("path") if isinstance(spec, dict) else None
@@ -141,15 +178,18 @@ def _stream_errors(host, entry, registry, links_doc, users):
             errors.append("%s: stream %s collides with a project" % (host, name))
     # #1330 review: the receiver marks a stream by NAME, so no other name may use its account
     stream_accts = users(host)
-    for name, row in sorted(dict(peer_channel.host_projects(registry, host),
-                                 **peer_channel.bridge_rows(links_doc, host)).items()):
+    rows = dict(peer_channel.stream_rows(links_doc, host, "locals"),
+                **peer_channel.host_projects(registry, host))
+    rows.update(peer_channel.bridge_rows(links_doc, host))
+    for name, row in sorted(rows.items()):
         if row.get("account") in stream_accts:
             errors.append("%s: %s runs as stream account %s; a stream joins only through "
                           "streams" % (host, name, row.get("account")))
     return errors
 
 
-def validate_links(links_doc, registry, root_hosts=None, stream_users=stream_users):
+def validate_links(links_doc, registry, root_hosts=None, stream_users=stream_users,
+                   host_users=host_users):
     """Every problem in ``links_doc`` as a string (empty = valid): an unknown host
     (not a ``DISK_GUARD_ROOT_HOSTS`` name), a host entry without a ``links`` list, a
     malformed pair, a self link, a bad #1320 stream, or a project that is not a
@@ -168,6 +208,8 @@ def validate_links(links_doc, registry, root_hosts=None, stream_users=stream_use
             errors.append("%s: 'links' must be a list" % host)
             continue
         errors += _stream_errors(host, entry, registry, links_doc, stream_users)
+        if "locals" in entry:
+            errors += _local_errors(host, entry, registry, links_doc, host_users, stream_users)
         projects = peer_channel.host_projects(registry, host, links_doc)
         topics = entry.get("topics") if isinstance(entry.get("topics"), dict) else {}
         for pair in raw:
@@ -345,8 +387,8 @@ def install_step(user=None, host=None, claude_dir=None, run=None, links_doc=None
     claude_dir = Path(claude_dir)
     marker = claude_dir / MARKER_NAME
     try:
-        linked = (user in accounts_for_host(host, links_doc, registry)
-                  or is_bridge_home(user, links_doc, host))
+        linked = (user in accounts_for_host(HOME_FLEET.get(host, host), links_doc, registry)
+                  or is_bridge_home(user, links_doc, host))     # #1365: links by fleet name
     except (OSError, ValueError) as e:
         print("  ⚠ peer channel: config unreadable (%s)" % e, file=sys.stderr)
         return False
@@ -683,7 +725,7 @@ def provision_peer_channel_root(hosts=None, run=None, links_doc=None, registry=N
 
 
 def status_lines(host=None, claude_dir=None, links_doc=None, registry=None):
-    host = host or this_host()
+    host = host or HOME_FLEET.get(this_host(), this_host())
     claude_dir = Path(claude_dir or Path.home() / ".claude")
     links_doc = load_links() if links_doc is None else links_doc
     registry = load_registry() if registry is None else registry
@@ -747,7 +789,7 @@ sys.path.insert(0, os.path.join(home, "devel/airuleset"))
 import peer_channel as pc
 req = json.loads(%r)
 me = pwd.getpwuid(os.getuid()).pw_name
-print(pc.Peer(socket.gethostname(), me, os.getuid(), req["path"], home, armed=False)
+print(pc.Peer(pc.FLEET_HOST.get(socket.gethostname(), socket.gethostname()), me, os.getuid(), req["path"], home, armed=False)
       .send(req["to"], req["text"]))
 """
 
@@ -798,7 +840,7 @@ def main(argv=None, dirty=uncommitted_config, apply=provision_peer_channel_root)
             print("render-root refused: peer-links.json invalid: %s" % "; ".join(errors),
                   file=sys.stderr)
             return 1
-        host = a.host or this_host()
+        host = a.host or HOME_FLEET.get(this_host(), this_host())
         sys.stdout.write(render_root_script(accounts_for_host(host), host=host))
         return 0
     if a.action == "tell":

@@ -56,6 +56,7 @@ MAX_CONNS = 8
 RATE_MAX = 20
 PENDING_MAX = 50                    # #1269: messages held before the MCP handshake ends
 RATE_WINDOW_S = 600
+FLEET_HOST = {"odoo-gatekeeper": "gatekeeper"}   # #1365: a socket hostname -> its fleet name
 PROJECT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 SOCK_NAME_RE = re.compile(r"^([A-Za-z0-9][A-Za-z0-9_-]{0,63})\.(\d{1,10})\.sock$")
 PROTOCOLS = ("2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05")
@@ -138,11 +139,11 @@ def bridge_home(links_doc, user, cwd, home, host=None):
     return None
 
 
-def stream_rows(links_doc, host):
-    """#1320: ``hosts.<host>.streams``, non-registry members (a stream account); never malformed."""
+def stream_rows(links_doc, host, key="streams"):
+    """#1320: ``hosts.<host>.streams`` (a stream account); #1365: ``locals`` (trusted); never malformed."""
     hosts = links_doc.get("hosts") if isinstance(links_doc, dict) else None
     entry = hosts.get(host) if isinstance(hosts, dict) else None
-    raw = entry.get("streams") if isinstance(entry, dict) else None
+    raw = entry.get(key) if isinstance(entry, dict) else None
     return {n: {"name": n, "host": host, "account": s["account"], "path": s["path"],
                 "overrides": ["no-git"]} for n, s in (raw.items() if isinstance(raw, dict) else ())
             if isinstance(s, dict) and isinstance(s.get("path"), str) and PROJECT_RE.match(n)
@@ -155,8 +156,9 @@ def inbound_meta(links_doc, host, sender):
 
 
 def host_projects(registry, host, links_doc=None):
-    """{project: entry}: valid registry rows on ``host``, bridge far ends and streams."""
-    out = dict(stream_rows(links_doc, host), **bridge_rows(links_doc, host))
+    """{project: entry}: valid registry rows on ``host``, bridge far ends, streams and locals."""
+    out = dict(stream_rows(links_doc, host, "locals"), **stream_rows(links_doc, host))
+    out.update(bridge_rows(links_doc, host))
     for p in registry if isinstance(registry, list) else []:
         if not isinstance(p, dict) or p.get("host") != host:
             continue
@@ -973,10 +975,10 @@ def main(argv=None):
         except (OSError, ValueError) as e:
             sys.stderr.write("peer-channel: links unreadable: %s\n" % e)
     if home_end:
-        peer = home_peer(home_end, Peer(host, pw.pw_name, os.getuid(), os.getcwd(), pw.pw_dir,
+        peer = home_peer(home_end, Peer(FLEET_HOST.get(host, host), pw.pw_name, os.getuid(), os.getcwd(), pw.pw_dir,
                                         armed=channel_armed()), channel_armed(), pw.pw_dir)
     else:
-        peer = Peer(host, pw.pw_name, os.getuid(), os.getcwd(), pw.pw_dir, project_arg=a.project,
+        peer = Peer(FLEET_HOST.get(host, host), pw.pw_name, os.getuid(), os.getcwd(), pw.pw_dir, project_arg=a.project,
                     armed=a.mode == "bridge" or channel_armed())
     if a.mode == "bridge":
         try:

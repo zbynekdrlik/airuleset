@@ -126,7 +126,10 @@ class TestCommitted(unittest.TestCase):
         self.assertIn(["david3", "gatekeeper"], sub["links"])
         self.assertEqual(pc.linked_to(pc.host_links(self.doc, "subdev"), "gatekeeper"),
                          ["david3"])
-        self.assertNotIn("gatekeeper", self.doc["hosts"])
+        # #1365: on the gk box itself gk talks only to gk-infra, and no stream lives there
+        self.assertEqual(pc.linked_to(pc.host_links(self.doc, "gatekeeper"), "gatekeeper"),
+                         ["gk-infra"])
+        self.assertNotIn("streams", self.doc["hosts"]["gatekeeper"])
         topic = sub["topics"]["david3|gatekeeper"]
         self.assertIn("never", topic)
         self.assertLessEqual(len(topic), cpc.MAX_TOPIC)
