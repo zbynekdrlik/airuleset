@@ -68,7 +68,8 @@ DEFAULT_SUB = "impl-sub"
 DEFAULT_FAST = "impl-fast"
 
 # The controller's tailscale IPv4 (machine-identities: ar.newlevel.media /
-# MagicDNS `airuleset`); the gateway binds it (cli_model_gateway._tailscale_ip).
+# MagicDNS `airuleset`). NOTE #1358: the gateway now binds loopback only, so a
+# remote box flipped at this URL cannot reach it until the owner reopens it.
 CONTROLLER_TAILSCALE_IP = "100.101.214.103"
 
 # The string fields a valid marker MUST carry. `cwd` (#1060 L3a review) = the

@@ -3,9 +3,9 @@
 # Installed ONLY on the controller (box-class `controller`) by
 # `airuleset.py install` via cli_model_gateway.setup_model_gateway_service(),
 # and ONLY when an alias map (~/.claude/airuleset-model-gateway.json) exists.
-# The {{HOST_IP}} placeholder is substituted at install with the box's tailscale
-# IPv4 (`tailscale ip -4`), so the proxy binds ONLY the tailscale interface —
-# never LAN or public. Do not edit the installed copy in ~/.config/systemd/user/
+# The {{HOST_IP}} placeholder is substituted at install with 127.0.0.1
+# (cli_model_gateway.GATEWAY_BIND_HOST, #1358): the proxy binds LOOPBACK only —
+# never tailscale, LAN, public or a wildcard (the render guard refuses them). Do not edit the installed copy in ~/.config/systemd/user/
 # by hand — edit this template and re-run `python3 airuleset.py install`.
 
 [Unit]
@@ -26,12 +26,14 @@ Type=simple
 # lives next to the config.
 EnvironmentFile=%h/.config/airuleset/model-gateway.env
 Environment=PYTHONPATH=%h/.config/airuleset
-# Bound to the tailscale address ONLY (baked in at install — see {{HOST_IP}}).
+# #1358: the LiteLLM admin UI (/ui) is OFF — LiteLLM reads DISABLE_ADMIN_UI.
+Environment=DISABLE_ADMIN_UI=True
+# Bound to loopback ONLY (baked in at install — see {{HOST_IP}}).
 ExecStart=%h/.local/share/airuleset/model-gateway-venv/bin/litellm --config %h/.config/airuleset/model-gateway.yaml --host {{HOST_IP}} --port 4000
 Restart=on-failure
 RestartSec=5
 
-# --- Hardening (defense in depth; a tailscale-internal proxy) ---
+# --- Hardening (defense in depth; a loopback-only proxy) ---
 # NOTE: ProtectHome is deliberately NOT read-only — the proxy WRITES the JSONL
 # spend log under ~/.config/airuleset and READS the venv under ~/.local/share.
 # ProtectSystem=strict makes / read-only; ReadWritePaths re-opens ONLY the config

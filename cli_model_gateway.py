@@ -55,9 +55,15 @@ SERVICE_NAME = "model-gateway.service"
 # dir so litellm can import it (`litellm_settings.callbacks: <module>.<attr>`).
 CALLBACK_REF = "model_gateway_spend_logger.spend_logger_instance"
 
-# The single unit-template placeholder: the tailscale bind address baked in at
-# install (the gateway must bind ONLY the tailscale interface, never LAN/public).
+# The single unit-template placeholder: the bind address baked in at install.
 HOST_IP_PLACEHOLDER = "{{HOST_IP}}"
+
+# #1358: the gateway binds LOOPBACK only. The #1062 pilot that served remote
+# implementer windows over the tailnet is over (no model-backend marker points at
+# the controller), and a tailnet bind exposed :4000 + the LiteLLM `/ui` to every
+# tailnet node with no designed auth. A remote consumer needs an explicit owner
+# decision plus a real auth path — never a quiet revert of this constant.
+GATEWAY_BIND_HOST = "127.0.0.1"
 
 
 class ModelGatewayError(Exception):
@@ -213,14 +219,29 @@ def render_gateway_env(config, read_secret, master_key_file=None):
     return "\n".join(lines) + "\n"
 
 
+def _is_loopback_literal(host):
+    """True only for a loopback IP LITERAL (127.0.0.0/8, ::1). A hostname
+    (`localhost` resolves via /etc/hosts and could be rebound), a wildcard
+    (`0.0.0.0`, `::`), a tailscale/LAN/public address are all False."""
+    import ipaddress
+    try:
+        return ipaddress.ip_address(str(host).strip()).is_loopback
+    except ValueError:
+        return False
+
+
 def render_gateway_unit(host_ip, template_path=None):
-    """Render the systemd --user unit, substituting the tailscale bind IP."""
+    """Render the systemd --user unit, substituting the bind IP. #1358: the
+    guard REFUSES anything but a loopback literal, so no install path can put
+    the gateway back on the tailnet or a wildcard."""
     tmpl = _expand(template_path or SERVICE_TEMPLATE)
     if not tmpl.exists():
         raise ModelGatewayError(f"missing service template: {tmpl}")
-    if not host_ip:
-        raise ModelGatewayError("refusing to render the unit with an empty bind "
-                                "IP — the gateway must bind the tailscale address")
+    if not _is_loopback_literal(host_ip):
+        raise ModelGatewayError(
+            f"refusing to render the unit with bind {host_ip!r} — the gateway "
+            f"binds loopback only (#1358); a tailnet/wildcard bind needs an "
+            f"owner decision and a real auth path")
     return tmpl.read_text(encoding="utf-8").replace(HOST_IP_PLACEHOLDER, str(host_ip))
 
 
@@ -438,9 +459,9 @@ def _read_secret_file(path):
 
 
 def _tailscale_ip():
-    """The box's tailscale IPv4 (`tailscale ip -4`, first line) — the ONLY
-    address the gateway is allowed to bind. Raises loudly when unavailable, so
-    the install never binds a LAN/public interface by mistake."""
+    """The box's tailscale IPv4 (`tailscale ip -4`, first line). Raises loudly
+    when unavailable. Since #1358 the gateway never BINDS it (it binds
+    GATEWAY_BIND_HOST); `cli_model_backend.default_base_url` still reads it."""
     try:
         r = subprocess.run(["tailscale", "ip", "-4"], capture_output=True,
                            text=True, timeout=15)
@@ -553,12 +574,8 @@ def setup_model_gateway_service(alias_map_path=None):
         return False
     changed |= installed
 
-    # 5. render + write the unit, enable, health-check.
-    try:
-        host_ip = _tailscale_ip()
-    except ModelGatewayError as e:
-        print(f"  model-gateway: {e}", file=sys.stderr)
-        return False
+    # 5. render + write the unit, enable, health-check. #1358: loopback only.
+    host_ip = GATEWAY_BIND_HOST
     SERVICE_DEST.parent.mkdir(parents=True, exist_ok=True)
     changed |= _write_if_changed(SERVICE_DEST, render_gateway_unit(host_ip))
     print(f"  model-gateway: config {'CHANGED' if changed else 'unchanged'} "
