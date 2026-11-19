@@ -158,3 +158,17 @@ def test_a_failed_write_is_loud_and_never_restarts(tmp_path):
 def test_cmd_install_wires_the_cap():
     src = inspect.getsource(airuleset.cmd_install)
     assert "provision_controller_journal_cap" in src
+
+
+def test_a_restart_in_the_same_second_as_the_write_reads_live(tmp_path):
+    """systemd prints ActiveEnterTimestamp in WHOLE seconds, the drop-in mtime
+    has a fraction. A restart in the same second as the write is live; reading
+    it as "not live" restarted journald on every install (live 19.11.2026)."""
+    dest = tmp_path / "cap.conf"
+    dest.write_text(cj.render_controller_journal_cap())
+    t = int(time.time()) - 60
+    os.utime(dest, (t + 0.37, t + 0.37))
+    run = _Run(started=t)
+    out = cj.provision_controller_journal_cap(run=run, dest=str(dest),
+                                              box_class="controller")
+    assert out.startswith("unchanged"), out
