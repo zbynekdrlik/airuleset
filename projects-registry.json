@@ -150,13 +150,13 @@
   {
     "name": "restreamer",
     "host": "dev1",
-    "path": "~/devel/restreamer",
+    "path": "/home/restreamer/devel/restreamer",
     "branch_model": "2-branch",
     "default_branch": "main",
     "work_branch": "dev",
     "overrides": [],
     "onboarded": null,
-    "account": "newlevel"
+    "account": "restreamer"
   },
   {
     "name": "songplayer",

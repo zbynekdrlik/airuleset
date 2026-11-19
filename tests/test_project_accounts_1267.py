@@ -198,14 +198,14 @@ class TestMinterSkipsPending(unittest.TestCase):
                 mock.patch.object(ci_sync, "run_after_mint", return_value=0):
             rc, minted, out = self._mint_all()
         self.assertEqual(rc, 0)
-        self.assertEqual(minted, ["companion-updater", "dasio", "dcontroller", "devbridge", "dstack", "dsync", "fleet-backup", "fohmixer", "iemmixer", "intercom", "mikrotik-pz", "nlch-finances", "obs", "shading", "tuke", "varos", "vstack"])
+        self.assertEqual(minted, ["companion-updater", "dasio", "dcontroller", "devbridge", "dstack", "dsync", "fleet-backup", "fohmixer", "iemmixer", "intercom", "mikrotik-pz", "nlch-finances", "obs", "restreamer", "shading", "tuke", "varos", "vstack"])
         for acct in NEW:
             self.assertIn("project-gh-token: %s: SKIPPED — pending" % acct, out)
 
     def test_a_live_account_is_minted_again(self):
         with mock.patch.object(ci_sync, "run_after_mint", return_value=0):
             rc, minted, out = self._mint_all()
-        self.assertEqual(minted, ["companion-updater", "dasio", "dcontroller", "devbridge", "dstack", "dsync", "fleet-backup", "fohmixer", "iemmixer", "intercom", "mikrotik-pz", "nlch-finances", "obs", "shading", "songplayer", "tuke", "varos", "vstack",
+        self.assertEqual(minted, ["companion-updater", "dasio", "dcontroller", "devbridge", "dstack", "dsync", "fleet-backup", "fohmixer", "iemmixer", "intercom", "mikrotik-pz", "nlch-finances", "obs", "restreamer", "shading", "songplayer", "tuke", "varos", "vstack",
                           "wall-bridge"])
         self.assertNotIn("wall-bridge: SKIPPED", out)
 
@@ -240,13 +240,13 @@ class TestPeerLinks(unittest.TestCase):
         # wall-bridge never reaches the root script's `account missing` exit 3
         with _pending():
             accts = cpc.accounts_for_host("dev1")
-        self.assertEqual(accts, ["airuleset-peer", "companion-updater", "dasio", "dcontroller", "devbridge", "dstack", "dsync", "fleet-backup", "fohmixer", "iemmixer", "intercom", "mikrotik-pz", "newlevel", "nlch-finances", "obs", "presenter-peer", "shading", "tuke", "vstack"])
+        self.assertEqual(accts, ["airuleset-peer", "companion-updater", "dasio", "dcontroller", "devbridge", "dstack", "dsync", "fleet-backup", "fohmixer", "iemmixer", "intercom", "mikrotik-pz", "newlevel", "nlch-finances", "obs", "presenter-peer", "restreamer", "shading", "tuke", "vstack"])
         self.assertNotIn("wall-bridge", cpc.render_tmpfiles(accts))
 
     def test_wall_bridge_joins_once_live(self):
         self.assertEqual(cpc.accounts_for_host("dev1"),
                          ["airuleset-peer", "companion-updater", "dasio", "dcontroller", "devbridge", "dstack", "dsync", "fleet-backup", "fohmixer", "iemmixer", "intercom", "mikrotik-pz",
-                          "newlevel", "nlch-finances", "obs", "presenter-peer", "shading", "songplayer", "tuke", "vstack", "wall-bridge"])
+                          "newlevel", "nlch-finances", "obs", "presenter-peer", "restreamer", "shading", "songplayer", "tuke", "vstack", "wall-bridge"])
 
 
 if __name__ == "__main__":

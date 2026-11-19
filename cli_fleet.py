@@ -522,7 +522,7 @@ REMOTE_HOSTS += [
         ("devbridge", "dev1", "100.104.8.125", False),     # #1320, live 14.11.
         ("fleet-backup", "dev1", "100.104.8.125", False),  # #1339, live 16.11.
         ("companion-updater", "dev1", "100.104.8.125", False),  # #1363
-        ("restreamer", "dev1", "100.104.8.125", True),   # #1373, pending
+        ("restreamer", "dev1", "100.104.8.125", False),  # #1373, live 19.11.
     )
 ]
 

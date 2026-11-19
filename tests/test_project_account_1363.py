@@ -99,7 +99,8 @@ class TestCompanionUpdaterAccount(unittest.TestCase):
         self.assertIn("companion-updater|shading", dev1["topics"])
 
     def test_legacy_ceiling_back_to_20(self):
-        self.assertEqual(cli_accounts.LEGACY_CEILING, 20)
+        # 20 after this migration; later ones (#1373 restreamer) only lower it.
+        self.assertLessEqual(cli_accounts.LEGACY_CEILING, 20)
 
 
 if __name__ == "__main__":
