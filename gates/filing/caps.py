@@ -1,7 +1,7 @@
 """gates.filing.caps -- the gh-backed lookups, near-duplicate check,
 stream-routing decision and authority resolution for the ungated-issue-filing
-gate (#1020 Part 2). #1297 removed the daily cap, the chain-width cap and the
-net-drain brake: a separate deliverable always gets its own ticket.
+gate (#1020 Part 2). #1297 removed the daily and chain-width caps; the #1378
+worth-it bar + 72 h net-flow brake for Claude-born filings live in `worth`.
 
 Extracted VERBATIM from the classifier that lived embedded in
 hooks/block-ungated-issue-filing.sh; the pure parse helpers it needs

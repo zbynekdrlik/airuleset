@@ -603,7 +603,8 @@ push / PR / merge / deploy, never that backup.
    `subagent-stop-check-design.sh` gate as `validated:`/`approach:`.
    **Same-branch-fix mandate (#311):** every finding from `/review` / `/requesting-code-review` —
    INCLUDING one in code adjacent to your diff, not just inside it — is fixed in THIS SAME branch
-   before you merge, or dropped with your own stated reasoning posted on the ticket. A NEW follow-up
+   before you merge, or dropped with your own stated reasoning posted on the ticket (a 🔵 is
+   NEVER a ticket, #1378). A NEW follow-up
    ticket is filed ONLY when the finding honestly clears one of the six bundling-gate criteria
    (`complete-planned-work.md` — >300 LoC, schema migration, API break, security boundary,
    cross-cutting, or a genuine user decision) — name the criterion in the `Scope-gate:` line, and
@@ -643,8 +644,8 @@ push / PR / merge / deploy, never that backup.
 9. Anything you identify but do not finish → **FIX it in-lane (this branch) whenever you
    can** — a small adjacent problem, a flaky test, a review finding all land HERE, never in
    a new ticket. A genuinely out-of-scope discovery goes in your evidence block's
-   `followup_candidates:` line (title + why it is separate — its `Scope-gate:` criterion, `separate-work` or one of the six — + est. LoC) for
-   the SUPERVISOR to file as its own linked ticket (#1297) — **you have NO `gh issue create` authority; the
+   `followup_candidates:` line (title + why it is separate — its `Scope-gate:` criterion, `separate-work` or one of the six — + its `Impact: <who is hit and how>` + est. LoC) for
+   the SUPERVISOR, who files only a real defect (#1378) and drops the rest with a line — **you have NO `gh issue create` authority; the
    scope-gate hook BLOCKS a worker's filing outright (#842)**, so never `gh issue create` and
    never put a `filed:` line in your return (a return with `filed:` is REJECTED at
    integration and the lane is sent back). Never silently drop it (`no-dropped-work.md`).

@@ -6,7 +6,7 @@ Submodules by CONCERN, each under the 600-line ratchet:
   * parse    -- command + issue-body parsing (pure; adopts gates.shellcmd)
   * caps     -- gh-backed lookups, near-dup, stream-routing, authority
   * presence -- the UNATTENDED read + dismissal-word / owner-quote gates
-  * render   -- the verbatim block-message walls + summary formatting
+  * render / worth -- the block-message walls; the #1378 Impact bar + net-flow brake
   * __main__ -- the orchestrator run as `python3 -m gates.filing`
 
 Behaviour is byte-preserving vs the shipped bash classifier -- proven by

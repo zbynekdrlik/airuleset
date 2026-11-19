@@ -50,7 +50,7 @@ no "nothing is hands-off so I'm stopping". You answer the important questions; e
 - `ci-monitoring.md` — 2-branch single-CI repo: the worker monitors its OWN CI **foreground** (NEVER `run_in_background` — that ends the subagent), the main loop verifies the result; long / multi-stage pipeline (3-branch): the SUPERVISOR owns the CI waits and the worker returns per stage (Step 3 multi-stage note)
 - `post-deploy-verification.md` / `version-on-dashboard.md` — deploys verified via the live DOM version
 - `milestone-notifications.md` — short `❓`/`✅` idle pings only on a worker's ❓ question or the FINAL ✅ (mobile model); BUT each finished+deployed ticket ALSO sends ONE structured Discord completion card (the worker fires it directly at merge — the user's explicit per-ticket ask); every device message @mentions the tmux owner (zbynek/marek)
-- `no-dropped-work.md` — a step of the same deliverable is a `- [ ]` line in the ticket's description, a separate deliverable its own ticket linked both ways (#1297); workers return `followup_candidates:`
+- `no-dropped-work.md` — a step of the same deliverable is a `- [ ]` line in the ticket's description, a separate deliverable its own ticket linked both ways (#1297), a Claude-born one only for a real defect with an `Impact:` line (#1378); workers return `followup_candidates:`
 - `verify-issue-still-valid.md` — the worker FIRST proves the issue still reproduces against current code + live system; obsolete/already-solved tickets get closed with evidence, never blindly implemented
 - `ask-before-assuming.md` — a genuine per-issue question is a CONVERSATION with you, asked the MOMENT the ticket needs it and it ALWAYS pings; then either BLOCK (`❓ NEEDS YOU`) or ask-and-continue (`❓ ASKED` + track on the issue, work other tickets meanwhile) — never buried, never a reason to abandon the issue, never a reason to reproach you (NO night/day difference (#791): ask the moment it arises 24/7 — no night-hour cutoff, no time-of-day deferral)
 - `user-questions-slovak.md` — HOW to phrase it: SELF-CONTAINED (a person with ZERO terminal context understands it — which project, what happened, every cross-project/ticket link explained), plain Slovak, no jargon; delivered as the `❓` text marker (waits UNLIMITED), NEVER a 60-second `AskUserQuestion` dialog for an away user; structured template + ONE decision per ping is hook-enforced
@@ -748,12 +748,13 @@ merge→gates→push at a time per repo across all sessions).
    - **Worker filing authority — NONE (#842).** A worker has NO `gh issue create` / `gh api
      …/issues` POST authority — the scope-gate hook hard-BLOCKS a subagent's filing (payload
      `agent_id`). It FIXES every discovery in-lane and returns a `followup_candidates:` line
-     (title + why it is separate — its `Scope-gate:` criterion, `separate-work` or one of the six — + est. LoC) for YOU to file — each separate one as its own ticket (`Part of #N` + a `- [ ] #<new>` line on the current ticket), a step of the same deliverable as a `- [ ]` line (#1297). At
+     (title + why it is separate — its `Scope-gate:` criterion, `separate-work` or one of the six — + its `Impact:` + est. LoC). The supervisor (YOU) files only the candidates that pass the #1378 worth-it bar (a real defect a user or the business hits) — each as its own ticket (`Part of #N` + a `- [ ] #<new>` line on the current ticket) — and drops the rest with one line on the PR/ticket; a step of the same deliverable is a `- [ ]` line (#1297). At
      integration (Step 4) a worker return carrying a `filed:` line is REJECTED — send that lane
      back (`SendMessage` if it is alive, else re-dispatch fresh) to fix it in-lane; never accept
      a worker-filed ticket. YOUR OWN filings follow the same in-lane-first rule: fix in-lane by
-     default; each separate deliverable becomes its own ticket (`Part of #N` + `- [ ] #<new>` on
-     #N, #1297) — there is no net-drain brake and no daily cap.
+     default; a separate deliverable becomes its own ticket (`Part of #N` + `- [ ] #<new>` on
+     #N, #1297), a Claude-born one only with a real `Impact:` and while the stream drains (the
+     72 h `net-flow-brake`, #1378); there is no daily cap.
    - **Every dispatch RETURNS IMMEDIATELY** (background) — do NOT block waiting on it. End the turn
      `⏳ WORKING`; a worker returning RE-INVOKES this loop, and on each re-invocation you integrate
      any ready branches (Step 4) under the integration mutex as they return.

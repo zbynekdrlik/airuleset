@@ -19,7 +19,7 @@ import re
 import sys
 
 from gates import audit, command_of, field_of, read_payload
-from gates.filing import render
+from gates.filing import render, worth
 from gates.filing.parse import (
     ACK_REACTION_CITE_RE, ALLOWED, CLIENT_MSG_ORIGIN_RE, CRITERION_RE,
     DEDUP_RE, LOC_NUM_RE, PRESENCE_GATED,
@@ -459,15 +459,15 @@ def classify_command(cmd, sid, cwd, repo_dir, log_path, unattended):
             else:
                 dedup_claim = _clean_field(dedup_match.group(1))[:80]
                 batch_titles = _batch_titles_by_repo.setdefault(target_repo, [])
-                # #1297: no daily cap, no chain-width cap, no net-drain brake --
-                # a separate deliverable always gets its own ticket. Dedup stays.
-                near_dup = _near_duplicate(title, body, cwd, target_repo,
-                                            batch_titles)
+                # #1378: a Claude-born ticket needs a real Impact + a draining stream.
+                reason = worth.block_reason(crit_l, body, target_repo, _explicit_stream_labels(
+                    tk, api_call), cwd, log_path, clean_title)
+                near_dup = None if reason else _near_duplicate(title, body, cwd, target_repo,
+                                                               batch_titles)
                 if near_dup:
-                    if near_dup == "in-batch":
-                        reason = "near-duplicate:in-this-batch"
-                    else:
-                        reason = "near-duplicate:#%s" % near_dup
+                    reason = ("near-duplicate:in-this-batch" if near_dup == "in-batch"
+                              else "near-duplicate:#%s" % near_dup)
+                if reason:
                     results.append(("BLOCK", clean_title, reason, parents_str,
                                      target_repo, dedup_claim))
                 else:

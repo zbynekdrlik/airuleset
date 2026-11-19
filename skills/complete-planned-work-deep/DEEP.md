@@ -28,7 +28,7 @@ If ANY of these are not true, you are NOT done. Keep working.
 
 **Intent, not wording.** The examples above are representative. ANY phrase that shifts incomplete work to a later time, a different session, or a new issue — under any wording — is banned. If you're about to say something that means "I'll do this later," STOP and do it now.
 
-**If you discover something genuinely out of scope** (not in the plan, not in the original prompt, but important), file it as its OWN ticket linked to the current one (`Part of #N` + a `- [ ] #<new>` line on `#N`) BEFORE sending the completion report; a step of the SAME deliverable is a `- [ ]` line in the current ticket's description instead (#1297) — the ONLY acceptable ways to "postpone" work.
+**If you discover something genuinely out of scope** (not in the plan, not in the original prompt, but a real defect a user or the business hits), file it as its OWN ticket with an `Impact:` line, linked to the current one (`Part of #N` + a `- [ ] #<new>` line on `#N`) BEFORE sending the completion report — anything less is fixed now or dropped with one line (#1378); a step of the SAME deliverable is a `- [ ]` line in the current ticket's description instead (#1297) — the ONLY acceptable ways to "postpone" work.
 
 **CRITICAL — deferral phrases MUST cite the ticket number:**
 
@@ -93,7 +93,7 @@ If NONE of these apply → the cleanup is small and MUST land in the CURRENT PR,
 
 The follow-up gate exists for REAL out-of-scope work (schema migrations, framework upgrades, multi-day refactors), NOT for small cleanups the agent noticed while touching the file. Filing a follow-up issue for a 20-line refactor wastes a PR cycle, a CI cycle, and a review round.
 
-**The default fate is FIX NOW.** A worktree WORKER has NO `gh issue create` authority (#842) — it fixes in-lane and returns `followup_candidates:` for the SUPERVISOR to file. A genuinely separate deliverable is filed as its own linked ticket; there is no daily cap and no net-drain brake (#1297). When in doubt between "file a follow-up" and "fix it in this PR" for a small cleanup in a file you touch, fix it now.
+**The default fate is FIX NOW.** A worktree WORKER has NO `gh issue create` authority (#842) — it fixes in-lane and returns `followup_candidates:` for the SUPERVISOR to file. A genuinely separate deliverable is filed as its own linked ticket — a Claude-born one only with a real `Impact:`, and only while its stream drains (the 72 h `net-flow-brake`, #1378); there is no daily cap (#1297). When in doubt between "file a follow-up" and "fix it in this PR" for a small cleanup in a file you touch, fix it now.
 
 **Banned phrases (intent, all rewordings):**
 
