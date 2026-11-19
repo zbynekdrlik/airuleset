@@ -131,7 +131,8 @@ class DropLane:
         self.gateway_account = gateway_account
         # #931: "local" = the tunnel runs on this box (ingress → 127.0.0.1:port);
         # "controller" = the tunnel runs on the controller (ingress → origin_host:port,
-        # where origin_host is this box's tailscale IP). No local tunnel config/service
+        # where origin_host is this box's tailscale IP — loopback for an account on
+        # the controller machine itself, #1362). No local tunnel config/service
         # exists; the controller's install manages the ingress.
         self.topology = topology
         # The tailscale IP the controller's tunnel proxies to (controller topology only).
@@ -485,7 +486,8 @@ def resolve_public_lane_full(marker_path=None, nodename=None, username=None):
     BIND on so the tunnel origin can reach it (#931):
     - LOCAL topology: `"127.0.0.1"` (cloudflared on the same box → loopback).
     - CONTROLLER topology: `lane.origin_host` (cloudflared on the controller →
-      this box's tailscale IP).
+      this box's tailscale IP; `127.0.0.1` for an account on the controller
+      machine itself, #1362, where nothing binds tailscale).
 
     Fail-closed: a controller lane with no `origin_host` → None (never fall
     back to loopback when the tunnel origin is remote).

@@ -45,12 +45,19 @@ _NODENAME_OVERRIDE = {"gatekeeper": "odoo-gatekeeper", "spinbike-vps": "spinbike
 # to itself), so `build_drop_lanes` never generates it from the fleet loop; it is
 # derived at the END of the build from the controller box's OWN fleet entry (the
 # claudy@controller service account is the only REMOTE_HOSTS row on the controller
-# box and carries the controller tailscale origin), with a DISTINCT hostname so it
+# box; its origin is loopback since #1362), with a DISTINCT hostname so it
 # never collides with claudy's drop-airuleset lane. The nodename literal comes
 # from the existing override (no NEW hand literal for the identity); the hostname
 # is a new lane fact.
 CONTROLLER_NODENAME = _NODENAME_OVERRIDE["claudy@controller"]
 CONTROLLER_LOCAL_DROP_HOST = "drop-controller.newlevel.media"
+
+# #1362: the tunnel ORIGIN of every lane whose account lives on the controller
+# machine. cloudflared runs on that same box, so loopback reaches the drop
+# server, and the controller's file-drop binds loopback ONLY
+# (filedrop.is_controller_box). A tailscale origin there kept :8788/:8790 and the
+# drop ports open on the tailnet (ts-input accepts tailscale0 before ufw).
+CONTROLLER_DROP_ORIGIN = "127.0.0.1"
 
 # The GRANDFATHERED hand-authored drop hosts a pure derivation cannot produce
 # (re-exported by cli_drop_gateway, whose seed lanes use them). They live in
@@ -269,13 +276,16 @@ def build_drop_lanes(remote_hosts, *, seed, drop_lane_cls,
         # Tailscale box → controller-tunnel origin; public-only box → a
         # local-topology placeholder (never a public/plaintext controller origin).
         if _is_tailscale_host(entry.get("host")):
+            # #1362: a lane on the controller machine itself → loopback origin.
+            origin = (CONTROLLER_DROP_ORIGIN if nodename == CONTROLLER_NODENAME
+                      else entry.get("host"))
             lanes[key] = drop_lane_cls(
                 host=host, port=port,
                 tunnel_uuid=controller_tunnel_uuid,
                 tunnel_config=None, tunnel_service=None,
                 tunnel_system_unit=False, access=access,
                 gateway_account=None,
-                topology="controller", origin_host=entry.get("host"),
+                topology="controller", origin_host=origin,
                 filedrop_port=None)
         else:
             lanes[key] = drop_lane_cls(
@@ -296,17 +306,17 @@ def build_drop_lanes(remote_hosts, *, seed, drop_lane_cls,
 
 
 def _controller_origin_ip(remote_hosts):
-    """The controller box's tailscale origin IP for the LOCAL-account lane (#1115
-    slice G), derived from the controller's OWN fleet entry — the claudy@controller
-    service account is the only REMOTE_HOSTS row on the controller box, so its
-    `host` is the controller tailscale IP. No separate hand literal. Returns None
-    when no such (non-paused, tailscale) entry exists."""
+    """The tunnel origin for the LOCAL-account lane (#1115 slice G):
+    ``CONTROLLER_DROP_ORIGIN`` (loopback, #1362 — cloudflared runs on the
+    controller itself) when the controller box has its OWN fleet entry (the
+    claudy@controller service account, a non-paused tailscale row), else None —
+    no controller entry means no controller lane at all."""
     for entry in remote_hosts:
         if cli_fleet.is_paused(entry):
             continue
         if _nodename_for_entry(entry) == CONTROLLER_NODENAME \
                 and _is_tailscale_host(entry.get("host")):
-            return entry["host"]
+            return CONTROLLER_DROP_ORIGIN
     return None
 
 
@@ -317,7 +327,7 @@ def _add_controller_local_lane(lanes, remote_hosts, used_ports, drop_lane_cls,
     Keyed ``(CONTROLLER_NODENAME, CONTROLLER_NODENAME)`` (the box's real hostname
     IS the local account name), a DISTINCT hostname ``CONTROLLER_LOCAL_DROP_HOST``
     (never claudy's ``drop-airuleset``), controller topology riding the ONE
-    controller tunnel, origin = the controller's own tailscale IP, access-gated
+    controller tunnel, origin = loopback (#1362, ``CONTROLLER_DROP_ORIGIN``), access-gated
     (its owner-only spec is derived by ``generated_access_specs`` like every other
     generated access lane). ``filedrop_port=None`` — the push-measured value
     arrives via the ~/.claude/drop-lanes.json cache (harvested locally, see
@@ -672,8 +682,9 @@ def drop_ingress_rules_for_controller(drop_lanes, cache=None, access_specs=None)
     cli_drop_gateway.DROP_LANES) so this stays a self-contained leaf.
 
     The ``service_url`` uses the lane's ``origin_host`` (the box's tailscale
-    IP) + ``port`` — cloudflared on the controller proxies to
-    ``http://<tailscale>:<port>`` where the drop server listens.
+    IP; loopback for a lane on the controller machine itself, #1362) + ``port``
+    — cloudflared on the controller proxies to ``http://<origin>:<port>`` where
+    the drop server listens.
 
     #1114: each lane with a known ``filedrop_port`` ALSO gets a ``/s/`` path rule
     ``(host, "^/s/", http://origin_host:filedrop_port)`` emitted BEFORE its drop

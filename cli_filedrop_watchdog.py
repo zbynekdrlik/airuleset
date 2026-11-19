@@ -453,6 +453,8 @@ def cmd_share(args):
     from filedrop.server import instance_id
     from filedrop.share import ShareError, share
     private = bool(getattr(args, "private", False))
+    if private:                     # #1362: no tailscale bind on the controller
+        _vd.refuse_private_on_controller("share")
     if not private:                 # #1192: refuse BEFORE any side effect
         try:
             lane_full = _dg.resolve_public_lane_full()
