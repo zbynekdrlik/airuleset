@@ -173,6 +173,60 @@ class TestUnisolatableMessageFallsBackToWholeCommand(_Base):
         self.assertIn("#46", r.stderr)
 
 
+class TestReviewRound1(_Base):
+    """The first review's under-check repros: each #42 is in the real message."""
+
+    def test_trailer_value_is_scanned(self):
+        self.mark(41)
+        r = self.run_hook("git commit -m 'x (#41)' --trailer 'Closes: #42'")
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("#42", r.stderr)
+
+    def test_dev_stdin_message_file_is_never_read_in_the_hook(self):
+        r = self.run_hook("printf 'fix (#42)\\n' | git commit -F /dev/stdin")
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("#42", r.stderr)
+
+    def test_file_rewritten_under_another_spelling_is_not_read_stale(self):
+        (self.repo / "m.txt").write_text("stale message\n")
+        for cmd in ("printf 'fix (#42)\\n' > m.txt && git commit -F ./m.txt",
+                    "P=m; printf 'fix (#42)' > $P.txt; git commit -F m.txt",
+                    "python3 -c \"open('m'+'.txt','w').write('fix (#42)')\" "
+                    "&& git commit -F m.txt"):
+            r = self.run_hook(cmd)
+            self.assertEqual(r.returncode, 2, cmd + r.stderr)
+            self.assertIn("#42", r.stderr, cmd)
+
+    def test_mid_word_hash_does_not_cut_the_rest_of_the_command(self):
+        r = self.run_hook("git commit -m v1.2#hotfix -m 'Refs (#42)'")
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("#42", r.stderr)
+
+    def test_cat_heredoc_in_another_dir_is_not_the_message_file(self):
+        self.mark(41)
+        sub = self.repo / "sub"
+        sub.mkdir()
+        (sub / "m.txt").write_text("fix (#42)\n")
+        cmd = "cat > m.txt <<'EOF'\nfix (#41)\nEOF\ncd sub && git commit -F m.txt"
+        r = self.run_hook(cmd)
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("#42", r.stderr)
+
+    def test_message_file_next_to_a_log_heredoc_is_read_from_disk(self):
+        (self.repo / "msg.txt").write_text("fix (#43)\n")
+        cmd = LOG_APPEND + "git add docs && git commit -F msg.txt"
+        r = self.run_hook(cmd)
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("#43", r.stderr)
+        self.assertNotIn("#101", r.stderr)
+
+    def test_commit_behind_a_wrapper_next_to_a_plain_commit_falls_back(self):
+        self.mark(41)
+        r = self.run_hook("git commit -m 'a (#41)'; time git commit -m 'b (#42)'")
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("#42", r.stderr)
+
+
 class TestTimingBound(_Base):
 
     def test_large_heredoc_body_stays_fast(self):
@@ -188,11 +242,12 @@ class TestTimingBound(_Base):
 
     def test_long_unbroken_token_stays_fast(self):
         self.mark(41)
-        cmd = "echo " + "a" * 200000 + " >> f && git commit -m 'x (#41)'"
-        t0 = time.monotonic()
-        r = self.run_hook(cmd)
-        self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertLess(time.monotonic() - t0, 4.0)
+        for cmd in ("echo " + "A" * 400000 + " | base64 -d > f.bin && git commit -m 'x (#41)'",
+                    "git commit -m 'x (#41) " + "y" * 300000 + "'"):
+            t0 = time.monotonic()
+            r = self.run_hook(cmd)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertLess(time.monotonic() - t0, 3.0)
 
 
 if __name__ == "__main__":
