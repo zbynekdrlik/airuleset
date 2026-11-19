@@ -28,6 +28,10 @@ STUBS = {
     # prints its list, so the stub must too (empty output = verify FAIL).
     "fail2ban-client": ('case "$*" in "get sshd ignoreip") '
                         'echo "127.0.0.0/8 100.64.0.0/10" ;; esac; exit 0\n'),
+    # #1349: the apply gates its MaxStartups drop-in with `sshd -t` and reads
+    # the effective value back from `sshd -T` (no output = verify FAIL).
+    "sshd": ('echo "sshd $*" >> "$LOG"; case "$1" in -T) '
+             'echo "maxstartups 60:30:200"; echo "persourcemaxstartups 30" ;; esac; exit 0\n'),
     "du": 'for a; do case "$a" in -*) ;; *) printf "0\\t%s\\n" "$a" ;; esac; done\n',
     "ionice": 'echo "ionice $*" >> "$LOG"; shift; shift; exec "$@"\n',
     # #1244: a real `logrotate --debug` names every log some read stanza rotates
@@ -76,6 +80,16 @@ class TestApplyScriptRuns(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertNotIn("try-restart systemd-journald", calls)
         self.assertIn("unchanged", r.stdout)
+
+    def test_sshd_reloads_once_then_never_again(self):
+        # #1349: a changed MaxStartups drop-in reloads sshd, an unchanged one not
+        r, calls = self.apply()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(calls.count("systemctl reload ssh"), 1, calls)
+        r, calls = self.apply()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("sshd -t", calls)
+        self.assertNotIn("systemctl reload ssh", calls)
 
     def test_the_cap_written_is_the_host_cap(self):
         self.apply()

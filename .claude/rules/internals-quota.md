@@ -8,6 +8,7 @@ paths:
   - "cli_disk_guard_root.py"
   - "cli_logrotate_owner.py"
   - "cli_fail2ban.py"
+  - "cli_sshd_maxstartups.py"
 ---
 
 ### airuleset internals — per-user quota on shared-stream boxes (#950 / #1140)
@@ -40,3 +41,8 @@ paths:
 - **A `jail.d/*.conf` loses to any hand-made `jail.local`.** fail2ban reads jail.conf → jail.d/*.conf → jail.local → jail.d/*.local. subdev's jail.local overrode the #841 `[DEFAULT] ignoreip`, so the controller got banned 3× on 16.11. The managed fix is `jail.d/50-airuleset-hardening.local` (`cli_fail2ban`). It appends PER JAIL with `ignoreip = %(known/ignoreip)s …`, which keeps the hand-made entries. Never put `known/` in `[DEFAULT]`: fail2ban 1.0.2 then refuses the WHOLE config ("Recursion limit exceeded").
 - **Measure fail2ban precedence offline, never from memory.** Copy `/etc/fail2ban` to a scratch dir, add the candidate files, run `fail2ban-client -c <dir> -d | grep addignoreip` (the effective per-jail list). `-c <dir> -t` exits 255 on a refused config.
 - **The apply runs `-t` before `reload`.** A refused config removes the .local and fails the apply. The read-back requires the tailnet CIDR in the RUNNING `fail2ban-client get sshd ignoreip`, because deployed ≠ effective.
+
+### sshd MaxStartups drop-in (#1349)
+
+- **sshd takes the FIRST value it reads.** Ubuntu's `sshd_config` includes `sshd_config.d/*.conf` on its first lines, so a drop-in beats the main file, but a foreign drop-in that sorts before `50-` beats ours. The read-back therefore compares the value `sshd -T` resolves (root only: a non-root `sshd -T` prints nothing). `sshd -T` parses the files, not the running daemon, so a sha256 stamp in `/run/airuleset` records what the daemon last reloaded: an unchanged file whose earlier reload failed reloads again (review 🟡).
+- **Validate, then reload only on change.** `cli_sshd_maxstartups` writes through `_install`, which sets `DGROOT_WROTE` when it really replaced a file. `sshd -t` gates the reload; a refused config this run wrote is removed and fails the leg, one a foreign file broke fails the leg and leaves ours alone. A full-apply harness (`test_disk_guard_root_apply_1223`) stubs every system tool the script calls, so a new tool in the apply needs a new stub there.
