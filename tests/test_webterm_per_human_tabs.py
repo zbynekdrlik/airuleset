@@ -32,7 +32,7 @@ import cli_webterm_profiles as profiles  # noqa: E402
 ZBYNEK_ORDER = [
     "ar", "claudy", "fohmixer",   # #1183 fohmixer@dev1 project account
     "varos",   # #1220 varos@dev2 project account
-    "wall-bridge", "songplayer", "dstack", "dasio", "iemmixer", "dcontroller", "dsync", "intercom", "obs", "shading", "vstack", "nlch-finances", "tuke", "mikrotik-pz", "devbridge", "fleet-backup", "companion-updater", "restreamer",   # #1267, #1270, #1295, #1310, #1320, #1339, #1363 dev1 project accounts
+    "wall-bridge", "songplayer", "dstack", "dasio", "iemmixer", "dcontroller", "dsync", "intercom", "obs", "shading", "vstack", "nlch-finances", "tuke", "mikrotik-pz", "devbridge", "fleet-backup", "companion-updater", "restreamer",   # #1267, #1270, #1295, #1310, #1320, #1339, #1363, #1373 dev1 project accounts
     "dev1", "dev2", "gatekeeper",   # #1302: montalu1-6 removed (client gone)
     "david1-subdev", "david2-subdev", "david3-subdev", "david4-subdev",
     "david5-subdev", "david6-subdev", "david7-subdev", "david8-subdev",   # #1341

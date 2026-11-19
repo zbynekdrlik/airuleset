@@ -44,7 +44,7 @@ import sys
 LEGACY_FREEZE_DATE = "2026-09-29"
 
 # DOWN-ONLY ratchet: the legacy project count (every registry row outside a
-# declared project account: the 24 `newlevel` rows + odoo-erp in `gatekeeper`).
+# declared project account: the `newlevel` rows (24 at the freeze) + odoo-erp in `gatekeeper`).
 # It must EQUAL the live count (test-locked), so a migration lowers it in the
 # same change; raising it is a visible, reviewable edit that the freeze forbids.
 LEGACY_CEILING = 19
