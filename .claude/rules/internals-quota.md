@@ -6,6 +6,8 @@ paths:
   - "hooks/block-own-transcript-read.sh"
   - "cli_question_block.py"
   - "cli_disk_guard_root.py"
+  - "cli_controller_journal.py"
+  - "cli_scratch_children.py"
   - "cli_logrotate_owner.py"
   - "cli_fail2ban.py"
   - "cli_sshd_maxstartups.py"
@@ -46,3 +48,4 @@ paths:
 
 - **OpenSSH 9.6 keeps the LAST `MaxStartups` it reads but the FIRST `PerSourceMaxStartups` (measured with `sshd -T` on two lines, 19.11.).** The first rollout assumed first-wins, named the file `50-`, and lost on gk to a hand-made `60-airuleset-maxstartups.conf` (30:30:150, #358); the live read-back caught it. The file is now `90-` and retires our own marked `50-`. Never assume one sshd directive's precedence from another: test the pair. The read-back therefore compares the value `sshd -T` resolves (root only: a non-root `sshd -T` prints nothing). `sshd -T` parses the files, not the running daemon, so a sha256 stamp in `/run/airuleset` records what the daemon last reloaded: an unchanged file whose earlier reload failed reloads again (review 🟡).
 - **Validate, then reload only on change.** `cli_sshd_maxstartups` writes through `_install`, which sets `DGROOT_WROTE` when it really replaced a file. `sshd -t` gates the reload; a refused config this run wrote is removed and fails the leg, one a foreign file broke fails the leg and leaves ours alone. A full-apply harness (`test_disk_guard_root_apply_1223`) stubs every system tool the script calls, so a new tool in the apply needs a new stub there.
+- **#1355 — the controller is outside the #841 root fan-out, so its root config is a LOCAL `cmd_install` provisioner (`cli_controller_journal`, journald `SystemMaxUse=1G`).** Idempotence on file BYTES alone hides a failed `try-restart`: the cap sits on disk but is never live, and every later install says `unchanged`. So compare journald's `ActiveEnterTimestamp --timestamp=unix` with the drop-in mtime and re-restart + rotate when journald is older. Same ticket: the daily `sweep_claude_scratch` now consumes the live-session `stale_children` (`cli_scratch_children`), not only the >= 80 % drain. A scripted `str.replace` on a multi-line block that recurs in the same file (`discovery error` + `for c in candidates:` exists in BOTH the scratch and transcript sweeps) edits every site: assert `s.count(old) == 1` first.
