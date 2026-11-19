@@ -92,7 +92,7 @@ class TestStepExecution(unittest.TestCase):
         with open(self.mo, "w") as f:
             f.write(FOREIGN_MONTALU)
 
-    def _stubs(self, t_rc=0, reload_rc=0, shadow=None):
+    def _stubs(self, t_rc=0, reload_rc=0, shadow=None, mv_fails=False):
         # sshd -T: the FIRST MaxStartups wins in sshd, so a "shadow" value
         # models a foreign drop-in sorting before 50-; else the managed file's
         # value when it exists; else the OpenSSH default.
@@ -113,7 +113,10 @@ class TestStepExecution(unittest.TestCase):
                "path": self.path})
         systemctl = ('#!/bin/bash\necho "systemctl $*" >> "%s"\nexit %d\n'
                      % (self.calls, reload_rc))
-        for name, body in (("sshd", sshd), ("systemctl", systemctl)):
+        stubs = [("sshd", sshd), ("systemctl", systemctl)]
+        if mv_fails:
+            stubs.append(("mv", "#!/bin/bash\nexit 1\n"))
+        for name, body in stubs:
             p = os.path.join(self.bin, name)
             with open(p, "w") as f:
                 f.write(body)
@@ -209,6 +212,18 @@ class TestStepExecution(unittest.TestCase):
         out, err, calls = self.run_step(pre="DGROOT_WROTE=1\n")
         self.assertNotIn("systemctl reload", calls)
         self.assertIn("fail=0", out)
+
+    def test_a_failed_install_reloads_nothing_and_fails(self):
+        # review round 2: `_install` must not flag a write it never made
+        out, err, calls = self.run_step(mv_fails=True)
+        self.assertFalse(os.path.exists(self.path))
+        self.assertNotIn("systemctl reload", calls)
+        self.assertFalse(os.path.exists(os.path.join(self.d, "run")))
+        self.assertIn("install of %s failed" % self.path, err)
+        self.assertNotIn("wrote %s" % self.path, out)
+        self.assertIn("fail=1", out)
+        self.assertFalse([f for f in os.listdir(self.conf_d)
+                          if f.startswith(".airuleset-dgroot")])
 
     def test_shadowed_effective_value_fails_the_readback(self):
         out, err, calls = self.run_step(shadow="10:30:100")

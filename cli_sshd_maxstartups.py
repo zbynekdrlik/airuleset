@@ -56,7 +56,7 @@ def build_sshd_maxstartups_step(heredoc_mark, path=SSHD_MAXSTARTUPS_PATH,
         'SSHD_MS_FAIL=""\n'
         'DGROOT_WROTE=""\n'
         "_install %s 0644 <<'%s'\n%s%s\n"
-        'sshd_ms_sum=$(sha256sum < %s 2>/dev/null | cut -d" " -f1 || true)\n'
+        'sshd_ms_sum=$( { sha256sum < %s | cut -d" " -f1; } 2>/dev/null || true)\n'
         'if sshd_t_out=$(sshd -t 2>&1); then\n'
         '    if [ -n "$DGROOT_WROTE" ] || [ "$(cat %s 2>/dev/null || true)" != '
         '"$sshd_ms_sum" ]; then\n'
