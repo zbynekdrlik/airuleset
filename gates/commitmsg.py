@@ -5,27 +5,31 @@ The design gate used to scan the WHOLE Bash command, so a worker that appended
 `#N` lines to an in-repo log (`cat >> docs/autopilot-log.md <<'EOF' … EOF &&
 git commit -m "… (#41)"`) needed a design marker for every `#N` in the FILE.
 
-Two review rounds showed that building the message by POSITIVE parsing (which
-commit, which -m) leaks: heredoc capture, `split_top_level` and shlex each
-disagree with bash somewhere (a quoted `cat <<EOF` line in a message, `git -c x
-commit`, a line continuation, `--tr`), and every disagreement dropped a real
-ref. So the invariant is inverted (#1307: name what may be REMOVED, never what
-must be found): the whole command is scanned EXCEPT heredoc bodies that are
-PROVABLY file content:
+Three review rounds shaped this. Building the message by POSITIVE parsing
+leaked (heredoc capture, `split_top_level` and shlex each disagree with bash
+somewhere), and so did every check that ENUMERATED dangerous shapes (a
+respelt `-F` path, a glob, `sh s.s''h`). So everything here is a whitelist
+(#1307: name what may be removed, never what must be found). The whole command
+is scanned EXCEPT the bodies of heredocs that are provably inert file content,
+and only when the WHOLE command has this shape:
 
-  * the heredoc's start line is, in full, `[cd DIR &&] cat >[>] FILE <<[-]WORD`,
-    reached at top level (no open quote, no comment) with no other heredoc
-    operator before it -- so the line is real shell, not message text;
-  * nothing in the command can read a written file into a message: no
-    `-t`/`--template`, no `-F`/`--file` naming a written file or a glob (`-F -`
-    fed by a heredoc is fine), no `$` expansion other than `$(cat <<…`, no
-    backtick, no `<` input redirect;
-  * FILE is named elsewhere only by git subcommands that cannot execute it
-    (add/rm/mv/diff/status/log/show/restore/commit) or another such writer;
-  * the body does not itself mention `git commit` (a script being written).
+  * each removed body belongs to a start line that is, in full, `[cd DIR &&]
+    cat >[>] FILE <<'WORD'` (quoted delimiter: the body is never expanded),
+    reached at top level (no open quote, comment or continuation) before any
+    other heredoc operator; FILE has no `.git*` / `.husky` / `hooks` component
+    (files git itself reads: MERGE_MSG, config, hooks) and does not resolve into
+    one through a symlink in cwd;
+  * every other top-level segment is `cd DIR`, such a writer, or `git add|rm|mv|
+    diff|status|log|show|restore|commit` -- nothing that can execute a file;
+  * nothing can read a file into a message: no `-F`/`-t`/`--file`/`--template`,
+    no `$` expansion other than `$(cat <<…`, no backtick, no `<` redirect;
+  * at most _MAX_BODIES bodies (the checks stay linear-time).
 
-Anything else keeps its refs (the old over-check). Message FILES (`-F path`) are
-read from disk and ADDED, so a stale or odd read can only over-check.
+Anything else keeps every ref (the old over-check). Message FILES (`-F path`)
+are read from disk and only ever ADDED, so a stale or odd read over-checks.
+Accepted residuals: a `cd` before a writer is not followed when the symlink
+check resolves FILE (the `.git` component check on the literal path still is),
+and a custom `core.hooksPath` dir other than `hooks`/`.husky` is not known.
 """
 import os
 import re
@@ -34,17 +38,19 @@ from gates.shellcmd import split_top_level
 
 _MSGFILE_MAX_BYTES = 1_000_000
 _MAX_CMD = 1_000_000            # above this, never prove anything (time bound)
+_MAX_BODIES = 50
+_MAX_CDS = 20
 _WRITER_LINE_RX = re.compile(
     r"[ \t]*(?:cd[ \t]+[\w./-]+[ \t]*&&[ \t]*)?cat[ \t]*>>?[ \t]*([\w./-]+)"
-    r"[ \t]*<<(-?)[ \t]*(['\"]?)(\w+)\3[ \t]*")
-_WRITER_SEG_RX = re.compile(
-    r"\s*(?:cd\s+[\w./-]+|cat\s*>>?\s*[\w./-]+\s*<<-?\s*(['\"]?)\w+\1)\s*")
+    r"[ \t]*<<(-?)[ \t]*(['\"])(\w+)\3[ \t]*")
+_WRITER_SEG_RX = re.compile(r"\s*cat\s*>>?\s*[\w./-]+\s*<<-?\s*(['\"])\w+\1\s*")
+_CD_SEG_RX = re.compile(r"\s*cd\s+[\w./-]+\s*")
 _GIT_SEG_RX = re.compile(
-    r"\s*(?:sudo\s+)?git\s+(?:add|rm|mv|diff|status|log|show|restore|commit)\b")
-_BODY_COMMIT_RX = re.compile(r"\bgit\b[^\n]{0,200}?\bcommit\b")
+    r"\s*git\s+(?:add|rm|mv|diff|status|log|show|restore|commit)(?:\s[\s\S]*)?")
+_GIT_INTERNAL_RX = re.compile(r"(?:^|/)(?:\.git[^/]*|\.husky|hooks)(?:/|$)")
+_GIT_REAL_RX = re.compile(r"(?:^|/)(?:\.git[^/]*|\.husky)(?:/|$)")
 # Anything that could pull a file's content into a commit message.
 _FILE_FLAG_RX = re.compile(r"(?<![\w-])(?:-[A-Za-z]*[Ft]|--(?:fi|te))")
-_STDIN_HEREDOC_RX = re.compile(r"[ \t]*-[ \t]*<<")
 _EXPANSION_RX = re.compile(r"\$(?!\(cat[ \t]*<<)|`|(?<!<)<(?!<)")
 _CD_TARGET_RX = re.compile(r"(?:^|[;&|(\n])[ \t]*cd[ \t]+([\w./-]+)")
 _MSGFILE_RX = re.compile(
@@ -53,7 +59,7 @@ _MSGFILE_RX = re.compile(
 
 def _quote_state(line, state):
     """Bash quote state after `line`: None = top level, "'" / '"' = open quote,
-    "\\" = a line continuation (the next line is not a fresh command). A comment
+    "\\\\" = a line continuation (the next line is not a fresh command). A comment
     ends the line."""
     if state == "\\":
         state = None
@@ -80,10 +86,10 @@ def _quote_state(line, state):
     return state
 
 
-def _writer_bodies(cmd):
-    """[(file, start_line, end_line)] of heredocs whose start line is a top-level
-    `cat > FILE <<WORD` writer; stops at the first other heredoc operator."""
-    lines = cmd.split("\n")
+def _writer_bodies(lines):
+    """[(file, first_body_line, terminator_line)] of quoted-delimiter heredocs
+    whose start line is a top-level `cat > FILE` writer; stops at the first
+    other heredoc operator."""
     out, state, i = [], None, 0
     while i < len(lines):
         line = lines[i]
@@ -96,67 +102,62 @@ def _writer_bodies(cmd):
             if j == len(lines):
                 break                   # unterminated: bash reads to EOF
             out.append((m.group(1), i + 1, j))
+            if len(out) > _MAX_BODIES:
+                return []
             i = j + 1
             continue
         if "<<" in line:
             break                       # an unknown heredoc: stop proving
         state = _quote_state(line, state)
         i += 1
-    return out, lines
+    return out
 
 
-def _reads_files(rest, names):
-    """True when `rest` could pull a written file into a message: a template, a
-    `-F`/`--file` naming a written file (or a glob), any expansion or `<`."""
-    bases = {os.path.basename(n) for n in names}
-    for m in _FILE_FLAG_RX.finditer(rest):
-        if _STDIN_HEREDOC_RX.match(rest, m.end()):
-            continue
-        f = _MSGFILE_RX.match(rest, m.start())
-        if not f or not m.group(0).endswith(("F", "fi")):
-            return True             # -t / --template / an unparsable -F
-        val = f.group(2)
-        if any(ch in val for ch in "*?[~") or os.path.basename(val) in bases:
-            return True
-    return bool(_EXPANSION_RX.search(rest))
-
-
-def _named_only_safely(name, rest):
-    base = os.path.basename(name)
-    for seg in split_top_level(rest):
-        if base in seg and not (_GIT_SEG_RX.match(seg) or _WRITER_SEG_RX.fullmatch(seg)):
+def _inert_target(name, cwd):
+    if _GIT_INTERNAL_RX.search(name):
+        return False
+    if cwd:
+        real = os.path.realpath(os.path.join(cwd, name))
+        if _GIT_REAL_RX.search(real):
             return False
     return True
 
 
-def scan_text(cmd):
-    """`cmd` minus the heredoc bodies that are provably file content."""
+def _whitelisted(seg):
+    return (not seg.strip() or _CD_SEG_RX.fullmatch(seg) or _WRITER_SEG_RX.fullmatch(seg)
+            or _GIT_SEG_RX.fullmatch(seg))
+
+
+def scan_text(cmd, cwd=None):
+    """`cmd` minus the heredoc bodies that are provably inert file content."""
     cmd = cmd or ""
     if len(cmd) > _MAX_CMD:
         return cmd
-    bodies, lines = _writer_bodies(cmd)
-    if not bodies:
+    lines = cmd.split("\n")
+    bodies = _writer_bodies(lines)
+    if not bodies or not all(_inert_target(name, cwd) for name, _, _ in bodies):
         return cmd
     drop = set()
     for _, a, b in bodies:
-        drop.update(range(a, b))
+        drop.update(range(a, b + 1))
     rest = "\n".join(ln for k, ln in enumerate(lines) if k not in drop)
-    if _reads_files(rest, [name for name, _, _ in bodies]):
+    if _FILE_FLAG_RX.search(rest) or _EXPANSION_RX.search(rest):
         return cmd
-    for name, a, b in bodies:
-        if _BODY_COMMIT_RX.search("\n".join(lines[a:b])) or not _named_only_safely(name, rest):
-            return cmd
+    if not all(_whitelisted(seg) for seg in split_top_level(rest)):
+        return cmd
     return rest
 
 
 def _candidate_dirs(cmd, cwd):
-    """cwd plus every literal `cd` target, cumulatively (over-reading is harmless:
-    the result only ADDS refs)."""
+    """cwd plus the first literal `cd` targets, cumulatively (over-reading is
+    harmless: the result only ADDS refs)."""
     dirs, cur = [cwd], cwd
-    for m in _CD_TARGET_RX.finditer(cmd):
+    for k, m in enumerate(_CD_TARGET_RX.finditer(cmd)):
+        if k >= _MAX_CDS:
+            break
         cur = os.path.normpath(os.path.join(cur, m.group(1)))
         dirs.append(cur)
-    return list(dict.fromkeys(dirs))[:20]
+    return list(dict.fromkeys(dirs))
 
 
 def msgfile_text(cmd, cwd):

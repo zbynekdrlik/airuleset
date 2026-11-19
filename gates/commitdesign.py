@@ -133,7 +133,7 @@ def main():
 
     # #1353 -- heredoc bodies that are provably FILE content (an in-repo log)
     # are not the message; -F message files on disk are added.
-    refs = dg.issue_refs(commitmsg.scan_text(cmd) + "\n" + commitmsg.msgfile_text(cmd, work_cwd))
+    refs = dg.issue_refs(commitmsg.scan_text(cmd, work_cwd) + "\n" + commitmsg.msgfile_text(cmd, work_cwd))
     if not refs:
         sys.exit(0)
 
