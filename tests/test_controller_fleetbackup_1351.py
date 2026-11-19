@@ -93,6 +93,19 @@ def test_duplicate_unrestricted_copy_is_dropped_so_from_is_not_bypassed():
     assert new.splitlines() == [DESIRED, FOREIGN]
 
 
+def test_commented_out_copy_of_our_key_is_a_foreign_line_kept_verbatim():
+    existing = "# ssh-ed25519 %s old copy\n" % BLOB
+    new, action = fb.reconcile_authorized_keys(existing, DESIRED)
+    assert action == "added"
+    assert new == existing + DESIRED + "\n"
+
+
+def test_escaped_quote_inside_an_option_does_not_split_it():
+    line = 'command="echo \\"a b\\"",no-pty ssh-ed25519 %s c' % BLOB
+    assert fb.parse_key_line(line) == (
+        'command="echo \\"a b\\"",no-pty', "ssh-ed25519", BLOB)
+
+
 def test_reconcile_is_idempotent():
     once, _ = fb.reconcile_authorized_keys(FOREIGN + "\n", DESIRED)
     twice, action = fb.reconcile_authorized_keys(once, DESIRED)
@@ -113,11 +126,13 @@ class _Box:
 
     MUTATING = ("useradd", "passwd -l", "write-ak", "chmod", "sudoers")
 
-    def __init__(self, user=True, locked=True, ak=None, modes="700 600",
+    def __init__(self, user=True, locked=True, ak=None, modes="750 700 600",
                  sudo_ok=True, sudoers_unchanged=True):
         self.user = user
         self.locked = locked
         self.ak = (DESIRED + "\n") if ak is None else ak
+        if ak is False:
+            self.ak = None         # the file does not exist
         self.modes = modes
         self.sudo_ok = sudo_ok
         self.sudoers_unchanged = sudoers_unchanged
@@ -140,8 +155,8 @@ class _Box:
         if a[:3] == ["sudo", "-n", "useradd"]:
             self.writes.append("useradd")
             self.user = True
-            self.locked = False
-            self.ak = ""
+            self.locked = True     # a real `useradd -m` leaves `!` in shadow
+            self.ak = None         # and no ~/.ssh/authorized_keys
             return self._ok()
         if a[:4] == ["sudo", "-n", "passwd", "-S"]:
             return self._ok("fleetbackup %s 2026-11-17 0 99999 7 -1\n"
@@ -150,7 +165,13 @@ class _Box:
             self.writes.append("passwd -l")
             self.locked = True
             return self._ok()
+        if a[:5] == ["sudo", "-n", "-u", "fleetbackup", "test"]:
+            return self._ok(rc=0 if self.ak is not None else 1)
         if a[:5] == ["sudo", "-n", "-u", "fleetbackup", "cat"]:
+            if self.ak is None:
+                return types.SimpleNamespace(
+                    returncode=1, stdout="",
+                    stderr="cat: %s: Datei oder Verzeichnis nicht gefunden\n" % AK)
             return self._ok(self.ak)
         if a[:5] == ["sudo", "-n", "-u", "fleetbackup", "stat"]:
             return self._ok(self.modes.replace(" ", "\n") + "\n")
@@ -193,10 +214,12 @@ def test_live_hand_made_state_reads_satisfied_with_zero_writes():
 
 
 def test_fresh_box_creates_locked_user_key_and_sudo():
+    """A real useradd leaves the password locked and no authorized_keys file;
+    the missing file is detected without parsing (localised) error text."""
     box = _Box(user=False, sudoers_unchanged=False)
     out = fb.provision_fleetbackup_login(run=box, box_class="controller")
     assert out.startswith("applied"), out
-    assert box.writes == ["useradd", "passwd -l", "write-ak", "sudoers"]
+    assert box.writes == ["useradd", "write-ak", "sudoers"]
     assert box.ak == DESIRED + "\n"
     useradd = next(a for a, _ in box.calls if a[:3] == ["sudo", "-n", "useradd"])
     assert "-m" in useradd and useradd[-1] == "fleetbackup"
@@ -209,8 +232,46 @@ def test_foreign_lines_survive_and_unrestricted_copy_gets_from():
     assert box.ak.splitlines() == [FOREIGN, DESIRED]
 
 
+def test_user_with_a_password_gets_it_locked():
+    box = _Box(locked=False)
+    out = fb.provision_fleetbackup_login(run=box, box_class="controller")
+    assert out.startswith("applied"), out
+    assert box.writes == ["passwd -l"]
+
+
+def test_missing_authorized_keys_on_existing_user_is_written():
+    box = _Box(ak=False)
+    out = fb.provision_fleetbackup_login(run=box, box_class="controller")
+    assert out.startswith("applied"), out
+    assert box.writes == ["write-ak"]
+    assert box.ak == DESIRED + "\n"
+
+
+def test_group_writable_home_is_fixed_too_strictmodes():
+    box = _Box(modes="770 700 600")
+    out = fb.provision_fleetbackup_login(run=box, box_class="controller")
+    assert out.startswith("applied"), out
+    chmods = [a for a, _ in box.calls if a[:5] == ["sudo", "-n", "-u", "fleetbackup", "chmod"]]
+    assert chmods and HOME in chmods[0]
+
+
+def test_real_runner_under_pytest_is_inert():
+    """#1196: a test that drives the real cmd_install must never reach real sudo."""
+    out = fb.provision_fleetbackup_login(box_class="controller")
+    assert out == "skipped (pytest)"
+
+
+def test_install_step_never_raises_and_prints_one_line(capsys, monkeypatch):
+    def boom(**_kw):
+        raise RuntimeError("x")
+    monkeypatch.setattr(fb, "provision_fleetbackup_login", boom)
+    fb.install_step()
+    err = capsys.readouterr().err
+    assert "fleetbackup login error (non-fatal)" in err
+
+
 def test_wrong_modes_are_fixed_without_rewriting_the_file():
-    box = _Box(modes="755 644")
+    box = _Box(modes="750 755 644")
     out = fb.provision_fleetbackup_login(run=box, box_class="controller")
     assert out.startswith("applied"), out
     assert box.writes == ["chmod"]
@@ -247,8 +308,8 @@ def test_a_failing_step_reports_failed_not_applied():
     assert out.startswith("FAILED"), out
 
 
-def test_cmd_install_calls_the_provisioner_non_fatally():
+def test_cmd_install_calls_the_non_fatal_install_step():
+    """The call site is the leaf's install_step (it owns the try/except, so
+    cmd_install grows by as few lines as possible; #1116 slice 2 shape)."""
     src = inspect.getsource(airuleset.cmd_install)
-    assert "provision_fleetbackup_login" in src
-    i = src.index("provision_fleetbackup_login")
-    assert "try:" in src[max(0, i - 300):i]
+    assert "cli_controller_fleetbackup import install_step" in src
