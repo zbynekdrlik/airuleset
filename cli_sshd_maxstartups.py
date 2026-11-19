@@ -12,11 +12,13 @@ that window fails with ``kex_exchange_identification: Connection reset``.
     ``60:30:200``. sshd takes the FIRST value it reads and Ubuntu includes
     ``sshd_config.d/*.conf`` at the top of ``sshd_config``, so the drop-in wins
     over the main file; a foreign drop-in that sorts earlier would still win,
-    which is why the read-back checks the EFFECTIVE ``sshd -T`` value.
-  * ``sshd -t`` gates the reload: a refused config is removed again and the
-    leg fails, so a broken file never waits for the next sshd restart.
+    which is why the read-back checks the value ``sshd -T`` resolves.
+  * ``sshd -t`` gates the reload: a refused config this run wrote is removed
+    again and the leg fails, so a broken file never waits for the next sshd
+    restart; a config broken by a foreign file fails the leg untouched.
   * ``systemctl reload ssh`` (SIGHUP, live sessions survive) runs ONLY when
-    the file changed; an unchanged file reloads nothing.
+    the file changed or the last reload did not land (a sha256 stamp in
+    ``/run/airuleset``); otherwise nothing reloads.
   * The #985 ``60-airuleset-password.conf`` and every foreign file are never
     touched.
 """
@@ -24,6 +26,8 @@ import shlex
 
 SSHD_MAXSTARTUPS_PATH = "/etc/ssh/sshd_config.d/50-airuleset-maxstartups.conf"
 SSHD_MAXSTARTUPS = "60:30:200"
+# sha256 of the drop-in the running sshd last reloaded (wiped at boot).
+SSHD_MAXSTARTUPS_STAMP = "/run/airuleset/sshd-maxstartups.reloaded"
 
 
 def render_sshd_maxstartups_conf():
@@ -36,47 +40,62 @@ def render_sshd_maxstartups_conf():
     )
 
 
-def build_sshd_maxstartups_step(heredoc_mark, path=SSHD_MAXSTARTUPS_PATH):
+def build_sshd_maxstartups_step(heredoc_mark, path=SSHD_MAXSTARTUPS_PATH,
+                                stamp=SSHD_MAXSTARTUPS_STAMP):
     """The apply-script step: write the drop-in through the script's
-    ``_install`` (which sets ``DGROOT_WROTE`` only when it changed the file),
-    gate it with ``sshd -t``, then reload only on a change. A refused config
-    removes the drop-in and sets ``SSHD_MS_FAIL``; so does a failed reload.
-    ``path`` exists for the execution tests (a scratch dir)."""
-    qpath = shlex.quote(path)
+    ``_install`` (which sets ``DGROOT_WROTE`` only when it replaced the file),
+    gate it with ``sshd -t``, then reload when the file changed OR the reload
+    stamp does not hold the file's sha256 (a reload that failed on an earlier
+    run is retried; ``/run`` is wiped at boot, so at worst one extra reload).
+    A refused config this run wrote is removed again; a refused config this
+    run did NOT change (a foreign drop-in broke it) leaves our file alone.
+    Both, and a failed reload, set ``SSHD_MS_FAIL``. ``path``/``stamp`` exist
+    for the execution tests (a scratch dir)."""
+    qpath, qstamp = shlex.quote(path), shlex.quote(stamp)
     return (
         'SSHD_MS_FAIL=""\n'
         'DGROOT_WROTE=""\n'
         "_install %s 0644 <<'%s'\n%s%s\n"
+        'sshd_ms_sum=$(sha256sum < %s 2>/dev/null | cut -d" " -f1 || true)\n'
         'if sshd_t_out=$(sshd -t 2>&1); then\n'
-        '    if [ -n "$DGROOT_WROTE" ]; then\n'
+        '    if [ -n "$DGROOT_WROTE" ] || [ "$(cat %s 2>/dev/null || true)" != '
+        '"$sshd_ms_sum" ]; then\n'
         '        if systemctl reload ssh >/dev/null 2>&1; then\n'
+        '            mkdir -p "$(dirname %s)" && printf "%%s\\n" "$sshd_ms_sum" > %s '
+        '|| echo "  ⚠ disk-guard-root: sshd reload stamp not written (non-fatal)"\n'
         '            echo "  disk-guard-root: sshd reloaded (MaxStartups %s)"\n'
         '        else\n'
         '            echo "  ⚠ DISK-GUARD-ROOT: sshd reload failed" >&2\n'
         '            SSHD_MS_FAIL=1\n'
         '        fi\n'
         '    fi\n'
-        'else\n'
+        'elif [ -n "$DGROOT_WROTE" ]; then\n'
         '    rm -f %s\n'
         '    echo "  ⚠ DISK-GUARD-ROOT: sshd config test failed — %s removed, '
         'reload skipped: $(printf "%%s" "$sshd_t_out" | head -n 3)" >&2\n'
         '    SSHD_MS_FAIL=1\n'
+        'else\n'
+        '    echo "  ⚠ DISK-GUARD-ROOT: sshd config test failed on a config this '
+        'run did not change (a foreign drop-in?) — reload skipped: '
+        '$(printf "%%s" "$sshd_t_out" | head -n 3)" >&2\n'
+        '    SSHD_MS_FAIL=1\n'
         'fi'
         % (qpath, heredoc_mark, render_sshd_maxstartups_conf(), heredoc_mark,
-           SSHD_MAXSTARTUPS, qpath, path)
+           qpath, qstamp, qstamp, qstamp, SSHD_MAXSTARTUPS, qpath, path)
     )
 
 
 def build_sshd_maxstartups_readback():
-    """Read-back: a failed step fails the apply, and the value sshd itself
-    resolves (``sshd -T``) must be the managed one — a foreign drop-in that
-    sorts before ``50-`` would shadow the file while it sits on disk."""
+    """Read-back: a failed step fails the apply, and the value sshd resolves
+    from the files on disk (``sshd -T``) must be the managed one — a foreign
+    drop-in that sorts before ``50-`` would shadow ours. ``sshd -T`` parses the
+    files, not the running daemon; the reload stamp above covers the daemon."""
     return (
         'if [ -n "$SSHD_MS_FAIL" ]; then fail=1; fi\n'
         'sshd_ms=$(sshd -T 2>/dev/null | grep -i "^maxstartups " || true)\n'
         'if [ "$sshd_ms" != "maxstartups %s" ]; then\n'
-        '    echo "  ⚠ DISK-GUARD-ROOT VERIFY FAIL: effective sshd MaxStartups '
-        'is [${sshd_ms#maxstartups }], expected %s" >&2\n'
+        '    echo "  ⚠ DISK-GUARD-ROOT VERIFY FAIL: configured sshd MaxStartups '
+        '(sshd -T) is [${sshd_ms#maxstartups }], expected %s" >&2\n'
         '    fail=1\n'
         'fi' % (SSHD_MAXSTARTUPS, SSHD_MAXSTARTUPS)
     )

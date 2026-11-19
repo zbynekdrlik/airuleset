@@ -119,11 +119,13 @@ class TestStepExecution(unittest.TestCase):
                 f.write(body)
             os.chmod(p, 0o755)
 
-    def run_step(self, **kw):
+    def run_step(self, pre="", **kw):
         self._stubs(**kw)
-        script = ('set -uo pipefail\nJOURNALD_CHANGED=""\n'
+        stamp = os.path.join(self.d, "run", "sshd-maxstartups.reloaded")
+        script = ('set -uo pipefail\nJOURNALD_CHANGED=""\n' + pre
                   + g.render_install_fn() + "\n"
-                  + ms.build_sshd_maxstartups_step("EOF_MARK", path=self.path)
+                  + ms.build_sshd_maxstartups_step("EOF_MARK", path=self.path,
+                                                   stamp=stamp)
                   + "\nfail=0\n" + ms.build_sshd_maxstartups_readback()
                   + '\necho "fail=$fail"\n')
         env = dict(os.environ, PATH=self.bin + ":" + os.environ["PATH"])
@@ -177,6 +179,36 @@ class TestStepExecution(unittest.TestCase):
         out, err, calls = self.run_step(reload_rc=1)
         self.assertIn("fail=1", out)
         self.assertIn("sshd reload failed", err)
+
+    def test_a_failed_reload_is_retried_on_the_next_run(self):
+        # review 🟡: the file is unchanged on run 2, but the daemon never
+        # loaded it, so the reload stamp (sha256) must trigger a retry.
+        self.run_step(reload_rc=1)
+        os.remove(self.calls)
+        out, err, calls = self.run_step()
+        self.assertIn("unchanged %s" % self.path, out)
+        self.assertEqual(calls.count("systemctl reload ssh"), 1, calls)
+        self.assertIn("fail=0", out)
+        os.remove(self.calls)
+        out, err, calls = self.run_step()
+        self.assertNotIn("systemctl reload", calls)
+
+    def test_a_foreign_broken_config_leaves_our_unchanged_file(self):
+        self.run_step()
+        out, err, calls = self.run_step(t_rc=255)
+        self.assertEqual(open(self.path).read(),
+                         ms.render_sshd_maxstartups_conf())
+        self.assertIn("did not change", err)
+        self.assertIn("fail=1", out)
+        self.assert_foreign_untouched()
+
+    def test_an_earlier_write_in_the_script_does_not_reload_sshd(self):
+        # the journald cap (or any other file) changed, ours did not
+        self.run_step()
+        os.remove(self.calls)
+        out, err, calls = self.run_step(pre="DGROOT_WROTE=1\n")
+        self.assertNotIn("systemctl reload", calls)
+        self.assertIn("fail=0", out)
 
     def test_shadowed_effective_value_fails_the_readback(self):
         out, err, calls = self.run_step(shadow="10:30:100")

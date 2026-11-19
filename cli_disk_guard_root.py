@@ -60,8 +60,7 @@ from cli_fail2ban import (  # noqa: F401
     FAIL2BAN_BANTIME, FAIL2BAN_IGNOREIP, FAIL2BAN_IGNOREIP_JAILS,
     FAIL2BAN_JAIL_LOCAL_PATH, FAIL2BAN_JAIL_PATH, build_fail2ban_readback,
     build_fail2ban_step, render_fail2ban_hardening, render_fail2ban_ignoreip_local)
-from cli_sshd_maxstartups import (  # noqa: F401 — #1349 sshd MaxStartups leaf
-    build_sshd_maxstartups_readback, build_sshd_maxstartups_step, render_sshd_maxstartups_conf)
+from cli_sshd_maxstartups import build_sshd_maxstartups_readback, build_sshd_maxstartups_step, render_sshd_maxstartups_conf  # noqa: F401,E501 — #1349 leaf
 
 
 # ---------------------------------------------------------------------------
@@ -531,7 +530,7 @@ def render_install_fn():
         ' echo "  disk-guard-root: unchanged $dest"; return 0; fi\n'
         '    [ "$dest" = %s ] && JOURNALD_CHANGED=1\n'
         '    chmod "$mode" "$tmp"\n'
-        '    mv -f "$tmp" "$dest"; DGROOT_WROTE=1\n'
+        '    mv -f "$tmp" "$dest" && DGROOT_WROTE=1\n'
         '    trap - EXIT\n'
         '    echo "  disk-guard-root: wrote $dest"\n'
         '}' % shlex.quote(JOURNALD_CAP_PATH)
