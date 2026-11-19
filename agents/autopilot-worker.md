@@ -603,14 +603,16 @@ push / PR / merge / deploy, never that backup.
    `subagent-stop-check-design.sh` gate as `validated:`/`approach:`.
    **Same-branch-fix mandate (#311):** every finding from `/review` / `/requesting-code-review` —
    INCLUDING one in code adjacent to your diff, not just inside it — is fixed in THIS SAME branch
-   before you merge, or dropped with your own stated reasoning posted on the ticket. A NEW follow-up
+   before you merge, or dropped with your own stated reasoning posted on the ticket (a 🔵 is
+   NEVER a ticket, #1378). A NEW follow-up
    ticket is filed ONLY when the finding honestly clears one of the six bundling-gate criteria
    (`complete-planned-work.md` — >300 LoC, schema migration, API break, security boundary,
    cross-cutting, or a genuine user decision) — name the criterion in the `Scope-gate:` line, and
    never file one that names THIS ticket as its own origin unless that criterion genuinely holds.
    "The finding is technically outside the diff" is NOT a criterion by itself — a <100 LoC
    adjacent-code finding is DO NOW, same branch, same PR, per `complete-planned-work.md`'s own
-   follow-up gate.
+   follow-up gate. A review-born follow-up ALSO needs a real `Impact:` (#1378), whatever its
+   criterion; a 🔵 never becomes one.
 7. Merge per `pr-merge-policy.md`: default auto-merge (merge it yourself); a
    `airuleset:merge=manual` marker → STOP at the green PR and report it instead of merging.
    Then monitor main CI + any deploy workflow to terminal. **Fire the per-ticket Discord card for EACH
@@ -643,8 +645,8 @@ push / PR / merge / deploy, never that backup.
 9. Anything you identify but do not finish → **FIX it in-lane (this branch) whenever you
    can** — a small adjacent problem, a flaky test, a review finding all land HERE, never in
    a new ticket. A genuinely out-of-scope discovery goes in your evidence block's
-   `followup_candidates:` line (title + why it is separate — its `Scope-gate:` criterion, `separate-work` or one of the six — + est. LoC) for
-   the SUPERVISOR to file as its own linked ticket (#1297) — **you have NO `gh issue create` authority; the
+   `followup_candidates:` line (title + why it is separate — its `Scope-gate:` criterion, `separate-work` or one of the six — + its `Impact: <who is hit and how>` + est. LoC) for
+   the SUPERVISOR, who files only a real defect (#1378) and drops the rest with a line — **you have NO `gh issue create` authority; the
    scope-gate hook BLOCKS a worker's filing outright (#842)**, so never `gh issue create` and
    never put a `filed:` line in your return (a return with `filed:` is REJECTED at
    integration and the lane is sent back). Never silently drop it (`no-dropped-work.md`).
@@ -692,7 +694,7 @@ issue_state: <#A=closed, #B=closed, … (each member)>
 dropped: <#K split out of the batch mid-flight (gate violation), issue left OPEN, re-dispatch solo | "none">
 obsolete_closed: <#K closed-as-obsolete in STEP 0 with evidence, NOT via this PR | "none">
 unverified: <list | "none">
-filed: <#K list | "none">
+followup_candidates: <per candidate: title — its Scope-gate criterion — Impact: <who is hit and how> — est. LoC | "none">  (never `filed:`, #842)
 ```
 
 **fork-no-merge variant of the FINAL MESSAGE** (no PR / merge / deploy exists for this stream — do
@@ -713,7 +715,7 @@ cards_fired: <#A ✓, #B ✓  (notify --run-card --handoff, one per issue)>
 issue_state: <#A=OPEN (handed off), #B=OPEN (handed off), …>   ← NEVER closed by you
 obsolete_handed_off: <#K commented OBSOLETE, left OPEN | "none">
 unverified: <list | "none">
-filed: <#K list | "none">
+followup_candidates: <per candidate: title — its Scope-gate criterion — Impact: <who is hit and how> — est. LoC | "none">  (never `filed:`, #842)
 ```
 
 **branch-merge variant of the FINAL MESSAGE** (your PR merges into the project's INTEGRATION
@@ -738,7 +740,7 @@ issue_state: <#A=OPEN (merged into integration, hand-off posted, awaiting gateke
 dropped: <#K split out of the batch mid-flight (gate violation), issue left OPEN, re-dispatch solo | "none">
 obsolete_handed_off: <#K commented OBSOLETE, left OPEN | "none">
 unverified: <list | "none">
-filed: <#K list | "none">
+followup_candidates: <per candidate: title — its Scope-gate criterion — Impact: <who is hit and how> — est. LoC | "none">  (never `filed:`, #842)
 ```
 
 **Worktree-mode variant of the FINAL MESSAGE** (`isolation: "worktree"`, full authority — the
@@ -760,5 +762,5 @@ lane_return: <per issue: the LANE-RETURN comment posted as your LAST act (#844) 
 dropped: <#K split out mid-flight (gate violation), issue left OPEN, re-dispatched solo | "none">
 obsolete_closed: <#K closed-as-obsolete in STEP 0 with evidence | "none">
 unverified: <list | "none">
-filed: <#K list | "none">
+followup_candidates: <per candidate: title — its Scope-gate criterion — Impact: <who is hit and how> — est. LoC | "none">  (never `filed:`, #842)
 ```

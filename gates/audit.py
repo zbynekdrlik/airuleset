@@ -106,7 +106,7 @@ CLI_BYPASS_LOGS = (
     ("destructive-remote-bypasses.log", ()),
     ("manual-drain-bypasses.log", ()),
     ("prod-write-budget-bypasses.log", ()),
-    ("stream-merge-bypasses.log", ()),
+    ("stream-merge-bypasses.log", ()), ("scope-gate-bypasses.log", ()),  # (#1378)
     ("subdev-ssh-bypasses.log", ()),
     ("vault-store-reads.log", ()), ("utc-time-bypasses.log", ()),  # (#1343)
     ("script-check-bypasses.log", ()), ("handover-bypasses.log", ()),  # (#1180)

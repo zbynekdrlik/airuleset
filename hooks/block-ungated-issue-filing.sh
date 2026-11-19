@@ -5,7 +5,7 @@ set -euo pipefail
 #
 # The Scope-gate / Dedup / chain-depth / stream-routing / presence /
 # dismissal-word classifier (#137/#329/#390/#842/#962/#993; #1297 removed the
-# daily, chain-width and net-drain caps) now lives in the importable, testable `gates/filing` package, run as
+# daily and chain-width caps; #1378 added the Impact bar + net-flow brake, `gates/filing/worth.py`) now lives in the `gates/filing` package, run as
 # `python3 -P -m gates.filing`. It reads the JSON payload on STDIN (current CC
 # contract), does the #842 worker (subagent) hard-block, the pre-filter, the
 # `airuleset:scope-gate-ok` bypass, the presence read, all classification + git
