@@ -855,8 +855,8 @@ class TestBodyFilePassthrough1044(unittest.TestCase):
                  m.patch("sys.stdout", new_callable=io.StringIO):
                 rc = airuleset.cmd_handoff(self._make_args(bp))
             self.assertEqual(0, rc, "valid --body-file should post")
-            # Receipt sha256 == the RAW body (posted verbatim, no mutation).
-            expect = hashlib.sha256(body.encode()).hexdigest()
+            # Receipt sha256 == the POSTED file: raw body, Verified-at-UTC: re-stamped (#1344).
+            expect = hashlib.sha256(open(os.path.join(gate_dir, "body-zbynekdrlik-odoo-erp-1044.md"), "rb").read()).hexdigest()
             receipts = [fn for fn in os.listdir(gate_dir)
                         if fn.endswith(".json")]
             self.assertTrue(receipts, "no receipt written")
