@@ -68,9 +68,14 @@ DEFAULT_SUB = "impl-sub"
 DEFAULT_FAST = "impl-fast"
 
 # The controller's tailscale IPv4 (machine-identities: ar.newlevel.media /
-# MagicDNS `airuleset`). NOTE #1358: the gateway now binds loopback only, so a
-# remote box flipped at this URL cannot reach it until the owner reopens it.
+# MagicDNS `airuleset`).
 CONTROLLER_TAILSCALE_IP = "100.101.214.103"
+
+# #1358: the controller gateway binds LOOPBACK only, so no remote box may be
+# flipped onto it — `set` refuses the default and any URL naming the controller.
+# Reopening remote use is an owner decision plus a real auth path.
+_CONTROLLER_GATEWAY_HOSTS = frozenset({CONTROLLER_TAILSCALE_IP, "airuleset",
+                                       "ar.newlevel.media"})
 
 # The string fields a valid marker MUST carry. `cwd` (#1060 L3a review) = the
 # stream's PROJECT dir the implementer window starts in (so its session transcript
@@ -92,29 +97,6 @@ _MARKER_UNSAFE_RE = re.compile(r"""['"`\s;|&$\\<>(){}]""")
 
 def _expand(p):
     return Path(os.path.expanduser(str(p)))
-
-
-def default_base_url():
-    """The controller gateway's base URL (`http://<tailscale-ip>:<GATEWAY_PORT>`).
-    Reads L1's `GATEWAY_PORT` AND — since `set` runs ON the controller (where the
-    L1 gateway binds) — L1's live `_tailscale_ip()` so the marker points at the
-    address the gateway is ACTUALLY bound to, never a hard-coded IP that could
-    drift (review B-MINOR). Falls back to the pinned CONTROLLER_TAILSCALE_IP on
-    any failure (off-controller, no tailscale, an unexpected error)."""
-    try:
-        from cli_model_gateway import GATEWAY_PORT
-        port = int(GATEWAY_PORT)
-    except Exception:
-        port = 4000
-    try:
-        from cli_model_gateway import _tailscale_ip
-        live = (_tailscale_ip() or "").strip()
-        ip = live or CONTROLLER_TAILSCALE_IP
-    except Exception:
-        # off-controller / no tailscale / error → the pinned fallback (the
-        # expected path anywhere but the controller; not a real failure).
-        ip = CONTROLLER_TAILSCALE_IP
-    return "http://%s:%d" % (ip, port)
 
 
 # --------------------------------------------------------------------------- #
@@ -194,10 +176,28 @@ def marker_from_entry(entry):
     return {k: entry[k] for k in _MARKER_FIELDS}
 
 
+def _refuse_controller_gateway(base_url):
+    """#1358: raise when `base_url` is unset (the old default was the controller
+    gateway) or names the controller — the gateway binds loopback only, so a
+    marker pointing there switches the box onto a backend that refuses every
+    connection."""
+    from urllib.parse import urlsplit
+    if not (base_url or "").strip():
+        raise ModelBackendError(
+            "--base-url is required: the controller model gateway binds loopback "
+            "only (#1358), so no remote box can use it; reopening it needs an "
+            "owner decision and a real auth path")
+    host = (urlsplit(base_url.strip()).hostname or "").lower()
+    if host in _CONTROLLER_GATEWAY_HOSTS:
+        raise ModelBackendError(
+            "refusing base_url %r: the controller model gateway binds loopback "
+            "only (#1358) and is unreachable from another box" % base_url)
+
+
 def set_target(target, base_url=None, main=None, sub=None, fast=None,
                key_file=None, cwd=None, path=None, home=None):
-    """Add/replace `target`'s registry entry. Defaults: base_url →
-    default_base_url(); main/sub/fast → the impl(ementer) tier aliases; key_file →
+    """Add/replace `target`'s registry entry. `base_url` is REQUIRED and must
+    not name the controller gateway (#1358); main/sub/fast → the impl(ementer) tier aliases; key_file →
     TARGET_KEY_FILE. `cwd` is REQUIRED (#1060 L3a) — the stream's PROJECT dir the
     implementer window starts in (an absolute path, e.g.
     /home/miva1/devel/odoo/odoo-erp) — there is no sane default. Returns the
@@ -210,9 +210,10 @@ def set_target(target, base_url=None, main=None, sub=None, fast=None,
         raise ModelBackendError(
             "--cwd is required — the implementer's PROJECT dir on the target "
             "(an absolute path, e.g. /home/<user>/devel/odoo/odoo-erp)")
+    _refuse_controller_gateway(base_url)
     reg = load_registry(path=path, home=home)
     reg[target] = {
-        "base_url": base_url or default_base_url(),
+        "base_url": base_url,
         "key_file": key_file or TARGET_KEY_FILE,
         "main": main or DEFAULT_MAIN,
         "sub": sub or DEFAULT_SUB,

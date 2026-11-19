@@ -458,23 +458,6 @@ def _read_secret_file(path):
         return fh.read().strip()
 
 
-def _tailscale_ip():
-    """The box's tailscale IPv4 (`tailscale ip -4`, first line). Raises loudly
-    when unavailable. Since #1358 the gateway never BINDS it (it binds
-    GATEWAY_BIND_HOST); `cli_model_backend.default_base_url` still reads it."""
-    try:
-        r = subprocess.run(["tailscale", "ip", "-4"], capture_output=True,
-                           text=True, timeout=15)
-    except Exception as e:
-        raise ModelGatewayError(f"cannot read tailscale ip: {e}")
-    ip = (r.stdout or "").strip().splitlines()
-    if r.returncode != 0 or not ip:
-        raise ModelGatewayError(
-            f"tailscale ip -4 returned nothing (rc={r.returncode}); refusing to "
-            f"bind a non-tailscale interface")
-    return ip[0].strip()
-
-
 def _generate_master_key():
     import secrets as _secrets
     return "sk-" + _secrets.token_urlsafe(32)

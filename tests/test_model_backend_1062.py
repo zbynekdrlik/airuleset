@@ -982,17 +982,8 @@ class TestReviewFixes1062(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             with self.assertRaises(mb.ModelBackendError):
                 mb.set_target("miva1@subdev", main="x'; rm -rf /",
+                              base_url="http://10.1.2.3:4000",  # #1358
                               cwd="/proj", path=str(Path(d) / "reg.json"))
-
-    def test_default_base_url_uses_live_tailscale_ip(self):
-        with m.patch("cli_model_gateway._tailscale_ip", return_value="100.9.9.9"):
-            self.assertEqual(mb.default_base_url(), "http://100.9.9.9:4000")
-
-    def test_default_base_url_falls_back_on_failure(self):
-        with m.patch("cli_model_gateway._tailscale_ip",
-                     side_effect=RuntimeError("no tailscale")):
-            self.assertEqual(mb.default_base_url(),
-                             "http://%s:4000" % mb.CONTROLLER_TAILSCALE_IP)
 
     def test_marker_json_no_trailing_newline(self):
         self.assertFalse(mb.marker_json(MARKER).endswith("\n"))

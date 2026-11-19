@@ -10511,8 +10511,8 @@ def main():
     p_mb.add_argument("--fast", default=None,
                       help="set: the fast/haiku-tier alias (default impl-fast)")
     p_mb.add_argument("--base-url", dest="base_url", default=None,
-                      help="set: the gateway base URL (default the controller "
-                           "tailscale gateway)")
+                      help="set: REQUIRED — the gateway base URL; the controller "
+                           "gateway is loopback-only and refused (#1358)")
     p_mb.add_argument("--key-file", dest="key_file", default=None,
                       help="set: the on-target token file (default "
                            "~/.secrets/model-gateway.key)")

@@ -5,7 +5,8 @@
 # and ONLY when an alias map (~/.claude/airuleset-model-gateway.json) exists.
 # The {{HOST_IP}} placeholder is substituted at install with 127.0.0.1
 # (cli_model_gateway.GATEWAY_BIND_HOST, #1358): the proxy binds LOOPBACK only —
-# never tailscale, LAN, public or a wildcard (the render guard refuses them). Do not edit the installed copy in ~/.config/systemd/user/
+# never tailscale, LAN, public or a wildcard (the render guard refuses them).
+# Do not edit the installed copy in ~/.config/systemd/user/
 # by hand — edit this template and re-run `python3 airuleset.py install`.
 
 [Unit]

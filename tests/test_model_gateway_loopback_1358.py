@@ -50,16 +50,12 @@ class TestInstallUsesBindHost(unittest.TestCase):
     def test_install_writes_loopback_unit_and_probes_loopback(self):
         """Drive the real install step on a temp home with the side-effecting
         seams (venv, systemctl, health probe, secrets) faked: the written unit
-        binds 127.0.0.1, the health probe targets 127.0.0.1, and the live
-        tailscale address is never consulted."""
+        binds 127.0.0.1 and the health probe targets 127.0.0.1."""
         import json
         import tempfile
         from unittest import mock as m
 
         probed = []
-
-        def _no_tailscale():
-            raise AssertionError("install must not read the tailscale IP")
 
         with tempfile.TemporaryDirectory() as d:
             d = Path(d)
@@ -80,7 +76,6 @@ class TestInstallUsesBindHost(unittest.TestCase):
                     m.patch.object(mg, "_read_secret_file", return_value="v"), \
                     m.patch.object(mg, "_ensure_venv", return_value=(True, False)), \
                     m.patch.object(mg, "_enable_service", return_value=True), \
-                    m.patch.object(mg, "_tailscale_ip", side_effect=_no_tailscale), \
                     m.patch.object(mg, "_health_check",
                                    side_effect=lambda h, deep=True: probed.append(h) or True), \
                     m.patch("sys.stdout"):
