@@ -17,9 +17,10 @@ Claude-born filing:
     cleanup, refactor, hygiene, consistency, …) with no harm word anywhere --
     "konzistencia skladu je porušená" is a defect, "consistency with the other
     screens" is not.
-  * ``brake_blocks`` -- over the last 72 h, Claude-born filings CREATED >=
-    issues CLOSED as completed (any origin) blocks; 0/0 blocks too (the
-    dispatched design). Counts are INJECTED, so the decision is a pure function.
+  * ``brake_blocks`` -- over the last 72 h, Claude-born filings CREATED >
+    issues CLOSED as completed (any origin) blocks; equal counts and 0/0 pass
+    (the owner-approved "created MORE than it closed"). Counts are INJECTED, so
+    the decision is a pure function.
   * ``flow_counts`` -- the two live ``gh issue list --search`` reads behind the
     brake, per scope: EVERY ``stream:<x>`` label the filing carries (also a
     ``gh api … -f labels[]=stream:x``), else the whole repo; any non-draining
@@ -180,8 +181,8 @@ def impact_reason(body):
 
 
 def brake_blocks(created, closed):
-    """#1378: the stream files at least as fast as it closes -> BLOCK (0/0 too)."""
-    return created >= closed
+    """#1378: the stream files faster than it closes -> BLOCK (equal / 0/0 pass)."""
+    return created > closed
 
 
 _API_LABEL_RE = re.compile(r"^labels\[\]=(stream:[A-Za-z0-9_-]+)$", re.IGNORECASE)
@@ -316,7 +317,7 @@ def log_bypass(cmd, sid):
 
 def _brake_reason(scope_text, created, closed):
     return ("net-flow-brake (%s: %d Claude-born separate-work tickets filed vs %d closed "
-            "as completed in the last %d h -- it files at least as fast as it closes; put "
+            "as completed in the last %d h -- it files faster than it closes; put "
             "the item as a `- [ ]` line in the DESCRIPTION of the ticket it belongs to "
             "(never a comment), fix it now, or drop it with one line; switching the "
             "Scope-gate criterion is not an exit)"
