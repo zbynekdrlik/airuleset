@@ -60,6 +60,8 @@ from cli_fail2ban import (  # noqa: F401
     FAIL2BAN_BANTIME, FAIL2BAN_IGNOREIP, FAIL2BAN_IGNOREIP_JAILS,
     FAIL2BAN_JAIL_LOCAL_PATH, FAIL2BAN_JAIL_PATH, build_fail2ban_readback,
     build_fail2ban_step, render_fail2ban_hardening, render_fail2ban_ignoreip_local)
+from cli_sshd_maxstartups import (  # noqa: F401 — #1349 sshd MaxStartups leaf
+    build_sshd_maxstartups_readback, build_sshd_maxstartups_step, render_sshd_maxstartups_conf)
 
 
 # ---------------------------------------------------------------------------
@@ -529,7 +531,7 @@ def render_install_fn():
         ' echo "  disk-guard-root: unchanged $dest"; return 0; fi\n'
         '    [ "$dest" = %s ] && JOURNALD_CHANGED=1\n'
         '    chmod "$mode" "$tmp"\n'
-        '    mv -f "$tmp" "$dest"\n'
+        '    mv -f "$tmp" "$dest"; DGROOT_WROTE=1\n'
         '    trap - EXIT\n'
         '    echo "  disk-guard-root: wrote $dest"\n'
         '}' % shlex.quote(JOURNALD_CAP_PATH)
@@ -562,6 +564,7 @@ def build_apply_script(drain=True, journal_max=None):
     # fail2ban hardening ONLY where fail2ban is installed (a box without it is
     # left clean, and the read-back below never fails for its absence).
     parts.append(build_fail2ban_step(_HEREDOC_MARK))
+    parts.append(build_sshd_maxstartups_step(_HEREDOC_MARK))  # #1349
     parts.append("")
     # Create the world-readable report dir now (tmpfiles.d covers subsequent
     # boots) and reload systemd so it re-reads the journald cap + the new units.
@@ -623,6 +626,7 @@ def build_apply_script(drain=True, journal_max=None):
     parts.append(build_logrotate_readback(managed_logs))
     # 2b. (#1306) fail2ban step outcome + the effective sshd ignoreip.
     parts.append(build_fail2ban_readback())
+    parts.append(build_sshd_maxstartups_readback())  # 2c. #1349 effective MaxStartups
     # 3. the daily report timer is enabled.
     parts.append(
         'if ! systemctl is-enabled airuleset-disk-guard-root.timer '
