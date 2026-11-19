@@ -39,9 +39,11 @@ class TestRender(unittest.TestCase):
         self.assertTrue(first.startswith("# Managed by airuleset"), first)
         self.assertIn("#1349", first)
 
-    def test_path_is_a_50_airuleset_sshd_drop_in(self):
+    def test_path_sorts_after_the_legacy_60_drop_in(self):
+        # sshd keeps the LAST MaxStartups it reads, so the drop-in sorts
+        # after the hand-made 60-airuleset-maxstartups.conf on gk (#358).
         self.assertEqual(ms.SSHD_MAXSTARTUPS_PATH,
-                         "/etc/ssh/sshd_config.d/50-airuleset-maxstartups.conf")
+                         "/etc/ssh/sshd_config.d/90-airuleset-maxstartups.conf")
 
     def test_never_the_985_password_drop_in(self):
         self.assertNotEqual(ms.SSHD_MAXSTARTUPS_PATH, g.SSHD_PASSWORD_PATH)
@@ -82,7 +84,8 @@ class TestStepExecution(unittest.TestCase):
         self.d = td.name
         self.conf_d = os.path.join(self.d, "sshd_config.d")
         os.mkdir(self.conf_d)
-        self.path = os.path.join(self.conf_d, "50-airuleset-maxstartups.conf")
+        self.path = os.path.join(self.conf_d, "90-airuleset-maxstartups.conf")
+        self.legacy = os.path.join(self.conf_d, "50-airuleset-maxstartups.conf")
         self.calls = os.path.join(self.d, "calls")
         self.bin = os.path.join(self.d, "bin")
         os.mkdir(self.bin)
@@ -104,20 +107,19 @@ class TestStepExecution(unittest.TestCase):
             'case "$1" in\n'
             '  -t) [ %(t_rc)d -ne 0 ] && echo "bad option" >&2; exit %(t_rc)d;;\n'
             '  -T) echo "port 22"\n'
-            '      v=10:30:100\n'
-            '      if [ -n "%(shadow)s" ]; then v="%(shadow)s"\n'
-            '      elif [ -f "%(path)s" ]; then\n'
-            '        v=$(awk \'$1=="MaxStartups"{print $2}\' "%(path)s"); fi\n'
+            '      v=$(cat "%(conf_d)s"/*.conf 2>/dev/null | awk '
+            '\'$1=="MaxStartups"{v=$2} END{print v}\')\n'
+            '      [ -n "$v" ] || v=10:30:100\n'
+            '      [ -n "%(shadow)s" ] && v="%(shadow)s"\n'
             '      echo "maxstartups $v"\n'
-            '      p=none\n'
-            '      if [ -n "%(ps_shadow)s" ]; then p="%(ps_shadow)s"\n'
-            '      elif [ -f "%(path)s" ]; then\n'
-            '        p=$(awk \'$1=="PerSourceMaxStartups"{print $2}\' "%(path)s")\n'
-            '        [ -n "$p" ] || p=none; fi\n'
+            '      p=$(cat "%(conf_d)s"/*.conf 2>/dev/null | awk '
+            '\'$1=="PerSourceMaxStartups"{print $2; exit}\')\n'
+            '      [ -n "$p" ] || p=none\n'
+            '      [ -n "%(ps_shadow)s" ] && p="%(ps_shadow)s"\n'
             '      echo "persourcemaxstartups $p"; exit 0;;\n'
             'esac\nexit 0\n'
             % {"calls": self.calls, "t_rc": t_rc, "shadow": shadow or "",
-               "ps_shadow": ps_shadow or "",
+               "ps_shadow": ps_shadow or "", "conf_d": self.conf_d,
                "path": self.path})
         systemctl = ('#!/bin/bash\necho "systemctl $*" >> "%s"\nexit %d\n'
                      % (self.calls, reload_rc))
@@ -245,6 +247,38 @@ class TestStepExecution(unittest.TestCase):
         out, err, calls = self.run_step(ps_shadow="none")
         self.assertIn("fail=1", out)
         self.assertIn("PerSourceMaxStartups", err)
+
+    def test_a_legacy_60_drop_in_does_not_win(self):
+        # gk carries a hand-made `60-airuleset-maxstartups.conf` with
+        # MaxStartups 30:30:150 (#358). sshd keeps the LAST MaxStartups.
+        with open(os.path.join(self.conf_d, "60-airuleset-maxstartups.conf"),
+                  "w") as f:
+            f.write("MaxStartups 30:30:150\n")
+        out, err, calls = self.run_step()
+        self.assertIn("fail=0", out, err)
+
+    def test_a_later_foreign_value_still_fails_the_readback(self):
+        with open(os.path.join(self.conf_d, "95-foreign.conf"), "w") as f:
+            f.write("MaxStartups 10:30:100\n")
+        out, err, calls = self.run_step()
+        self.assertIn("fail=1", out)
+        self.assertIn("10:30:100", err)
+
+    def test_our_first_50_drop_in_is_retired(self):
+        # The first rollout wrote 50-airuleset-maxstartups.conf (sorts before
+        # 60-, so it lost). Only our own marked file is removed.
+        with open(self.legacy, "w") as f:
+            f.write(ms.LEGACY_MARKER + " old\nMaxStartups 60:30:200\n")
+        out, err, calls = self.run_step()
+        self.assertFalse(os.path.exists(self.legacy))
+        self.assertIn("fail=0", out, err)
+        self.assert_foreign_untouched()
+
+    def test_a_foreign_50_file_is_left_alone(self):
+        with open(self.legacy, "w") as f:
+            f.write("MaxStartups 20:30:100\n")
+        self.run_step()
+        self.assertEqual(open(self.legacy).read(), "MaxStartups 20:30:100\n")
 
 
 if __name__ == "__main__":
