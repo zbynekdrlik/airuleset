@@ -155,5 +155,43 @@ class TestBodyFileStampsVerifiedAt(unittest.TestCase):
         self.assertEqual((posted, receipts), ([], []))
 
 
+class TestStampEdgeShapes(unittest.TestCase):
+    """Review 🔵 findings on the leaf (#1344): exact output per shape."""
+    NOW = "2026-11-19T10:00:00Z"
+
+    def _stamp(self, body):
+        import cli_handoff_stamp
+        return cli_handoff_stamp.stamp_verified_at(body, self.NOW)
+
+    def test_bold_head_insert_gets_no_stray_star(self):
+        out, err = self._stamp("RFR\n**HEAD:** abcdef12\n")
+        self.assertIsNone(err)
+        self.assertEqual(out, "RFR\nVerified-at-UTC: %s\n**HEAD:** abcdef12\n"
+                         % self.NOW)
+
+    def test_bullet_head_insert_copies_the_bullet(self):
+        out, _ = self._stamp("  - HEAD: abcdef12\n")
+        self.assertEqual(out, "  - Verified-at-UTC: %s\n  - HEAD: abcdef12\n"
+                         % self.NOW)
+
+    def test_info_string_line_does_not_close_a_fence(self):
+        body = "HEAD: abcdef12\n```\n```bash\nVerified-at-UTC: x\n```\n"
+        self.assertIsNotNone(self._stamp(body)[1])
+
+    def test_shorter_backtick_run_does_not_close_a_longer_fence(self):
+        body = "HEAD: abcdef12\n````\n```\nVerified-at-UTC: x\n````\n"
+        self.assertIsNotNone(self._stamp(body)[1])
+
+    def test_unicode_line_separator_end_is_kept(self):
+        out, err = self._stamp("Verified-at-UTC: old\u2028HEAD: abcdef12\n")
+        self.assertIsNone(err)
+        self.assertEqual(out, "Verified-at-UTC: %s\u2028HEAD: abcdef12\n"
+                         % self.NOW)
+
+    def test_head_only_inside_a_fence_is_refused(self):
+        out, err = self._stamp("RFR\n```\nHEAD: abcdef12\n```\n")
+        self.assertIn("unfenced HEAD", err)
+
+
 if __name__ == "__main__":
     unittest.main()

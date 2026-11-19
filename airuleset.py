@@ -5174,7 +5174,7 @@ def _handoff_clear_bounce(repo, issue, gk_state, branch=None, body=None):
 
 def _cmd_handoff_post_body_file(repo, issue, branch, body_file):
     """#1044 pass-through: sign AND post a STREAM-authored, gate-compliant body
-    VERBATIM in one command.
+    VERBATIM in one command, only Verified-at-UTC: re-stamped (#1344).
 
     The odoo-erp gate OWNS the body shape (it evolves across 10+ checks_*
     modules and requires execution evidence the field-generator cannot
@@ -5338,7 +5338,7 @@ def _cmd_handoff_post_body_file(repo, issue, branch, body_file):
     # answered (state bounce-unanswered), never on a fail-open/stale state.
     if _handoff_clear_bounce(repo, issue, _gk_state, branch, body):
         print("handoff: prio:bounce cleared on #%s" % issue)
-    print("handoff: READY-FOR-REVIEW posted verbatim on #%s (round %d, "
+    print("handoff: READY-FOR-REVIEW posted (Verified-at-UTC stamped) on #%s (round %d, "
           "HEAD %s)" % (issue, rnd, body_head[:12]))
     return 0
 

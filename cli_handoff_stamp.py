@@ -22,8 +22,12 @@ from typing import Optional
 _VA_LINE_RE = re.compile(
     r"^([ \t]*[-*]?[ \t]*\**Verified-at-UTC\**[ \t]*:[ \t]*\**[ \t]*)(.*)$",
     re.IGNORECASE)
-_HEAD_LINE_RE = re.compile(r"^([ \t]*[-*]?[ \t]*)\**HEAD\**[ \t]*:", re.IGNORECASE)
-_FENCE_RE = re.compile(r"^[ \t]*(```|~~~)")
+# The composer's own HEAD: line shape; the inserted line copies only a real
+# bullet prefix (a bold `**HEAD:**` must not lend it a stray `*`).
+_HEAD_LINE_RE = re.compile(r"^[ \t]*[-*]?[ \t]*\**HEAD\**[ \t]*:", re.IGNORECASE)
+_BULLET_PREFIX_RE = re.compile(r"[ \t]*(?:[-*][ \t]+)?")
+# CommonMark-style fences: a closer is the SAME char, at least as long, bare.
+_FENCE_RE = re.compile(r"^[ \t]{0,3}(`{3,}|~{3,})(.*)$")
 _BLOCK = "handoff BLOCK: --body-file "
 
 
@@ -41,11 +45,16 @@ def stamp_verified_at(body: str, now_utc: str) -> tuple[str, Optional[str]]:
     lines = body.splitlines(keepends=True)
     out, fence, stamped, head_at = [], None, False, None
     for line in lines:
-        text = line.rstrip("\r\n")
+        text = (line.splitlines() or [""])[0]   # every splitlines() line end
         eol = line[len(text):]
         fm = _FENCE_RE.match(text)
-        if fm:
-            fence = None if fence == fm.group(1) else (fence or fm.group(1))
+        if fm and fence is None:
+            fence = fm.group(1)
+            out.append(line)
+            continue
+        if (fm and fm.group(1)[0] == fence[0] and len(fm.group(1)) >= len(fence)
+                and not fm.group(2).strip()):
+            fence = None
             out.append(line)
             continue
         m = _VA_LINE_RE.match(text)
@@ -60,13 +69,13 @@ def stamp_verified_at(body: str, now_utc: str) -> tuple[str, Optional[str]]:
             out.append(m.group(1) + now_utc + eol)
             stamped = True
             continue
-        if head_at is None and not fence and _HEAD_LINE_RE.match(text):
+        if head_at is None and fence is None and _HEAD_LINE_RE.match(text):
             head_at = len(out)
         out.append(line)
     if not stamped:
         if head_at is None:
-            return body, _BLOCK + "body has no HEAD: line to stamp beside"
-        prefix = _HEAD_LINE_RE.match(out[head_at]).group(1)
+            return body, _BLOCK + "body has no unfenced HEAD: line to stamp beside"
+        prefix = _BULLET_PREFIX_RE.match(out[head_at]).group(0)
         out.insert(head_at, "%sVerified-at-UTC: %s\n" % (prefix, now_utc))
     return "".join(out), None
 
