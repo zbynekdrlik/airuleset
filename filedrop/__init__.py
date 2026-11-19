@@ -205,8 +205,14 @@ LOOPBACK = "127.0.0.1"
 
 def is_controller_box(nodename=None):
     """True on the controller machine (#1362): its file-drop binds loopback only
-    and its drop lanes' tunnel origin is loopback."""
+    and its drop lanes' tunnel origin is loopback.
+
+    `FILEDROP_NODENAME` overrides the real nodename, like `FILEDROP_HOST` does
+    for the bind: it is the seam that keeps the test suite hermetic when it runs
+    ON the controller (CLI subprocesses inherit it). Never set it in a unit."""
     if nodename is None:
+        nodename = os.environ.get("FILEDROP_NODENAME")
+    if not nodename:
         try:
             nodename = os.uname().nodename
         except OSError:

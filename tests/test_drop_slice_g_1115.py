@@ -91,7 +91,7 @@ def _acc(apps=None):
 OWNER = "drlik.zbynek@gmail.com"
 CONTROLLER_KEY = ("airuleset", "airuleset")
 CONTROLLER_HOST = "drop-controller.newlevel.media"
-CONTROLLER_ORIGIN = "100.101.214.103"
+CONTROLLER_ORIGIN = "127.0.0.1"  # #1362: cloudflared runs on the controller itself
 ZONE = "newlevel.media"
 
 
@@ -115,7 +115,6 @@ class TestLocalControllerLanePresent(unittest.TestCase):
         lane = self.lanes[CONTROLLER_KEY]
         self.assertEqual(lane.topology, "controller")
         self.assertEqual(lane.origin_host, CONTROLLER_ORIGIN)
-        self.assertTrue(dg._is_tailscale_host(lane.origin_host))
         self.assertEqual(lane.tunnel_uuid, dg._CONTROLLER_TUNNEL_UUID)
         self.assertTrue(lane.access)
         self.assertIsNone(lane.filedrop_port)   # cache-provided, like all generated
@@ -123,11 +122,14 @@ class TestLocalControllerLanePresent(unittest.TestCase):
         self.assertIsNone(lane.tunnel_service)
 
     def test_origin_is_the_controller_fleet_entry_not_a_hand_literal(self):
-        # The origin equals the tailscale host on the controller's OWN fleet entry
-        # (the claudy@controller service account), never a separate literal.
+        # The lane exists because the controller has its OWN fleet entry (the
+        # claudy@controller service account); its origin is the shared #1362
+        # loopback constant, never that entry's tailscale host.
         entry = next(e for e in cli_fleet.REMOTE_HOSTS
                      if dl._nodename_for_entry(e) == "airuleset")
-        self.assertEqual(self.lanes[CONTROLLER_KEY].origin_host, entry["host"])
+        self.assertEqual(self.lanes[CONTROLLER_KEY].origin_host,
+                         dl.CONTROLLER_DROP_ORIGIN)
+        self.assertNotEqual(self.lanes[CONTROLLER_KEY].origin_host, entry["host"])
 
     def test_port_distinct_and_in_range(self):
         lane = self.lanes[CONTROLLER_KEY]
@@ -145,7 +147,7 @@ class TestLocalControllerLanePresent(unittest.TestCase):
         ctrl_port = dl._GENERATED_DROP_PORTS[CONTROLLER_KEY]
         last = max(dl._GENERATED_DROP_PORTS.values()) + 1
         fake_fleet = [
-            {"name": "claudy@controller", "host": CONTROLLER_ORIGIN,
+            {"name": "claudy@controller", "host": "100.101.214.103",
              "user": "claudy", "drop": {"port": last + 1}},
             {"name": "newbox", "host": "100.99.99.99", "user": "newuser"},
         ]
@@ -187,7 +189,7 @@ class TestExistingLanesByteIdentical(unittest.TestCase):
         self.assertEqual(cl.host, "drop-airuleset.newlevel.media")
         self.assertEqual(cl.port, 8877)
         self.assertEqual(cl.topology, "controller")
-        self.assertEqual(cl.origin_host, "100.101.214.103")
+        self.assertEqual(cl.origin_host, "127.0.0.1")  # #1362 loopback origin
         self.assertTrue(cl.access)
         self.assertIsNone(cl.filedrop_port)
 

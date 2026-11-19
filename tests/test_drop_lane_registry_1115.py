@@ -182,8 +182,13 @@ class TestGeneratedLaneFields(unittest.TestCase):
     def test_no_generated_controller_lane_has_a_nontailscale_origin(self):
         # Review fix: a controller-topology origin MUST be a tailscale IP (the
         # drop hop stays on the tailnet). A public-only box (forestshop) would
-        # otherwise proxy over the public internet in cleartext.
+        # otherwise proxy over the public internet in cleartext. #1362: a lane
+        # on the controller machine itself is fronted by cloudflared on the SAME
+        # box, so its origin is loopback (never public either).
         for key, lane in self.lanes.items():
+            if key[0] == dl.CONTROLLER_NODENAME:
+                self.assertEqual(lane.origin_host, dl.CONTROLLER_DROP_ORIGIN, key)
+                continue
             if lane.topology == "controller" and lane.origin_host:
                 self.assertTrue(dg._is_tailscale_host(lane.origin_host),
                                 "%s controller origin %s is not tailscale"

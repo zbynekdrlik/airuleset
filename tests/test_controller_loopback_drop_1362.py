@@ -8,6 +8,7 @@ the controller node (`CONTROLLER_NODENAME`). The box-class marker is per
 account (claudy reads `workstation`), so it is NOT that predicate.
 """
 import io
+import os
 import sys
 import tempfile
 import types
@@ -38,7 +39,25 @@ def _controller_lanes():
             if k[0] == dl.CONTROLLER_NODENAME}
 
 
-class TestBindIps(unittest.TestCase):
+class _RealNodename(unittest.TestCase):
+    """The real-nodename path: never let an ambient FILEDROP_NODENAME decide."""
+
+    def setUp(self):
+        env = mock.patch.dict("os.environ")
+        env.start()
+        self.addCleanup(env.stop)
+        os.environ.pop("FILEDROP_NODENAME", None)
+
+
+class TestBindIps(_RealNodename):
+    def test_nodename_seam_overrides_the_real_nodename(self):
+        with mock.patch("os.uname", return_value=_uname("airuleset")), \
+                mock.patch.dict("os.environ", {"FILEDROP_NODENAME": "dev1"}):
+            self.assertFalse(filedrop.is_controller_box())
+        with mock.patch("os.uname", return_value=_uname("dev1")), \
+                mock.patch.dict("os.environ", {"FILEDROP_NODENAME": "airuleset"}):
+            self.assertTrue(filedrop.is_controller_box())
+
     def test_controller_binds_loopback_only(self):
         with mock.patch("os.uname", return_value=_uname("airuleset")), \
                 mock.patch.object(filedrop, "_iface_ips", return_value=_TS_PAIRS):
@@ -110,7 +129,7 @@ class TestControllerLaneOrigin(unittest.TestCase):
         self.assertEqual(ips, ["127.0.0.1"])
 
 
-class TestPrivateRefusedOnController(unittest.TestCase):
+class TestPrivateRefusedOnController(_RealNodename):
     def test_select_lane_private_refuses_on_controller(self):
         lane = ("drop-controller.newlevel.media", 8891, "127.0.0.1")
         err = io.StringIO()

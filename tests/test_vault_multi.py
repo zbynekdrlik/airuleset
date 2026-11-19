@@ -39,6 +39,10 @@ SERVER = ROOT / "filedrop" / "vault_server.py"
 TOK = "toktoktoktoktok603"
 
 
+# #1362: hermetic off the controller's loopback-only / no --private branch.
+from filedrop_host_testlib import setUpModule, tearDownModule  # noqa: E402,F401
+
+
 def _free_port():
     sk = socket.socket()
     sk.bind(("127.0.0.1", 0))

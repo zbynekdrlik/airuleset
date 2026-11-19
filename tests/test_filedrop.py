@@ -11,6 +11,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 
+# #1362: hermetic off the controller's loopback-only / no --private branch.
+from filedrop_host_testlib import setUpModule, tearDownModule  # noqa: E402,F401
+
+
 class TestConstants(unittest.TestCase):
     def test_constants_present(self):
         import filedrop

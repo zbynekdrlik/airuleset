@@ -7,6 +7,10 @@ from unittest import mock
 import filedrop
 
 
+# #1362: hermetic off the controller's loopback-only / no --private branch.
+from filedrop_host_testlib import setUpModule, tearDownModule  # noqa: E402,F401
+
+
 class TestDanteLeg(unittest.TestCase):
 
     def test_interface_path_drops_the_dante_leg(self):
