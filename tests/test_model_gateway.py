@@ -143,8 +143,9 @@ class TestRenderUnit(unittest.TestCase):
         self.assertNotRegex(tmpl, r"--host\s+\d+\.\d+\.\d+\.\d+")
 
     def test_render_substitutes_host_ip(self):
-        out = mg.render_gateway_unit("100.101.214.103")
-        self.assertIn("--host 100.101.214.103", out)
+        # #1358: loopback is the only bind the render guard accepts.
+        out = mg.render_gateway_unit("127.0.0.1")
+        self.assertIn("--host 127.0.0.1", out)
         self.assertNotIn("{{HOST_IP}}", out)
 
     def test_empty_ip_refused(self):

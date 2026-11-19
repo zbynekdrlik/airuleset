@@ -2113,6 +2113,7 @@ def cmd_install(args):
     except Exception as e:
         print(f"  watchdog setup error (non-fatal): {e}", file=sys.stderr)
     maybe_setup_project_gh_token_timer()   # #1190: controller-only, never raises
+    maybe_setup_venue_bypass_timer()       # #1370: controller-only, never raises
     maybe_refresh_project_gh_app_shim()    # #1199: project accounts only, never raises
     maybe_respawn_stale_project_panes()    # #1310: a pane older than claude() gets it
 
@@ -9311,6 +9312,8 @@ from cli_project_gh_token import (  # noqa: E402, F401
     register_parser as _register_project_gh_token_parser,
 )
 from cli_pane_respawn import maybe_respawn_stale_project_panes  # noqa: E402, F401
+from cli_venue_bypass import cmd_venue_bypass_sync, maybe_setup_timer as maybe_setup_venue_bypass_timer, register_parser as _register_venue_bypass_parser  # noqa: E402, F401  #1370
+from cli_publish_app import cmd_publish_app, register_parser as _register_publish_app_parser  # noqa: E402, F401  #1370
 # --- #1224: print the last delivered ❓ block (never read the own transcript) ---
 import cli_owner_notice  # noqa: E402 - #1300 owner notice -> footer U
 from cli_question_block import (  # noqa: E402, F401
@@ -9324,7 +9327,7 @@ def _register_leaf_parsers(sub):
     one call from main() keeps main() from growing per leaf."""
     for register in (_register_stream_priority_parser, _register_box_queue_parser,
                      _register_accounts_parser, _register_project_gh_token_parser,
-                     _register_question_block_parser):
+                     _register_question_block_parser, _register_venue_bypass_parser, _register_publish_app_parser):
         register(sub)
 
 # --- #1062 L1: managed LiteLLM model gateway CLI leaf ---
@@ -10511,8 +10514,8 @@ def main():
     p_mb.add_argument("--fast", default=None,
                       help="set: the fast/haiku-tier alias (default impl-fast)")
     p_mb.add_argument("--base-url", dest="base_url", default=None,
-                      help="set: the gateway base URL (default the controller "
-                           "tailscale gateway)")
+                      help="set: REQUIRED — the gateway base URL; the controller "
+                           "gateway is loopback-only and refused (#1358)")
     p_mb.add_argument("--key-file", dest="key_file", default=None,
                       help="set: the on-target token file (default "
                            "~/.secrets/model-gateway.key)")
@@ -11111,6 +11114,7 @@ SUBCOMMANDS = {
     "accounts": cmd_accounts,
     "project-gh-token": cmd_project_gh_token,
     "question-block": cmd_question_block,
+    "venue-bypass-sync": cmd_venue_bypass_sync, "publish-app": cmd_publish_app,  # #1370
 }
 # Backwards-compatible alias used by main() before SUBCOMMANDS existed.
 commands = SUBCOMMANDS
