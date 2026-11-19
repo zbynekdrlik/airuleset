@@ -141,6 +141,25 @@ class TestDirtyKindTransitions(_Base):
         self.assertEqual(st["state"], "dirty:a")
         self.assertEqual(st["dirty_kind"], "refresh-failed")
 
+    def test_retired_stale_refresh_record_is_refresh_failed(self):
+        # refresh() over a `refreshing` record whose lock is free retires it
+        # (its earlier refresh died) — the box is dirty because that refresh
+        # never completed. Snapshot the state from INSIDE the new refresh.
+        snap = Path(self._tmp.name) / "snap.json"
+        self.write_config(refresh=f"cp {self.state_path()} {snap}")
+        st = {"version": 1, "box": BOX, "state": "refreshing", "queue": [],
+              "holder": None, "reason": "released dirty by a",
+              "dirty_kind": "released", "updated_at": 1.0,
+              "refresh": {"token": "old", "pid": self.me, "started_at": 1.0,
+                          "deadline": 9e12, "from": "dirty:a"}}
+        self.state_path().write_text(json.dumps(st))
+        self.assertTrue(bq.refresh(BOX)["ok"])
+        mid = json.loads(snap.read_text())
+        self.assertEqual(mid["state"], "refreshing")
+        self.assertEqual(mid["dirty_kind"], "refresh-failed")
+        self.assertEqual(mid["reason"], "released dirty by a")
+        self.assertEqual(self.state()["dirty_kind"], "")
+
     def test_take_after_refresh_keeps_empty(self):
         self.hold()
         bq.release(BOX, "a", now=1001.0)
