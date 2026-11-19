@@ -37,7 +37,10 @@ SERVER = ROOT / "filedrop" / "upload_server.py"
 # public drop lane (the controller since #1115 slice G) makes cmd_upload print
 # the public URL first, so pin "no public lane" for the whole module; a test that
 # exercises the public path patches resolve_public_lane_full itself.
+from filedrop_host_testlib import off_controller  # noqa: E402
+
 _NO_PUBLIC_LANE = None
+_OFF_CONTROLLER = off_controller()
 
 
 def setUpModule():
@@ -46,11 +49,13 @@ def setUpModule():
     _NO_PUBLIC_LANE = m.patch.object(cli_drop_gateway, "resolve_public_lane_full",
                                      return_value=None)
     _NO_PUBLIC_LANE.start()
+    _OFF_CONTROLLER.start()  # #1362: not the controller's loopback-only branch
 
 
 def tearDownModule():
     if _NO_PUBLIC_LANE is not None:
         _NO_PUBLIC_LANE.stop()
+    _OFF_CONTROLLER.stop()
 
 
 def read(rel):

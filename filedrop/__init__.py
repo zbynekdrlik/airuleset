@@ -193,8 +193,40 @@ def _bind_priority(ip):
     return 4
 
 
+# #1362: the controller MACHINE's real nodename. Every drop lane of every account
+# on it (airuleset, claudy) is fronted by cloudflared on this same box, so nothing
+# of the file-drop needs tailscale here, and tailscale's ts-input chain accepts
+# tailscale0 before ufw, so a firewall rule cannot close such a bind. Keyed on the
+# MACHINE, not the per-account box-class marker (claudy reads `workstation`).
+# A literal, since this stdlib leaf imports no cli_* module; drift-locked to
+# cli_drop_lanes.CONTROLLER_NODENAME by test_controller_loopback_drop_1362.py
+# (test_predicate_is_the_drop_lane_node).
+CONTROLLER_NODENAME = "airuleset"
+LOOPBACK = "127.0.0.1"
+
+
+def is_controller_box(nodename=None):
+    """True on the controller machine (#1362): its file-drop binds loopback only
+    and its drop lanes' tunnel origin is loopback.
+
+    `FILEDROP_NODENAME` overrides the real nodename, like `FILEDROP_HOST` does
+    for the bind: it is the seam that keeps the test suite hermetic when it runs
+    ON the controller (CLI subprocesses inherit it). Never set it in a unit."""
+    if nodename is None:
+        nodename = os.environ.get("FILEDROP_NODENAME")
+    if not nodename:
+        try:
+            nodename = os.uname().nodename
+        except OSError:
+            return False
+    return nodename == CONTROLLER_NODENAME
+
+
 def bind_ips():
     """This machine's PRIVATE reachable IPv4s, tailscale-first then LAN, deduped.
+
+    #1362: on the controller machine ONLY loopback — the public drop lane
+    (cloudflared on the same box) is its one channel, `--private` refuses there.
 
     The SINGLE source of truth for which addresses BOTH file-drop servers bind AND
     which URLs the `share` / `upload` CLIs advertise — so the user always gets a
@@ -206,6 +238,8 @@ def bind_ips():
     those are dropped by interface NAME (_VIRT_IFACE) when `ip` is available. Falls
     back to loopback ONLY when nothing private is found, so a URL at least resolves
     locally instead of the CLI printing nothing."""
+    if is_controller_box():
+        return [LOOPBACK]
     pairs = _iface_ips()
     if pairs:
         # Interface-aware: keep tailscale (by CIDR, any iface) + private IPs on a

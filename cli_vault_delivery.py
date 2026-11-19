@@ -36,7 +36,8 @@ def public_lane(args=None):
     `cli_drop_gateway.resolve_public_lane_full` which returns the lane whenever
     a registered lane + live marker exist. #931: bind_ip is "127.0.0.1" for
     local-topology lanes (tunnel on this box) or the tailscale IP for
-    controller-topology lanes (tunnel on the controller).
+    controller-topology lanes (tunnel on the controller) — loopback again for a
+    lane on the controller machine itself (#1362).
     """
     import cli_drop_gateway as _dg
     lane = _dg.resolve_public_lane_full()
@@ -60,8 +61,9 @@ def public_bind_ips(bind_ip, encrypted_private, lane_lookup=None):
     Exception: a LOCAL-topology (loopback origin) lane behind Cloudflare Access.
     There loopback is the endpoint's whole exposure and Access its outer gate;
     a tailnet bind would add a path that skips Access (review finding), so it
-    stays loopback-only. A controller-topology origin is already a tailscale IP,
-    so the fallback adds no new exposure there. Unknown lane -> loopback-only
+    stays loopback-only (this also keeps the controller's own Access lanes off
+    the tailnet, #1362). A remote controller-topology origin is already a
+    tailscale IP, so the fallback adds no new exposure there. Unknown lane -> loopback-only
     (the fail-closed direction)."""
     extra = [ip for ip in encrypted_private if ip != bind_ip]
     if not str(bind_ip).startswith("127."):
@@ -128,8 +130,22 @@ def dead_detail(code) -> str:
     return "HTTP %s" % code
 
 
+def _on_controller():
+    """#1362: the controller has no private path (`--private` refuses there)."""
+    from filedrop import is_controller_box
+    return is_controller_box()
+
+
 def refusal_line(prog, why):
-    """The ONE loud line a producer prints when it hands out NO URL (#1192)."""
+    """The ONE loud line a producer prints when it hands out NO URL (#1192).
+    On the controller it never advises `--private`, which refuses there (#1362)."""
+    if _on_controller():
+        return ("%s: !!! ŽIADNA URL — verejný odkaz nefunguje (%s). Controller "
+                "nemá súkromnú cestu (--private je vypnuté) — oprav verejný lane "
+                "(push / drop-gateway --apply). / NO URL printed — the public lane "
+                "is unusable (%s); the controller has no private path (--private "
+                "is refused): fix the public lane (push / drop-gateway --apply) "
+                "(#1362)." % (prog, why, why))
     return ("%s: !!! ŽIADNA URL — verejný odkaz nefunguje (%s). Tailscale/LAN "
             "odkaz sa sám nevypisuje (bezpečnostné riziko); ak ho naozaj treba, "
             "spusti znova s --private. / NO URL printed — the public lane is "
@@ -140,16 +156,48 @@ def refusal_line(prog, why):
 def access_unverified_note(prog):
     """The note beside a public URL whose lane answered only Cloudflare Access's
     edge 302: its `/healthz` bypass app is not applied yet (#1189/#1192)."""
+    if _on_controller():                 # #1362: no --private on the controller
+        return ("%s: public lane is behind Cloudflare Access and its /healthz is "
+                "not bypassed yet — the tunnel is NOT verified from here. If the "
+                "link shows error 1033, fix the lane (push / drop-gateway --apply); "
+                "the controller has no --private path (#1362)." % prog)
     return ("%s: public lane is behind Cloudflare Access and its /healthz is not "
             "bypassed yet — the tunnel is NOT verified from here. If the link "
             "shows error 1033, re-run with --private (#1189/#1192)." % prog)
 
 
+def refuse_private_on_controller(prog, lane=None):
+    """#1362: on the controller machine nothing of the file-drop binds tailscale
+    (`filedrop.bind_ips` is loopback only), so `--private` has no address to
+    print. Refuse loudly, naming the public lane, and exit 1 BEFORE any side
+    effect. A no-op on every other box. `lane` = an already-resolved
+    `(host, port, bind_ip)`; else it is resolved here (never raises)."""
+    from filedrop import is_controller_box
+    if not is_controller_box():
+        return
+    if not (lane and lane[0]):
+        try:
+            import cli_drop_gateway as _dg
+            lane = _dg.resolve_public_lane_full()
+        except Exception:
+            lane = None
+    where = ("https://%s/" % lane[0]) if lane and lane[0] else \
+        "this account's public drop lane (none is live right now)"
+    print("%s: --private nie je na controlleri k dispozícii — nič tu nepočúva na "
+          "tailscale; použi verejný odkaz %s (spusti bez --private). / --private "
+          "is unavailable on the controller: nothing here listens on tailscale; "
+          "use the public lane %s (re-run without --private) (#1362)."
+          % (prog, where, where), file=sys.stderr)
+    raise SystemExit(1)
+
+
 def select_lane(prog, lane, private):
     """The lane a producer delivers on (#1192). `--private` -> no public lane
-    (the pre-existing tailscale/LAN path, opt-in only). No lane and no
-    `--private` -> the loud refusal and exit 1 BEFORE any endpoint starts."""
+    (the pre-existing tailscale/LAN path, opt-in only; refused on the controller,
+    #1362). No lane and no `--private` -> the loud refusal and exit 1 BEFORE any
+    endpoint starts."""
     if private:
+        refuse_private_on_controller(prog, lane)
         return None, None, None
     if lane and lane[0]:
         return lane

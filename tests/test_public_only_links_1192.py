@@ -43,6 +43,10 @@ PORT = 8870
 PRIVATE_PORT = 8830
 
 
+# #1362: hermetic off the controller's loopback-only / no --private branch.
+from filedrop_host_testlib import setUpModule, tearDownModule  # noqa: E402,F401
+
+
 def url_lines(text):
     return [ln for ln in text.splitlines() if "://" in ln]
 

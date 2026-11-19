@@ -47,7 +47,10 @@ SERVER = ROOT / "filedrop" / "vault_server.py"
 # These tests exercise the PRIVATE secret-request URLs. A box with a live public
 # drop lane (the controller since #1115 slice G) prints the public URL first, so
 # pin "no public lane" for the module; a public-path test patches it itself.
+from filedrop_host_testlib import off_controller  # noqa: E402
+
 _NO_PUBLIC_LANE = None
+_OFF_CONTROLLER = off_controller()
 
 
 def setUpModule():
@@ -56,11 +59,13 @@ def setUpModule():
     _NO_PUBLIC_LANE = m.patch.object(cli_drop_gateway, "resolve_public_lane_full",
                                      return_value=None)
     _NO_PUBLIC_LANE.start()
+    _OFF_CONTROLLER.start()  # #1362: not the controller's loopback-only branch
 
 
 def tearDownModule():
     if _NO_PUBLIC_LANE is not None:
         _NO_PUBLIC_LANE.stop()
+    _OFF_CONTROLLER.stop()
 
 # Deliberately not spelled `secret = "..."` / `token = "..."`: those shapes are
 # what hooks/block-sensitive-staging.sh's KV_PAT is for, and a fixture must not
