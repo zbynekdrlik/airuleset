@@ -47,13 +47,49 @@ class TestAdminUiDisabled(unittest.TestCase):
 
 
 class TestInstallUsesBindHost(unittest.TestCase):
-    def test_setup_does_not_resolve_tailscale(self):
-        # The install step takes its bind from GATEWAY_BIND_HOST, never from the
-        # live tailscale address (the pre-#1358 source).
-        src = Path(mg.__file__).read_text(encoding="utf-8")
-        body = src.split("def setup_model_gateway_service", 1)[1].split("\ndef ", 1)[0]
-        self.assertNotIn("_tailscale_ip(", body)
-        self.assertIn("GATEWAY_BIND_HOST", body)
+    def test_install_writes_loopback_unit_and_probes_loopback(self):
+        """Drive the real install step on a temp home with the side-effecting
+        seams (venv, systemctl, health probe, secrets) faked: the written unit
+        binds 127.0.0.1, the health probe targets 127.0.0.1, and the live
+        tailscale address is never consulted."""
+        import json
+        import tempfile
+        from unittest import mock as m
+
+        probed = []
+
+        def _no_tailscale():
+            raise AssertionError("install must not read the tailscale IP")
+
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            amp = d / "map.json"
+            amp.write_text(json.dumps({
+                "aliases": {"impl-main": "openrouter/x", "impl-sub": "openrouter/x",
+                            "impl-fast": "openrouter/x"},
+                "providers": {"openrouter": {"key_file": str(d / "or.key")}},
+            }))
+            unit = d / "systemd" / "model-gateway.service"
+            with m.patch.object(mg, "CONFIG_DIR", d / "cfg"), \
+                    m.patch.object(mg, "YAML_PATH", d / "cfg" / "gw.yaml"), \
+                    m.patch.object(mg, "ENV_PATH", d / "cfg" / "gw.env"), \
+                    m.patch.object(mg, "SPEND_LOGGER_DEST", d / "cfg" / "sl.py"), \
+                    m.patch.object(mg, "MASTER_KEY_FILE", d / "master"), \
+                    m.patch.object(mg, "SERVICE_DEST", unit), \
+                    m.patch.object(mg, "_service_state", return_value="inactive"), \
+                    m.patch.object(mg, "_read_secret_file", return_value="v"), \
+                    m.patch.object(mg, "_ensure_venv", return_value=(True, False)), \
+                    m.patch.object(mg, "_enable_service", return_value=True), \
+                    m.patch.object(mg, "_tailscale_ip", side_effect=_no_tailscale), \
+                    m.patch.object(mg, "_health_check",
+                                   side_effect=lambda h, deep=True: probed.append(h) or True), \
+                    m.patch("sys.stdout"):
+                ok = mg.setup_model_gateway_service(alias_map_path=str(amp))
+            text = unit.read_text(encoding="utf-8")
+        self.assertTrue(ok)
+        self.assertIn("--host 127.0.0.1 --port 4000", text)
+        self.assertIn("Environment=DISABLE_ADMIN_UI=True", text)
+        self.assertEqual(probed, ["127.0.0.1"])
 
 
 if __name__ == "__main__":
