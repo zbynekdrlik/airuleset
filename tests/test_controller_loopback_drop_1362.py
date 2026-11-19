@@ -161,5 +161,25 @@ class TestPrivateRefusedOnController(_RealNodename):
         self.assertIn("drop-controller.newlevel.media", err.getvalue())
 
 
+class TestControllerMessagesNeverAdvisePrivate(_RealNodename):
+    """A dead lane on the controller must not send the user to --private,
+    which the controller refuses (review finding)."""
+
+    def _msgs(self):
+        return (vd.refusal_line("share", "x"), vd.access_unverified_note("share"))
+
+    def test_controller_messages_do_not_advise_private(self):
+        with mock.patch("os.uname", return_value=_uname("airuleset")):
+            for msg in self._msgs():
+                self.assertNotIn("re-run with --private", msg)
+                self.assertNotIn("spusti znova s --private", msg)
+                self.assertIn("#1362", msg)
+
+    def test_other_boxes_still_advise_private(self):
+        with mock.patch("os.uname", return_value=_uname("dev1")):
+            for msg in self._msgs():
+                self.assertIn("re-run with --private", msg)
+
+
 if __name__ == "__main__":
     unittest.main()
