@@ -26,17 +26,22 @@ import shlex
 
 SSHD_MAXSTARTUPS_PATH = "/etc/ssh/sshd_config.d/50-airuleset-maxstartups.conf"
 SSHD_MAXSTARTUPS = "60:30:200"
+# One source may hold at most 30 pre-auth slots: the controller's push burst
+# (~20-25) fits, and one source on a public box (gk, subdev) cannot take all 200.
+SSHD_PER_SOURCE_MAXSTARTUPS = "30"
 # sha256 of the drop-in the running sshd last reloaded (wiped at boot).
 SSHD_MAXSTARTUPS_STAMP = "/run/airuleset/sshd-maxstartups.reloaded"
 
 
 def render_sshd_maxstartups_conf():
     """The ``50-airuleset-maxstartups.conf`` body: the managed marker on line
-    1, then the one ``MaxStartups`` directive."""
+    1, then ``MaxStartups`` and the ``PerSourceMaxStartups`` cap."""
     return (
         "# Managed by airuleset (#1349) — the push fans out ~20 parallel ssh\n"
         "# sessions per box; the default MaxStartups 10:30:100 dropped them.\n"
-        "MaxStartups %s\n" % SSHD_MAXSTARTUPS
+        "MaxStartups %s\n"
+        "PerSourceMaxStartups %s\n"
+        % (SSHD_MAXSTARTUPS, SSHD_PER_SOURCE_MAXSTARTUPS)
     )
 
 
@@ -97,5 +102,14 @@ def build_sshd_maxstartups_readback():
         '    echo "  ⚠ DISK-GUARD-ROOT VERIFY FAIL: configured sshd MaxStartups '
         '(sshd -T) is [${sshd_ms#maxstartups }], expected %s" >&2\n'
         '    fail=1\n'
-        'fi' % (SSHD_MAXSTARTUPS, SSHD_MAXSTARTUPS)
+        'fi\n'
+        'sshd_ps=$(sshd -T 2>/dev/null | grep -i "^persourcemaxstartups " '
+        '|| true)\n'
+        'if [ "$sshd_ps" != "persourcemaxstartups %s" ]; then\n'
+        '    echo "  ⚠ DISK-GUARD-ROOT VERIFY FAIL: configured sshd '
+        'PerSourceMaxStartups (sshd -T) is [${sshd_ps#persourcemaxstartups }], '
+        'expected %s" >&2\n'
+        '    fail=1\n'
+        'fi' % (SSHD_MAXSTARTUPS, SSHD_MAXSTARTUPS,
+                SSHD_PER_SOURCE_MAXSTARTUPS, SSHD_PER_SOURCE_MAXSTARTUPS)
     )
