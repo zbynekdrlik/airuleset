@@ -427,6 +427,17 @@ SERVICE_ACCOUNTS = {
         "project_dir": "devel/companion-updater", "tmux_session": "companion-updater",
         "webterm_sessions": {h: {"preferred": "companion-updater", "start_dir_chain": ["devel/companion-updater"]} for h in ("zbynek", "marek")},
     },
+    # #1373 (owner 19.11.): restreamer leaves `newlevel` so its camera-box peer link goes live. No
+    # nextest/wasm-bindgen pin: CI's differ from dstack's/devbridge's on the one shared cargo bin.
+    "restreamer": {
+        "host": "dev1", "sudo": False, "repo": "zbynekdrlik/restreamer",   # public
+        "github_app": True, "repo_secrets": [],   # its 20 CI secrets are set already
+        "tools": ["rust-target:wasm32-unknown-unknown", "cargo:trunk", "cargo:cargo-mutants@27.1.0",
+                  "cargo:cargo-audit", "binaryen:version_131", "playwright:1.58.2/chromium"],
+        "secrets": ["stream-lan.env", "manager-server.env"],   # in ~/.restreamer-secrets/
+        "project_dir": "devel/restreamer", "tmux_session": "restreamer",
+        "webterm_sessions": {h: {"preferred": "restreamer", "start_dir_chain": ["devel/restreamer"]} for h in ("zbynek", "marek")},
+    },
     "iemmixer": {
         "host": "dev1",
         "sudo": False,

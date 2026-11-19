@@ -401,9 +401,10 @@ class TestMintAccount(_Base):
         self.assertEqual(gh.requests, [])
 
     def test_mint_all_covers_exactly_the_github_app_accounts(self):
-        # #1267: wall-bridge/songplayer are live since 29.10.
+        # #1267: wall-bridge/songplayer are live since 29.10.; #1373 restreamer
+        # is declared but pending, so mint --all leaves it out.
         self.assertEqual(pgt.github_app_accounts(),
-                         ["companion-updater", "dasio", "dcontroller", "devbridge", "dstack", "dsync", "fleet-backup", "fohmixer", "iemmixer", "intercom", "mikrotik-pz", "nlch-finances", "obs", "shading", "songplayer", "tuke", "varos", "vstack",
+                         ["companion-updater", "dasio", "dcontroller", "devbridge", "dstack", "dsync", "fleet-backup", "fohmixer", "iemmixer", "intercom", "mikrotik-pz", "nlch-finances", "obs", "restreamer", "shading", "songplayer", "tuke", "varos", "vstack",
                           "wall-bridge"])
         with mock.patch.object(pgt, "mint_account", return_value=0) as m:
             rc = pgt.cmd_project_gh_token(mock.Mock(action="mint", account=None,
