@@ -46,6 +46,7 @@ from cli_target_purge import (
     _dir_stats,
     _min_age_days_env,
 )
+from cli_scratch_children import expand_live_children, refused_at_act  # #1355
 from cli_scratch_use import child_in_use, scratch_use_stat
 
 CLAUDE_DIR = Path.home() / ".claude"
@@ -649,11 +650,10 @@ def sweep_claude_scratch(tmp_dir=None, uid=None, dry_run: bool = False,
 
     #380: the two discovery sources are combined the SAME way
     `sweep_stale_worktrees` already combines `discover_stale_worktrees` +
-    `discover_orphaned_worktree_branches` -- if EITHER raises, nothing
-    from EITHER source is trusted (a partial discovery is not safer than
-    none at all); this ships the /tmp/wt-* litter shape to every managed
-    box through the SAME cadence gate, log, and state file, no new
-    mechanism.
+    `discover_orphaned_worktree_branches` -- if EITHER raises, nothing from
+    EITHER source is trusted (a partial discovery is not safer than none);
+    #1355: each row's `stale_children` (a LIVE session's unused scratchpad
+    children) are candidates too, re-checked by `refused_at_act`.
 
     Cadence-gated via its own state file, mirroring #315/#345/the CLI-
     version sweep exactly -- never leans on the 60s watchdog timer
@@ -694,7 +694,7 @@ def sweep_claude_scratch(tmp_dir=None, uid=None, dry_run: bool = False,
             discovery_failed = True
             results.append({"path": None, "removed": False,
                             "reason": "discovery error: %s" % e})
-
+    candidates = expand_live_children(candidates)   # #1355: a live session's stale children
     for c in candidates:
         entry = dict(c)
         entry["removed"] = False
@@ -719,9 +719,8 @@ def sweep_claude_scratch(tmp_dir=None, uid=None, dry_run: bool = False,
                 entry["reason"] = "already gone"
                 results.append(entry)
                 continue
-            if _target_in_live_use(p, proc_dir=proc_dir):
-                entry["reason"] = ("in live use (or undeterminable) -- refused "
-                                   "(re-checked before delete)")
+            if refused_at_act(c, p, now, proc_dir, _target_in_live_use):
+                entry["reason"] = "in live use (or undeterminable) -- refused (re-checked before delete)"
                 results.append(entry)
                 continue
             if p.is_dir():
@@ -1841,7 +1840,7 @@ def sweep_old_transcripts(home=None, projects_dir=None, dry_run: bool = True,
             discovery_failed = True
             results.append({"path": None, "removed": False,
                             "reason": "discovery error: %s" % e})
-
+    candidates = expand_live_children(candidates)   # #1355: a live session's stale children
     for c in candidates:
         entry = dict(c)
         entry["removed"] = False
