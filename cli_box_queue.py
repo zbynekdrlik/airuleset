@@ -11,6 +11,11 @@ that prose with one tested state machine every lane runs identically.
 
 Model (per box, `~/.claude/box-queue/<box>.json`):
   state  pristine | held:<lane> | dirty:<lane> | refreshing
+  dirty_kind  WHY the box is dirty (#1361; readers key on THIS, never on the
+         free-text `reason`): released (a holder's voluntary release) |
+         reclaimed (a dead/lapsed/over-max-hold holder taken over) |
+         refresh-failed (a refresh that did not complete) | "" (pristine, or
+         unknown provenance: a corrupt or pre-#1361 state file)
   queue  strict FIFO of {lane, pid, enqueued_at, seen_at}
   holder {lane, pid, taken_at, lease_until} while held
   refresh {token, pid, started_at, deadline, from} while refreshing
@@ -228,7 +233,13 @@ def load_config(box):
 def _fresh_state(box, now, state="pristine", reason=""):
     return {"version": 1, "box": box, "state": state, "queue": [],
             "holder": None, "refresh": None, "reason": reason,
-            "updated_at": now}
+            "dirty_kind": "", "updated_at": now}
+
+
+def _set_state(st, state, reason, kind=""):
+    """Every transition into dirty:* or pristine goes through here, so the
+    structured `dirty_kind` (#1361) never drifts from `state`."""
+    st["state"], st["reason"], st["dirty_kind"] = state, reason, kind
 
 
 def _num(v):
@@ -243,6 +254,8 @@ def _valid(st, box):
     if not isinstance(st, dict) or st.get("box") != box:
         return False
     if not isinstance(st.get("reason"), str) or not isinstance(st.get("state"), str):
+        return False
+    if not isinstance(st.get("dirty_kind", ""), str):
         return False
     q = st.get("queue")
     if not isinstance(q, list):
@@ -308,6 +321,7 @@ def _load_state(paths, box, now, events):
     except ValueError:
         st = None
     if _valid(st, box):
+        st.setdefault("dirty_kind", "")  # a pre-#1361 file: unknown kind
         return st, False
     aside = p.with_name(f"{p.name}.corrupt-{int(now)}-{os.getpid()}")
     try:
@@ -331,6 +345,11 @@ def _save_state(path, st):
     finally:
         if tmp.exists():
             tmp.unlink()
+
+
+def _refresh_from(r):
+    """The dirty state a refresh that did not complete returns the box to."""
+    return r["from"] if r["from"].startswith("dirty:") else "dirty:refresh"
 
 
 def _kill_stuck_refresh(paths):
@@ -364,8 +383,8 @@ def _reap(st, now, cfg, box, events, paths, own_refresh=False):
         elif h["lease_until"] > now + cfg["max_hold_s"]:
             why = "lease timestamp in the future"
         if why:
-            frm, st["state"] = st["state"], f"dirty:{h['lane']}"
-            st["holder"], st["reason"] = None, f"reclaimed: {why}"
+            frm, st["holder"] = st["state"], None
+            _set_state(st, f"dirty:{h['lane']}", f"reclaimed: {why}", "reclaimed")
             _event(events, now, box, "RECLAIM", h["lane"], frm, st["state"], why)
             changed = True
     r = st["refresh"]
@@ -381,8 +400,9 @@ def _reap(st, now, cfg, box, events, paths, own_refresh=False):
                 _event(events, now, box, "REFRESH-LATE", reason=note)
                 changed = True
         if why:
-            st["state"] = r["from"] if r["from"].startswith("dirty:") else "dirty:refresh"
-            st["refresh"], st["reason"] = None, f"refresh interrupted: {why}"
+            st["refresh"] = None
+            _set_state(st, _refresh_from(r), f"refresh interrupted: {why}",
+                       "refresh-failed")
             _event(events, now, box, "REFRESH-LOST", frm="refreshing",
                    to=st["state"], reason=why)
             changed = True
@@ -602,10 +622,10 @@ def release(box, lane, clean=False, reason="", now=None):
             st["holder"] = None
             frm = st["state"]
             if clean:
-                st["state"], st["reason"] = "pristine", ""
+                _set_state(st, "pristine", "")
             else:
-                st["state"] = f"dirty:{lane}"
-                st["reason"] = reason or f"released dirty by {lane}"
+                _set_state(st, f"dirty:{lane}",
+                           reason or f"released dirty by {lane}", "released")
             _event(events, t, box, "RELEASE", lane, frm, st["state"], reason)
             return {"ok": True, "msg": f"{lane} released {box} -> "
                                        f"{st['state']}"}, True
@@ -711,9 +731,8 @@ def refresh(box, force=False, now_fn=time.time, sleep_fn=time.sleep):
             # We hold the refresh lock EXCLUSIVELY (taken before this
             # transaction), so no process of the recorded refresh is alive:
             # the record is stale. Retire it and refresh on top of it.
-            old = st["refresh"]
-            s = old["from"] if old["from"].startswith("dirty:") else "dirty:refresh"
-            st["refresh"], st["state"] = None, s
+            s, st["refresh"] = _refresh_from(st["refresh"]), None
+            _set_state(st, s, st["reason"], "refresh-failed")
             _event(events, t, box, "REFRESH-LOST", frm="refreshing", to=s,
                    reason="stale refreshing record — its refresh lock was free")
         if s.startswith("held:"):
@@ -799,11 +818,11 @@ def _finisher(box, token, ok, why):
                     f"result discarded"}, False
         st["refresh"] = None
         if ok:
-            st["state"], st["reason"] = "pristine", ""
+            _set_state(st, "pristine", "")
             _event(events, t, box, "REFRESH-OK", frm="refreshing", to="pristine")
             return {"ok": True, "msg": f"{box} refreshed -> pristine"}, True
-        st["state"] = r["from"] if r["from"].startswith("dirty:") else "dirty:refresh"
-        st["reason"] = f"refresh failed: {why}"
+        _set_state(st, _refresh_from(r), f"refresh failed: {why}",
+                   "refresh-failed")
         _event(events, t, box, "REFRESH-FAIL", frm="refreshing",
                to=st["state"], reason=why)
         return {"ok": False, "msg": f"refresh of {box} FAILED ({why}); box "
@@ -847,8 +866,10 @@ def _render(st, now):
     if h:
         left = max(h["lease_until"] - now, 0)
         held = f"{h['lane']} (pid {h['pid']}, lease {left:.0f}s left)"
-    lines = [f"BOX {st['box']}  state={st['state']}  holder={held}  "
-             f"queue={len(st['queue'])}"]
+    kind = st.get("dirty_kind", "")
+    lines = [f"BOX {st['box']}  state={st['state']}  "
+             + (f"dirty_kind={kind}  " if kind else "")
+             + f"holder={held}  queue={len(st['queue'])}"]
     for i, e in enumerate(st["queue"], 1):
         lines.append(f"  {i}. {e['lane']} (pid {e['pid']}, waiting "
                      f"{max(now - e['enqueued_at'], 0):.0f}s)")
