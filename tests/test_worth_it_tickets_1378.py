@@ -318,7 +318,7 @@ class TestBrake(unittest.TestCase):
 
     def test_a_pass_counts_toward_the_next_filing_in_the_same_command(self):
         log = str(Path(tempfile.mkdtemp(prefix="t1378-log-")) / "scope-gate.log")
-        run = self._runner(_born(1), _done(3))
+        run = self._runner(_born(2), _done(3))
         body = _body(GOOD_IMPACT + "\n")
         self.assertIsNone(self.w.block_reason("separate-work", body, "o/r", ["stream:x"], "/",
                                               log, "t1", runner=run, now=self.NOW))
@@ -326,7 +326,7 @@ class TestBrake(unittest.TestCase):
                                               log, "t2", runner=run, now=self.NOW))
         r = self.w.block_reason("separate-work", body, "o/r", ["stream:x"], "/", log, "t3",
                                 runner=run, now=self.NOW)
-        self.assertTrue(r and "3 Claude-born" in r, r)
+        self.assertTrue(r and "4 Claude-born" in r, r)
         self.assertEqual(len(self.calls), 2)
 
     def test_brake_reason_names_its_exits(self):
@@ -463,10 +463,12 @@ class TestWorthGateEndToEnd(unittest.TestCase):
         self.assertIn("DESCRIPTION", r.stderr)
         self.assertIn("never a comment", r.stderr)
 
-    def test_zero_closes_and_zero_filings_still_brakes(self):
+    def test_zero_closes_and_zero_filings_pass(self):
+        # Owner-approved "created MORE than it closed": a quiet stream may file
+        # its first real defect.
         r = _run(_cmd(_body(GOOD_IMPACT + "\n")), self._gh([], []), self.home)
-        self.assertEqual(r.returncode, 2, r.stderr)
-        self.assertIn("-> net-flow-brake", r.stderr)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("net-flow-brake", r.stderr)
 
     def test_not_planned_closes_do_not_drain(self):
         r = _run(_cmd(_body(GOOD_IMPACT + "\n")), self._gh(_born(2), _done(9, "NOT_PLANNED")),
@@ -502,16 +504,16 @@ class TestWorthGateEndToEnd(unittest.TestCase):
             self.assertEqual(r.returncode, 0, (body, r.stderr))
 
     def test_one_command_cannot_file_a_whole_review_round_past_the_brake(self):
-        # #1378 review R1: 2 filed / 3 closed leaves room for ONE more.
+        # #1378 review R1: 3 filed / 3 closed leaves room for ONE more.
         parts = []
         for i in range(2):
             parts.append("cat > b%d.md <<'EOF'\n%s\nEOF\ngh issue create -R o/r -l stream:david3 "
                          "-t 'distinct defect %d %s' -F b%d.md"
                          % (i, _body(GOOD_IMPACT + " %d\n" % i), i, uuid.uuid4().hex, i))
-        r = _run(" &&\n".join(parts), self._gh(_born(2), _done(3)), self.home)
+        r = _run(" &&\n".join(parts), self._gh(_born(3), _done(3)), self.home)
         self.assertEqual(r.returncode, 2, r.stderr)
         self.assertEqual(r.stderr.count("-> net-flow-brake"), 1, r.stderr)
-        self.assertIn("3 Claude-born", r.stderr)
+        self.assertIn("4 Claude-born", r.stderr)
 
     def test_the_bypass_is_audited(self):
         r = _run(_cmd(_body()) + "  # airuleset:scope-gate-ok owner said file it", self._gh(),
