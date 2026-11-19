@@ -66,11 +66,11 @@ Before filing a follow-up issue, apply the bundling gate (per `autonomous-batch-
 - Security boundary modification, OR
 - Cross-cutting refactor (rename across >5 files, dep major bump, framework upgrade), OR
 - Genuine design dependency on a separate decision the user must make, OR
-- It is a separate deliverable (`separate-work`, #1297: another request, a task for another project, a defect outside the change in hand). A <100 LoC cleanup in a file this change already touches is NOT separate — fix it in this PR.
+- It is a separate deliverable (`separate-work`, #1297: another request, a task for another project, a REAL defect outside the change in hand — Claude-born, it needs an `Impact:` line and a draining stream, #1378). A <100 LoC cleanup in a file this change already touches is NOT separate — fix it in this PR.
 
 If NONE of these apply → the cleanup is small and MUST land in the CURRENT PR, not a follow-up issue. Fix it, ship it in the same PR.
 
-**This gate is mechanically enforced, not prose-only, on every `gh issue create` / `gh api .../issues` POST** (`hooks/block-ungated-issue-filing.sh`, #137): the issue body must carry a `Scope-gate: <criterion>` line naming which of the six exemptions above applies (`>300-loc`/`schema-migration`/`api-break`/`security-boundary`/`cross-cutting`/`needs-user-decision`), a separate deliverable (`separate-work`: another request, a task for another project, a defect outside the change in hand, #1297), or the owner-asked mode (`user-request`). `planned-work` is retired: a plan step is a `- [ ]` checklist item in the current ticket, never a new issue. No line, or a fabricated one that doesn't apply → fix it now in the current PR instead of filing.
+**This gate is mechanically enforced, not prose-only, on every `gh issue create` / `gh api .../issues` POST** (`hooks/block-ungated-issue-filing.sh`, #137): the issue body must carry a `Scope-gate: <criterion>` line naming which of the six exemptions above applies (`>300-loc`/`schema-migration`/`api-break`/`security-boundary`/`cross-cutting`/`needs-user-decision`), a separate deliverable (`separate-work`: another request, a task for another project, a defect outside the change in hand, #1297 — a Claude-born one also needs an `Impact:` line and passes the 72 h `net-flow-brake`, #1378), or the owner-asked mode (`user-request`). `planned-work` is retired: a plan step is a `- [ ]` checklist item in the current ticket, never a new issue. No line, or a fabricated one that doesn't apply → fix it now in the current PR instead of filing.
 
 **Things that DO NOT qualify as "genuinely out of scope" (must be done in current PR):**
 

@@ -158,17 +158,17 @@ def _fake_gh(tmpdir, responses, require_repo=None):
         "argv = sys.argv[1:]\n"
         "responses = %r\n"
         "require_repo = %r\n"
-        # #1070 item 7 -- the net-drain ratchet now runs on attended filings too;
-        # answer the day-count queries DRAINING (created 0 < closed 9) so the
-        # ratchet allows and each chain/depth test exercises its own concern.
+        # #1378 -- the net-flow brake reads 72 h JSON rows; answer DRAINING (no
+        # Claude-born filing created, 9 closed as completed) so the brake
+        # allows and each chain/depth test exercises its own concern.
         # Repo-independent (the require_repo teeth below are for `issue view`).
         # A non-count `issue list` (near-dup) is still unserved (exits 1 below).
         "if len(argv) >= 2 and argv[0] == 'issue' and argv[1] == 'list':\n"
         "    joined = ' '.join(argv)\n"
         "    if 'created:' in joined:\n"
-        "        print('0'); sys.exit(0)\n"
+        "        print('[]'); sys.exit(0)\n"
         "    if 'closed:' in joined:\n"
-        "        print('9'); sys.exit(0)\n"
+        "        print(json.dumps([{'number': n, 'stateReason': 'COMPLETED'} for n in range(9)])); sys.exit(0)\n"
         "if require_repo is not None:\n"
         "    repo = None\n"
         "    for i, a in enumerate(argv):\n"
@@ -205,15 +205,15 @@ def _fake_gh_list(tmpdir, issues):
         "issues = %r\n"
         "if len(argv) >= 2 and argv[0] == 'issue' and argv[1] == 'list':\n"
         "    joined = ' '.join(argv)\n"
-        # #1070 item 7 -- the net-drain ratchet now runs on ATTENDED filings too,
-        # so the default stub must answer the day-count queries. Default DRAINING
-        # (created 0 < closed 9) so the ratchet ALLOWS by default and every test
+        # #1378 -- the net-flow brake runs on attended filings too, so the
+        # default stub answers its 72 h JSON reads. Default DRAINING (none
+        # created, 9 closed as completed) so the brake ALLOWS and every test
         # that is NOT about the ratchet keeps exercising its real concern; a test
         # that wants a BLOCK uses _fake_gh_netdrain with explicit counts.
         "    if 'created:' in joined:\n"
-        "        print('0'); sys.exit(0)\n"
+        "        print('[]'); sys.exit(0)\n"
         "    if 'closed:' in joined:\n"
-        "        print('9'); sys.exit(0)\n"
+        "        print(json.dumps([{'number': n, 'stateReason': 'COMPLETED'} for n in range(9)])); sys.exit(0)\n"
         "    if issues is None:\n"
         "        sys.exit(1)\n"
         "    print(json.dumps(issues))\n"
@@ -259,15 +259,15 @@ def _fake_gh_stream(tmpdir, labels, issues=(), call_log=None):
         "    print(json.dumps(label_rows))\n"
         "    sys.exit(0)\n"
         "if len(argv) >= 2 and argv[0] == 'issue' and argv[1] == 'list':\n"
-        # #1070 item 7 -- the net-drain ratchet now runs on attended filings too
+        # #1378 -- the net-flow brake runs on attended filings too
         # (the reduced-stream / full-authority filers these stream tests model),
-        # so answer the day-count queries DRAINING (created 0 < closed 9) so the
-        # ratchet allows and each test exercises its stream-routing concern.
+        # so answer its JSON reads DRAINING (none created, 9 completed) so the
+        # brake allows and each test exercises its stream-routing concern.
         "    joined = ' '.join(argv)\n"
         "    if 'created:' in joined:\n"
-        "        print('0'); sys.exit(0)\n"
+        "        print('[]'); sys.exit(0)\n"
         "    if 'closed:' in joined:\n"
-        "        print('9'); sys.exit(0)\n"
+        "        print(json.dumps([{'number': n, 'stateReason': 'COMPLETED'} for n in range(9)])); sys.exit(0)\n"
         "    print(json.dumps(list(issues)))\n"
         "    sys.exit(0)\n"
         "sys.exit(1)\n" % (call_log, label_rows, issues)

@@ -321,7 +321,7 @@ def block_message(blocked):
         "",
         "The description is the task list. For EVERY unchecked line, either:",
         "  - finish it and tick it with its evidence: `- [x] <item> — <commit / test / live read>`, or",
-        "  - move it to its own ticket (`Part of #<this>` in the new body) and list it here as",
+        "  - move it to its own ticket (`Part of #<this>`; Claude-born: with an `Impact:`, #1378), listed here as",
         "    `- [ ] #<new>` -- then this ticket closes only once that child is closed and ticked.",
         "A comment that added work must also have added its `- [ ]` line to the description.",
         "Edit with `gh issue edit <N> --body-file <file>`. Nothing done here? Close it",

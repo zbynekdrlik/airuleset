@@ -1819,7 +1819,7 @@ if [ "$IS_COMPLETION" = "1" ]; then
             echo "" >&2
             echo "  Fix NOW (#1297):" >&2
             echo "    1. a step of the same deliverable: a '- [ ]' line in the ticket's description (gh issue edit), cite 'Recorded on #<N>', OR" >&2
-            echo "    2. a separate deliverable: gh issue create ('Part of #<N>'), then 'Filed as #<returned-N>: <title>'" >&2
+            echo "    2. a separate deliverable: gh issue create ('Part of #<N>'; a Claude-born one only with a real 'Impact:' line, #1378), then 'Filed as #<returned-N>: <title>'" >&2
             echo "" >&2
             echo "  See skills/complete-planned-work-deep/DEEP.md → 'CRITICAL — deferral phrases MUST cite the ticket number'." >&2
             add_hard "Deferral phrase in completion report without explicit 'Filed as #N' / 'Tracked as #N' reference"

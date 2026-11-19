@@ -958,7 +958,7 @@ merge→gates→push at a time per repo across all sessions).
    >    becomes ONE ticket labelled `architecture-rework` under the normal filing gate (a real
    >    criterion such as `>300-loc` / `cross-cutting`; body: area + files + concrete patchwork
    >    signs + target concept) → `REWORK #N`. ONE open rework ticket per area: a further finding
-   >    there is a COMMENT on it, never a second. It is INFRA class (below) and sorts first. A
+   >    there is a `- [ ]` line in its DESCRIPTION, never a comment, never a second ticket. It is INFRA class (below) and sorts first. A
    >    change into an area with an open `architecture-rework` ticket does NOT integrate as more
    >    patchwork — it waits for the rework, or is folded into it. Also confirm the claimed
    >    commits, RED/GREEN test pairs, and clean `/review` + `/requesting-code-review` results

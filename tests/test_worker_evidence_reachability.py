@@ -198,7 +198,7 @@ COVERAGE_TABLE = {
     "dropped": ("supervisor-reverify", ()),
     "obsolete_closed": ("supervisor-reverify", ()),
     "unverified": ("self-audit", ()),
-    "filed": ("self-audit", ()),
+    "followup_candidates": ("supervisor-reverify", ()),  # #1378: was `filed:`
     "branch": ("supervisor-reverify", ()),
     "worktree": ("supervisor-reverify", ()),
     "local_verify": ("self-audit", ()),

@@ -611,7 +611,8 @@ push / PR / merge / deploy, never that backup.
    never file one that names THIS ticket as its own origin unless that criterion genuinely holds.
    "The finding is technically outside the diff" is NOT a criterion by itself — a <100 LoC
    adjacent-code finding is DO NOW, same branch, same PR, per `complete-planned-work.md`'s own
-   follow-up gate.
+   follow-up gate. A review-born follow-up ALSO needs a real `Impact:` (#1378), whatever its
+   criterion; a 🔵 never becomes one.
 7. Merge per `pr-merge-policy.md`: default auto-merge (merge it yourself); a
    `airuleset:merge=manual` marker → STOP at the green PR and report it instead of merging.
    Then monitor main CI + any deploy workflow to terminal. **Fire the per-ticket Discord card for EACH
@@ -693,7 +694,7 @@ issue_state: <#A=closed, #B=closed, … (each member)>
 dropped: <#K split out of the batch mid-flight (gate violation), issue left OPEN, re-dispatch solo | "none">
 obsolete_closed: <#K closed-as-obsolete in STEP 0 with evidence, NOT via this PR | "none">
 unverified: <list | "none">
-filed: <#K list | "none">
+followup_candidates: <per candidate: title — its Scope-gate criterion — Impact: <who is hit and how> — est. LoC | "none">  (never `filed:`, #842)
 ```
 
 **fork-no-merge variant of the FINAL MESSAGE** (no PR / merge / deploy exists for this stream — do
@@ -714,7 +715,7 @@ cards_fired: <#A ✓, #B ✓  (notify --run-card --handoff, one per issue)>
 issue_state: <#A=OPEN (handed off), #B=OPEN (handed off), …>   ← NEVER closed by you
 obsolete_handed_off: <#K commented OBSOLETE, left OPEN | "none">
 unverified: <list | "none">
-filed: <#K list | "none">
+followup_candidates: <per candidate: title — its Scope-gate criterion — Impact: <who is hit and how> — est. LoC | "none">  (never `filed:`, #842)
 ```
 
 **branch-merge variant of the FINAL MESSAGE** (your PR merges into the project's INTEGRATION
@@ -739,7 +740,7 @@ issue_state: <#A=OPEN (merged into integration, hand-off posted, awaiting gateke
 dropped: <#K split out of the batch mid-flight (gate violation), issue left OPEN, re-dispatch solo | "none">
 obsolete_handed_off: <#K commented OBSOLETE, left OPEN | "none">
 unverified: <list | "none">
-filed: <#K list | "none">
+followup_candidates: <per candidate: title — its Scope-gate criterion — Impact: <who is hit and how> — est. LoC | "none">  (never `filed:`, #842)
 ```
 
 **Worktree-mode variant of the FINAL MESSAGE** (`isolation: "worktree"`, full authority — the
@@ -761,5 +762,5 @@ lane_return: <per issue: the LANE-RETURN comment posted as your LAST act (#844) 
 dropped: <#K split out mid-flight (gate violation), issue left OPEN, re-dispatched solo | "none">
 obsolete_closed: <#K closed-as-obsolete in STEP 0 with evidence | "none">
 unverified: <list | "none">
-filed: <#K list | "none">
+followup_candidates: <per candidate: title — its Scope-gate criterion — Impact: <who is hit and how> — est. LoC | "none">  (never `filed:`, #842)
 ```

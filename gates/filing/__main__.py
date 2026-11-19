@@ -461,7 +461,7 @@ def classify_command(cmd, sid, cwd, repo_dir, log_path, unattended):
                 batch_titles = _batch_titles_by_repo.setdefault(target_repo, [])
                 # #1378: a Claude-born ticket needs a real Impact + a draining stream.
                 reason = worth.block_reason(crit_l, body, target_repo, _explicit_stream_labels(
-                    tk, api_call), cwd, log_path, clean_title)
+                    tk, api_call), cwd, log_path, clean_title, tk=tk)
                 near_dup = None if reason else _near_duplicate(title, body, cwd, target_repo,
                                                                batch_titles)
                 if near_dup:
@@ -500,7 +500,7 @@ def main():
     if not _prefilter_pass(cmd):
         return 0
     if "airuleset:scope-gate-ok" in cmd:
-        return 0
+        return worth.log_bypass(cmd, sid)  # #1378 review: an honoured bypass is audited
 
     unattended = is_away(sid)
     results = classify_command(cmd, sid, cwd, repo_dir, log_path, unattended)

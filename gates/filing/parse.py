@@ -37,7 +37,7 @@ ALLOWED = {
 
 
 # #842/#962 -- an UNATTENDED session may claim these only when the body quotes
-# a recent owner message (presence gate). #1297 removed every filing cap.
+# a recent owner message (presence gate). #1297 removed the caps; #1378 = worth.py.
 PRESENCE_GATED = {"user-request"}
 
 
