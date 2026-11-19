@@ -1728,10 +1728,7 @@ def cmd_install(args):
     except Exception as e:
         print(f"  owner-sudo provisioning error (non-fatal): {e}", file=sys.stderr)
 
-    # --- 3b-quinque-bis. Owner break-glass fail2ban ignoreip (#982):
-    # controller-only, sudo-gated — writes the owner-specific ignoreip
-    # drop-in so the owner's laptop IP is never banned by fail2ban.
-    # Non-fatal (a non-controller box or a box without sudo skips). ---
+    # --- 3b-quinque-bis. Controller-only, sudo-gated, non-fatal: owner fail2ban ignoreip (#982). ---
     try:
         from cli_disk_guard_root import provision_owner_ignoreip
         result = provision_owner_ignoreip()
@@ -1739,9 +1736,7 @@ def cmd_install(args):
     except Exception as e:
         print(f"  break-glass ignoreip error (non-fatal): {e}", file=sys.stderr)
 
-    # --- 3b-quinque-bis-2. sshd password login for airuleset user (#985):
-    # controller-only, sudo-gated — renders the Match User drop-in so the
-    # owner can SSH with a password from any device. Non-fatal. ---
+    # --- 3b-quinque-bis-2. sshd password login for the airuleset user (#985). ---
     try:
         from cli_disk_guard_root import provision_sshd_password
         result = provision_sshd_password()
@@ -1749,14 +1744,19 @@ def cmd_install(args):
     except Exception as e:
         print(f"  sshd password error (non-fatal): {e}", file=sys.stderr)
 
-    # --- 3b-quinque-bis-3. ufw SSH rate-limit rule (#985):
-    # controller-only — ensures public SSH is rate-limited by ufw. ---
+    # --- 3b-quinque-bis-3. ufw SSH rate-limit rule (#985). ---
     try:
         from cli_disk_guard_root import provision_ufw_ssh
         result = provision_ufw_ssh()
         print(f"  ufw ssh: {result}")
     except Exception as e:
         print(f"  ufw ssh error (non-fatal): {e}", file=sys.stderr)
+    # --- 3b-quinque-bis-4. journald cap (#1355): the controller is not in DISK_GUARD_ROOT_HOSTS. ---
+    try:
+        from cli_controller_journal import provision_controller_journal_cap
+        print(f"  journal cap: {provision_controller_journal_cap()}")
+    except Exception as e:
+        print(f"  journal cap error (non-fatal): {e}", file=sys.stderr)
 
     # --- 3b-quinque-quater-pre. Managed volume (#999): install is idempotent
     # CONFIGURATION and NEVER moves data or stops services — it PRINTS a
