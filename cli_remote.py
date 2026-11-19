@@ -308,7 +308,7 @@ def provision_model_backend_markers(hosts=None, run=None, skip_names=None,
     if not members:
         return []
 
-    failed = []
+    members, failed = mbk.drop_unreachable_targets(members, reg)  # #1358
     skip = set(skip_names or ())
     deliverable = []
     for h in members:
