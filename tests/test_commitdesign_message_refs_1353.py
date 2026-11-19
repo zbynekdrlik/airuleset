@@ -78,12 +78,11 @@ class TestFileAndStdinMessagesAreStillScanned(_Base):
         r = self.run_hook(cmd)
         self.assertEqual(r.returncode, 2, r.stderr)
         self.assertIn("#43", r.stderr)
-        self.assertNotIn("#101", r.stderr)
 
     def test_dash_F_file_on_disk_designed_passes(self):
         self.mark(43)
         (self.repo / "msg.txt").write_text("fix: thing (#43)\n")
-        cmd = LOG_APPEND + "git commit --file=msg.txt"
+        cmd = "git commit --file=msg.txt"
         r = self.run_hook(cmd)
         self.assertEqual(r.returncode, 0, r.stderr)
 
@@ -110,11 +109,10 @@ class TestFileAndStdinMessagesAreStillScanned(_Base):
         r = self.run_hook(cmd)
         self.assertEqual(r.returncode, 2, r.stderr)
         self.assertIn("#44", r.stderr)
-        self.assertNotIn("#101", r.stderr)
 
     def test_dash_F_stdin_heredoc_designed_passes(self):
         self.mark(44)
-        cmd = LOG_APPEND + "git commit -F - <<'EOF'\nfix: thing (#44)\nEOF"
+        cmd = "git commit -F - <<'EOF'\nfix: thing (#44)\nEOF"
         r = self.run_hook(cmd)
         self.assertEqual(r.returncode, 0, r.stderr)
 
@@ -219,7 +217,6 @@ class TestReviewRound1(_Base):
         r = self.run_hook(cmd)
         self.assertEqual(r.returncode, 2, r.stderr)
         self.assertIn("#43", r.stderr)
-        self.assertNotIn("#101", r.stderr)
 
     def test_commit_behind_a_wrapper_next_to_a_plain_commit_falls_back(self):
         self.mark(41)
@@ -275,6 +272,48 @@ class TestReviewRound2(_Base):
         self._blocks_42("cat > s.sh <<'EOF'\ngit commit -m 'fix #42'\nEOF\nbash *.sh && git commit -am x")
 
 
+class TestReviewRound3(_Base):
+    """The third review's repros: every shape it found keeps the body's refs."""
+
+    def _blocks(self, cmd, ref):
+        r = self.run_hook(cmd)
+        self.assertEqual(r.returncode, 2, cmd + r.stderr)
+        self.assertIn(ref, r.stderr, cmd)
+
+    def test_respelt_message_file_path(self):
+        for tail in ("git commit -F docs/autopilot-log.m''d",
+                     "git commit -F docs/auto\\pilot-log.md",
+                     'git commit -F "docs/autopilot-log".md',
+                     "git commit -F docs/autopilot-log.{md,md}"):
+            self._blocks(LOG_APPEND + tail, "#101")
+
+    def test_glob_or_copy_read_into_the_message(self):
+        for tail in ("cat docs/*.md > m.txt && git commit -F m.txt",
+                     "cp docs/auto* m.txt && git commit -F m.txt"):
+            self._blocks(LOG_APPEND + tail, "#101")
+
+    def test_written_script_run_under_a_respelt_name(self):
+        self.mark(41)
+        self._blocks("cat > s.sh <<'EOF'\ng''it commit --allow-empty -m 'ref (#105)'\nEOF\n"
+                     "sh s.s''h && git commit -m 'x (#41)'", "#105")
+
+    def test_unquoted_delimiter_body_is_executable(self):
+        self.mark(41)
+        self._blocks("cat >> docs/autopilot-log.md <<EOF\n"
+                     "$(g''it commit --allow-empty -qm 'ref (#104)')\nEOF\n"
+                     "git commit -m 'x (#41)'", "#104")
+
+    def test_files_git_itself_reads(self):
+        self.mark(41)
+        self._blocks("cat > .git/MERGE_MSG <<'EOF'\nref (#102)\nEOF\ngit commit --no-edit", "#102")
+        self._blocks("cat > .git/hooks/prepare-commit-msg <<'EOF'\necho '#108' >> \"$1\"\nEOF\n"
+                     "git commit -m 'x (#41)'", "#108")
+
+    def test_symlink_into_git_dir(self):
+        (self.repo / "log.md").symlink_to(self.repo / ".git" / "MERGE_MSG")
+        self._blocks("cat > log.md <<'EOF'\nref (#102)\nEOF\ngit commit --no-edit", "#102")
+
+
 class TestTimingBound(_Base):
 
     def test_large_heredoc_body_stays_fast(self):
@@ -287,6 +326,16 @@ class TestTimingBound(_Base):
         dt = time.monotonic() - t0
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertLess(dt, 4.0)
+
+    def test_many_writers_and_cd_chains_stay_fast(self):
+        self.mark(41)
+        writers = "".join("cat >> f%d.md <<'EOF'\nx\nEOF\n" % i for i in range(900))
+        for cmd in (writers + "git commit -m 'x (#41)'",
+                    "cd d && " * 20000 + "git commit -F m.txt -m 'x (#41)'"):
+            t0 = time.monotonic()
+            r = self.run_hook(cmd)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertLess(time.monotonic() - t0, 3.0)
 
     def test_long_unbroken_token_stays_fast(self):
         self.mark(41)
