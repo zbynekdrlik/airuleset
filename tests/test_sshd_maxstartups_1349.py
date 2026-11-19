@@ -119,8 +119,7 @@ class TestStepExecution(unittest.TestCase):
             '      echo "persourcemaxstartups $p"; exit 0;;\n'
             'esac\nexit 0\n'
             % {"calls": self.calls, "t_rc": t_rc, "shadow": shadow or "",
-               "ps_shadow": ps_shadow or "", "conf_d": self.conf_d,
-               "path": self.path})
+               "ps_shadow": ps_shadow or "", "conf_d": self.conf_d})
         systemctl = ('#!/bin/bash\necho "systemctl $*" >> "%s"\nexit %d\n'
                      % (self.calls, reload_rc))
         stubs = [("sshd", sshd), ("systemctl", systemctl)]

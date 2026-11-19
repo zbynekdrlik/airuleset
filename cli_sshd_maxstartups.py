@@ -8,11 +8,14 @@ box within ~2 s. OpenSSH's default ``MaxStartups 10:30:100`` drops 30 % of new
 unauthenticated connections above 10, so a project's own deploy that lands in
 that window fails with ``kex_exchange_identification: Connection reset``.
 
-  * ``sshd_config.d/50-airuleset-maxstartups.conf`` raises the pool to
-    ``60:30:200``. sshd takes the FIRST value it reads and Ubuntu includes
-    ``sshd_config.d/*.conf`` at the top of ``sshd_config``, so the drop-in wins
-    over the main file; a foreign drop-in that sorts earlier would still win,
-    which is why the read-back checks the value ``sshd -T`` resolves.
+  * ``sshd_config.d/90-airuleset-maxstartups.conf`` raises the pool to
+    ``60:30:200`` and caps one source at 30. OpenSSH 9.6 keeps the LAST
+    ``MaxStartups`` it reads but the FIRST ``PerSourceMaxStartups`` (measured
+    with ``sshd -T``), so the file sorts after the hand-made
+    ``60-airuleset-maxstartups.conf`` on gk (#358, 30:30:150). The first
+    rollout's ``50-`` file lost to it and is retired (only when it carries
+    our marker). The read-back checks what ``sshd -T`` resolves, because a
+    foreign file can still override either value.
   * ``sshd -t`` gates the reload: a refused config this run wrote is removed
     again and the leg fails, so a broken file never waits for the next sshd
     restart; a config broken by a foreign file fails the leg untouched.
@@ -22,9 +25,14 @@ that window fails with ``kex_exchange_identification: Connection reset``.
   * The #985 ``60-airuleset-password.conf`` and every foreign file are never
     touched.
 """
+import os
 import shlex
 
-SSHD_MAXSTARTUPS_PATH = "/etc/ssh/sshd_config.d/50-airuleset-maxstartups.conf"
+SSHD_MAXSTARTUPS_PATH = "/etc/ssh/sshd_config.d/90-airuleset-maxstartups.conf"
+# The first rollout's path (sorted before gk's 60- file, so it lost).
+SSHD_MAXSTARTUPS_LEGACY_PATH = (
+    "/etc/ssh/sshd_config.d/50-airuleset-maxstartups.conf")
+LEGACY_MARKER = "# Managed by airuleset (#1349)"
 SSHD_MAXSTARTUPS = "60:30:200"
 # One source may hold at most 30 pre-auth slots: the controller's push burst
 # (~20-25) fits, and one source on a public box (gk, subdev) cannot take all 200.
@@ -46,7 +54,7 @@ def render_sshd_maxstartups_conf():
 
 
 def build_sshd_maxstartups_step(heredoc_mark, path=SSHD_MAXSTARTUPS_PATH,
-                                stamp=SSHD_MAXSTARTUPS_STAMP):
+                                stamp=SSHD_MAXSTARTUPS_STAMP, legacy=None):
     """The apply-script step: write the drop-in through the script's
     ``_install`` (which sets ``DGROOT_WROTE`` only when it replaced the file),
     gate it with ``sshd -t``, then reload when the file changed OR the reload
@@ -57,9 +65,18 @@ def build_sshd_maxstartups_step(heredoc_mark, path=SSHD_MAXSTARTUPS_PATH,
     Both, and a failed reload, set ``SSHD_MS_FAIL``. ``path``/``stamp`` exist
     for the execution tests (a scratch dir)."""
     qpath, qstamp = shlex.quote(path), shlex.quote(stamp)
+    if legacy is None:
+        legacy = os.path.join(os.path.dirname(path),
+                              os.path.basename(SSHD_MAXSTARTUPS_LEGACY_PATH))
+    qleg = shlex.quote(legacy)
+    retire = (
+        'if [ -f %s ] && head -n 1 %s | grep -qF %s; then\n'
+        '    rm -f %s && DGROOT_WROTE=1 && '
+        'echo "  disk-guard-root: retired %s (sorted before a 60- file)"\n'
+        'fi\n' % (qleg, qleg, shlex.quote(LEGACY_MARKER), qleg, legacy))
     return (
         'SSHD_MS_FAIL=""\n'
-        'DGROOT_WROTE=""\n'
+        'DGROOT_WROTE=""\n' + retire +
         "_install %s 0644 <<'%s'\n%s%s\n"
         'sshd_ms_sum=$( { sha256sum < %s | cut -d" " -f1; } 2>/dev/null || true)\n'
         'if sshd_t_out=$(sshd -t 2>&1); then\n'
