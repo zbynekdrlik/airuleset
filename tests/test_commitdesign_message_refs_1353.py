@@ -40,13 +40,15 @@ class TestHeredocFileContentIsNotTheMessage(_Base):
         self.assertNotIn("#101", r.stderr)
         self.assertNotIn("#102", r.stderr)
 
-    def test_echo_append_refs_do_not_block(self):
+    def test_echo_append_is_still_over_checked(self):
+        # Only a `cat > f <<EOF` heredoc body is provably file content; an
+        # echo/printf argument is not proven (review round 2), so it still counts.
         self.mark(41)
         cmd = ("echo '- #101 shipped' >> docs/autopilot-log.md && "
-               "printf '%s\\n' '#102' >> docs/x.md && "
                'git commit -am "log (#41)"')
         r = self.run_hook(cmd)
-        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("#101", r.stderr)
 
     def test_clustered_am_flag_message_is_scanned(self):
         cmd = LOG_APPEND + 'git commit -am "log (#42)"'
@@ -102,7 +104,6 @@ class TestFileAndStdinMessagesAreStillScanned(_Base):
         r = self.run_hook(cmd)
         self.assertEqual(r.returncode, 2, r.stderr)
         self.assertIn("#44", r.stderr)
-        self.assertNotIn("#101", r.stderr)
 
     def test_dash_F_stdin_heredoc_is_scanned(self):
         cmd = LOG_APPEND + "git commit -F - <<'EOF'\nfix: thing (#44)\nEOF"
@@ -225,6 +226,53 @@ class TestReviewRound1(_Base):
         r = self.run_hook("git commit -m 'a (#41)'; time git commit -m 'b (#42)'")
         self.assertEqual(r.returncode, 2, r.stderr)
         self.assertIn("#42", r.stderr)
+
+
+class TestReviewRound2(_Base):
+    """The second review's repros: text the parsers misread keeps its refs."""
+
+    def _blocks_42(self, cmd):
+        r = self.run_hook(cmd)
+        self.assertEqual(r.returncode, 2, cmd + r.stderr)
+        self.assertIn("#42", r.stderr, cmd)
+
+    def test_heredoc_looking_line_inside_a_quoted_message(self):
+        self._blocks_42('git commit -m "subject\n\nexplains cat <<EOF\nfix #42\nEOF\nend"')
+        self._blocks_42('git commit -m "x\ncat >> f.md <<EOF\n#42\nEOF\n"')
+
+    def test_heredoc_operator_in_a_comment(self):
+        self.mark(41)
+        self._blocks_42('git commit -m "chore (#41)" # <<true\n'
+                        'git commit --allow-empty -m "fix #42"\ntrue')
+
+    def test_commit_spelt_with_git_global_options(self):
+        self.mark(41)
+        self._blocks_42(LOG_APPEND + 'git commit -m "a (#41)" && '
+                        'git -c user.name=x commit --allow-empty -m "fix #42"')
+        self._blocks_42(LOG_APPEND + 'git commit -m "a (#41)" && git -C . commit -m "fix #42"')
+
+    def test_line_continuation_and_short_abbreviations(self):
+        self.mark(41)
+        self._blocks_42(LOG_APPEND + 'git commit -m "subject (#41)" \\\n-m "Refs #42"')
+        self._blocks_42(LOG_APPEND + 'git commit -m "a (#41)" --tr "Refs: #42"')
+        self._blocks_42(LOG_APPEND + 'git commit -m "a (#41)" --me "fix #42"')
+
+    def test_continuation_into_a_writer_line_is_not_file_content(self):
+        self._blocks_42("git commit -F - \\\ncat > f.md <<'EOF'\nfix #42\nEOF")
+
+    def test_git_output_flag_rewrite_of_the_message_file(self):
+        (self.repo / "m.txt").write_text("old msg\n")
+        self._blocks_42("git log -1 --format=%B --output=m.txt HEAD~3 && "
+                        "git commit -F m.txt  # HEAD~3 is the #42 fix")
+
+    def test_written_file_read_back_into_the_message(self):
+        for tail in ('git commit -m "$(cat m.txt)"', "git commit -F ./m.txt",
+                     "git commit -F - < m.txt", "bash m.txt && git commit -am x",
+                     "git commit -t m.txt"):
+            self._blocks_42("cat > m.txt <<'EOF'\nfix #42\nEOF\n" + tail)
+
+    def test_written_script_that_commits(self):
+        self._blocks_42("cat > s.sh <<'EOF'\ngit commit -m 'fix #42'\nEOF\nbash *.sh && git commit -am x")
 
 
 class TestTimingBound(_Base):
