@@ -4,7 +4,8 @@ link can go live. This is the PENDING phase (#1267 order): the account is declar
 before its root bootstrap, so no unattended controller path contacts the missing
 user, its registry row still names `newlevel`, and no dashboard tab exists yet.
 The tools are restreamer's own CI and lockfile pins, minus every cargo tool whose
-CI version differs from a sibling's on dev1's one shared cargo bin."""
+CI version differs from a sibling's on dev1's one shared cargo bin (validate_tools
+refuses such a clash, tests/test_toolchain_cargo_pins_1373.py)."""
 import json
 import unittest
 from pathlib import Path
@@ -14,7 +15,6 @@ import cli_drop_lanes as drop
 import cli_fleet
 import cli_peer_channel as cpc
 import cli_project_gh_token as pgt
-import cli_project_toolchain as toolchain
 import cli_webterm as w
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -48,19 +48,8 @@ class TestRestreamerAccountPending(unittest.TestCase):
             "cargo:cargo-mutants@27.1.0",            # CI pin
             "cargo:cargo-audit",                     # unpinned in CI
             "binaryen:version_131",                  # trunk data-wasm-opt
-            "playwright:1.58.2/chromium",            # e2e lockfile
+            "playwright:1.58.2/chromium",            # its untracked e2e lock; CI floats ^1.50.0
         ]))
-
-    def test_no_cargo_pin_differs_from_a_sibling_on_the_shared_bin(self):
-        # A pinned cargo tool always reinstalls (#1275), so two versions of one
-        # crate on dev1 would replace each other on every render.
-        mine = {c: v for c, v in toolchain.plan(self.spec)["cargo"] if v}
-        for other, raw in bootstrap.SERVICE_ACCOUNTS.items():
-            if other == ACCT or raw.get("host") != "dev1":
-                continue
-            theirs = {c: v for c, v in toolchain.plan(bootstrap.account_spec(other))["cargo"] if v}
-            for crate, ver in mine.items():
-                self.assertEqual(theirs.get(crate, ver), ver, (other, crate))
 
     def test_secret_inventory_names_the_restreamer_secrets_files(self):
         # ~/.restreamer-secrets/{stream-lan,manager-server}.env, copied at cutover.
