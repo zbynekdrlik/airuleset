@@ -1757,6 +1757,8 @@ def cmd_install(args):
         print(f"  journal cap: {provision_controller_journal_cap()}")
     except Exception as e:
         print(f"  journal cap error (non-fatal): {e}", file=sys.stderr)
+    from cli_controller_fleetbackup import install_step as fleetbackup_login_step
+    fleetbackup_login_step()  # 3b-quinque-bis-5: dev1 fleet-backup manager login (#1351), non-fatal
 
     # --- 3b-quinque-quater-pre. Managed volume (#999): install is idempotent
     # CONFIGURATION and NEVER moves data or stops services — it PRINTS a
