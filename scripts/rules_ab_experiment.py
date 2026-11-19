@@ -586,9 +586,19 @@ def write_architecture_ablated_claude_md(real: Path, cfg: Path) -> tuple[int, in
     return modules_touched, total_stripped
 
 
-def bootstrap(root: Path) -> None:
-    """Build the two scratch profiles. Never touches the real ``~/.claude``."""
-    real = Path.home() / ".claude"
+def bootstrap(root: Path, home: Path | None = None) -> None:
+    """Build the scratch profiles from ``home`` (default: the real home).
+
+    Reads ``<home>/.claude`` and ``<home>/.claude.json`` and only ever writes
+    under ``root``. ``home`` is the seam that lets a test pass a minimal
+    profile instead of copying the real one, whose skills tree and credential
+    otherwise land in the pytest basetemp three times per run (#1371)."""
+    home = Path.home() if home is None else home
+    real = home / ".claude"
+    if ARCHITECTURE_FIRST_MODULE not in (real / "CLAUDE.md").read_text(encoding="utf-8"):
+        raise RuntimeError(
+            f"{real / 'CLAUDE.md'} has no {ARCHITECTURE_FIRST_MODULE} import "
+            "(architecture-first): condition C would ablate nothing")
     settings = json.loads((real / "settings.json").read_text())
 
     for cond in CONDITIONS:
@@ -624,7 +634,7 @@ def bootstrap(root: Path) -> None:
         # CLAUDE_CONFIG_DIR is set — copy the real one so the session does not
         # hit fresh onboarding. MCP servers are stripped: they are identical
         # across conditions and only add startup cost and noise.
-        top_path = Path.home() / ".claude.json"
+        top_path = home / ".claude.json"
         top = json.loads(top_path.read_text()) if top_path.is_file() else {}
         top["mcpServers"] = {}
         top["projects"] = {}
@@ -652,11 +662,19 @@ def make_tree(root: Path, task: Task, cond: str, rep: int = 1) -> Path:
     32836799214), while the default falls back to copying. And the two
     steps that can fail for environment reasons fail LOUD (script-failure-
     policy): the clone dying silently is exactly how run 3 surfaced as a
-    misleading FileNotFoundError two commands downstream."""
+    misleading FileNotFoundError two commands downstream.
+
+    `--shared` borrows REPO's objects through `objects/info/alternates`
+    instead of hardlinking them (#1371): a hardlinked object file pins its
+    pack after REPO repacks, so each run tree held ~96 MB of real disk. No
+    hardlink also means no cross-device failure. The objects the run needs
+    (task.base and its history) are reachable on main, so REPO never prunes
+    them."""
     tree = root / f"run-{slot_name(task.issue, cond, rep)}"
     if tree.exists():
         shutil.rmtree(tree)
-    r = _run(["git", "clone", "--no-checkout", str(REPO), str(tree)], timeout=600)
+    r = _run(["git", "clone", "--shared", "--no-checkout", str(REPO), str(tree)],
+             timeout=600)
     if r.returncode != 0:
         raise RuntimeError(
             f"git clone {REPO} -> {tree} failed (rc={r.returncode}): "
