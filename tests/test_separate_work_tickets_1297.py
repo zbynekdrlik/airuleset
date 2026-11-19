@@ -58,7 +58,8 @@ class TestSeparateWorkFiles(unittest.TestCase):
     def test_a_second_ticket_naming_the_same_parent_passes(self):
         gh = _fake_gh(self.home, {"100": {"title": "the request", "body": "A normal ticket."}})
         for i, topic in enumerate(("alpha defect in the parser", "beta defect in the renderer")):
-            r = run(body_cmd("%s (#100 follow-up)" % topic, "Part of #100 (#100 follow-up). %d" % i,
+            r = run(body_cmd("%s (#100 follow-up)" % topic, "Part of #100 (#100 follow-up). %d\n"
+                             "Impact: clients see a wrong order total on the checkout screen" % i,
                              scope_gate="separate-work"),
                     home=self.home, cwd=self.cwd, gh_bin=gh, session_id=_present())
             self.assertEqual(r.returncode, 0, r.stderr)
