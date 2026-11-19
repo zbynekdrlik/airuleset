@@ -130,8 +130,22 @@ def dead_detail(code) -> str:
     return "HTTP %s" % code
 
 
+def _on_controller():
+    """#1362: the controller has no private path (`--private` refuses there)."""
+    from filedrop import is_controller_box
+    return is_controller_box()
+
+
 def refusal_line(prog, why):
-    """The ONE loud line a producer prints when it hands out NO URL (#1192)."""
+    """The ONE loud line a producer prints when it hands out NO URL (#1192).
+    On the controller it never advises `--private`, which refuses there (#1362)."""
+    if _on_controller():
+        return ("%s: !!! ŽIADNA URL — verejný odkaz nefunguje (%s). Controller "
+                "nemá súkromnú cestu (--private je vypnuté) — oprav verejný lane "
+                "(push / drop-gateway --apply). / NO URL printed — the public lane "
+                "is unusable (%s); the controller has no private path (--private "
+                "is refused): fix the public lane (push / drop-gateway --apply) "
+                "(#1362)." % (prog, why, why))
     return ("%s: !!! ŽIADNA URL — verejný odkaz nefunguje (%s). Tailscale/LAN "
             "odkaz sa sám nevypisuje (bezpečnostné riziko); ak ho naozaj treba, "
             "spusti znova s --private. / NO URL printed — the public lane is "
@@ -142,6 +156,11 @@ def refusal_line(prog, why):
 def access_unverified_note(prog):
     """The note beside a public URL whose lane answered only Cloudflare Access's
     edge 302: its `/healthz` bypass app is not applied yet (#1189/#1192)."""
+    if _on_controller():                 # #1362: no --private on the controller
+        return ("%s: public lane is behind Cloudflare Access and its /healthz is "
+                "not bypassed yet — the tunnel is NOT verified from here. If the "
+                "link shows error 1033, fix the lane (push / drop-gateway --apply); "
+                "the controller has no --private path (#1362)." % prog)
     return ("%s: public lane is behind Cloudflare Access and its /healthz is not "
             "bypassed yet — the tunnel is NOT verified from here. If the link "
             "shows error 1033, re-run with --private (#1189/#1192)." % prog)

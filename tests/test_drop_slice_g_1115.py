@@ -121,7 +121,7 @@ class TestLocalControllerLanePresent(unittest.TestCase):
         self.assertIsNone(lane.tunnel_config)
         self.assertIsNone(lane.tunnel_service)
 
-    def test_origin_is_the_controller_fleet_entry_not_a_hand_literal(self):
+    def test_origin_is_the_shared_loopback_constant_not_the_fleet_host(self):
         # The lane exists because the controller has its OWN fleet entry (the
         # claudy@controller service account); its origin is the shared #1362
         # loopback constant, never that entry's tailscale host.

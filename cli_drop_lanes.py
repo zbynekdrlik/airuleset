@@ -305,7 +305,7 @@ def build_drop_lanes(remote_hosts, *, seed, drop_lane_cls,
     return lanes
 
 
-def _controller_origin_ip(remote_hosts):
+def _controller_lane_origin(remote_hosts):
     """The tunnel origin for the LOCAL-account lane (#1115 slice G):
     ``CONTROLLER_DROP_ORIGIN`` (loopback, #1362 — cloudflared runs on the
     controller itself) when the controller box has its OWN fleet entry (the
@@ -337,7 +337,7 @@ def _add_controller_local_lane(lanes, remote_hosts, used_ports, drop_lane_cls,
     key = (CONTROLLER_NODENAME, CONTROLLER_NODENAME)
     if key in lanes:
         return  # a seed already covers it (never today) — never overwrite
-    origin = _controller_origin_ip(remote_hosts)
+    origin = _controller_lane_origin(remote_hosts)
     port = _GENERATED_DROP_PORTS.get(key)
     if origin is None:
         print("#1115 slice G WARNING: no controller fleet entry with a tailscale "

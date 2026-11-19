@@ -198,7 +198,9 @@ def _bind_priority(ip):
 # of the file-drop needs tailscale here, and tailscale's ts-input chain accepts
 # tailscale0 before ufw, so a firewall rule cannot close such a bind. Keyed on the
 # MACHINE, not the per-account box-class marker (claudy reads `workstation`).
-# Drift-locked to cli_drop_lanes.CONTROLLER_NODENAME (the lane-origin side).
+# A literal, since this stdlib leaf imports no cli_* module; drift-locked to
+# cli_drop_lanes.CONTROLLER_NODENAME by test_controller_loopback_drop_1362.py
+# (test_predicate_is_the_drop_lane_node).
 CONTROLLER_NODENAME = "airuleset"
 LOOPBACK = "127.0.0.1"
 
