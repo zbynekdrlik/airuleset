@@ -727,7 +727,7 @@ def _cmd_webterm_only_apply_sshd(dry_run=False):
     2. Over ``ssh -J <gk hop> root@subdev``:
        a. Writes a temp file.
        b. ``sshd -t`` validates BEFORE moving into place.
-       c. If valid, ``mv`` + ``systemctl reload sshd``.
+       c. If valid, ``mv`` + reload (Ubuntu ``ssh``, else ``sshd``).
        d. If invalid, REMOVE temp + NO reload.
     3. Read-back: ``sshd -T -C user=<each>`` to verify the Match applies.
     """
@@ -755,7 +755,7 @@ def _cmd_webterm_only_apply_sshd(dry_run=False):
         "  [ -f \"$DROPIN\" ] && cp \"$DROPIN\" \"$BACKUP\"\n"
         "  mv \"$TMPF\" \"$DROPIN\"\n"
         "  if sshd -t -f /etc/ssh/sshd_config 2>&1; then\n"
-        "    systemctl reload sshd\n"
+        "    systemctl reload ssh 2>/dev/null || systemctl reload sshd\n"
         "    echo 'APPLIED: %(path)s reloaded'\n"
         "  else\n"
         "    echo 'RESTORE: sshd -t failed after mv; restoring' >&2\n"
