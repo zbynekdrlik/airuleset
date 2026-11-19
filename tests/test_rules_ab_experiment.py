@@ -910,6 +910,16 @@ def test_bootstrap_builds_from_an_injected_home_never_the_real_one(tmp_path, mon
     assert _tree_bytes(root) < 1_000_000
 
 
+def test_bootstrap_fails_loud_when_the_profile_lacks_architecture_first(tmp_path):
+    """#1371 review: with no fixture reading the real CLAUDE.md, the run itself
+    must refuse a profile whose C condition would ablate nothing."""
+    home = _fake_home(tmp_path)
+    md = home / ".claude" / "CLAUDE.md"
+    md.write_text("# fake\n@~/devel/airuleset/modules/core/tdd-workflow.md\n")
+    with pytest.raises(RuntimeError, match="architecture-first"):
+        ab.bootstrap(tmp_path / "ab95", home=home)
+
+
 def test_bootstrap_builds_condition_c_alongside_a_and_b(tmp_path, monkeypatch):
     """bootstrap() over a minimal fake home (#1371), never the real ~/.claude."""
     monkeypatch.setenv("HOME", str(tmp_path / "no-such-home"))
