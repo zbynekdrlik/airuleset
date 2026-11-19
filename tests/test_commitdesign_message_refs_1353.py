@@ -314,6 +314,34 @@ class TestReviewRound3(_Base):
         self._blocks("cat > log.md <<'EOF'\nref (#102)\nEOF\ngit commit --no-edit", "#102")
 
 
+class TestReviewRound4(_Base):
+    """The fourth review's repros: whitelisted git segments must not write."""
+
+    def _blocks_41(self, cmd):
+        r = self.run_hook(cmd)
+        self.assertEqual(r.returncode, 2, cmd + r.stderr)
+        self.assertIn("#41", r.stderr, cmd)
+
+    def test_escaped_space_before_hash_is_not_a_comment(self):
+        self._blocks_41("git commit -q -m x\\ #'\ncat > f <<\"W\"\n#41\nW\n' && git status --short")
+
+    def test_redirect_from_a_git_segment_into_a_message_file(self):
+        for out in (".git/MERGE_MSG", ".git/SQUASH_MSG"):
+            self._blocks_41("cat > m <<'W'\nfix the thing (#41)\nW\n"
+                            "git add m && git show :m > %s && git rm -q --cached m && "
+                            "git commit -q --no-edit" % out)
+
+    def test_git_output_option_into_a_message_file(self):
+        self._blocks_41("cat > m <<'W'\nfix the thing (#41)\nW\n"
+                        "git diff --no-index --output=.git/MERGE_MSG /dev/null m ; "
+                        "git commit -q --no-edit")
+
+    def test_plain_add_and_commit_still_drops_the_log_refs(self):
+        self.mark(41)
+        r = self.run_hook(LOG_APPEND + 'git add -A docs && git commit -qam "log (#41)" -- docs')
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+
 class TestTimingBound(_Base):
 
     def test_large_heredoc_body_stays_fast(self):
