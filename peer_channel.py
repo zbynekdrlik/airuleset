@@ -42,6 +42,7 @@ REGISTRY_FILE = "projects-registry.json"
 LINKS_FILE = "peer-links.json"
 CHANNEL_ARG = "plugin:peer@airuleset"
 NOT_ARMED = "session was not launched with --channels " + CHANNEL_ARG
+NO_SESSION = ("{p} has no live session: only the owner starts sessions. If a ticket waits on {p}, make it an owner action now (a ❓ asking the owner to start {p}'s session + label needs-owner-action = U), never an ops-wait/W park (#1374).")
 LOG_MAX_BYTES = 5 * 1024 * 1024
 MAX_TEXT = 100_000                  # #1269: one long reply stays one message (was 4000)
 MAX_WIRE = 6 * MAX_TEXT + 1024      # a JSON \uXXXX escape is 6 bytes per char
@@ -619,8 +620,7 @@ class Peer:
                  attempted=len(results), errors=errors, chars=len(text), preview=text[:200])
         if ok:
             return True, "delivered to %d %s session(s)" % (ok, to)
-        return False, ("%s has no live session" % to if not results
-                       else "not delivered: " + "; ".join(errors))
+        return False, NO_SESSION.format(p=to) if not results else "not delivered: " + "; ".join(errors)
 
     def list_peers(self):
         self.start_listener()
