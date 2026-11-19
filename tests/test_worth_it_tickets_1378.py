@@ -10,7 +10,7 @@ no `Requested by <owner>/<repo>#N` handover from ANOTHER project) only for a rea
 defect someone hits, proven by an `Impact: <who is hit and how>` line; a nit /
 cleanup / 🔵 finding is fixed in the PR in hand or dropped; (2) one screen / one
 flow = one ticket with `- [ ]` lines in its DESCRIPTION, never comments; (3) a
-per-stream net-flow brake over 72 h: Claude-born filed >= closed (completed) ->
+per-stream net-flow brake over 72 h: Claude-born filed > closed (completed) ->
 BLOCK; a gh error fails OPEN with a logged `brake-unverified`; (4) worker
 `followup_candidates:` carry their Impact and are not filed by default.
 """
@@ -332,12 +332,15 @@ class TestBrake(unittest.TestCase):
     def test_brake_reason_names_its_exits(self):
         r = self.w._brake_reason("stream:x", 4, 4)
         for part in ("DESCRIPTION", "(never a comment)", "drop it with one line",
-                     "at least as fast", "not an exit"):
+                     "faster than it closes", "not an exit"):
             self.assertIn(part, r)
 
     def test_decision(self):
-        self.assertTrue(self.w.brake_blocks(0, 0))
-        self.assertTrue(self.w.brake_blocks(3, 3))
+        # Owner-approved design (#1378 body): braked when the stream "created
+        # MORE Claude-born tickets than it closed" -- equal counts and 0/0 pass.
+        self.assertFalse(self.w.brake_blocks(0, 0))
+        self.assertFalse(self.w.brake_blocks(3, 3))
+        self.assertTrue(self.w.brake_blocks(1, 0))
         self.assertTrue(self.w.brake_blocks(33, 3))
         self.assertFalse(self.w.brake_blocks(2, 3))
 
@@ -589,7 +592,7 @@ class TestDoctrine1378(unittest.TestCase):
         self.assertIn("a real defect is never dropped", deep)
         self.assertNotIn("There is no fourth fate", deep)
         module = self._read("modules/quality/no-dropped-work.md")
-        self.assertIn("Braked while its stream filed ≥ it closed in 72 h", module)
+        self.assertIn("Braked while its stream filed > it closed in 72 h", module)
         self.assertIn("dropped with one line", module)
         self.assertIn("block-close-with-open-checklist.sh", module)
         skill = self._read("skills/autopilot/SKILL.md")
