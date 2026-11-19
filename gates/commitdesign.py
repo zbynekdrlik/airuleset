@@ -17,6 +17,7 @@ import time
 from gates import command_of, field_of, read_payload
 from gates import audit
 from gates import design as dg
+from gates import commitmsg
 from gates import ghread
 
 _AUDIT_LOG = "no-design-skips.log"
@@ -126,13 +127,15 @@ def main():
     if not cwd:
         sys.exit(0)
 
-    refs = dg.issue_refs(cmd)
-    if not refs:
-        sys.exit(0)
-
     # #187 -- an inline `cd /other/repo && git commit` moves the shell to a
     # DIFFERENT repo than the payload's static cwd.
     work_cwd = notify.resolve_work_cwd(cmd, cwd)
+
+    # #1353 -- heredoc bodies that are provably FILE content (an in-repo log)
+    # are not the message; -F message files on disk are added.
+    refs = dg.issue_refs(commitmsg.scan_text(cmd, work_cwd) + "\n" + commitmsg.msgfile_text(cmd, work_cwd))
+    if not refs:
+        sys.exit(0)
 
     # #1003 -- a resync merge commit introduces NO new design; exempt it.
     merge_ok, merge_reason = dg.is_merge_commit_context(cmd, work_cwd)
