@@ -595,6 +595,10 @@ def bootstrap(root: Path, home: Path | None = None) -> None:
     otherwise land in the pytest basetemp three times per run (#1371)."""
     home = Path.home() if home is None else home
     real = home / ".claude"
+    if ARCHITECTURE_FIRST_MODULE not in (real / "CLAUDE.md").read_text(encoding="utf-8"):
+        raise RuntimeError(
+            f"{real / 'CLAUDE.md'} has no {ARCHITECTURE_FIRST_MODULE} import "
+            "(architecture-first): condition C would ablate nothing")
     settings = json.loads((real / "settings.json").read_text())
 
     for cond in CONDITIONS:
