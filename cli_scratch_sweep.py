@@ -1840,7 +1840,7 @@ def sweep_old_transcripts(home=None, projects_dir=None, dry_run: bool = True,
             discovery_failed = True
             results.append({"path": None, "removed": False,
                             "reason": "discovery error: %s" % e})
-    candidates = expand_live_children(candidates)   # #1355: a live session's stale children
+
     for c in candidates:
         entry = dict(c)
         entry["removed"] = False

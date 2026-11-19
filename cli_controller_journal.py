@@ -59,6 +59,40 @@ def _already_current(dest, content):
         return False
 
 
+def _journald_started_before(dest, run):
+    """True when journald's current start predates the drop-in's mtime, so the
+    cap on disk is NOT live yet (a restart that failed after the write: the
+    bytes then read "unchanged" forever, review 🟡). An unreadable start time
+    reads False: never restart journald on every install over a doubt."""
+    try:
+        r = run(["systemctl", "show", "-p", "ActiveEnterTimestamp", "--timestamp=unix",
+                 "systemd-journald.service"], capture_output=True, text=True, timeout=10)
+        started = float((r.stdout or "").strip().split("@", 1)[1])
+        return started < os.stat(dest).st_mtime
+    except (OSError, ValueError, IndexError, subprocess.SubprocessError) as e:
+        print("  journal cap: journald start time unreadable (%r)" % e, file=sys.stderr)
+        return False
+
+
+def _root_leg_owns_controller():
+    """The #841 root leg writes the SAME `50-airuleset-journal-cap.conf`; if the
+    controller ever joins DISK_GUARD_ROOT_HOSTS, that leg owns the cap and two
+    writers must never fight over one file (review 🔵)."""
+    import cli_disk_guard_root as dgr
+    import cli_fleet
+    return any(h.get("host") == dgr.CONTROLLER_TAILSCALE_IP
+               for h in cli_fleet.DISK_GUARD_ROOT_HOSTS)
+
+
+def _cleanup(run, tmp):
+    """Remove a leftover tmp drop-in; a failing cleanup is reported, never
+    allowed to replace the original failure status (review 🔵)."""
+    try:
+        _sudo(run, ["rm", "-f", tmp], timeout=5)
+    except Exception as e:  # noqa: BLE001
+        print("  journal cap: cleanup of %s failed (%r)" % (tmp, e), file=sys.stderr)
+
+
 def provision_controller_journal_cap(run=None, dest=None, box_class=None):
     """Install the controller's journald cap drop-in. Returns a status line:
     ``skipped (...)``, ``unchanged (...)``, ``applied (...)`` or ``FAILED (...)``.
@@ -66,14 +100,19 @@ def provision_controller_journal_cap(run=None, dest=None, box_class=None):
     Order: write atomically (tee to a tmp file, chmod 0644, mv), then restart
     journald (it reads journald.conf.d only at start; a rotate alone would
     vacuum to the OLD limit, the #841 "deployed != effective" trap), then
-    rotate, then read back ``journalctl --disk-usage`` into the status."""
+    rotate, then read back ``journalctl --disk-usage`` into the status. A file
+    already in place whose journald start predates it is not rewritten, only
+    restarted + rotated (the cap was written but never made live)."""
     run = run or subprocess.run
     bc = box_class if box_class is not None else _box_class()
     if bc != "controller":
         return "skipped (box-class=%s, not controller)" % bc
+    if _root_leg_owns_controller():
+        return "skipped (controller is in DISK_GUARD_ROOT_HOSTS: the #841 root leg owns the cap)"
     content = render_controller_journal_cap()
     dest = dest or CONTROLLER_JOURNAL_CAP_PATH
-    if _already_current(dest, content):
+    written = _already_current(dest, content)
+    if written and not _journald_started_before(dest, run):
         return "unchanged (%s)" % dest
     try:
         probe = _sudo(run, ["true"], timeout=10)
@@ -83,14 +122,15 @@ def provision_controller_journal_cap(run=None, dest=None, box_class=None):
         return "skipped (no passwordless sudo)"
     tmp = dest + ".airuleset-tmp"
     try:
-        steps = ((["mkdir", "-p", os.path.dirname(dest)], None),
-                 (["tee", tmp], content),
-                 (["chmod", "0644", tmp], None),
-                 (["mv", "-f", tmp, dest], None))
+        steps = () if written else (
+            (["mkdir", "-p", os.path.dirname(dest)], None),
+            (["tee", tmp], content),
+            (["chmod", "0644", tmp], None),
+            (["mv", "-f", tmp, dest], None))
         for args, stdin in steps:
             r = _sudo(run, args, stdin=stdin)
             if getattr(r, "returncode", 1) != 0:
-                _sudo(run, ["rm", "-f", tmp], timeout=5)
+                _cleanup(run, tmp)
                 return "FAILED (%s rc=%d)" % (args[0], r.returncode)
         r = _sudo(run, ["systemctl", "try-restart", "systemd-journald.service"])
         if getattr(r, "returncode", 1) != 0:
@@ -100,7 +140,7 @@ def provision_controller_journal_cap(run=None, dest=None, box_class=None):
             return "FAILED (journalctl --rotate rc=%d)" % r.returncode
         usage = _sudo(run, ["journalctl", "--disk-usage"])
     except Exception as e:  # noqa: BLE001
-        _sudo(run, ["rm", "-f", tmp], timeout=5)
+        _cleanup(run, tmp)
         return "FAILED (error: %r)" % e
     return "applied (%s, SystemMaxUse=%s; %s)" % (
         dest, JOURNAL_CAP_CONTROLLER, (getattr(usage, "stdout", "") or "").strip())

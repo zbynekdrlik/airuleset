@@ -100,6 +100,24 @@ def test_act_time_recheck_refuses_a_child_used_since_the_plan(tmp_path):
     assert "refused" in kid["reason"]
 
 
+def test_act_time_recheck_refuses_a_child_held_open_since_the_plan(tmp_path):
+    """Old by mtime AND atime, but a process opened a file in it after the
+    plan: the act-time fd check refuses it."""
+    now = time.time()
+    uid, sess, proc = _live_session(tmp_path, now)
+    child = sess / "scratchpad" / "review-clone"
+    (Path(proc) / "44" / "fd").mkdir(parents=True)
+    os.symlink(str((child / "src" / "a.py").resolve()), Path(proc) / "44" / "fd" / "5")
+    row = {"path": str(sess), "reason": "live session -- kept", "uuid": _UUID,
+           "live": True, "size": 1,
+           "stale_children": [{"path": str(child), "size": 64, "cls": "scratch",
+                               "reason": None, "floor_days": 2}]}
+    rows = _sweep(tmp_path, uid, now, proc, candidates=[row])
+    assert child.is_dir(), rows
+    kid = next(r for r in rows if r["path"] == str(child))
+    assert "refused" in kid["reason"]
+
+
 def test_dry_run_reports_the_child_and_deletes_nothing(tmp_path):
     now = time.time()
     uid, sess, proc = _live_session(tmp_path, now)
