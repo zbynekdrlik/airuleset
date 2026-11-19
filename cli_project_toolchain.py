@@ -142,19 +142,20 @@ def parse_tool(entry):
     return kind, m
 
 
-def _pipx_pins(tools):
-    """{pkg: version} of the PINNED pipx entries in ``tools``."""
+def _pins(tools, kind="pipx", name="pkg"):
+    """{name: version} of the PINNED ``kind`` entries in ``tools``."""
     out = {}
     for t in tools:
-        kind, m = parse_tool(t)
-        if kind == "pipx" and m.group("ver"):
-            out[m.group("pkg").lower()] = m.group("ver")
+        k, m = parse_tool(t)
+        if k == kind and m.group("ver"):
+            out[m.group(name).lower()] = m.group("ver")
     return out
 
 
 def validate_tools(spec, account=None, declared=()):
     """Every problem with a declaration's ``tools`` ([] = valid). A pipx venv
-    is ONE copy per box, so two accounts on one host may not pin the same
+    and a cargo bin are ONE copy per box (a pinned cargo tool always
+    reinstalls, #1373), so two accounts on one host may not pin the same
     package to different versions."""
     tools = spec.get("tools", ())
     if not isinstance(tools, (list, tuple)):
@@ -170,20 +171,21 @@ def validate_tools(spec, account=None, declared=()):
     if len(set(tools)) != len(tools):
         errs.append("tools lists an entry twice")
     errs += _binaryen_problems(tools, account, declared, spec.get("host", "controller"))
-    mine = _pipx_pins(tools)
-    for other, raw in sorted(dict(declared).items()):
-        if other == account or raw.get("host", "controller") != spec.get(
-                "host", "controller"):
-            continue
-        try:
-            theirs = _pipx_pins(raw.get("tools") or ())
-        except ValueError:
-            continue            # the other declaration reports its own error
-        for pkg, ver in sorted(mine.items()):
-            if theirs.get(pkg, ver) != ver:
-                errs.append("pipx:%s==%s conflicts with %s's pin %s on the same "
-                            "host (one shared venv per box)"
-                            % (pkg, ver, other, theirs[pkg]))
+    for kind, name, sep, where in (("pipx", "pkg", "==", "venv"), ("cargo", "crate", "@", "cargo bin")):
+        mine = _pins(tools, kind, name)
+        for other, raw in sorted(dict(declared).items()):
+            if other == account or raw.get("host", "controller") != spec.get(
+                    "host", "controller"):
+                continue
+            try:
+                theirs = _pins(raw.get("tools") or (), kind, name)
+            except ValueError:
+                continue            # the other declaration reports its own error
+            for pkg, ver in sorted(mine.items()):
+                if theirs.get(pkg, ver) != ver:
+                    errs.append("%s:%s%s%s conflicts with %s's pin %s on the same "
+                                "host (one shared %s per box)"
+                                % (kind, pkg, sep, ver, other, theirs[pkg], where))
     return errs
 
 
