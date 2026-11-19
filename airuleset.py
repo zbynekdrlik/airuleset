@@ -5174,7 +5174,7 @@ def _handoff_clear_bounce(repo, issue, gk_state, branch=None, body=None):
 
 def _cmd_handoff_post_body_file(repo, issue, branch, body_file):
     """#1044 pass-through: sign AND post a STREAM-authored, gate-compliant body
-    VERBATIM in one command.
+    VERBATIM in one command, only Verified-at-UTC: re-stamped (#1344).
 
     The odoo-erp gate OWNS the body shape (it evolves across 10+ checks_*
     modules and requires execution evidence the field-generator cannot
@@ -5182,7 +5182,7 @@ def _cmd_handoff_post_body_file(repo, issue, branch, body_file):
     only the minimal cross-repo invariants, VERIFIES (never rewrites) the
     body's HEAD is the live branch tip, signs, and posts. Returns an int rc."""
     import subprocess
-    import datetime
+    import cli_handoff_stamp as _hs  # #1344: stamps Verified-at-UTC
     import hashlib
     import time as _time
 
@@ -5300,9 +5300,11 @@ def _cmd_handoff_post_body_file(repo, issue, branch, body_file):
 
     # Write receipt BEFORE posting (the hook verifies the body hash).
     gate_dir = os.path.join(os.path.expanduser("~"), HANDOFF_GATE_DIR)
-    os.makedirs(gate_dir, exist_ok=True)
-    body_hash = hashlib.sha256(body.encode()).hexdigest()
     owner_repo = repo.replace("/", "-") if "/" in repo else repo
+    body, body_file, now_utc = _hs.stamp_body_file(body, gate_dir, owner_repo, issue)
+    if body_file is None:
+        return 1
+    body_hash = hashlib.sha256(body.encode()).hexdigest()
     receipt_path = os.path.join(gate_dir, "%s-%s.json" % (owner_repo, issue))
     receipt = json.dumps({"sha256": body_hash,
                           "ts": _time.time(),
@@ -5316,8 +5318,6 @@ def _cmd_handoff_post_body_file(repo, issue, branch, body_file):
     except OSError as e:
         print("handoff WARNING: could not write receipt: %s" % e)
     log_path = os.path.join(os.path.expanduser("~"), HANDOFF_GATE_LOG)
-    now_utc = datetime.datetime.now(datetime.timezone.utc).strftime(
-        "%Y-%m-%dT%H:%M:%SZ")
     try:
         with open(log_path, "a") as f:
             f.write("PASS body-file issue=%s repo=%s round=%d ts=%s\n"
@@ -5338,7 +5338,7 @@ def _cmd_handoff_post_body_file(repo, issue, branch, body_file):
     # answered (state bounce-unanswered), never on a fail-open/stale state.
     if _handoff_clear_bounce(repo, issue, _gk_state, branch, body):
         print("handoff: prio:bounce cleared on #%s" % issue)
-    print("handoff: READY-FOR-REVIEW posted verbatim on #%s (round %d, "
+    print("handoff: READY-FOR-REVIEW posted (Verified-at-UTC stamped) on #%s (round %d, "
           "HEAD %s)" % (issue, rnd, body_head[:12]))
     return 0
 
@@ -9856,8 +9856,8 @@ def main():
                       help="Pass-through mode (#1044): sign AND post a "
                            "STREAM-authored, gate-compliant body VERBATIM in "
                            "one command — fences and the single HEAD: line "
-                           "pass through untouched (no wrapping, no HEAD "
-                           "re-stamp). Use this for a rich hand-off whose "
+                           "pass through untouched; only Verified-at-UTC: is "
+                           "stamped at post time (#1344). Use for a hand-off whose "
                            "evidence the field-generated path cannot carry.")
     # Extended template fields (#969).
     p_ho.add_argument("--stack",

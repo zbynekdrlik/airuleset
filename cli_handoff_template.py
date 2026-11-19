@@ -552,7 +552,7 @@ def compose_body(
     # table. Wrapping it inside the Self-review block emits a SECOND, duplicate
     # HEAD: line that the gate parses instead of the composer's fresh one (the
     # mangling defect). A rich hand-off body belongs on the verbatim
-    # --body-file path, which signs + posts it 1:1 with fences and HEAD intact.
+    # --body-file path: posted 1:1 with fences + HEAD intact (Verified-at-UTC stamped).
     if is_full_body(self_review_table):
         return ("", "handoff BLOCK: --self-review-file looks like a FULL "
                 "readiness body (it carries a READY-FOR-REVIEW marker or "
