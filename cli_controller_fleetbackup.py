@@ -25,8 +25,10 @@ user (``sudo -u fleetbackup``), so root never writes into a user-owned dir.
 The sudoers file goes through the #659 visudo-validated installer.
 """
 
+import os
 import re
 import subprocess
+import sys
 
 from cli_owner_vps import _sudoers_install_script
 
@@ -63,9 +65,13 @@ def parse_key_line(line):
         return None
     options = ""
     if not _is_key_type(s.split(None, 1)[0]):
-        in_quote = False
+        in_quote = escaped = False
         for i, ch in enumerate(s):
-            if ch == '"':
+            if escaped:
+                escaped = False
+            elif ch == "\\" and in_quote:
+                escaped = True
+            elif ch == '"':
                 in_quote = not in_quote
             elif ch in " \t" and not in_quote:
                 options, s = s[:i], s[i:].lstrip()
@@ -135,6 +141,8 @@ def _write_ak_script(ssh_dir):
 def provision_fleetbackup_login(run=None, box_class=None, spec=None):
     """Ensure the declared ``fleetbackup`` login. Returns ``skipped (...)``,
     ``unchanged (...)``, ``applied (...)`` or ``FAILED (...)``."""
+    if run is None and os.environ.get("PYTEST_CURRENT_TEST"):
+        return "skipped (pytest)"   # #1196: never real sudo from a test install
     run = run or subprocess.run
     spec = spec or FLEETBACKUP
     bc = box_class if box_class is not None else _box_class()
@@ -179,23 +187,28 @@ def provision_fleetbackup_login(run=None, box_class=None, spec=None):
         ssh_dir = home + "/.ssh"
         ak = ssh_dir + "/authorized_keys"
         as_user = ["sudo", "-n", "-u", user]
-        r = call(as_user + ["cat", ak])
-        if r.returncode == 0:
-            existing = r.stdout or ""
-        elif "No such file" in (r.stderr or ""):
-            existing = ""
-        else:
-            raise _StepFailed("read %s rc=%s" % (ak, r.returncode))
-        new, action = reconcile_authorized_keys(existing, spec["authorized_key"])
+        # `test -e` instead of parsing cat's (localised) error text
+        exists = call(as_user + ["test", "-e", ak]).returncode == 0
+        existing = call(as_user + ["cat", ak], what="read authorized_keys").stdout \
+            if exists else ""
+        new, action = reconcile_authorized_keys(existing or "", spec["authorized_key"])
         if action != "present":
             call(as_user + ["sh", "-c", _write_ak_script(ssh_dir)], stdin=new,
                  what="write authorized_keys")
             done.append("key %s" % action)
-        else:
-            m = call(as_user + ["stat", "-c", "%a", ssh_dir, ak], what="stat")
-            if any(int(x, 8) & 0o077 for x in (m.stdout or "").split()):
-                call(as_user + ["chmod", "go-rwx", ssh_dir, ak], what="chmod")
-                done.append("ssh modes fixed")
+        # sshd StrictModes: no group/world write on the home, no group/world
+        # access to .ssh and the key file (read back after a write too).
+        paths = [home, ssh_dir, ak]
+        modes = (call(as_user + ["stat", "-c", "%a"] + paths, what="stat").stdout
+                 or "").split()
+        if len(modes) != len(paths):
+            raise _StepFailed("stat returned %r for %r" % (modes, paths))
+        if int(modes[0], 8) & 0o022:
+            call(as_user + ["chmod", "go-w", home], what="chmod home")
+            done.append("home mode fixed")
+        if any(int(x, 8) & 0o077 for x in modes[1:]):
+            call(as_user + ["chmod", "go-rwx", ssh_dir, ak], what="chmod")
+            done.append("ssh modes fixed")
 
         r = call(["sudo", "-n", "sh", "-c",
                   _sudoers_install_script(spec["sudoers_path"])],
@@ -209,3 +222,12 @@ def provision_fleetbackup_login(run=None, box_class=None, spec=None):
     if not done:
         return "unchanged (%s: key with from=, %s)" % (user, spec["sudoers_path"])
     return "applied (%s: %s)" % (user, ", ".join(done))
+
+
+def install_step():
+    """The ``cmd_install`` call site: one status line, never raises (the
+    #1116 slice 2 shape, so the install goes on whatever happens here)."""
+    try:
+        print("  fleetbackup login: %s" % provision_fleetbackup_login())
+    except Exception as e:  # noqa: BLE001
+        print("  fleetbackup login error (non-fatal): %r" % (e,), file=sys.stderr)
