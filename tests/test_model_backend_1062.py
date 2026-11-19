@@ -121,8 +121,9 @@ class TestRegistry(unittest.TestCase):
     def test_set_defaults_and_clear_roundtrip(self):
         with tempfile.TemporaryDirectory() as d:
             reg = Path(d) / "reg.json"
+            # #1358: the controller-gateway default is refused; pass a URL.
             entry = mb.set_target("miva1@subdev", cwd="/home/miva1/devel/odoo",
-                                  path=str(reg))
+                                  base_url="http://10.1.2.3:4000", path=str(reg))
             self.assertEqual(entry["main"], "impl-main")
             self.assertEqual(entry["sub"], "impl-sub")
             self.assertEqual(entry["fast"], "impl-fast")
@@ -778,7 +779,7 @@ class TestDeployShipping(unittest.TestCase):
     def _reg_with_miva1(self, d):
         reg = Path(d) / "reg.json"
         mb.set_target("miva1@subdev", cwd="/home/miva1/devel/odoo",
-                      path=str(reg))
+                      base_url="http://10.1.2.3:4000", path=str(reg))
         return str(reg)
 
     def _master_key(self, d):
@@ -927,7 +928,8 @@ class TestCliDispatch(unittest.TestCase):
                         Path(d) / "marker.json"), \
                 m.patch("sys.stdout", io.StringIO()) as out:
             rc = mb.cmd_model_backend(
-                self._Args(mb_action="set", mb_args=["miva1@subdev"]))
+                self._Args(mb_action="set", mb_args=["miva1@subdev"],
+                           base_url="http://10.1.2.3:4000"))  # #1358
             self.assertEqual(rc, 0)
             rc2 = mb.cmd_model_backend(self._Args(mb_action="status"))
             self.assertEqual(rc2, 0)
@@ -943,7 +945,7 @@ class TestCliDispatch(unittest.TestCase):
                 m.patch("cli_model_backend.REGISTRY_PATH",
                         Path(d) / "reg.json"), \
                 m.patch("sys.stdout", io.StringIO()):
-            mb.set_target("miva1@subdev", cwd="/proj",
+            mb.set_target("miva1@subdev", cwd="/proj", base_url="http://10.1.2.3:4000",
                           path=str(Path(d) / "reg.json"))
             rc = mb.cmd_model_backend(
                 self._Args(mb_action="clear", mb_args=["miva1@subdev"],
@@ -1011,7 +1013,7 @@ class TestReviewFixes1062(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             reg = Path(d) / "reg.json"
             mb.set_target("miva1@subdev", cwd="/home/miva1/devel/odoo",
-                          path=str(reg))
+                          base_url="http://10.1.2.3:4000", path=str(reg))
             k = Path(d) / "master.key"
             k.write_text("sk-x\n")
 
