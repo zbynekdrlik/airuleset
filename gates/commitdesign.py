@@ -11,6 +11,7 @@ orchestration + block-message layer the bash hook used to carry inline. Bypass:
 """
 import os
 import re
+import shlex
 import sys
 import time
 
@@ -18,6 +19,10 @@ from gates import command_of, field_of, read_payload
 from gates import audit
 from gates import design as dg
 from gates import ghread
+from gates.selfservice import (
+    _CATFILE_RE, _HEREDOC_RE, _apply_cd, _capture_heredocs, _strip_prefix,
+)
+from gates.shellcmd import split_top_level
 
 _AUDIT_LOG = "no-design-skips.log"
 
@@ -29,6 +34,147 @@ _NODESIGN_REASON_RE = re.compile(r'\[no-design:\s*[^\]]+\]')
 
 def _stderr(msg):
     sys.stderr.write(msg)
+
+
+# --------------------------------------------------------------------------- #
+# #1353 -- ticket refs come from the commit MESSAGE, never from file content the
+# same command writes (a `cat >> docs/autopilot-log.md <<EOF … #N … EOF` heredoc).
+# Every helper returns None on doubt; the caller then scans the whole command.
+# --------------------------------------------------------------------------- #
+_MSGFILE_MAX_BYTES = 1_000_000
+_HEREDOC_DELIM_RX = re.compile(r"<<-?[ \t]*(['\"]?)(\w+)\1")
+_CAT_HEREDOC_SUBST_RX = re.compile(r"\$\(\s*cat\s*<<-?[ \t]*(['\"]?)(\w+)\1\s*\)")
+# Options whose message is not in the command (reused/templated/editor-built).
+_UNRESOLVABLE_LONG = ("reuse-message", "reedit-message", "fixup", "squash", "template")
+_UNRESOLVABLE_SHORT = "cCt"
+
+
+def _heredoc_body(delim, direct_bodies, cmd):
+    """The body of the (single) direct heredoc named `delim`; None when it was
+    not captured or another direct heredoc reuses the delimiter (the capture
+    keys direct bodies by delimiter; a `cat > f` body is keyed by file)."""
+    if delim not in direct_bodies:
+        return None
+    starts = 0
+    for line in cmd.split("\n"):
+        m = _HEREDOC_RE.search(line.rstrip())
+        if m and m.group(2) == delim and not _CATFILE_RE.match(line):
+            starts += 1
+    return direct_bodies[delim] if starts == 1 else None
+
+
+def _inline_message(value, direct_bodies, cmd):
+    """An -m value: literal text, or a `$(cat <<EOF …)` substitution whose body
+    the heredoc capture holds. Any other expansion ($VAR, `…`) -> None."""
+    parts = []
+    for m in _CAT_HEREDOC_SUBST_RX.finditer(value):
+        body = _heredoc_body(m.group(2), direct_bodies, cmd)
+        if body is None:
+            return None
+        parts.append(body)
+    rest = _CAT_HEREDOC_SUBST_RX.sub(" ", value)
+    if "$" in rest or "`" in rest:
+        return None
+    return "\n".join([rest] + parts)
+
+
+def _file_message(path, seg, eff_cwd, file_bodies, direct_bodies, cmd):
+    """A -F/--file message: stdin heredoc (`-F -`), a `cat > f <<EOF` body from
+    this command, or the file on disk. A path this command also touches by any
+    other means (printf/echo/tee/cp …) is never read from a possibly stale disk."""
+    if path == "-":
+        delims = [m.group(2) for m in _HEREDOC_DELIM_RX.finditer(seg)]
+        if len(delims) != 1:
+            return None
+        return _heredoc_body(delims[0], direct_bodies, cmd)
+    if path in file_bodies:
+        written_by_cat = cmd.count(path) == 2 and not re.search(
+            r">>\s*['\"]?" + re.escape(path), cmd)
+        return file_bodies[path] if written_by_cat else None
+    if cmd.count(path) != 1:
+        return None
+    full = path if os.path.isabs(path) else (
+        os.path.join(eff_cwd, path) if eff_cwd else None)
+    if not full:
+        return None
+    try:
+        with open(full, "r", encoding="utf-8", errors="replace") as fh:
+            return fh.read(_MSGFILE_MAX_BYTES)
+    except OSError:
+        return None
+
+
+def _message_sources(args):
+    """[(kind, value)] for one `git commit`'s args (kind 'm' or 'F'); None when
+    the message is not fully in the command (no -m/-F, -C/-c/--fixup/…)."""
+    out, i, n = [], 0, len(args)
+    while i < n:
+        t = args[i]
+        i += 1
+        if t == "--":
+            break
+        if t.startswith("--"):
+            name, eq, val = t[2:].partition("=")
+            if len(name) >= 2 and any(o.startswith(name) for o in _UNRESOLVABLE_LONG):
+                return None
+            kind = "m" if (len(name) >= 3 and "message".startswith(name)) else (
+                "F" if (len(name) >= 3 and "file".startswith(name)) else None)
+            if kind is None:
+                continue
+            if not eq:
+                if i >= n:
+                    return None
+                val, i = args[i], i + 1
+            out.append((kind, val))
+            continue
+        if not t.startswith("-") or t == "-":
+            continue
+        for k, ch in enumerate(t[1:], 1):
+            if ch in _UNRESOLVABLE_SHORT:
+                return None
+            if ch in "uS":          # optional value glued to the flag
+                break
+            if ch in "mF":
+                val = t[k + 1:]
+                if not val:
+                    if i >= n:
+                        return None
+                    val, i = args[i], i + 1
+                out.append(("m" if ch == "m" else "F", val))
+                break
+    return out or None
+
+
+def _commit_message_text(cmd, cwd):
+    """The text of every `git commit` message in `cmd` (#1353), or None when it
+    cannot be isolated -- the caller then falls back to the whole command."""
+    file_bodies, direct_bodies, skeleton = _capture_heredocs(cmd)
+    eff_cwd, messages, commits = cwd or None, [], 0
+    for seg in split_top_level(skeleton):
+        if not seg.strip():
+            continue
+        try:
+            tk = _strip_prefix(shlex.split(seg, comments=True))
+        except ValueError:
+            return None
+        if not tk:
+            continue
+        if tk[0] == "cd":
+            eff_cwd = _apply_cd(eff_cwd, tk)
+            continue
+        if tk[:2] != ["git", "commit"]:
+            continue
+        commits += 1
+        sources = _message_sources(tk[2:])
+        if sources is None:
+            return None
+        for kind, val in sources:
+            text = (_inline_message(val, direct_bodies, cmd) if kind == "m" else
+                    _file_message(val, seg, eff_cwd, file_bodies, direct_bodies, cmd))
+            if text is None:
+                return None
+            messages.append(text)
+    return "\n".join(messages) if commits else None
 
 
 def _bare_nodesign_block(audit_log_path):
@@ -126,7 +272,9 @@ def main():
     if not cwd:
         sys.exit(0)
 
-    refs = dg.issue_refs(cmd)
+    # #1353 -- refs come from the commit MESSAGE; whole command only on doubt.
+    message = _commit_message_text(cmd, cwd)
+    refs = dg.issue_refs(cmd if message is None else message)
     if not refs:
         sys.exit(0)
 

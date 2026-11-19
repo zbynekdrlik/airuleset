@@ -87,7 +87,7 @@
     "gates/__init__.py": 109,
     "gates/audit.py": 335,
     "gates/commandshadow.py": 152,
-    "gates/commitdesign.py": 245,
+    "gates/commitdesign.py": 393,
     "gates/design/__init__.py": 21,
     "gates/design/classifiers.py": 541,
     "gates/design/gitctx.py": 396,
