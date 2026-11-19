@@ -509,6 +509,20 @@ def test_make_tree_clone_never_demands_hardlinks(tmp_path, monkeypatch):
     assert "--local" not in clone
 
 
+def test_make_tree_shares_objects_never_copies_or_hardlinks_them(tmp_path):
+    """#1371: a plain local clone hardlinks every object file (~96 MB per run
+    tree on the controller). Those links pin pack files after the source
+    repacks, so the pytest basetemp grows real disk use. `--shared` borrows
+    the objects through alternates instead: no copy, no hardlink, and it
+    works across filesystems."""
+    tree = ab.make_tree(tmp_path, ab.TASKS[88], "A", rep=1)
+    assert (tree / ".git" / "objects" / "info" / "alternates").is_file()
+    linked = [p for p in (tree / ".git").rglob("*")
+              if p.is_file() and p.stat().st_nlink > 1]
+    assert linked == []
+    assert _tree_bytes(tree / ".git" / "objects") < 1_000_000
+
+
 def test_summarise_by_task_never_pools_different_tickets():
     """Pooling task 88 and task 96 into one A-vs-B total can hide a real
     per-ticket effect behind an unrelated one — each task gets its own
@@ -842,16 +856,65 @@ def test_write_architecture_ablated_claude_md_returns_touched_and_stripped_count
     assert stripped >= 1  # tdd-workflow.md carries at least one genuine use
 
 
-def test_bootstrap_builds_condition_c_alongside_a_and_b(tmp_path):
-    """bootstrap() reads the REAL ~/.claude — a real profile must exist on
-    this box (true for every managed box, and this session's own)."""
-    real = Path.home() / ".claude"
-    if not (real / "settings.json").is_file():
-        pytest.skip("no real ~/.claude/settings.json on this box")
-    if not (real / "CLAUDE.md").is_file():
-        pytest.skip("no real ~/.claude/CLAUDE.md on this box")
+def _fake_home(tmp_path):
+    """A minimal home holding only what bootstrap() reads (#1371).
+
+    The real ~/.claude carries an 89 MB skills tree and the live OAuth
+    credential, and copying it three times left ~269 MB plus three credential
+    copies in the pytest basetemp on every run. This fixture holds the
+    rule-delivery hook (dropped only in B), one neutralised hook (dropped in
+    all), one enforcing hook (kept in all), a CLAUDE.md importing two real
+    modules, a tiny skill + agent, a fake credential and a top-level dotfile."""
+    home = tmp_path / "fake-home"
+    real = home / ".claude"
+    (real / "skills" / "demo").mkdir(parents=True)
+    (real / "skills" / "demo" / "SKILL.md").write_text("# demo\n", encoding="utf-8")
+    (real / "agents").mkdir()
+    (real / "agents" / "demo.md").write_text("# agent\n", encoding="utf-8")
+    hooks = [
+        f"bash ~/.claude/hooks/{ab.RULE_DELIVERY_HOOK}.sh",
+        f"bash ~/.claude/hooks/{ab.NEUTRALISED_HOOKS[0]}.sh",
+        "bash ~/.claude/hooks/block-history-rewrite.sh",
+    ]
+    (real / "settings.json").write_text(json.dumps(_settings_with(hooks)))
+    (real / "CLAUDE.md").write_text(
+        "# fake\n"
+        f"@~/devel/airuleset/{ab.ARCHITECTURE_FIRST_MODULE}\n"
+        "@~/devel/airuleset/modules/core/tdd-workflow.md\n",
+        encoding="utf-8",
+    )
+    (real / ".credentials.json").write_text('{"fake": true}')
+    (home / ".claude.json").write_text(json.dumps({"mcpServers": {"x": {}}, "k": 1}))
+    return home
+
+
+def _tree_bytes(path):
+    return sum(p.stat().st_size for p in path.rglob("*") if p.is_file())
+
+
+def test_bootstrap_builds_from_an_injected_home_never_the_real_one(tmp_path, monkeypatch):
+    """#1371: bootstrap() takes the home it reads from, and the fixture tree it
+    builds stays tiny. HOME points at a directory that does not exist, so any
+    read of the real profile fails instead of copying it."""
+    monkeypatch.setenv("HOME", str(tmp_path / "no-such-home"))
+    home = _fake_home(tmp_path)
     root = tmp_path / "ab95"
-    ab.bootstrap(root)
+    ab.bootstrap(root, home=home)
+    for cond in ab.CONDITIONS:
+        cfg = root / f"config-{cond}"
+        assert (cfg / "skills" / "demo" / "SKILL.md").is_file()
+        assert (cfg / "agents" / "demo.md").is_file()
+        assert (cfg / ".credentials.json").read_text() == '{"fake": true}'
+        top = json.loads((cfg / ".claude.json").read_text())
+        assert top["mcpServers"] == {} and top["k"] == 1
+    assert _tree_bytes(root) < 1_000_000
+
+
+def test_bootstrap_builds_condition_c_alongside_a_and_b(tmp_path, monkeypatch):
+    """bootstrap() over a minimal fake home (#1371), never the real ~/.claude."""
+    monkeypatch.setenv("HOME", str(tmp_path / "no-such-home"))
+    root = tmp_path / "ab95"
+    ab.bootstrap(root, home=_fake_home(tmp_path))
     assert (root / "config-C" / "CLAUDE.md").is_file()
     c_md = (root / "config-C" / "CLAUDE.md").read_text(encoding="utf-8")
     assert ab.ARCHITECTURE_FIRST_MODULE not in c_md
