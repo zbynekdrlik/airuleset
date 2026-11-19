@@ -44,6 +44,7 @@ crash CLI mode, #433 L-E).
 import json
 import os
 import re
+import sys
 from pathlib import Path
 
 
@@ -68,8 +69,14 @@ DEFAULT_SUB = "impl-sub"
 DEFAULT_FAST = "impl-fast"
 
 # The controller's tailscale IPv4 (machine-identities: ar.newlevel.media /
-# MagicDNS `airuleset`); the gateway binds it (cli_model_gateway._tailscale_ip).
+# MagicDNS `airuleset`).
 CONTROLLER_TAILSCALE_IP = "100.101.214.103"
+
+# #1358: the controller gateway binds LOOPBACK only, so no remote box may be
+# flipped onto it — `set` refuses the default and any URL naming the controller.
+# Reopening remote use is an owner decision plus a real auth path.
+_CONTROLLER_GATEWAY_HOSTS = frozenset({CONTROLLER_TAILSCALE_IP, "airuleset",
+                                       "ar.newlevel.media"})
 
 # The string fields a valid marker MUST carry. `cwd` (#1060 L3a review) = the
 # stream's PROJECT dir the implementer window starts in (so its session transcript
@@ -91,29 +98,6 @@ _MARKER_UNSAFE_RE = re.compile(r"""['"`\s;|&$\\<>(){}]""")
 
 def _expand(p):
     return Path(os.path.expanduser(str(p)))
-
-
-def default_base_url():
-    """The controller gateway's base URL (`http://<tailscale-ip>:<GATEWAY_PORT>`).
-    Reads L1's `GATEWAY_PORT` AND — since `set` runs ON the controller (where the
-    L1 gateway binds) — L1's live `_tailscale_ip()` so the marker points at the
-    address the gateway is ACTUALLY bound to, never a hard-coded IP that could
-    drift (review B-MINOR). Falls back to the pinned CONTROLLER_TAILSCALE_IP on
-    any failure (off-controller, no tailscale, an unexpected error)."""
-    try:
-        from cli_model_gateway import GATEWAY_PORT
-        port = int(GATEWAY_PORT)
-    except Exception:
-        port = 4000
-    try:
-        from cli_model_gateway import _tailscale_ip
-        live = (_tailscale_ip() or "").strip()
-        ip = live or CONTROLLER_TAILSCALE_IP
-    except Exception:
-        # off-controller / no tailscale / error → the pinned fallback (the
-        # expected path anywhere but the controller; not a real failure).
-        ip = CONTROLLER_TAILSCALE_IP
-    return "http://%s:%d" % (ip, port)
 
 
 # --------------------------------------------------------------------------- #
@@ -193,10 +177,68 @@ def marker_from_entry(entry):
     return {k: entry[k] for k in _MARKER_FIELDS}
 
 
+def refuse_controller_gateway(base_url):
+    """#1358: raise when `base_url` is unset (the old default was the controller
+    gateway), is not an http(s) URL with a host, names the controller (its
+    tailscale IP, also IPv4-mapped; `airuleset` or any `airuleset.*` MagicDNS
+    name; `ar.newlevel.media`), or is loopback — the gateway binds loopback
+    only, and a loopback URL on a REMOTE box points at that box's own empty
+    port. Either way the box would be flipped onto a backend that refuses
+    every connection."""
+    import ipaddress
+    from urllib.parse import urlsplit
+
+    def _refuse(why):
+        raise ModelBackendError(
+            "refusing base_url %r: %s — the controller model gateway binds "
+            "loopback only (#1358); reopening remote use needs an owner "
+            "decision and a real auth path" % (base_url, why))
+
+    if not (base_url or "").strip():
+        raise ModelBackendError(
+            "--base-url is required: the controller model gateway binds loopback "
+            "only (#1358), so no remote box can use it; reopening it needs an "
+            "owner decision and a real auth path")
+    parts = urlsplit(base_url.strip())
+    host = (parts.hostname or "").rstrip(".").lower()
+    if parts.scheme not in ("http", "https") or not host:
+        _refuse("not an http(s) URL with a host")
+    if (host in _CONTROLLER_GATEWAY_HOSTS or host.split(".", 1)[0] == "airuleset"
+            or host == "localhost"):
+        _refuse("it names the controller or loopback")
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return
+    mapped = getattr(ip, "ipv4_mapped", None)
+    for cand in (ip, mapped):
+        if cand is not None and (cand.is_loopback
+                                 or str(cand) == CONTROLLER_TAILSCALE_IP):
+            _refuse("it names the controller or loopback")
+
+
+def drop_unreachable_targets(members, reg):
+    """#1358: split deploy `members` (fleet host dicts named in `reg`) into
+    (shippable, failed). A registry entry whose base_url the controller-gateway
+    check refuses — a hand-edited or pre-1358 entry — is skipped LOUDLY and
+    reported as a `(name, reason)` failure, never shipped."""
+    keep, failed = [], []
+    for h in members:
+        try:
+            refuse_controller_gateway(reg[h["name"]].get("base_url"))
+        except ModelBackendError as e:
+            print("  ⚠ model-backend delivery to %s SKIPPED — %s" % (h["name"], e),
+                  file=sys.stderr)
+            failed.append((h["name"], "model-backend-unreachable-base-url"))
+            continue
+        keep.append(h)
+    return keep, failed
+
+
 def set_target(target, base_url=None, main=None, sub=None, fast=None,
                key_file=None, cwd=None, path=None, home=None):
-    """Add/replace `target`'s registry entry. Defaults: base_url →
-    default_base_url(); main/sub/fast → the impl(ementer) tier aliases; key_file →
+    """Add/replace `target`'s registry entry. `base_url` is REQUIRED and
+    must not name the controller gateway (#1358); main/sub/fast → the impl(ementer) tier aliases; key_file →
     TARGET_KEY_FILE. `cwd` is REQUIRED (#1060 L3a) — the stream's PROJECT dir the
     implementer window starts in (an absolute path, e.g.
     /home/miva1/devel/odoo/odoo-erp) — there is no sane default. Returns the
@@ -209,9 +251,10 @@ def set_target(target, base_url=None, main=None, sub=None, fast=None,
         raise ModelBackendError(
             "--cwd is required — the implementer's PROJECT dir on the target "
             "(an absolute path, e.g. /home/<user>/devel/odoo/odoo-erp)")
+    refuse_controller_gateway(base_url)
     reg = load_registry(path=path, home=home)
     reg[target] = {
-        "base_url": base_url or default_base_url(),
+        "base_url": base_url,
         "key_file": key_file or TARGET_KEY_FILE,
         "main": main or DEFAULT_MAIN,
         "sub": sub or DEFAULT_SUB,
@@ -275,6 +318,7 @@ def _cmd_status(args):
     if not reg:
         print("model-backend: no registry — no box is flipped to the gateway")
         print("  (flip one with: airuleset.py model-backend set <user@host> "
+              "--cwd <project-dir> --base-url <gateway-url> "
               "[--main impl-main --sub impl-sub --fast impl-fast])")
         # Also report THIS box's own marker state.
         mb = load_marker()
@@ -298,8 +342,8 @@ def _cmd_set(args):
     a = list(getattr(args, "mb_args", []) or [])
     if not a:
         raise ModelBackendError(
-            "usage: model-backend set <user@host> --cwd <project-dir> [--main A "
-            "--sub B --fast C --base-url URL --key-file PATH]")
+            "usage: model-backend set <user@host> --cwd <project-dir> --base-url "
+            "URL [--main A --sub B --fast C --key-file PATH]")
     target = a[0]
     entry = set_target(
         target,
