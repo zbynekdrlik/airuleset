@@ -127,15 +127,15 @@ def main():
     if not cwd:
         sys.exit(0)
 
-    # #1353 -- refs come from the commit MESSAGE; whole command only on doubt.
-    message = commitmsg.message_text(cmd, cwd)
-    refs = dg.issue_refs(cmd if message is None else message)
-    if not refs:
-        sys.exit(0)
-
     # #187 -- an inline `cd /other/repo && git commit` moves the shell to a
     # DIFFERENT repo than the payload's static cwd.
     work_cwd = notify.resolve_work_cwd(cmd, cwd)
+
+    # #1353 -- heredoc bodies that are provably FILE content (an in-repo log)
+    # are not the message; -F message files on disk are added.
+    refs = dg.issue_refs(commitmsg.scan_text(cmd) + "\n" + commitmsg.msgfile_text(cmd, work_cwd))
+    if not refs:
+        sys.exit(0)
 
     # #1003 -- a resync merge commit introduces NO new design; exempt it.
     merge_ok, merge_reason = dg.is_merge_commit_context(cmd, work_cwd)
