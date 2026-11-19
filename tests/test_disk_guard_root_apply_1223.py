@@ -31,7 +31,7 @@ STUBS = {
     # #1349: the apply gates its MaxStartups drop-in with `sshd -t` and reads
     # the effective value back from `sshd -T` (no output = verify FAIL).
     "sshd": ('echo "sshd $*" >> "$LOG"; case "$1" in -T) '
-             'echo "maxstartups 60:30:200" ;; esac; exit 0\n'),
+             'echo "maxstartups 60:30:200"; echo "persourcemaxstartups 30" ;; esac; exit 0\n'),
     "du": 'for a; do case "$a" in -*) ;; *) printf "0\\t%s\\n" "$a" ;; esac; done\n',
     "ionice": 'echo "ionice $*" >> "$LOG"; shift; shift; exec "$@"\n',
     # #1244: a real `logrotate --debug` names every log some read stanza rotates

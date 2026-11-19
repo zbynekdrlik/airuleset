@@ -31,7 +31,8 @@ class TestRender(unittest.TestCase):
     def test_content_sets_maxstartups_60_30_200(self):
         body = ms.render_sshd_maxstartups_conf()
         lines = [ln for ln in body.splitlines() if ln and not ln.startswith("#")]
-        self.assertEqual(lines, ["MaxStartups 60:30:200"])
+        self.assertEqual(lines, ["MaxStartups 60:30:200",
+                                 "PerSourceMaxStartups 30"])
 
     def test_first_line_is_the_managed_marker(self):
         first = ms.render_sshd_maxstartups_conf().splitlines()[0]
@@ -92,7 +93,8 @@ class TestStepExecution(unittest.TestCase):
         with open(self.mo, "w") as f:
             f.write(FOREIGN_MONTALU)
 
-    def _stubs(self, t_rc=0, reload_rc=0, shadow=None, mv_fails=False):
+    def _stubs(self, t_rc=0, reload_rc=0, shadow=None, mv_fails=False,
+               ps_shadow=None):
         # sshd -T: the FIRST MaxStartups wins in sshd, so a "shadow" value
         # models a foreign drop-in sorting before 50-; else the managed file's
         # value when it exists; else the OpenSSH default.
@@ -107,9 +109,15 @@ class TestStepExecution(unittest.TestCase):
             '      elif [ -f "%(path)s" ]; then\n'
             '        v=$(awk \'$1=="MaxStartups"{print $2}\' "%(path)s"); fi\n'
             '      echo "maxstartups $v"\n'
-            '      echo "persourcemaxstartups none"; exit 0;;\n'
+            '      p=none\n'
+            '      if [ -n "%(ps_shadow)s" ]; then p="%(ps_shadow)s"\n'
+            '      elif [ -f "%(path)s" ]; then\n'
+            '        p=$(awk \'$1=="PerSourceMaxStartups"{print $2}\' "%(path)s")\n'
+            '        [ -n "$p" ] || p=none; fi\n'
+            '      echo "persourcemaxstartups $p"; exit 0;;\n'
             'esac\nexit 0\n'
             % {"calls": self.calls, "t_rc": t_rc, "shadow": shadow or "",
+               "ps_shadow": ps_shadow or "",
                "path": self.path})
         systemctl = ('#!/bin/bash\necho "systemctl $*" >> "%s"\nexit %d\n'
                      % (self.calls, reload_rc))
@@ -230,6 +238,13 @@ class TestStepExecution(unittest.TestCase):
         self.assertIn("fail=1", out)
         self.assertIn("MaxStartups", err)
         self.assertIn("10:30:100", err)
+
+    def test_missing_per_source_cap_fails_the_readback(self):
+        # A public box (gk, subdev) must not let ONE source hold every one
+        # of the 200 pre-auth slots: the effective per-source cap is 30.
+        out, err, calls = self.run_step(ps_shadow="none")
+        self.assertIn("fail=1", out)
+        self.assertIn("PerSourceMaxStartups", err)
 
 
 if __name__ == "__main__":
