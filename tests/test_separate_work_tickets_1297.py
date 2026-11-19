@@ -22,7 +22,7 @@ import unittest
 import uuid
 from pathlib import Path
 
-from test_scope_gate import _fake_gh, _fake_gh_netdrain, body_cmd, run  # noqa: E402
+from test_scope_gate import _fake_gh, body_cmd, run  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -72,12 +72,16 @@ class TestSeparateWorkFiles(unittest.TestCase):
                     home=self.home, cwd=self.cwd, session_id=_present())
             self.assertEqual(r.returncode, 0, r.stderr)
 
-    def test_net_drain_no_longer_blocks(self):
-        r = run(body_cmd("not draining", "a separate defect found outside the change",
+    def test_net_flow_brake_is_back_for_claude_born_tickets(self):
+        # #1378 (owner 19.11.2026) reverses this half of #1297: a stream that
+        # files more Claude-born tickets than it closes is braked again.
+        from test_worth_it_tickets_1378 import GOOD_IMPACT, _born, _done, _flow_gh
+        r = run(body_cmd("not draining", "a separate defect outside the change\n" + GOOD_IMPACT,
                          scope_gate="separate-work"),
-                gh_bin=_fake_gh_netdrain(self.home, created=99, closed=0),
+                gh_bin=_flow_gh(self.home, _born(9), _done(1)),
                 home=self.home, cwd=self.cwd, session_id=_present())
-        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("net-flow-brake", r.stderr)
 
     def test_follow_up_of_a_follow_up_still_blocks(self):
         gh = _fake_gh(self.home, {"200": {"title": "x (#100 follow-up)",
