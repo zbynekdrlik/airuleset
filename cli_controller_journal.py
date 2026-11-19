@@ -68,7 +68,8 @@ def _journald_started_before(dest, run):
         r = run(["systemctl", "show", "-p", "ActiveEnterTimestamp", "--timestamp=unix",
                  "systemd-journald.service"], capture_output=True, text=True, timeout=10)
         started = float((r.stdout or "").strip().split("@", 1)[1])
-        return started < os.stat(dest).st_mtime
+        # whole seconds (systemd) vs a fractional mtime: compare at seconds
+        return started < int(os.stat(dest).st_mtime)
     except (OSError, ValueError, IndexError, subprocess.SubprocessError) as e:
         print("  journal cap: journald start time unreadable (%r)" % e, file=sys.stderr)
         return False
