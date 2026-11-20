@@ -10,69 +10,86 @@ peer messages), and no Stop hook read the language of the final message.
 THE CHECK (``hooks/stop-check-owner-language.sh``, Stop payload on stdin):
 1. ``stop_hook_active`` → allow: the turn already continues after a Stop-hook
    block, so this gate blocks at most ONCE per owner prompt and never wedges.
-2. The final message is judged FIRST, with no I/O: ``prose_words`` drops fenced
-   code, inline code, ``> `` quotes, the title in ``#N (…)``, every token that
-   carries a URL, a path or an identifier character, and ALL-CAPS acronyms /
-   status keywords. Fewer than ``MIN_PROSE_WORDS`` → allow. Mainly English =
-   at least ``MIN_EN`` English stopwords and ``en >= EN_RATIO * sk``.
+2. The final message is judged FIRST, with no I/O. ``prose_words`` keeps only
+   prose: fenced code (``` and ~~~, each closed by its own fence), ``> `` quotes,
+   markdown table rows and log lines are dropped; inline code, double-quoted
+   strings and ticket titles (``#N (…)``, ``#N — …``, ``PR #N: …``) are cut out
+   of a line; a token carrying a URL, a path, an identifier character or a digit
+   is skipped; ALL-CAPS acronyms / keywords and capitalised names in mid-sentence
+   (Kežmarok, Spišská Nová Ves) count for neither language. Fewer than
+   ``MIN_PROSE_WORDS`` → allow. Mainly English = at least ``MIN_EN`` English
+   stopwords and ``en >= EN_RATIO * sk``.
 3. Only then the transcript is read BACKWARDS in ``CHUNK`` pieces, at most
-   ``MAX_SCAN_BYTES`` (the family bound ``gates.handover.TAIL_BYTES``; never the
-   whole file, #1224). The newest main-thread user entry that is not a tool
-   result and not an ``isMeta`` body decides: Stop-hook feedback, a
-   ``<task-notification>``, a ``<channel …>`` peer message or a compact summary
-   → allow (not the owner's language); anything else is the owner's prompt,
-   judged by its first ``PROMPT_LEAD_WORDS`` words. A prompt with no signal
-   (``1``, ``continue``, a ``<command-name>`` echo) takes the language of an
-   older prompt (``owner_language``).
-4. A Slovak prompt + a mainly-English message → exit 2.
+   ``MAX_SCAN_BYTES`` and ``SCAN_BUDGET_S`` (never the whole file, #1224; Claude
+   Code 2.1.3xx adds ~2 MiB of api-request records a minute, so the window is
+   wide and a line is decoded only when a cheap byte test says it is a user
+   entry or a queued command). The newest owner-side turn decides
+   (``owner_language``): Stop-hook feedback (``isMeta``), a ``<task-notification>``,
+   a ``<channel …>`` peer message or a compact summary → allow; a message the
+   owner typed mid-turn (a queued command) counts as a prompt. A prompt is
+   judged by its first ``PROMPT_LEAD_WORDS`` words, or by a short first / last
+   line around a paste. A prompt with no language signal (``1``, an image,
+   ``continue``, a machine nudge from ``machine_prompts``, a command echo, the
+   Esc marker) takes the language of an older prompt.
+4. A Slovak prompt + a mainly-English message → exit 2, and a fresh
+   ``/tmp/airuleset-owner-language-block-<sid>`` marker tells
+   ``notify-discord-pending.sh`` not to ping the rejected draft.
 
 The heuristic is two-language only: Slovak diacritics and Slovak stopwords
 (diacritics-free forms included, the owner types "som pri terminali") against
 English stopwords; words both languages use count for neither. Every regex is
-linear; the token filter is plain ``str`` work. Corpus replay before shipping
-(the controller's main session, last 300 MB): 429 judged stops after a Slovak
-prompt, 0 would-block.
+linear or bounded; the token filter is plain ``str`` work. Corpus replay before
+shipping (the controller's main session, last 300 MB): 432 judged stops after a
+Slovak prompt, 0 would-block. Recall on the real devbridge transcript is
+unmeasured (another account).
 
-FAIL-OPEN everywhere: an unreadable payload or transcript, any exception →
-journal (``owner-language-gate.log`` in the audits dir) + exit 0.
+FAIL-OPEN: an unreadable payload or transcript, a prompt outside the window or
+the time budget, any exception → journal (``owner-language-gate.log`` in the
+audits dir) + exit 0.
 Dry-run: echo '{"last_assistant_message":"…","transcript_path":"…"}' | python3 -m gates.ownerlang
-STDLIB ONLY.
+STDLIB ONLY; never imports ``watchdog``.
 """
 import json
 import os
 import re
 import sys
+import time
 
 from gates import audit, read_payload
-from gates.handover import TAIL_BYTES, _entry_text, _is_turn_boundary
+from gates.handover import entry_text
+from machine_prompts import (DISCORD_ANSWER_PREFIXES, INTERRUPT_PREFIX,
+                             MACHINE_PROMPT_EXACT, MACHINE_PROMPT_PREFIXES)
 
 GATE_LOG = "owner-language-gate.log"
+MARKER_DIR = "/tmp"                 # the literal dir notify-discord-pending.sh reads
 MIN_PROSE_WORDS = 12
 PROMPT_LEAD_WORDS = 40
+SHORT_LINE_WORDS = 12
 PROMPT_LOOKBACK = 5
 MIN_EN = 4
 EN_RATIO = 3
 CHUNK = 65536
-MAX_SCAN_BYTES = TAIL_BYTES
+MAX_SCAN_BYTES = 32 * 1024 * 1024
+SCAN_BUDGET_S = 2.0
 
 SK_CHARS = frozenset("áäčďéíĺľňóôŕšťúýž")
 # Diacritics-free forms on purpose: the owner types "som pri terminali", "cize
-# co dalej?", "hotovo, over". A word with a Slovak diacritic counts anyway, so
-# the list carries mostly the bare forms. Left out because English uses them
-# too: a, to, do, on, so, no, by, ten, tie, pod, my, stale.
+# co dalej?". A word with a Slovak diacritic counts anyway, so the list carries
+# mostly the bare forms. Left out because English uses them too: a, to, do, on,
+# so, no, by, ten, tie, pod, my, over, stale.
 SK_STOP = frozenset("""
 som si sa je sme ste su bol bola bolo boli bude budem budes budu ale aj ani
 alebo len iba uz nie ano ak ked kde kedy preco co cize takze ako aby ze tak teda
-este teraz potom znova znovu zase opat tu tam ta ti tu mi ma mu ho ty vy ona oni
-mam mas mame maju nemam nemas nemame mozem mozes treba chcem chces nechcem
-potrebujem viem neviem vies vie nevie musi musis mal mala malo mali pri na v vo
-z zo k ku s o u za pre pred od po nad bez cez medzi okrem podla asi lebo preto
-ktory ktora ktore ktori vsetko nic nieco velmi dobre podme daj urob sprav skus
-pozri pozrime skusme urobme spravme robis riesis neries ide nejde funguje
-nefunguje hotovo hotove slovensky jeho jej ich mne teba tebe tiez hned dalej
-pise pises otazku spravu pokracuj zopakuj spoj prepoj pridaj odstran vymaz
-skontroluj over ukaz napis precitaj spusti zastav restartuj odloz odlozit nechaj
-zober prosim dakujem diky vdaka
+este teraz potom znova znovu zase opat tu tam ta ti mi ma mu ho ty vy ona oni
+toto tento tieto tohto mam mas mame maju nemam nemas nemame mozem mozes treba
+chcem chces nechcem potrebujem viem neviem vies vie nevie musi musis mal mala
+malo mali pri na v vo z zo k ku s o u za pre pred od po nad bez cez medzi okrem
+podla asi lebo preto ktory ktora ktore ktori vsetko nic nieco velmi dobre podme
+daj urob sprav skus pozri pozrime skusme urobme spravme robis riesis neries ide
+nejde funguje nefunguje hotovo hotove slovensky jeho jej ich mne teba tebe tiez
+hned dalej pise pises otazku spravu pokracuj zopakuj spoj prepoj pridaj odstran
+vymaz skontroluj ukaz napis precitaj spusti zastav restartuj odloz odlozit
+nechaj zober prosim dakujem diky vdaka
 """.split())
 EN_STOP = frozenset("""
 the and is are was were be been being this that these those with for of it its
@@ -84,21 +101,49 @@ don't you're i'll can't won't let's that's we're isn't doesn't didn't i've
 there's what's please thanks yes each other more most such very
 """.split())
 
-_WORD_RE = re.compile(r"[^\W\d_]+(?:['’][^\W\d_]+)?")
+_WORD_RE = re.compile(r"[^\W\d_]+(?:['\u2019][^\W\d_]+)?")
 _INLINE_CODE_RE = re.compile(r"`[^`\n]*`")
-_REF_TITLE_RE = re.compile(r"#\d{1,6}\s*\([^()\n]{0,300}\)")
-_JOINED_RE = re.compile(r"\w[.-]\w")    # x.py, 0.8.82, pre-commit
+_QUOTED_RE = re.compile('"[^"\\n]{0,600}"|\u201c[^\u201d\\n]{0,600}\u201d'
+                        '|\u201e[^\u201c\u201d\\n]{0,600}[\u201c\u201d]|\u00ab[^\u00bb\\n]{0,600}\u00bb')
+_REF_RE = re.compile(r"(?:\bPR\s*)?#\d{1,6}")
+_JOINED_RE = re.compile(r"\w[.-]\w")    # x.py, pre-commit, e-mail
 _JUNK_CHARS = frozenset("/\\_=@{}[]<>|$~")
+_LOG_LINE_RE = re.compile(
+    r"\[?\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}|\[?\d{2}:\d{2}:\d{2}"
+    r"|(?:ERROR|WARN(?:ING)?|INFO|DEBUG|TRACE|FATAL|CRITICAL)\b|Traceback \(")
+_SENTENCE_END = frozenset(".!?:")
+_TOKEN_TAIL = "\"')]}*»“”„_~`"
+_USER_LINE_RE = re.compile(rb'"type"\s*:\s*"user"')
 _TOOL_RESULT_RE = re.compile(rb'"type"\s*:\s*"tool_result"')
 _REMINDER_OPEN, _REMINDER_CLOSE = "<system-reminder>", "</system-reminder>"
+# owner text that a machine-prefix test would misread: a Discord-relayed answer,
+# and Stop-hook output the owner pasted (real feedback is an isMeta entry)
+_OWNER_TEXT_PREFIXES = DISCORD_ANSWER_PREFIXES + ("Stop hook feedback",)
+_HUMAN_ORIGINS = frozenset(("user", "human", "prompt", "keyboard"))
+_JOURNALLED = frozenset(("unreadable", "window", "budget"))
 
 _REASON = (
     "🚫 BLOCKED (#1379) — owner píše po slovensky, ale táto správa je po anglicky. "
     "Napíš ju znova PO SLOVENSKY: všetku prózu aj stavové riadky. Po anglicky "
-    "ostáva len kód, príkazy, cesty a presné chybové hlášky; vyžiadaný anglický "
-    "text (e-mail, návrh) daj do ``` bloku alebo `> ` citátu, tie sa nehodnotia.\n"
+    "ostáva len kód, príkazy, cesty, presné chybové hlášky (v `…` alebo \"…\") a "
+    "kľúčové slová značiek (`❓ NEEDS YOU`, `❓ ASKED`, `⏳ WORKING`, `✅ DONE`, "
+    "`## ✅ Work Complete`); vyžiadaný anglický text (e-mail, návrh) daj do ``` "
+    "bloku alebo `> ` citátu, tie sa nehodnotia.\n"
     "Owner writes Slovak: write this message in Slovak (English only in code, "
-    "commands, paths, error strings).")
+    "commands, paths, error strings and the status-marker keywords).")
+
+
+class _OverBudget(Exception):
+    """The backward scan ran past ``SCAN_BUDGET_S`` (the caller fails open)."""
+
+
+def _note(text):
+    """A diagnostic on stderr (a Stop hook's stderr reaches the transcript log,
+    never the model, when it exits 0)."""
+    try:
+        sys.stderr.write("stop-check-owner-language: %s\n" % text)
+    except (OSError, ValueError) as exc:     # a closed stderr: nothing left to tell
+        del exc
 
 
 def _drop_reminders(text):
@@ -117,25 +162,77 @@ def _drop_reminders(text):
         pos = end + len(_REMINDER_CLOSE)
 
 
-def prose_words(text):
-    """The lowercased prose words of ``text`` that the language is judged by."""
-    words, fenced = [], False
+def _cut_refs(line):
+    """``line`` without ticket titles: ``#N (…)`` (balanced parentheses, at
+    most 400 chars), ``#N — …`` / ``#N: …`` / ``PR #N: …`` (to the end of the
+    line or the next table cell)."""
+    out, pos = [], 0
+    for m in _REF_RE.finditer(line):
+        if m.start() < pos:
+            continue
+        out.append(line[pos:m.start()])
+        k = m.end()
+        while k < len(line) and line[k] == " ":
+            k += 1
+        nxt = line[k:k + 1]
+        if nxt == "(":
+            depth, end = 0, min(len(line), k + 400)
+            pos = end
+            for j in range(k, end):
+                depth += {"(": 1, ")": -1}.get(line[j], 0)
+                if depth == 0:
+                    pos = j + 1
+                    break
+        elif nxt and nxt in ":—–-" and line[k + 1:k + 2] in (" ", ""):
+            cell = line.find(" | ", k)
+            pos = len(line) if cell < 0 else cell
+        else:
+            pos = m.end()
+    out.append(line[pos:])
+    return "".join(out)
+
+
+def _line_words(line):
+    """The lowercased prose words of one already-cut line."""
+    words, initial = [], True
+    for tok in line.split():
+        found = _WORD_RE.findall(tok)
+        core = tok.rstrip(_TOKEN_TAIL)
+        ends = bool(core) and core[-1] in _SENTENCE_END
+        skip = (_JUNK_CHARS.intersection(tok) or _JOINED_RE.search(tok)
+                or any(c.isdigit() for c in tok))
+        for i, w in enumerate(found if not skip else ()):
+            low = w.replace("\u2019", "'").lower()
+            if len(w) > 1 and w.isupper():
+                continue                    # PC, SNV, CI, DONE, NEEDS YOU
+            if (len(w) > 1 and w[0].isupper() and not (initial and i == 0)
+                    and low not in SK_STOP and low not in EN_STOP):
+                continue                    # a name in mid-sentence
+            words.append(low)
+        initial = ends if found else (initial or ends)
+    return words
+
+
+def _prose_lines(text):
+    """The prose words of every judged line of ``text`` (a list per line)."""
+    fence = None
     for line in (text or "").splitlines():
         lead = line.lstrip()
+        if fence:
+            if lead.startswith(fence):
+                fence = None
+            continue
         if lead.startswith("```") or lead.startswith("~~~"):
-            fenced = not fenced
+            fence = lead[:3]
             continue
-        if fenced or lead.startswith(">"):
+        if lead.startswith(">") or lead.startswith("|") or _LOG_LINE_RE.match(lead):
             continue
-        line = _REF_TITLE_RE.sub(" ", _INLINE_CODE_RE.sub(" ", line))
-        for tok in line.split():
-            if "://" in tok or _JUNK_CHARS.intersection(tok) or _JOINED_RE.search(tok):
-                continue
-            for w in _WORD_RE.findall(tok):
-                if len(w) > 1 and w.isupper():
-                    continue                    # PC, SNV, CI, DONE, NEEDS YOU
-                words.append(w.lower())
-    return words
+        yield _line_words(_cut_refs(_QUOTED_RE.sub(" ", _INLINE_CODE_RE.sub(" ", line))))
+
+
+def prose_words(text):
+    """The lowercased prose words of ``text`` that the language is judged by."""
+    return [w for line in _prose_lines(text) for w in line]
 
 
 def scores(words):
@@ -160,28 +257,35 @@ def message_is_mainly_english(text):
 
 
 def prompt_language(text):
-    """``"sk"`` / ``"en"`` / ``"unknown"`` for an owner prompt, judged by its
-    first ``PROMPT_LEAD_WORDS`` prose words (no length floor: the owner writes
-    "slovensky!!!"). The LEAD decides because a long English instruction that
-    embeds a pasted Slovak ticket is not a Slovak prompt (corpus replay, an
-    eval wrapper "You are the design author …" carried sk 66 / en 32 overall)."""
-    words = prose_words(_drop_reminders(text or ""))[:PROMPT_LEAD_WORDS]
-    sk, en = scores(words)
+    """``"sk"`` / ``"en"`` / ``"unknown"`` for an owner prompt (no length floor:
+    the owner writes "slovensky!!!"). The first ``PROMPT_LEAD_WORDS`` words
+    decide, because a long English instruction that embeds a pasted Slovak
+    ticket is no Slovak prompt (corpus: an eval wrapper "You are the design
+    author …" carried sk 66 / en 32 overall); a short Slovak first or last line
+    around an English paste ("pozri toto:", "co s tym?") still makes it Slovak."""
+    lines = [ws for ws in _prose_lines(_drop_reminders(text or "")) if ws]
+    sk, en = scores([w for ws in lines for w in ws][:PROMPT_LEAD_WORDS])
     if sk > en:
         return "sk"
-    if en > sk:
-        return "en"
-    return "unknown"
+    for ws in lines[:1] + lines[-1:]:
+        if len(ws) <= SHORT_LINE_WORDS:
+            line_sk, line_en = scores(ws)
+            if line_sk > line_en:
+                return "sk"
+    return "en" if en > sk else "unknown"
 
 
-def _lines_backwards(path, max_bytes=MAX_SCAN_BYTES, chunk=CHUNK):
+def _lines_backwards(path, max_bytes, chunk=CHUNK, deadline=None):
     """Raw transcript lines, newest first, from at most the last ``max_bytes``;
-    the cut first line of the window is dropped. Raises OSError."""
+    the cut first line of the window is dropped. Raises OSError, or
+    ``_OverBudget`` past ``deadline`` (a ``time.monotonic`` value)."""
     with open(path, "rb") as fh:
         pos = fh.seek(0, os.SEEK_END)
         floor = max(0, pos - max_bytes)
         carry = b""
         while pos > floor:
+            if deadline is not None and time.monotonic() > deadline:
+                raise _OverBudget()
             step = min(chunk, pos - floor)
             pos -= step
             fh.seek(pos)
@@ -193,67 +297,100 @@ def _lines_backwards(path, max_bytes=MAX_SCAN_BYTES, chunk=CHUNK):
             yield from reversed(lines)
 
 
+def _is_machine(lead):
+    """Text that machinery, not the owner, typed (a nudge, a command echo, the
+    Esc marker, a reminder)."""
+    if lead.startswith(_OWNER_TEXT_PREFIXES):
+        return False
+    return (lead in MACHINE_PROMPT_EXACT or lead.startswith(MACHINE_PROMPT_PREFIXES)
+            or lead.startswith(INTERRUPT_PREFIX) or lead.startswith("<"))
+
+
+def _queued_turn(entry):
+    """A message queued mid-turn (``attachment`` ``queued_command``): the owner's
+    text is a prompt; a machine continuation or an absorbed notification is not
+    a turn at all (None)."""
+    att = entry.get("attachment")
+    if not isinstance(att, dict) or att.get("type") != "queued_command":
+        return None
+    text = att.get("prompt")
+    origin = att.get("origin")
+    kind = origin.get("kind") if isinstance(origin, dict) else None
+    if not isinstance(text, str) or (kind and kind not in _HUMAN_ORIGINS):
+        return None
+    text = _drop_reminders(text)
+    lead = text.lstrip()
+    if not lead or _is_machine(lead):
+        return None
+    return "prompt", text
+
+
 def _user_turn(entry):
     """``(kind, text)`` for a main-thread user entry, or None to keep walking
-    back (a tool result, an ``isMeta`` skill body / caveat, a reminder)."""
-    content = (entry.get("message") or {}).get("content")
+    back (a tool result, an ``isMeta`` skill body / caveat, a reminder only)."""
+    msg = entry.get("message")
+    content = msg.get("content") if isinstance(msg, dict) else None
     if isinstance(content, list) and any(
             isinstance(b, dict) and b.get("type") == "tool_result" for b in content):
         return None
     if not isinstance(content, (str, list)):
         return None
-    text = _entry_text(content)
+    raw = entry_text(content)
+    text = _drop_reminders(raw)
     lead = text.lstrip()
-    if lead.startswith("Stop hook feedback"):
-        return "feedback", lead
     if entry.get("isCompactSummary"):
         return "compact", ""
-    if entry.get("isMeta") or lead.startswith(_REMINDER_OPEN):
-        return None
+    if entry.get("isMeta"):
+        return ("feedback", lead) if lead.startswith("Stop hook feedback") else None
+    if not lead:
+        return None if raw.strip() else ("prompt", "")    # reminder only / an image
     if lead.startswith("<task-notification>"):
         return "notification", lead
     if lead.startswith("<channel"):
         return "channel", lead
-    if lead.startswith("<"):
-        return "prompt", ""          # a harness echo (`<command-name>`, local output)
-    return "prompt", text if _is_turn_boundary(entry) else ""
+    return "prompt", "" if _is_machine(lead) else text
 
 
-def user_turns(path, max_bytes=MAX_SCAN_BYTES):
-    """``(kind, text)`` of each main-thread user turn in the transcript tail,
-    newest first. Raises OSError (the caller fails open)."""
-    lines = _lines_backwards(path, max_bytes)
+def user_turns(path, max_bytes=None, deadline=None):
+    """``(kind, text)`` of each main-thread owner-side turn in the transcript
+    tail, newest first. Raises OSError / ``_OverBudget`` (the caller fails open)."""
+    lines = _lines_backwards(path, MAX_SCAN_BYTES if max_bytes is None else max_bytes,
+                             deadline=deadline)
     try:
         for raw in lines:
-            if b'"user"' not in raw or _TOOL_RESULT_RE.search(raw):
+            queued = b'"queued_command"' in raw
+            if not queued and (not _USER_LINE_RE.search(raw) or _TOOL_RESULT_RE.search(raw)):
                 continue
             try:
                 entry = json.loads(raw)
             except ValueError:
                 continue                              # torn line / junk
-            if (not isinstance(entry, dict) or entry.get("type") != "user"
-                    or entry.get("isSidechain")):
+            if not isinstance(entry, dict) or entry.get("isSidechain"):
                 continue
-            turn = _user_turn(entry)
+            kind = entry.get("type")
+            turn = (_user_turn(entry) if kind == "user"
+                    else _queued_turn(entry) if kind == "attachment" else None)
             if turn is not None:
                 yield turn
     finally:
         lines.close()
 
 
-def owner_language(path, max_bytes=MAX_SCAN_BYTES):
+def owner_language(path, max_bytes=None):
     """The language the owner is writing in, from the transcript tail: ``"sk"``
-    / ``"en"`` / ``"unknown"``, the kind of a non-owner newest turn
-    (``"feedback"`` / ``"notification"`` / ``"channel"`` / ``"compact"``), or
-    None when the transcript cannot be read.
+    / ``"en"`` / ``"unknown"``; the kind of a non-owner newest turn
+    (``"feedback"`` / ``"notification"`` / ``"channel"`` / ``"compact"``); or a
+    fail-open reason (``"unreadable"``, ``"window"``: no turn in the window,
+    ``"budget"``: the scan ran out of time).
 
-    A prompt with no language signal (the owner's ``1`` picking an option,
-    ``continue``, a slash command) takes the language of the newest older prompt
-    that has one, at most ``PROMPT_LOOKBACK`` prompts back and never across a
-    compact summary (corpus: 44 of ~450 owner prompts were a bare number)."""
+    A prompt with no language signal takes the language of the newest older
+    prompt that has one, at most ``PROMPT_LOOKBACK`` prompts back and never
+    across a compact summary (corpus: 44 of ~450 owner prompts were a bare
+    number)."""
     newest, looked = True, 0
+    deadline = time.monotonic() + SCAN_BUDGET_S
     try:
-        for kind, text in user_turns(path, max_bytes):
+        for kind, text in user_turns(path, max_bytes, deadline):
             if newest and kind != "prompt":
                 return kind
             newest = False
@@ -265,9 +402,11 @@ def owner_language(path, max_bytes=MAX_SCAN_BYTES):
             looked += 1
             if lang != "unknown" or looked >= PROMPT_LOOKBACK:
                 return lang
+    except _OverBudget:
+        return "budget"
     except (OSError, TypeError, ValueError):
-        return None
-    return None if newest else "unknown"
+        return "unreadable"
+    return "window" if newest else "unknown"
 
 
 def evaluate(payload):
@@ -288,25 +427,58 @@ def evaluate(payload):
     return "block", _REASON
 
 
+def _journal(event, cwd, detail=""):
+    """One audit line; never raises (a lost line never loses the verdict)."""
+    project = os.path.basename(cwd.rstrip("/")) or "unknown"
+    try:
+        audit.append_line(GATE_LOG, "%s %s project=%s cwd=%s %s" % (
+            audit.iso_now(), event, project, cwd, detail))
+    except Exception as exc:                    # e.g. a read-only audits dir
+        _note("journal write failed (%s): %s" % (event, exc))
+
+
+def _mark_block(session_id):
+    """The marker ``notify-discord-pending.sh`` reads to drop the ping of a
+    rejected draft; a symlink planted in /tmp is never followed."""
+    sid = re.sub(r"[^A-Za-z0-9._-]", "", session_id if isinstance(session_id, str) else "")
+    path = os.path.join(MARKER_DIR, "airuleset-owner-language-block-" + (sid or "unknown"))
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+    except OSError as exc:
+        _note("block marker not written: %s" % exc)
+        return
+    try:
+        os.write(fd, b"1")
+    except OSError as exc:
+        _note("block marker write failed: %s" % exc)
+    finally:
+        os.close(fd)
+
+
 def run(payload_text):
     """0 = allow, 2 = block (reason on stderr). Never raises."""
     try:
         payload = json.loads(payload_text) if payload_text else None
     except ValueError:
+        _journal("BADPAYLOAD", "", "%d bytes" % len(payload_text))
         return 0
-    cwd = payload.get("cwd", "") if isinstance(payload, dict) else ""
+    if not isinstance(payload, dict):
+        return 0
+    cwd = payload.get("cwd") if isinstance(payload.get("cwd"), str) else ""
     try:
-        verdict, reason = evaluate(payload)
+        verdict, why = evaluate(payload)
     except Exception as exc:                          # fail-open, but journalled
-        audit.append_line(GATE_LOG, "%s ERROR cwd=%s %s: %s" % (
-            audit.iso_now(), cwd, type(exc).__name__, str(exc)[:200]))
+        _journal("ERROR", cwd, "%s: %s" % (type(exc).__name__, str(exc)[:200]))
         return 0
     if verdict != "block":
+        reason = why.partition(":")[2]
+        if reason in _JOURNALLED:
+            _journal("UNREADABLE" if reason == "unreadable" else "WINDOW", cwd, why)
         return 0
-    sk, en = scores(prose_words(payload.get("last_assistant_message", "")))
-    audit.append_line(GATE_LOG, "%s BLOCK project=%s cwd=%s sk=%d en=%d" % (
-        audit.iso_now(), audit.project_of(cwd or None), cwd, sk, en))
-    sys.stderr.write(reason + "\n")
+    sys.stderr.write(why + "\n")
+    _mark_block(payload.get("session_id"))
+    sk, en = scores(prose_words(payload.get("last_assistant_message")))
+    _journal("BLOCK", cwd, "sk=%d en=%d" % (sk, en))
     return 2
 
 
