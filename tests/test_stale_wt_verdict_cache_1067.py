@@ -298,10 +298,13 @@ def test_cached_reclaimable_verdict_is_revalidated_fresh(box):
 
 
 def test_reclaimable_verdict_reruns_every_check_and_the_size_walk(box):
+    """#1380: a would-be reclaim also runs the precious ignored-file probe
+    (``git ls-files --others --ignored``), so 4 git calls, not 3."""
     _pass(box, FakeGit(contains="  origin/main\n"))
     git, sizes = FakeGit(contains="  origin/main\n"), []
     rows, _ = _pass(box, git, sizes=sizes)
-    assert len(git.calls) == 3 and sizes
+    assert len(git.calls) == 4 and sizes
+    assert git.calls[-1][0][:3] == ("ls-files", "--others", "--ignored")
     r = _row(rows)
     assert r["kind"] == "worktree-remove" and r["contained_in"] == "origin/main"
     assert r["branch"] == "worktree-agent-one"

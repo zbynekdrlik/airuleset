@@ -431,9 +431,9 @@ def test_worktree_NOT_reclaimable_when_head_unreachable(tmp_path):
     assert "origin" in row["reason"].lower() or "reachable" in row["reason"].lower()
 
 
-def test_worktree_reclaimable_when_dirty_but_reachable(tmp_path):
-    """#939: dirty+reachable IS reclaimable — the work is preserved on origin,
-    only scratch/temp files are lost. The old code blocked this permanently."""
+def test_worktree_kept_when_dirty_even_if_reachable(tmp_path):
+    """#1380 (owner 20.11.2026) reverses #939: a dirty tree is uncommitted work,
+    kept even when HEAD is reachable; the log still names the reachable ref."""
     p = tmp_path / "wt"
     p.mkdir()
     gr = _git_run_factory({
@@ -448,8 +448,7 @@ def test_worktree_reclaimable_when_dirty_but_reachable(tmp_path):
         recency_fn=lambda _r, _p, _n: 5 * 86400,
         precious_fn=lambda _p: False,
     )
-    assert row["reason"] is None, "dirty+reachable should be reclaimable (#939)"
-    assert row.get("dirty") is True, "reclaimable row must carry dirty=True flag"
+    assert row["reason"] and "dirty" in row["reason"], "a dirty tree must be kept (#1380)"
     assert row.get("reachable_via") is not None
 
 
