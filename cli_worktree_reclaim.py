@@ -152,10 +152,10 @@ def _worktree_reclaimable(root, path, branch, base, git_run, now,
     guards, cheapest-first: NOT locked (a locked worktree is a live session's,
     #348 — review 🔴), not a live lane (``live_gate``, #1193), not in live use,
     idle > `min_idle_s`, HEAD readable (else classified `orphan-gitdir` when the
-    gitdir points nowhere), no precious ignored file, clean tree, and HEAD
-    reachable from an origin ref. The precious check runs AFTER the HEAD-read so
-    an orphan (unreadable git) is never falsely kept by a git-error fail-safe
-    (review 🟡)."""
+    gitdir points nowhere), no precious ignored file, HEAD reachable from an
+    origin ref, and (#1380) a CLEAN tree. The precious check runs AFTER the
+    HEAD-read so an orphan (unreadable git) is never falsely kept by a
+    git-error fail-safe (review 🟡)."""
     git_run = git_run or _worktree_git
     in_live_use = in_live_use or _worktree_in_live_use
     recency_fn = recency_fn or _worktree_recency_age_s
@@ -195,12 +195,9 @@ def _worktree_reclaimable(root, path, branch, base, git_run, now,
         row["reason"] = "precious ignored file present (.env/*.key/local.settings) — kept"
         return row
 
-    # #939: check reachability BEFORE the clean-tree gate. A returned worker's
-    # worktree is typically dirty (scratch/temp/build files) but its HEAD is fully
-    # preserved on origin — the DIRECTORY is safe to free (the branch ref is always
-    # kept). Only when HEAD is NOT reachable do we need the tree for salvage. The
-    # old order (clean-tree BEFORE reachability) permanently blocked 100% of
-    # returned workers' worktrees (55 worktrees / 20G on david3).
+    # #939: reachability is checked BEFORE the clean-tree gate, so the log says
+    # WHY a tree is kept (not on origin vs dirty). #939 then freed a dirty but
+    # reachable tree; #1380 keeps it (below).
     via = _worktree_head_reachable_from_origin(path, branch, base, head, git_run)
     if via is None:
         row["reason"] = ("HEAD not reachable from any origin ref "
@@ -208,9 +205,12 @@ def _worktree_reclaimable(root, path, branch, base, git_run, now,
         return row
     row["reachable_via"] = via
 
+    # #1380 (owner 20.11.2026): a drain deletes only regenerable bytes, and a
+    # dirty tree's files are uncommitted work. Unmeasurable is never clean.
     clean = _worktree_is_clean(path, git_run)
-    if clean is False:
-        row["dirty"] = True                # decision-logged: dirty but reachable
+    if clean is not True:
+        row["reason"] = ("dirty worktree (uncommitted work is never discarded, #1380) — kept"
+                         if clean is False else "git status unreadable — kept")
     return row                             # reason None → directory reclaimable
 
 

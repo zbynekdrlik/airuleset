@@ -29,6 +29,15 @@ and never as root):
   ``airuleset-quota-refresh`` timer in ``cli_resource_guards_quota``) OR files
   the account owns outside those two paths.
 
+#1380 (david3, 20.11.2026): the hourly ceiling (#1140 D / #1315) keeps
+``hard = used + a few GiB``, so a busy account sits at 95-96 % of its hard
+limit BY DESIGN (56385 of 58888 MiB). The percentage alone read that as
+permanent pressure: the quota drain ran every poll toward an 80 % the moving
+ceiling never allows, deleting everything on the ladder. Pressure now ALSO
+needs less than ``QUOTA_MIN_ROOM_KIB`` of real room (``hard - used``), and the
+pass stops once ``QUOTA_TARGET_ROOM_KIB`` is free again. For any real ceiling
+(>= 10 GiB) 1 GiB of room is already >= 90 %, so the room decides.
+
 Best-effort throughout: a failed read or ``du`` degrades to "no quota data",
 never to an exception out of the guard. The parent's helpers (``_dbg``,
 ``_log_line``, the status cache, ``execute_drain``) are imported lazily inside
@@ -42,6 +51,9 @@ import subprocess
 
 QUOTA_DRAIN_PCT = 90            # quota pressure → the drain ladder runs
 QUOTA_TARGET_PCT = 80           # the quota pass stops once usage is back below this
+# #1380: the percentage of a ceiling that follows usage is no pressure by itself.
+QUOTA_MIN_ROOM_KIB = 1024 * 1024        # pressure needs less real room than 1 GiB
+QUOTA_TARGET_ROOM_KIB = 2 * 1024 * 1024  # ... and the pass stops at 2 GiB of room
 QUOTA_DRIFT_INTERVAL_S = 3600   # drift (a `du` of the home) at most hourly
 QUOTA_DRIFT_FINDING_MB = 1024   # drift above this is a finding
 QUOTA_DRIFT_STAGGER_MIN = 10    # first drift run spread over this many minutes by uid
@@ -107,6 +119,20 @@ def quota_pct(usage):
     return int(math.ceil(100.0 * used_kib / hard_kib))
 
 
+def room_kib(usage):
+    """#1380: the real room under the hard limit (``hard - used``, KiB), or None."""
+    if not usage:
+        return None
+    used_kib, hard_kib = usage
+    if not hard_kib or hard_kib <= 0:
+        return None
+    return hard_kib - used_kib
+
+
+def _gib(kib):
+    return "%.1fG" % (kib / 1048576.0)
+
+
 def read_quota_pct():
     """#950 API kept for callers/tests: the percentage, or None."""
     return quota_pct(read_quota_usage())
@@ -147,8 +173,10 @@ def quota_state(status, home, now, active, usage_fn=None):
     if pct is None:
         return QuotaState(None, False, False, False, None, usage_fn)
     status["quota_pct"] = pct
+    room = room_kib(usage)
+    status["quota_room_mb"] = room // 1024
     prev = _num(prior, "quota_pct")
-    pressure = pct >= QUOTA_DRAIN_PCT
+    pressure = pct >= QUOTA_DRAIN_PCT and room < QUOTA_MIN_ROOM_KIB      # #1380
     last = prior.get("quota_drain")
     before, after, ts = _num(last, "before_pct"), _num(last, "after_pct"), _num(last, "ts")
     exhausted = (pressure and before is not None and after is not None and after >= before
@@ -239,30 +267,48 @@ def run_quota_pass(status, home, now, dry_run, planners, q, do_action, geteuid_f
     (read-modify-write, so the record survives a dry-run poll too). Returns
     the log lines."""
     from watchdog import disk_guard as dg
+    last = {"usage": None}
 
     def recheck():
-        return quota_pct(_safe_read(q.usage_fn))
+        last["usage"] = _safe_read(q.usage_fn)
+        return quota_pct(last["usage"])
+
+    def room_back():
+        """#1380: stop once the real room is back (the ceiling follows usage,
+        so the 80 % target alone is never reached on a busy account)."""
+        room = room_kib(last["usage"])
+        if room is not None and room >= QUOTA_TARGET_ROOM_KIB:
+            return "quota room %s >= target %s" % (_gib(room), _gib(QUOTA_TARGET_ROOM_KIB))
+        return None
 
     own = [(lab, p) for lab, p in planners if lab not in QUOTA_PASS_EXCLUDED_RUNGS]
     log_path = dg._log_path(home)
     logs = dg.execute_drain(status, home, own, recheck, do_action,
                             geteuid_fn=geteuid_fn, log_path=log_path, now=now,
                             dry_run=dry_run, target_pct=QUOTA_TARGET_PCT,
-                            pressure="quota", timer=timer, ladder="quota")
+                            pressure="quota", timer=timer, ladder="quota",
+                            stop_fn=room_back)
     after = recheck()
+    after_room = room_kib(last["usage"])
+    before_room = room_kib(q.usage)
     rec = {"ts": now, "before_pct": q.pct, "after_pct": after,
            "trigger_pct": QUOTA_DRAIN_PCT, "target_pct": QUOTA_TARGET_PCT,
+           "before_room_mb": None if before_room is None else before_room // 1024,
+           "after_room_mb": None if after_room is None else after_room // 1024,
            "dry_run": bool(dry_run)}
     if timer is not None and timer.cut_short:   # #1067: deferred rungs, not exhausted
         rec["cut_short"] = True
     status["quota_drain"] = rec
     if after is not None:
         status["quota_pct"] = after
+        status["quota_room_mb"] = after_room // 1024
     line = dg._log_line(
         now, "QUOTA-DRAIN", str(home), 0,
-        "quota %d%% >= %d%% → drain toward < %d%% → %s" % (
-            q.pct, QUOTA_DRAIN_PCT, QUOTA_TARGET_PCT,
-            ("%d%%" % after) if after is not None else "quota unreadable (recorded as unknown)"))
+        "quota %d%% >= %d%% (room %s < %s) → drain toward < %d%% or room >= %s → %s" % (
+            q.pct, QUOTA_DRAIN_PCT, _gib(before_room or 0), _gib(QUOTA_MIN_ROOM_KIB),
+            QUOTA_TARGET_PCT, _gib(QUOTA_TARGET_ROOM_KIB),
+            ("%d%% (room %s)" % (after, _gib(after_room or 0))) if after is not None
+            else "quota unreadable (recorded as unknown)"))
     logs.append(line)
     dg._append_log(log_path, [line])
     try:
@@ -271,6 +317,7 @@ def run_quota_pass(status, home, now, dry_run, planners, q, do_action, geteuid_f
             cur["quota_drain"] = rec
             if after is not None:
                 cur["quota_pct"] = after
+                cur["quota_room_mb"] = after_room // 1024
             dg.write_status_cache(cur, home=home)
     except Exception as e:
         _dbg("quota_drain cache write: %r" % e)
@@ -322,7 +369,7 @@ def run_drain_passes(status, home, now, dry_run, planners, planners_fn, q,
 def carry_quota_fields(status, post):
     """A post-drain status rebuilt from ``disk_status`` knows nothing about the
     quota — carry this poll's quota fields over so the footer cache keeps them."""
-    for k in ("quota_pct", "quota_drift", "quota_drain"):
+    for k in ("quota_pct", "quota_room_mb", "quota_drift", "quota_drain"):
         if k in status:
             post[k] = status[k]
     return post
