@@ -5,11 +5,11 @@ Owner decision 20.11.2026 (airuleset#1380): fleet-backup (dev1) backs up those
 two directories of every subdev account. The box holds external developers'
 homes and its root is reachable only through the gk VPS, so the dev1 key gets
 NO sudo there (the controller's #1351 model is declined): a ``--system``
-account whose key runs only a read-only rrsync rooted at ``/home``, plus POSIX
-ACLs.
+account whose key runs only a read-only rrsync rooted at the one home a pull
+names, plus POSIX ACLs.
 
 Decided design (issue comments 7040909733, 7040933347, 7040947380) and the
-review decisions (rounds 1-3 on the ticket), each the more restrictive pick:
+review decisions (rounds 1-4 on the ticket), each the more restrictive pick:
   * ``u:fleetbackup:--x`` on the home and on ``.claude``; ``r-x`` on the dirs
     of the two trees (plus a default ACL with ``g::---,o::---``), ``r--`` on
     their files WITHOUT touching a file's mask (a 0600 file stays closed and is
@@ -21,9 +21,10 @@ review decisions (rounds 1-3 on the ticket), each the more restrictive pick:
   * Every grant runs AS the account (``runuser -u <u> -- setfacl -P``), timed,
     size-capped, its output read from a file. Root only ever adds a ``---``
     deny with ``setfacl -P -n``: deny-only never changes anybody's permissions.
-  * The forced command is an allow-list wrapper (printable ASCII only; only a
-    sender pull of paths inside the two trees) in front of ``rrsync -ro
-    /home``; the key carries an ``expiry-time`` every clean refresh renews.
+  * The forced command is an allow-list wrapper (a strict character set; only
+    a sender pull of paths inside the two trees of ONE account) in front of
+    ``rrsync -ro /home/<account>``; the key carries an ``expiry-time`` every
+    refresh renews.
   * The same idempotent refresh runs from the hourly quota-ceiling oneshot,
     and every push queues that unit; it takes its own root-only lock and keeps
     to a time budget.
@@ -31,13 +32,16 @@ review decisions (rounds 1-3 on the ticket), each the more restrictive pick:
 Mechanism: ONE root-owned installed script (``FLEETBACKUP_ACL_SCRIPT_PATH``,
 written by ``cli_resource_guards.guard_files()``) with the modes ``refresh``
 (root), ``apply`` (as the account), ``check`` (as fleetbackup: the read-back is
-the kernel's own access check, ``os.access``) and ``records``. The refresh
-owns the login: it writes the key only after a clean identity check and a
-read-back with no unresolved leak. It withdraws the login (account expired with
-its own marker value, key removed, sessions killed, read back) only when
-something OTHER than an account's own data stays reachable: what an account
-does to its own home fails that account alone. Pure renderers + constants,
-stdlib only.
+the kernel's own access check, ``os.access``), ``records`` and
+``deny-foreign`` (root). The refresh owns the login. A HOME-level fault (a
+leak, a deny that fails, a read-back that does not run) closes that home and
+fails it, never the login: every inode that carries a grant of ours belongs to
+the account (grants run as the account), so whatever root cannot close there
+is open by the account's own doing or through "other" bits anyone has (round 4:
+every per-path attribution of a withdrawal was tenant-triggerable). Only a
+BOX-level fault (a missing tool, fleetbackup's identity) withdraws the login
+(account expired with our own marked value, key removed, sessions killed, read
+back). Pure renderers + constants, stdlib only.
 """
 import shlex
 
@@ -63,10 +67,10 @@ FLEETBACKUP_BUDGET_S = 1500
 # Time the hourly ceiling unit grants the refresh: its budget plus the root
 # closes of the homes left when it runs out.
 FLEETBACKUP_REFRESH_BUDGET_S = FLEETBACKUP_BUDGET_S + 300
-# One account-side run (a tenant can STOP its own process), one full read-back,
-# and a quick one (the pre-refresh siblings, a single closed home); all are
-# also cut to what is left of the budget. Worst case per hostile tenant:
-# 60 + 120 + 300 + 60 s, so one tenant cannot use up the budget.
+# One account-side run (a tenant can STOP its own process) and root's batched
+# deny of the children the account does not own, one full read-back and its
+# root walk, a quick one (the pre-refresh siblings, a single closed home); all
+# are also cut to what is left of the budget.
 FLEETBACKUP_ACCOUNT_TIMEOUT_S = 120
 FLEETBACKUP_CHECK_TIMEOUT_S = 300
 FLEETBACKUP_QUICK_CHECK_TIMEOUT_S = 60
@@ -115,8 +119,11 @@ def render_fleetbackup_rrsync_wrapper(rrsync=RRSYNC_PATH, root=RRSYNC_ROOT):
     LANG LC_*`` lets the client pick the locale the pattern runs in. Then:
     ``rsync --server --sender``, options minus ``FLEETBACKUP_REFUSED_OPTIONS``,
     ``.``, and one or more paths that each lie inside ``<account>/uploads`` or
-    ``<account>/.claude/work-products`` (no ``..``). The client's text is
-    never evaluated."""
+    ``<account>/.claude/work-products`` (no ``..``) of ONE account. rrsync is
+    rooted at that account's home (the account prefix is stripped): rrsync
+    only checks that a path resolves inside its root, so with ``/home`` as the
+    root a tree swapped for a symlink to ANOTHER account's tree was served
+    (round 4). The client's text is never evaluated."""
     refused = "|".join("%s|%s=*" % (o, o) for o in FLEETBACKUP_REFUSED_OPTIONS)
     return (
         "#!/bin/sh\n"
@@ -135,6 +142,8 @@ def render_fleetbackup_rrsync_wrapper(rrsync=RRSYNC_PATH, root=RRSYNC_ROOT):
         "paths=0\n"
         "dot=0\n"
         "n=0\n"
+        'one=""\n'
+        'cmd="$1 $2 $3"\n'
         'for a in "$@"; do\n'
         "    n=$((n + 1))\n"
         '    [ "$n" -gt 3 ] || continue\n'
@@ -145,6 +154,7 @@ def render_fleetbackup_rrsync_wrapper(rrsync=RRSYNC_PATH, root=RRSYNC_ROOT):
         "            -*) ;;\n"
         '            *) fb_refuse "argument before the transfer root" ;;\n'
         "        esac\n"
+        '        cmd="$cmd $a"\n'
         "        continue\n"
         "    fi\n"
         '    case "$a" in */../*|*/..|../*|..) fb_refuse "a .. path" ;; esac\n'
@@ -156,10 +166,16 @@ def render_fleetbackup_rrsync_wrapper(rrsync=RRSYNC_PATH, root=RRSYNC_ROOT):
         "        uploads|uploads/*|.claude/work-products|.claude/work-products/*) ;;\n"
         '        *) fb_refuse "not inside a backup tree" ;;\n'
         "    esac\n"
+        '    [ -z "$one" ] || [ "$one" = "$acct" ] || fb_refuse "paths of two accounts"\n'
+        '    one=$acct\n'
+        '    cmd="$cmd $rest"\n'
         "    paths=$((paths + 1))\n"
         "done\n"
         '[ "$dot" -eq 1 ] && [ "$paths" -ge 1 ] || fb_refuse "no path"\n'
-        "exec %s -ro %s\n"
+        "# rrsync reads the words checked above, the account prefix stripped\n"
+        'SSH_ORIGINAL_COMMAND=$cmd\n'
+        "export SSH_ORIGINAL_COMMAND\n"
+        'exec %s -ro %s/"$one"\n'
         % (refused, shlex.quote(rrsync), shlex.quote(root))
     )
 
@@ -182,26 +198,36 @@ def _paused_accounts():
 # a bash `read -d ''` loop, which managed 1.7 MB/s (round 3).
 _CHECK_PY = r'''
 import os, sys
-fields = sys.stdin.buffer.read().split(b"\0")
-tail = fields.pop()              # after the last NUL: empty for a whole record stream
-if tail:
-    fields.append(tail)
 leak = miss = ok = priv = shown = 0
 def show(tag, p):
     global shown
     if shown < 20:
-        sys.stderr.write("  ⚠ FLEETBACKUP-READBACK %s: %r\n" % (tag, p))
+        sys.stderr.write("  \u26a0 FLEETBACKUP-READBACK %s: %r\n" % (tag, p[:300]))
     shown += 1
 def can(p, m):
     try:
         return os.access(p, m)
     except (OSError, ValueError):
         return False
-for i in range(0, len(fields), 3):
-    rec = fields[i:i + 3]
+def fields():                    # streamed: a tenant decides how big its trees are
+    buf = b""
+    while True:
+        chunk = sys.stdin.buffer.read(1 << 16)
+        if not chunk:
+            break
+        buf += chunk
+        if b"\0" in chunk:
+            *done, buf = buf.split(b"\0")
+            yield from done
+    if buf:
+        yield buf
+rec = []
+for f in fields():
+    rec.append(f)
     if len(rec) < 3:
-        miss += 1; show("MISS bad record", rec[0]); break
+        continue
     kind, mode, p = rec
+    rec = []
     if kind == b"C":
         if can(p, os.R_OK) or can(p, os.W_OK) or can(p, os.X_OK):
             leak += 1; show("LEAK reachable", p)
@@ -226,6 +252,8 @@ for i in range(0, len(fields), 3):
             priv += 1
     else:
         miss += 1; show("MISS bad record", kind)
+if rec:
+    miss += 1; show("MISS bad record", rec[0])
 print("leak=%d miss=%d readable=%d private=%d" % (leak, miss, ok, priv))
 '''
 
@@ -238,6 +266,7 @@ _ACL_SCRIPT_TEMPLATE = r'''#!/bin/bash
 # lock. Every grant runs AS the account (`apply`); root only adds `---` denies;
 # the read-back runs AS fleetbackup (`check`).
 # Modes: refresh (default, root) | apply <fb> <home> grant|hold | check | records <home> [siblings]
+#        | deny-foreign <home> <account> (root)
 set -euo pipefail
 FB=@@USER@@
 FB_SIG=@@SIG@@
@@ -418,6 +447,12 @@ fb_records() { # $1 home [siblings]: what fleetbackup may and may not reach, as 
     return "$rc"   # an incomplete record stream must never pass as a clean read-back
 }
 
+fb_deny_foreign() { # root, $1 home, $2 account: `---` on every child the account does not own,
+    #                 batched (one setfacl per child let a second account stall the refresh)
+    { fb_home_kids "$1" ! -user "$2" -print0; fb_claude_kids "$1" ! -user "$2" -print0; } \
+        | xargs -0 -r setfacl -P -n -m "u:$FB:---" --
+}
+
 fb_cut() { # $1 a timeout, $2 a floor: the timeout, cut to what is left of the budget
     local left
     left=$(fb_left)
@@ -433,6 +468,10 @@ fb_as_fb() { # $1 a timeout, rest: a mode of this script AS fleetbackup, no root
     shift
     timeout -k 10 "$t" runuser -u "$FB" -- env -i PATH="$FB_PATH" LC_ALL=C \
         /bin/bash "$FB_SELF" "$@" 8>&- 9>&-
+}
+
+fb_walk() { # $1 home [siblings]: fb_records as root, timed (an account decides how big its trees are)
+    timeout -k 10 "$(fb_cut "$FB_CHECK_TIMEOUT" 30)" /bin/bash "$FB_SELF" records "$@" 8>&- 9>&-
 }
 
 fb_prefix() { # account-side output can never forge a line or a terminal escape
@@ -488,37 +527,29 @@ fb_root_deny() { # $1 path: a deny-only ACL as root — -n, `---`: nobody's perm
     setfacl -P -n -m "u:$FB:---" -- "$1"
 }
 
-fb_owner() { # $1 path: its owner's name, "" when unknown
-    stat -c %U -- "$1" 2>/dev/null || true
-}
-
 fb_access_entry() { # $1 path: fleetbackup's ACCESS entry perms ("" when none; default entries ignored)
     getfacl -p -c -- "$1" 2>/dev/null | awk -F: -v fb="$FB" '$1 == "user" && $2 == fb { print substr($3, 1, 3) }'
 }
 
-fb_close_home() { # $1 account, $2 home, $3 1 when a child the account does not own may be
-    #               open -> 1 closed, or open only by the account's own doing | 2 not
-    local u="$1" h="$2" foreign="${3:-0}" c=0 owner
-    owner=$(fb_owner "$h")            # read first: no account can chown
-    fb_root_deny "$h" || true         # /home/<u> is a root-owned name (no swap); the read-back decides
+fb_close_home() { # $1 account, $2 home -> 1 always: the account failed this run. Never a
+    #               withdrawal: every inode that carries a grant of ours is the account's own
+    #               (grants run as the account), so what root cannot close here is open by the
+    #               account's own doing, or through "other" bits every local user has (round 4)
+    local u="$1" h="$2" c=0
+    fb_root_deny "$h" || fb_warn "$u: root could not close $(printf '%q' "$h")"
     fb_closed "$h" || c=$?
-    if [ "$c" -eq 0 ]; then return 1; fi
-    if [ "$c" -eq 2 ]; then fb_warn "$u: the read-back of the closed home did not run — UNRESOLVED"; return 2; fi
-    # Only the owner can change its inode's ACL after root's deny, or fill its xattr
-    # space so the deny fails: an inode the account owns, holding only what it owns,
-    # is its own doing — its backup fails, nobody else's (round 3: never withdraw for it)
-    if [ "$foreign" -eq 0 ] && [ "$owner" = "$u" ]; then
-        fb_warn "$u: its home stays open by its own doing — failed for $u only"
-        return 1
-    fi
-    fb_warn "$u: home still reachable after root closed it — UNRESOLVED"
-    return 2
+    case "$c" in
+        0) ;;
+        1) fb_warn "$u: its home stays reachable after root closed it — its own doing; failed for $u only" ;;
+        *) fb_warn "$u: the read-back of the closed home did not run — failed for $u only" ;;
+    esac
+    return 1
 }
 
-fb_account() { # $1 account, $2 home -> 0 ok | 1 failed, nothing of ours open | 2 open and not closable
-    #              | 3 not a managed home | 4 paused by policy (3 and 4: the caller treats
-    #              the home like any non-stream entry; only 3 is a failure)
-    local u="$1" h="$2" mode=grant rc=0 out p l m r v foreign=0 cr=0
+fb_account() { # $1 account, $2 home -> 0 ok | 1 failed (a reachable home is left closed) | 3 not a
+    #              managed home | 4 paused by policy (3 and 4: the caller treats the home like any
+    #              non-stream entry; only 3 is a failure)
+    local u="$1" h="$2" mode=grant rc=0 out p l m r v
     case " $FB_SKIP " in *" $u "*) fb_say "$u: paused (#851) — not granted"; return 4 ;; esac
     if [ -L "$h" ]; then fb_warn "$u: home $(printf '%q' "$h") is a symlink — not granted"; return 3; fi
     if [ "$(getent passwd "$u" | cut -d: -f6)" != "$h" ]; then
@@ -526,24 +557,22 @@ fb_account() { # $1 account, $2 home -> 0 ok | 1 failed, nothing of ours open | 
     fi
     if [ "$(fb_left)" -le 0 ]; then
         fb_warn "$u: over the refresh budget (${FB_BUDGET}s) — home closed, not granted this run"
-        fb_close_home "$u" "$h" 0 || cr=$?
-        return "$cr"   # 1 closed (this account failed) | 2 not closable
+        fb_close_home "$u" "$h" || true
+        return 1
     fi
     # visibility: how much was open BEFORE this refresh (moved-in children, owner edits)
-    out=$(fb_records "$h" siblings | fb_as_fb "$FB_QUICK_CHECK" check) || out=""
+    out=$(fb_walk "$h" siblings | fb_as_fb "$FB_QUICK_CHECK" check) || out=""
     if v=$(fb_sum <<<"$out"); then
         read -r l _ <<<"$v"
         if [ "$l" -ne 0 ]; then fb_warn "$u: $l child(ren) were reachable before this refresh — closing them"; fi
     else
         fb_warn "$u: the pre-refresh read-back did not run"
     fi
-    # a child the account does not own: root adds the deny
-    while IFS= read -r -d '' p; do
-        if ! fb_root_deny "$p"; then
-            fb_warn "$u: could not close $(printf '%q' "$p") (not owned by $u) — home HELD"
-            mode=hold; rc=1; foreign=1
-        fi
-    done < <({ fb_home_kids "$h" ! -user "$u" -print0; fb_claude_kids "$h" ! -user "$u" -print0; })
+    # a child the account does not own: root adds the deny, batched and timed
+    if ! timeout -k 10 "$(fb_cut "$FB_ACCOUNT_TIMEOUT" 1)" /bin/bash "$FB_SELF" deny-foreign "$h" "$u" 8>&- 9>&-; then
+        fb_warn "$u: a child $u does not own could not be closed (above) — home HELD"
+        mode=hold; rc=1
+    fi
     if ! fb_run_account "$u" apply "$FB" "$h" "$mode"; then
         fb_warn "$u: the account-side apply reported a failure (above)"; rc=1
     fi
@@ -552,61 +581,48 @@ fb_account() { # $1 account, $2 home -> 0 ok | 1 failed, nothing of ours open | 
             fb_warn "$u: $(printf '%q' "$h/$p") is not a plain directory — its tree is not granted"; rc=1
         fi
     done
-    out=$(fb_records "$h" | fb_as_fb "$FB_CHECK_TIMEOUT" check) || out=""
+    out=$(fb_walk "$h" | fb_as_fb "$FB_CHECK_TIMEOUT" check) || out=""
     if ! v=$(fb_sum <<<"$out"); then fb_warn "$u: the read-back did not run or was unreadable — treated as open"; fi
     read -r l m r p <<<"$v"
     if [ "$l" -ne 0 ]; then
         fb_warn "$u: $l path(s) reachable that must not be — home closed to $FB"
-        fb_close_home "$u" "$h" "$foreign" || cr=$?
-        return "$cr"   # 1 closed, or open only by its own doing | 2 not closable
+        fb_close_home "$u" "$h" || true
+        return 1
     fi
     if [ "$m" -ne 0 ]; then fb_warn "$u: $m path(s) under the two dirs are not readable (listed above)"; rc=1; fi
     fb_say "$u: readable=$r private=$p (files without group read stay closed, counted)"
     return "$rc"
 }
 
-fb_foreign_homes() { # every non-stream entry of FB_ROOT gets the deny (root may: only root writes /home)
-    local p cur owner v l list all theirs rc=0 failed=0
-    list=$(mktemp) && all=$(mktemp) && theirs=$(mktemp) || { fb_warn "mktemp failed — treated as open"; return 2; }
-    if ! find "$FB_ROOT" -ignore_readdir_race -mindepth 1 -maxdepth 1 ! -type l -print0 >"$list"; then
-        fb_warn "could not list $FB_ROOT — treated as open"; rc=2
-    fi
-    while [ "$rc" -eq 0 ] && IFS= read -r -d '' p; do
-        [ -z "${FB_STREAMS[${p##*/}]+x}" ] || continue
-        printf 'C\0-\0%s\0' "$p" >>"$all"
-        owner=$(fb_owner "$p")
-        # a non-root owner alone can reopen its inode (or make our deny fail); an entry
-        # owned by root, or by nobody known, open after our deny is unexplained
-        if [ -z "$owner" ] || [ "$owner" = root ]; then printf 'C\0-\0%s\0' "$p" >>"$theirs"; fi
+fb_foreign_homes() { # every non-stream entry of FB_ROOT gets the deny (root may: only root writes
+    #                  /home). Listed by NAME: root cannot stat a tenant's FUSE mount, and a
+    #                  fault on one entry fails the refresh, never the login (see fb_close_home)
+    local p cur v l rc=0
+    local -a ents=()
+    shopt -s nullglob dotglob
+    for p in "$FB_ROOT"/*; do
+        [ -n "${FB_STREAMS[${p##*/}]+x}" ] || [ -L "$p" ] || ents+=("$p")
+    done
+    shopt -u nullglob dotglob
+    for p in "${ents[@]}"; do
         cur=$(fb_access_entry "$p") || cur=""
         [ "$cur" != "---" ] || continue
         if fb_root_deny "$p"; then
             fb_say "closed $(printf '%q' "$p") (not a managed shared-stream home)"
         else
-            failed=1; fb_warn "could not close $(printf '%q' "$p") (owner: ${owner:-?})"
+            fb_warn "could not close $(printf '%q' "$p")"; rc=1
         fi
-    done <"$list"
-    if [ "$rc" -eq 0 ]; then
-        if ! v=$(fb_as_fb "$FB_CHECK_TIMEOUT" check <"$all" | fb_sum); then
-            fb_warn "the read-back of $FB_ROOT did not run — treated as open"; rc=2
-        else
-            read -r l _ <<<"$v"
-            rc=$failed
-            if [ "$l" -ne 0 ]; then
-                l=0
-                if [ -s "$theirs" ]; then
-                    v=$(fb_as_fb "$FB_QUICK_CHECK" check <"$theirs" | fb_sum) || v="1 0 0 0"
-                    read -r l _ <<<"$v"
-                fi
-                if [ "$l" -eq 0 ]; then
-                    fb_warn "a non-stream entry of $FB_ROOT is open only through its owner's own doing"; rc=1
-                else
-                    fb_warn "a root-owned entry of $FB_ROOT is still reachable — UNRESOLVED"; rc=2
-                fi
-            fi
-        fi
+    done
+    if ! v=$(for p in "${ents[@]}"; do printf 'C\0-\0%s\0' "$p"; done \
+             | fb_as_fb "$FB_CHECK_TIMEOUT" check | fb_sum); then
+        fb_warn "the read-back of $FB_ROOT did not run — failed"
+        return 1
     fi
-    rm -f -- "$list" "$all" "$theirs"
+    read -r l _ <<<"$v"
+    if [ "$l" -ne 0 ]; then
+        fb_warn "$l non-stream entr(y/ies) of $FB_ROOT still reachable (listed above) — its owner's doing; failed, fix by hand"
+        rc=1
+    fi
     return "$rc"
 }
 
@@ -657,16 +673,16 @@ fb_key_write() { # $1 the whole authorized_keys content (one line)
 
 fb_expiry() { getent shadow "$FB" | cut -d: -f8; }
 
-fb_withdraw() { # -> 0 only when the read-back proves fleetbackup has no login left
-    local exp before
-    before=$(fb_expiry) || before=""
-    if [ -z "$before" ]; then
-        # our own value (not an admin's `1`) + marker: only that is ever lifted again
-        if chage -E "$FB_WITHDRAW_EXPIRY" "$FB" >/dev/null 2>&1; then
-            if fb_rootdir "${FB_SSH%/*}"; then printf '%s\n' "$FB_WITHDRAW_EXPIRY" >"$FB_MARK"; fi
-        else
-            fb_warn "chage -E $FB_WITHDRAW_EXPIRY $FB failed"
+fb_withdraw() { # box-level faults only -> 0 when the read-back proves fleetbackup has no login left
+    local exp
+    exp=$(fb_expiry) || exp=""
+    if [ -z "$exp" ]; then
+        # the marker FIRST (a crash right after it leaves a marker with no expiry, which a restore
+        # forgets); our own value, never the admin's `1`: only it is ever lifted again
+        if ! { fb_rootdir "${FB_SSH%/*}" && printf '%s\n' "$FB_WITHDRAW_EXPIRY" >"$FB_MARK"; }; then
+            fb_warn "no withdrawal marker could be written — an admin lifts this expiry by hand (chage -E -1 $FB)"
         fi
+        chage -E "$FB_WITHDRAW_EXPIRY" "$FB" >/dev/null 2>&1 || fb_warn "chage -E $FB_WITHDRAW_EXPIRY $FB failed"
     fi
     if fb_rootdir "${FB_SSH%/*}" && fb_rootdir "$FB_SSH"; then
         rm -f -- "$FB_SSH/authorized_keys" "$FB_SSH/authorized_keys2"
@@ -695,8 +711,14 @@ fb_restore() { # the key with a fresh expiry-time FIRST, then lift OUR expiry (n
         rm -f -- "$FB_MARK"   # ours is gone (lifted now, or changed by someone since): forget it
         exp=$(fb_expiry) || exp=""
     fi
-    if [ -n "$exp" ]; then fb_warn "$FB has an account expiry set by someone else ($exp) — left as it is"; fi
     fb_say "key valid until ${until}Z (UTC)"
+    if [ -n "$exp" ]; then
+        fb_warn "$FB has an account expiry set by someone else ($exp) — left as it is"
+        if [ "$exp" -le $(( $(date +%s) / 86400 )) ] 2>/dev/null; then
+            fb_warn "$FB is EXPIRED: the backup login stays blocked until an admin lifts it (chage -E -1 $FB)"
+            return 1
+        fi
+    fi
 }
 
 fb_lock() { # the refresh lock on fd 8: root-only (a readable lock file can be flock-ed by anyone)
@@ -716,8 +738,10 @@ fb_lock() { # the refresh lock on fd 8: root-only (a readable lock file can be f
     fi
 }
 
-fb_refresh() { # -> 0 ok | 1 failed, nothing of ours open | 2 login withdrawn | 3 withdrawal failed | busy rc
-    local sig rc=0 r t home u m withdrawn=0
+fb_refresh() { # -> 0 ok | 1 failed (an account, a non-stream entry, the key) | 2 login withdrawn
+    #             | 3 withdrawal failed | busy rc. Only a BOX-level fault withdraws: a missing
+    #             tool or fleetbackup's identity; a home-level fault fails that home (fb_close_home)
+    local sig rc=0 r t home u m
     local -A FB_STREAMS=()
     cd /
     sig=$(getent passwd "$FB" | cut -d: -f6,7) || sig=""
@@ -748,26 +772,22 @@ fb_refresh() { # -> 0 ok | 1 failed, nothing of ours open | 2 login withdrawn | 
         [ "$r" -eq 0 ] || [ "$r" -eq 4 ] || rc=1
         # a refused or paused home is not managed: fb_foreign_homes closes it
         [ "$r" -ge 3 ] || FB_STREAMS[$u]=1
-        if [ "$r" -eq 2 ] && [ "$withdrawn" -eq 0 ]; then
-            withdrawn=1; fb_withdraw || withdrawn=2
-        fi
     done
-    r=0; fb_foreign_homes || r=$?
-    [ "$r" -eq 0 ] || rc=1
-    if [ "$r" -eq 2 ] && [ "$withdrawn" -eq 0 ]; then withdrawn=1; fb_withdraw || withdrawn=2; fi
-    if [ "$withdrawn" -eq 1 ]; then return 2; fi
-    if [ "$withdrawn" -eq 2 ]; then return 3; fi
+    fb_foreign_homes || rc=1
     fb_restore || rc=1
     fb_say "ACL refresh + read-back done (${#FB_STREAMS[@]} accounts, rc=$rc)"
     return "$rc"
 }
 
+# The modes are an interface: a refresh still running when a push replaces this file
+# calls the NEW file's modes with the old arguments, so keep both compatible.
 case "${1:-refresh}" in
     refresh) rc=0; fb_refresh || rc=$?; exit "$rc" ;;
     apply) shift; fb_apply "$@" ;;
     check) fb_check ;;
     records) fb_records "$2" "${3:-all}" ;;
-    *) echo "usage: $FB_SELF [refresh | apply <fb> <home> grant|hold | check | records <home> [siblings]]" >&2
+    deny-foreign) fb_deny_foreign "$2" "$3" ;;
+    *) echo "usage: $FB_SELF [refresh | apply <fb> <home> grant|hold | check | records <home> [siblings] | deny-foreign <home> <account>]" >&2
        exit 64 ;;
 esac
 '''
@@ -878,7 +898,8 @@ def render_fleetbackup_hourly_call(acl_script=FLEETBACKUP_ACL_SCRIPT_PATH):
     """The hourly quota-ceiling script's call, AFTER its limits block: it
     releases the quota lock (fd 9) first, because the refresh takes its own and
     may walk large trees. A busy refresh lock means another refresh (a manual
-    run) holds it: LOUD, not a failure. Leaves the status in ``fb_rc``."""
+    run) holds it: LOUD, not a failure. A missing script fails (the same push
+    installs both). Leaves the status in ``fb_rc``."""
     q = shlex.quote(acl_script)
     return (
         '# #1387: the fleetbackup ACL refresh (hourly, and queued by every push),\n'
@@ -890,6 +911,7 @@ def render_fleetbackup_hourly_call(acl_script=FLEETBACKUP_ACL_SCRIPT_PATH):
         '    /bin/bash %s || fb_rc=$?\n'
         'else\n'
         '    echo "  ⚠ quota-ceiling: %s missing — fleetbackup ACL refresh not run" >&2\n'
+        '    fb_rc=1\n'
         'fi\n'
         'if [ "$fb_rc" -eq %d ]; then\n'
         '    echo "  ⚠ quota-ceiling: fleetbackup refresh lock busy (another refresh is running)" >&2\n'
