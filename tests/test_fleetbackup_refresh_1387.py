@@ -615,6 +615,20 @@ class TestRefresh(unittest.TestCase):
         self.assertTrue(all(c.startswith("root-setfacl -P -n -m u:daemon:--- -- ") for c in root_calls),
                         root_calls)
 
+    def test_a_stalled_root_deny_is_cut_and_holds_the_home(self):
+        """Round 5 🟡: nothing failed without the timeout on root's batched deny."""
+        box = Box(self.td, fb="daemon", accounts=("nobody",), account_timeout_s=2)
+        h = box.home("nobody")
+        make_layout(h)
+        box.extra_env["FBT_STALL_SETFACL"] = "/devel"
+        box.answers(PRE0, CLEAN, NONE)
+        t0 = time.monotonic()
+        r = box.run()
+        self.assertLess(time.monotonic() - t0, 20)
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("HELD", r.stderr)
+        self.assertEqual(entry(h, "user:daemon:"), "user:daemon:---")
+
     def test_root_closes_many_foreign_children_in_a_few_calls(self):
         """Round 4 🟡: one root setfacl per child let a second account (or
         hardlinks) stall the refresh past its budget."""

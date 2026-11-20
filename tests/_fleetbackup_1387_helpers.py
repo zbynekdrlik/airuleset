@@ -83,6 +83,9 @@ exit 2
 # and never reaches it): logged, fails on a path containing FBT_FAIL_SETFACL
 _SETFACL = r'''#!/bin/bash
 echo "root-setfacl $*" >> "$FBT_LOG"
+if [ -n "${FBT_STALL_SETFACL:-}" ]; then
+    case "$*" in *"$FBT_STALL_SETFACL"*) sleep 30 ;; esac
+fi
 if [ -n "${FBT_FAIL_SETFACL:-}" ]; then
     case "$*" in *"$FBT_FAIL_SETFACL"*) echo "setfacl: forced failure" >&2; exit 1 ;; esac
 fi
@@ -96,6 +99,7 @@ exec /usr/bin/setfacl "$@"
 '''
 
 _ID = r'''#!/bin/bash
+if [ "$*" = -un ] && [ -n "${FBT_ID_UN:-}" ]; then echo "$FBT_ID_UN"; exit 0; fi
 for a in "$@"; do
     if [ "$a" = "$FBT_FB" ]; then
         case "$1" in

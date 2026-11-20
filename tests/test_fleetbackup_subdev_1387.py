@@ -96,6 +96,23 @@ class TestRrsyncWrapper(unittest.TestCase):
             self.assertEqual(log, "rrsync -ro /home/david3 :: %s --numeric-ids . %s\n" % (PULL, rel),
                              path)
 
+    def test_the_account_listing_reaches_the_home_root(self):
+        """Round 5 🟡: fleet-backup discovers the accounts with
+        `rsync --list-only <dest>:./` (pull.py list_accounts)."""
+        for path in ("./", "."):
+            cmd = "rsync --server --sender -de.LsfxCIvu --list-only . %s" % path
+            r, log = self._run(cmd)
+            self.assertEqual(r.returncode, 0, (path, r.stderr))
+            self.assertEqual(log, "rrsync -ro /home :: %s\n" % cmd, path)
+
+    def test_the_account_listing_is_only_that(self):
+        for cmd in ("rsync --server --sender -de.LsfxCIvu . ./",            # not a listing
+                    "rsync --server --sender -de.LsfxCIvu --list-only . ./ u/uploads/",
+                    "rsync --server --sender -de.LsfxCIvu --list-only . u/uploads/ ./",
+                    "rsync --server --sender -de.LsfxCIvu --list-only . ./ ./",
+                    "rsync --server --sender -de.LsfxCIvu --list-only . ../"):
+            self.assert_refused(cmd)
+
     def test_one_pull_names_one_account(self):
         """Round 4 🟡: rrsync only checks that a path resolves inside its root;
         rooted at /home, carol/uploads -> /home/bob/uploads served bob's tree."""
@@ -199,6 +216,13 @@ class TestRrsyncWrapperLive(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)
         self.assertNotIn("SECRET\n", found.values())
 
+    def test_the_consumer_lists_the_accounts(self):
+        r = subprocess.run(["rsync", "--list-only", "-e", self.ssh, "x:./"],
+                           capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        names = [ln.split(None, 4)[4] for ln in r.stdout.splitlines() if ln.startswith("d")]
+        self.assertIn("alice", names)
+
     def test_one_account_never_serves_another_accounts_tree(self):
         bob = os.path.join(self.root, "bob", "uploads")
         os.makedirs(bob)
@@ -277,7 +301,8 @@ class TestScriptInvariants(unittest.TestCase):
         tenant's choice, so root's walks and batched denies are timed too."""
         self.assertIn('timeout -k 10 "$(fb_cut "$FB_CHECK_TIMEOUT")" /bin/bash "$FB_SELF" records',
                       self.fn["fb_walk"])
-        self.assertIn('/bin/bash "$FB_SELF" deny-foreign "$h" "$u"', self.fn["fb_account"])
+        self.assertIn('timeout -k 10 "$(fb_cut "$FB_ACCOUNT_TIMEOUT")" /bin/bash "$FB_SELF" deny-foreign "$h" "$u"',
+                      self.fn["fb_account"])
         self.assertNotIn("fb_records", self.fn["fb_account"])
         self.assertNotIn("fb_root_deny", self.fn["fb_account"])
 

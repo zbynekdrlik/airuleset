@@ -239,6 +239,16 @@ class TestApply(_Tmp):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("user:nobody:r--", acl(self.p("uploads/x.txt")))
 
+    def test_the_account_grants_only_its_own_inodes(self):
+        """Round 5 🟡: another user's file in a tree dir the account opened
+        for writing must never be granted by the account (it could not
+        anyway: EPERM failed the account every hour) — root denies it."""
+        self.box.extra_env["FBT_ID_UN"] = "nobody"      # every inode here is "another user's"
+        r = self.apply()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        for rel in ("uploads", "uploads/x.txt", ".claude/work-products", ".claude/work-products/a/w.md"):
+            self.assertIsNone(entry(self.p(rel), "user:nobody:"), rel)
+
     def test_hold_closes_the_home_and_claude_and_opens_nothing(self):
         r = self.apply("hold")
         self.assertEqual(r.returncode, 0, r.stderr)
@@ -400,6 +410,30 @@ class TestRecords(_Tmp):
         make_layout(h)
         kinds = {k for k, _rel in _recs(box, h, "siblings")}
         self.assertEqual(kinds, {"T", "C"})
+
+    def test_another_users_inodes_in_a_tree_are_closed_children(self):
+        """Round 5 🟡: our DEFAULT grant reached another user's file written
+        into a tree dir (a default ACL beats the writer's umask). Such inodes
+        are read back as `C` and not descended into."""
+        box = Box(self.td)
+        h = box.home("nobody")                      # the account is `nobody`; the files are not its
+        make_layout(h)
+        recs = _recs(box, h)
+        self.assertIn(("C", "uploads"), recs)
+        self.assertIn(("C", ".claude/work-products"), recs)
+        self.assertFalse([rel for k, rel in recs if k in ("D", "F")], recs)
+
+    def test_root_denies_another_users_inodes_in_the_trees(self):
+        box = Box(self.td)
+        h = box.home("nobody")
+        make_layout(h)
+        r = box.run("deny-foreign", h, "nobody")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        for rel in ("uploads", ".claude/work-products", "devel", ".bashrc"):
+            self.assertEqual(entry(os.path.join(h, rel), "user:nobody:"), "user:nobody:---", rel)
+        self.assertIsNone(entry(os.path.join(h, "uploads", "x.txt"), "user:nobody:"))   # pruned
+        calls = [c for c in box.calls() if c.startswith("root-setfacl ")]
+        self.assertEqual(len(calls), 1, calls)
 
     def test_an_untraversed_claude_is_checked_as_a_closed_child(self):
         box = Box(self.td)
