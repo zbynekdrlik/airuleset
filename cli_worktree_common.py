@@ -29,7 +29,7 @@ from pathlib import Path
 CLAUDE_DIR = Path.home() / ".claude"
 
 
-_STALE_WORKTREE_PROTECTED_BRANCHES = ("main", "dev", "master")
+_STALE_WORKTREE_PROTECTED_BRANCHES = ("main", "dev", "master", "develop", "staging")  # = dgw (#1380)
 
 # #348 -- the two dominant leak shapes #345's own registered-worktree-only
 # scan structurally cannot see: a branch orphaned by a hand-removed

@@ -27,9 +27,8 @@ Code decides its own dispatch and integration; only the prune stays.
 # time-since-last-commit == time-since-hand-off, exactly the signal we want.
 WORKTREE_PRUNE_MIN_AGE_S = 2 * 3600
 
-# The sweep self-gates per repo at this cadence (git-heavy `worktree list` +
-# `status` reads), mirroring the hourly self-gate of the sibling per-repo jobs
-# (stuck_main / wip_ref). > age-threshold, so a skipped sweep loses nothing.
+# The sweep self-gates per repo at this cadence (git-heavy `worktree list` + `status`
+# reads), like the sibling per-repo jobs; > age-threshold, a skipped sweep loses nothing.
 WORKTREE_PRUNE_CADENCE_S = 3600
 
 
@@ -85,6 +84,7 @@ def prune_finished_worktrees(repo_root, run=None, *, now=None, dry_run=False,
     import cli_lane_liveness as lo
     import cli_worktree_sweep as ws
     from cli_lane_live_gate import LiveLaneGate
+    from watchdog import disk_guard_lane_wt as dlw
     run = run or _prune_run_default
     now = _time.time() if now is None else now
     logs = []
@@ -100,7 +100,7 @@ def prune_finished_worktrees(repo_root, run=None, *, now=None, dry_run=False,
 
     def _git_run(args, wt_cwd):
         try:
-            r = run(["git", "-C", str(wt_cwd)] + list(args))
+            r = run(["git", "-c", "status.showUntrackedFiles=normal", "-C", str(wt_cwd)] + list(args))
         except Exception:  # noqa: BLE001 — unmeasurable, never a false "clean"
             return None
         return r.stdout if getattr(r, "returncode", 1) == 0 else None
@@ -142,8 +142,8 @@ def prune_finished_worktrees(repo_root, run=None, *, now=None, dry_run=False,
         if live_use_fn(path):
             logs.append("worktree-prune kept (in live use): %s" % path)
             continue
-        if clean_fn(path) is not True:
-            logs.append("worktree-prune kept (dirty/unmeasurable tree): %s" % path)
+        if kept := ("dirty/unmeasurable tree" if clean_fn(path) is not True else (dlw.final_reason(path, _git_run) or (None,))[0]):  # #1380
+            logs.append("worktree-prune kept (%s): %s" % (kept, path))
             continue
         age = age_fn(ref)
         if age is None or age < age_min_s:
@@ -155,7 +155,7 @@ def prune_finished_worktrees(repo_root, run=None, *, now=None, dry_run=False,
                         % (lane.get("state"), path))
             continue
         try:
-            r = run(["git", "-C", repo_root, "worktree", "remove", path])
+            r = run(["git", "-c", "status.showUntrackedFiles=normal", "-C", repo_root, "worktree", "remove", path])
         except Exception as e:  # noqa: BLE001
             logs.append("worktree-prune kept (remove error %r): %s" % (e, path))
             continue

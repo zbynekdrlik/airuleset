@@ -258,7 +258,7 @@ def _log_path(home=None):
     return str(_guard_dir(home) / LOG_NAME)
 
 
-def _append_deletion_journal(home, now, rung, path, nbytes, mtime, level):
+def _append_deletion_journal(home, now, rung, path, nbytes, mtime, level, **extra):
     """Append one deletion record to the durable monthly journal (#861).
     ``~/.claude/disk-guard/deletions-YYYYMM.jsonl`` — append-only, monthly
     files. The guard NEVER deletes or truncates these (they are outside
@@ -271,6 +271,9 @@ def _append_deletion_journal(home, now, rung, path, nbytes, mtime, level):
         jp = gd / ("%s%s.jsonl" % (DELETIONS_JOURNAL_PREFIX, month))
         entry = {"ts": now, "rung": rung, "path": path,
                  "bytes": nbytes, "mtime": mtime, "level": level}
+        # #1380: a removed (possibly detached) worktree's HEAD and the ref that
+        # holds it, so the commit stays findable after the directory is gone
+        entry.update({k: v for k, v in extra.items() if v})
         with open(jp, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
     except OSError as e:
@@ -535,7 +538,7 @@ def discover_toolchain_dirs(home=None, box_class_fn=None, pgrep_fn=None,
 
 
 _SIGNING_GLOBS = ("*.jks", "*.keystore", "*.p12", "*.pfx")
-_SIGNING_PROPS = ("storepassword", "keypassword", "signing.")
+_SIGNING_PROPS = ("password", "signing.")      # storePassword, MYAPP_UPLOAD_STORE_PASSWORD
 
 
 def _signing_material(path, max_depth=3):
@@ -2514,8 +2517,7 @@ def _make_do_action(dry_run, sudo_ok=False, run_fn=None, scratch_live_fn=None, n
     return _do
 
 
-_PATH_KINDS = frozenset({"delete", "worktree-remove", "scratch-worktree-remove", "gzip",
-                         "orphan-gitdir"})
+_PATH_KINDS = frozenset({"delete", "worktree-remove", "scratch-worktree-remove", "gzip"})
 
 
 def _protected_owner_path(path, home, kind=None):
@@ -2733,7 +2735,8 @@ def execute_drain(status, home, planners, recheck_fn, do_action_fn,
                         home, now, rung=_label, path=path,
                         nbytes=planned if freed is None else freed,
                         mtime=a.get("mtime", 0),
-                        level=pressure or status.get("level", "drain"))
+                        level=pressure or status.get("level", "drain"),
+                        head=a.get("head"), contained_in=a.get("contained_in"))
                 rung_freed += (freed or 0)
                 rung_acted += 1
             logs.extend(rung_lines)

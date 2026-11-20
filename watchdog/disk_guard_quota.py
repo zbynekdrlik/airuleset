@@ -179,10 +179,17 @@ def quota_state(status, home, now, active, usage_fn=None):
     pressure = pct >= QUOTA_DRAIN_PCT and room < QUOTA_MIN_ROOM_KIB      # #1380
     last = prior.get("quota_drain")
     before, after, ts = _num(last, "before_pct"), _num(last, "after_pct"), _num(last, "ts")
+    # #1380: judged by ROOM when both passes recorded it — 1 % of a 58 GiB
+    # ceiling is ~580 MB, so a pass that freed 500 MB read as "exhausted"
+    b_room, a_room = _num(last, "before_room_mb"), _num(last, "after_room_mb")
+    if b_room is not None and a_room is not None:
+        before, after = -b_room, -a_room           # "after >= before" = no room won
     exhausted = (pressure and before is not None and after is not None and after >= before
                  and not last.get("dry_run") and not last.get("cut_short") and ts is not None
                  and 0 <= now - ts < QUOTA_EXHAUSTED_TTL_S)
-    growth = pressure and prev is not None and pct > prev
+    prev_room = _num(prior, "quota_room_mb")
+    growth = pressure and (room // 1024 < prev_room if prev_room is not None
+                           else prev is not None and pct > prev)
     return QuotaState(pct, pressure, growth, exhausted, usage, usage_fn)
 
 

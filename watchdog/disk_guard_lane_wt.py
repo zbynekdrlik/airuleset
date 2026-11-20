@@ -51,54 +51,124 @@ from pathlib import Path
 LANE_CLS = "lane-worktree"
 LANE_CLASSIFY_BUDGET_S = 15.0
 _DEFERRED = "classification deferred to the next pass (poll budget) — kept"
-SUBMODULES_KEPT = "worktree has submodules (git refuses them without --force) — kept"
-# An IGNORED entry a drain may delete with a clean, pushed tree: build output
-# and caches. Everything else ignored is somebody's work product (#1380).
+SUBMODULES_KEPT = "worktree has populated submodules (git refuses them without --force) — kept"
+# An IGNORED entry a drain may delete with a clean, pushed tree: build output,
+# caches and test output. Everything else ignored is a work product (#1380).
+# A dir name counts only for an entry that IS that dir (git lists an ignored
+# dir as one `!!` entry, never its contents); a file below such a name counts
+# only inside a self-ignoring cache dir (pytest / ruff write a `*` .gitignore,
+# Cargo and others a CACHEDIR.TAG) — an ignored `build/deploy.key` inside a
+# TRACKED `build/` is not build output.
 REGENERABLE_IGNORED_DIRS = frozenset({
     "__pycache__", "node_modules", ".venv", "venv", "target", "build", "dist",
     ".pytest_cache", ".mypy_cache", ".ruff_cache", ".tox", ".nox", ".cache",
-    "htmlcov", ".gradle", ".next", ".nuxt", ".parcel-cache", ".turbo", ".eggs"})
-REGENERABLE_IGNORED_GLOBS = ("*.pyc", "*.pyo", "*.egg-info", ".coverage", ".coverage.*",
-                             "test-results*", "playwright-report*", "*.o")
+    "htmlcov", ".gradle", ".next", ".nuxt", ".parcel-cache", ".turbo", ".eggs",
+    ".hypothesis", ".playwright-mcp", "blob-report"})
+REGENERABLE_IGNORED_DIR_GLOBS = ("*.egg-info", "test-results*", "playwright-report*")
+REGENERABLE_IGNORED_FILE_GLOBS = ("*.pyc", "*.pyo", ".coverage", ".coverage.*", "*.o",
+                                  "*.mo", "coverage.xml", "package-lock.json")
+NESTED_SCAN_MAX_ENTRIES = 2_000_000          # a walk past this is "unmeasurable"
 
 
-def _regenerable(entry: str) -> bool:
+def _self_ignoring(d: str) -> bool:
+    """A cache dir that ignores itself: a CACHEDIR.TAG, or a .gitignore whose
+    only rule is ``*`` (what pytest and ruff write)."""
+    if os.path.isfile(os.path.join(d, "CACHEDIR.TAG")):
+        return True
+    try:
+        with open(os.path.join(d, ".gitignore"), encoding="utf-8", errors="replace") as f:
+            rules = [ln.strip() for ln in f if ln.strip() and not ln.lstrip().startswith("#")]
+    except OSError:
+        return False
+    return rules == ["*"]
+
+
+def _regenerable(wt_path: str, entry: str) -> bool:
     """One ignored ``git status`` entry (a dir keeps its trailing ``/``)."""
     parts = [p for p in entry.split("/") if p]
     if not parts:
         return True
-    if any(p in REGENERABLE_IGNORED_DIRS for p in parts[:-1]):
+    name, is_dir = parts[-1], entry.endswith("/")
+    if is_dir and (name in REGENERABLE_IGNORED_DIRS
+                   or any(fnmatch.fnmatch(name, g) for g in REGENERABLE_IGNORED_DIR_GLOBS)):
         return True
-    name = parts[-1]
-    if name in REGENERABLE_IGNORED_DIRS:
-        return entry.endswith("/")
-    return any(fnmatch.fnmatch(name, g) for g in REGENERABLE_IGNORED_GLOBS)
+    if not is_dir and any(fnmatch.fnmatch(name, g) for g in REGENERABLE_IGNORED_FILE_GLOBS):
+        return True
+    return any(parts[i - 1] in REGENERABLE_IGNORED_DIRS
+               and _self_ignoring(os.path.join(wt_path, *parts[:i]))
+               for i in range(1, len(parts)))
+
+
+def _holds_git(d: str):
+    """True when a ``.git`` sits anywhere under ``d`` (a nested checkout the
+    checkout walk never enters: it skips target/, build/, .cache/ ...); None
+    when the walk is too large to finish (unmeasurable)."""
+    seen = 0
+    for _dp, dns, fns in os.walk(d, onerror=lambda e: None):
+        if ".git" in dns or ".git" in fns:
+            return True
+        seen += len(dns) + len(fns)
+        if seen > NESTED_SCAN_MAX_ENTRIES:
+            return None
+    return False
+
+
+def _index_reason(wt_path, run):
+    """Hidden local edits (skip-worktree ``S`` / assume-unchanged lowercase
+    tags: ``git status`` never shows them, the remove deletes them) and
+    populated submodules (git refuses them), from ``git ls-files -s -v``."""
+    out = run(["ls-files", "-s", "-v", "-z"], wt_path)
+    if out is None:
+        return "git index unreadable — kept", True
+    for rec in out.split("\x00"):
+        meta, _, rel = rec.partition("\t")
+        f = meta.split()
+        if len(f) < 2:
+            continue
+        if f[0] == "S" or f[0].islower():
+            return ("hidden local edits possible (%s is skip-worktree/assume-unchanged) — kept"
+                    % rel), False
+        sub = os.path.join(wt_path, rel)
+        if f[1] == "160000" and os.path.isdir(sub) and os.listdir(sub):
+            return SUBMODULES_KEPT, False
+    return None
 
 
 def final_reason(wt_path: str, git_run_fn=None):
     """The last gates of every worktree source before a reclaim, ``(reason,
-    error)`` to keep the tree or None: populated submodules (``git worktree
-    remove`` refuses them) and any IGNORED entry that is not build output or a
-    cache. ``error`` marks an unreadable answer (never cached)."""
-    if os.path.lexists(os.path.join(wt_path, ".gitmodules")):
-        return SUBMODULES_KEPT, False
+    error)`` to keep the tree or None: hidden local edits and populated
+    submodules (:func:`_index_reason`), untracked files, any IGNORED entry
+    that is not build output, a cache or test output (:func:`_regenerable`),
+    and a nested checkout inside an ignored dir. ``error`` marks an unreadable
+    answer (never cached). Every worktree remover calls it: the disk guard's
+    three sources and its executor, the Job 20 lane prune, the #345 sweep."""
     from cli_worktree_common import _worktree_git
+    run = git_run_fn or _worktree_git
+    kept = _index_reason(wt_path, run)
+    if kept is not None:
+        return kept
     # `--ignored=matching`: an ignored DIR is one entry, and a dir that is not
     # itself ignored is never listed for its ignored contents (`ls-files
     # --directory` listed `pkg/` for `pkg/__pycache__/`). Any non-`!!` record
     # (an untracked file appeared) is never regenerable.
-    out = (git_run_fn or _worktree_git)(
-        ["status", "--porcelain", "--ignored=matching", "--untracked-files=normal", "-z"],
-        wt_path)
+    out = run(["status", "--porcelain", "--ignored=matching", "--untracked-files=normal", "-z"],
+              wt_path)
     if out is None:
         return "ignored files unreadable — kept", True
     recs = [r for r in out.split("\x00") if r]
     dirty = [r[3:] for r in recs if not r.startswith("!! ")]
     if dirty:
         return ("dirty worktree (untracked %s) — kept" % ", ".join(dirty[:3])), False
-    bad = [r[3:] for r in recs if not _regenerable(r[3:])]
+    bad = [r[3:] for r in recs if not _regenerable(wt_path, r[3:])]
     if bad:
         return ("non-regenerable ignored file(s) %s — kept" % ", ".join(bad[:3])), False
+    for r in recs:
+        if r.endswith("/"):
+            nested = _holds_git(os.path.join(wt_path, r[3:]))
+            if nested is None:
+                return "ignored %s too large to scan for a nested checkout — kept" % r[3:], False
+            if nested:
+                return "holds another checkout inside ignored %s — kept" % r[3:], False
     return None
 
 

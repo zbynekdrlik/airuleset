@@ -475,14 +475,14 @@ def sweep_stale_worktrees(home=None, dry_run: bool = False, now=None, log_path=N
     on the 60s watchdog timer (FREEZE: no new job). `force=True` (the
     CLI's own manual invocation) or `dry_run=True` always bypasses it.
 
-    Known, deliberate residual (#345 adversarial-review THEORETICAL-2):
-    `git worktree remove` reports a worktree holding ONLY gitignored files
-    (a stray `.env`, a `target/` build dir) as clean and removes it, taking
-    those files with it -- this is the intended disk-reclaim behaviour and
-    matches git's own definition of "safe" (it still correctly REFUSES on
-    any untracked, non-ignored file). A per-worktree gitignored SECRET
-    would be lost this way; a dead worker's own worktree is never the
-    source of truth for one.
+    #1380 (owner 20.11.2026) closed the #345 THEORETICAL-2 residual: `git
+    worktree remove` deletes gitignored files of a "clean" tree, so every
+    candidate passes `disk_guard_lane_wt.final_reason` first -- only build
+    output, caches and test output may go with it (never a `.env`, a
+    `private/` dir, a hidden skip-worktree edit or a nested checkout), and
+    the walk (`_checkout_roots`) never enters ~/uploads or work-products.
+    git itself still REFUSES any untracked, non-ignored file
+    (`-c status.showUntrackedFiles=normal` in `_worktree_git`).
     """
     import time as _time
     now = _time.time() if now is None else now
@@ -584,6 +584,11 @@ def sweep_stale_worktrees(home=None, dry_run: bool = False, now=None, log_path=N
             results.append(entry)
             continue
 
+        from watchdog.disk_guard_lane_wt import final_reason   # #1380, before any unlock
+        if (kept := final_reason(c["path"], git_run)) is not None:
+            entry["reason"] = "%s -- left in place" % kept[0]
+            results.append(entry)
+            continue
         if kind == "locked_dead":
             # #348 -- a lock created by a now-provably-dead session must be
             # released before `worktree remove` can touch it at all; git
@@ -594,26 +599,18 @@ def sweep_stale_worktrees(home=None, dry_run: bool = False, now=None, log_path=N
                 entry["reason"] = "unlock refused -- left in place"
                 results.append(entry)
                 continue
-            # falls through to the SAME remove+branch-delete flow below,
-            # identical to a plain "worktree" candidate from here on.
-
+            # falls through to the SAME remove+branch-delete flow below.
         rc = git_run(["worktree", "remove", c["path"]], c["repo"],
                      timeout=STALE_WORKTREE_REMOVE_TIMEOUT_S)
         if rc is None:
             if kind == "locked_dead":
-                # #348 adversarial-review MINOR-1 (TRIGGERED live): the
-                # unlock above already succeeded -- if remove now refuses
-                # (a dirty file raced in between classification and this
-                # candidate's own turn, a permissions blip, a timeout),
-                # leaving the worktree UNLOCKED with its forensic pid/
-                # start reason gone forever would silently strip a real
-                # protection, and the very next ORDINARY #345 sweep would
-                # finish the job with NONE of this function's 5 safety
-                # checks. Best-effort restore the ORIGINAL lock+reason;
-                # the outcome is not re-verified further here -- a failed
-                # re-lock just means the next sweep re-discovers this
-                # worktree with an unparseable/no reason and refuses
-                # again on that basis, never worse than today's state.
+                # #348 adversarial-review MINOR-1 (TRIGGERED live): the unlock
+                # above succeeded, so a refused remove (a dirty file raced in,
+                # a permissions blip, a timeout) must not leave the worktree
+                # UNLOCKED with its forensic pid/start reason gone -- the next
+                # ordinary sweep would finish it with none of the 5 safety
+                # checks. Best-effort restore the ORIGINAL lock+reason; a
+                # failed re-lock means the next sweep refuses on that basis.
                 relock = ["worktree", "lock", c["path"]]
                 if c.get("lock_reason"):
                     relock += ["--reason", c["lock_reason"]]
