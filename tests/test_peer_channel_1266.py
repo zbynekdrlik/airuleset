@@ -354,7 +354,12 @@ class TestListenerHardening(_Env):
         b = self.peer("beta")
         b.start_listener()
         idle = [self._connect(b.sock_path) for _ in range(pc.MAX_CONNS)]
-        time.sleep(0.3)
+        # Wait until the listener has really taken every slot (a fixed 0.3 s sleep
+        # raced the accept thread under the push's full-suite load, 20.11.2026).
+        deadline = time.monotonic() + 10
+        while b.slots._value and time.monotonic() < deadline:
+            time.sleep(0.02)
+        self.assertEqual(b.slots._value, 0)
         extra = self._connect(b.sock_path)
         self.assertEqual(extra.recv(10), b"")        # closed at once, no thread
         self.assertIn("too many connections",
