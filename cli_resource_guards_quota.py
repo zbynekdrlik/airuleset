@@ -24,7 +24,9 @@ the files through its ``guard_files()`` + atomic ``_install``, and embeds
 * #1387: the hourly ceiling unit also runs the fleetbackup ACL refresh under
   the same lock (``cli_resource_guards_fleetbackup``).
 """
-from cli_resource_guards_fleetbackup import render_fleetbackup_hourly_call
+from cli_resource_guards_fleetbackup import (
+    FLEETBACKUP_REFRESH_BUDGET_S, render_fleetbackup_hourly_call,
+)
 
 # #950: per-user disk quota on shared-stream boxes.  ext4 usrquota via legacy
 # journaled quota (NOT `tune2fs -O quota` which is REFUSED on a mounted root
@@ -262,7 +264,8 @@ def render_quota_ceiling_service() -> str:
     (a ``Persistent=true`` catch-up at boot waits for its recount) AND the
     daily refresh: ``hourly`` and ``daily`` both elapse at 00:00, and the
     ordering makes systemd queue this job behind the refresh instead of racing
-    it for the lock. ``TimeoutStartSec`` exceeds the lock wait. No
+    it for the lock. ``TimeoutStartSec`` exceeds the lock wait, plus the #1387
+    fleetbackup refresh's budget (it walks the two trees of every account). No
     ``ExecStopPost=quotaon``: nothing here ever switches quota off."""
     return (
         "# Managed by airuleset (#1140 D) — hourly usage-aware quota ceilings.\n"
@@ -276,7 +279,7 @@ def render_quota_ceiling_service() -> str:
         "Type=oneshot\n"
         "TimeoutStartSec=%d\n"
         "ExecStart=/bin/bash %s\n"
-        % (QUOTA_LOCK_WAIT_S + 300, QUOTA_CEILING_SCRIPT_PATH)
+        % (QUOTA_LOCK_WAIT_S + 300 + FLEETBACKUP_REFRESH_BUDGET_S, QUOTA_CEILING_SCRIPT_PATH)
     )
 
 
@@ -329,6 +332,15 @@ def _render_quota_kmod_block() -> str:
     )
 
 
+def _render_is_stream_test(path_expr: str) -> str:
+    """#1387 review: the bash test "this box-class marker says shared-stream".
+    Root reads a file the ACCOUNT owns: a FIFO there (or a symlink to one)
+    blocked a plain grep forever and hung every loop over the homes (an
+    attacker-held ceiling/push). Regular, non-symlink files only, bounded."""
+    return ('[ -f %s ] && [ ! -L %s ] && timeout 5 grep -q "shared-stream" -- %s 2>/dev/null'
+            % (path_expr, path_expr, path_expr))
+
+
 def _render_quota_limits_block() -> str:
     """#950 fix-forward D3+D4: usage-aware per-user quota application.
 
@@ -373,8 +385,7 @@ def _render_quota_limits_block() -> str:
         '    # ALL accounts together is at most %d%% of the free space\n'
         '    fs_share_n=0\n'
         '    for home in /home/*; do\n'
-        '        if grep -q "shared-stream" "$home/.claude/airuleset-box-class" 2>/dev/null;'
-        ' then fs_share_n=$(( fs_share_n + 1 )); fi\n'
+        '        if @@IS_STREAM_HOME@@; then fs_share_n=$(( fs_share_n + 1 )); fi\n'
         '    done\n'
         '    [ "$fs_share_n" -ge 1 ] || fs_share_n=1\n'
         '    fs_bound_kib=$(( fs_avail_kib * %d / 100 / fs_share_n ))\n'
@@ -389,7 +400,7 @@ def _render_quota_limits_block() -> str:
         '    [ -d "$home" ] || continue\n'
         '    u=$(basename "$home")\n'
         '    bcf="$home/.claude/airuleset-box-class"\n'
-        '    grep -q "shared-stream" "$bcf" 2>/dev/null || continue\n'
+        '    @@IS_STREAM_BCF@@ || continue\n'
         '    # Y6: repquota failure -> no usage for ANY user, never guess 0\n'
         '    if [ "$rq_rc" -ne 0 ]; then\n'
         '        echo "  ⚠ quota: repquota gave no usage for $u'
@@ -461,7 +472,7 @@ def _render_quota_limits_block() -> str:
         '    [ -d "$home" ] || continue\n'
         '    u=$(basename "$home")\n'
         '    bcf="$home/.claude/airuleset-box-class"\n'
-        '    grep -q "shared-stream" "$bcf" 2>/dev/null || continue\n'
+        '    @@IS_STREAM_BCF@@ || continue\n'
         '    # Re-read the applied hard limit for THIS user\n'
         '    applied_hard=$(echo "$rq_verify" | awk -v u="$u" \'$1==u{print $5}\')\n'
         '    applied_soft=$(echo "$rq_verify" | awk -v u="$u" \'$1==u{print $4}\')\n'
@@ -490,7 +501,9 @@ def _render_quota_limits_block() -> str:
            QUOTA_SOFT_KIB, QUOTA_HARD_KIB,
            QUOTA_FS_AVAIL_BOUND_PCT,
            QUOTA_GRACE_S)
-    ).replace("@@ROOM_FLOOR@@", room)
+    ).replace("@@ROOM_FLOOR@@", room).replace(
+        "@@IS_STREAM_HOME@@", _render_is_stream_test('"$home/.claude/airuleset-box-class"')
+    ).replace("@@IS_STREAM_BCF@@", _render_is_stream_test('"$bcf"'))
 
 
 def _render_quota_timer_enable_block(timer: str, label: str) -> str:
