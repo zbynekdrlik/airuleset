@@ -114,6 +114,68 @@ class TypeVerifyReadsACollapsedBox(unittest.TestCase):
         self.assertEqual(len(sleeps), stash.TYPE_VERIFY_SETTLE_POLLS - 1)
 
 
+def _box_lines(cap):
+    """(above incl. the top border, box rows, bottom border + footer) of a capture."""
+    lines = cap.splitlines()
+    top = next(i for i, ln in enumerate(lines) if "more ─" in ln)
+    bot = max(i for i, ln in enumerate(lines) if set(ln.strip()) == {"─"})
+    return lines[:top + 1], lines[top + 1:bot], lines[bot:]
+
+
+class CollapsedReaderRefusesLookalikes(unittest.TestCase):
+    """The reader's own guards: each one is the only thing between a lookalike
+    render and an Enter on the stranded path."""
+
+    def setUp(self):
+        from watchdog import collapsed_box
+        self.cb = collapsed_box
+        self.cap, self.text = fixture("own_full_176x50")
+        self.above, self.body, self.foot = _box_lines(self.cap)
+
+    def _join(self, *parts):
+        return "\n".join(ln for part in parts for ln in part) + "\n"
+
+    def test_the_real_box_with_an_overflowing_agent_strip_still_reads(self):
+        strip = ["  ● main", "  ◯ opus-5.5 local_agent · Listing issues via gh · 118k",
+                 "  ↓ 1 more"]
+        cap = self._join(self.above, self.body, self.foot, strip)
+        self.assertTrue(self.cb.own_tail(cap, self.text))
+        self.assertIs(wd.pane_goal_armed(cap), False)
+
+    def test_a_quoted_collapsed_box_above_a_real_draft_is_not_the_box(self):
+        real = ["  owner draft row one", "  owner draft row two",
+                "─── ↓ 1 more " + "─" * 150]           # the real box, cursor moved up
+        cap = self._join(self.above, self.body, self.foot[:1], real, self.foot[1:])
+        self.assertIsNone(self.cb.rows(cap))
+        self.assertFalse(self.cb.own_tail(cap, self.text))
+
+    def test_the_walk_never_crosses_a_strict_separator(self):
+        cap = self._join(self.above, self.body[:5], ["─" * 176], self.body[5:], self.foot)
+        self.assertIsNone(self.cb.rows(cap))
+
+    def test_a_zero_hidden_count_proves_nothing(self):
+        cap = self.cap.replace("↑ 2 more", "↑ 0 more")
+        self.assertFalse(self.cb.own_tail(cap, self.text))
+
+    def test_too_few_visible_chars_prove_nothing(self):
+        cap = self._join(self.above, self.body[-1:], self.foot)   # 66 chars visible
+        self.assertFalse(self.cb.own_tail(cap, self.text))
+
+    def test_a_blank_row_inside_the_box_is_content(self):
+        cap = self._join(self.above, self.body[:10], [""], self.body[10:], self.foot)
+        self.assertFalse(self.cb.own_tail(cap, self.text))
+
+    def test_the_row_count_must_match_the_pane_width(self):
+        self.assertTrue(self.cb.own_tail(self.cap, self.text, cols=176))
+        self.assertFalse(self.cb.own_tail(self.cap, self.text, cols=150))
+        self.assertFalse(self.cb.own_tail(self.cap, self.text, cols=0))   # unknown width
+
+    def test_holds_sees_our_collapsed_tail(self):
+        self.assertTrue(self.cb.holds(self.cap, self.text))
+        fcap, _ = fixture("foreign_176x50")
+        self.assertFalse(self.cb.holds(fcap, self.text))
+
+
 class BoxReadersRecogniseOurCollapsedText(unittest.TestCase):
     """Item 2: never `box=empty`, never `not our own leftover` for our own text."""
 
@@ -193,12 +255,14 @@ class CollapsingBoxFake(DeliverGoalFakeTmux):
     FOOT = ["  wk 91%(3d)  opus5.5  I 24▲  ctx 735K  caveman",
             "  ⏵⏵ bypass permissions on · 1 shell · ↓ to manage"]
 
-    def __init__(self, spinner=False, **kw):
+    def __init__(self, spinner=False, client_activity=None, lag=False, **kw):
         bare = "\n".join(self.HEAD + ["─" * self.COLS, "❯", "─" * self.COLS]
                          + self.FOOT) + "\n"
         super().__init__([(PID, "claude", CWD, "111")], bare, model_type=True,
                          wrap_width=self.COLS, **kw)
         self.spinner = spinner
+        self.client_activity = client_activity     # epoch of an attached client's input
+        self.lag = lag                             # the last row never redraws
 
     def _render_wrapped(self):
         rows = _cc_rows(self.box, self.COLS)
@@ -206,6 +270,7 @@ class CollapsingBoxFake(DeliverGoalFakeTmux):
         if len(rows) > self.MAX_ROWS:
             top = ["─── ↑ %d more " % (len(rows) - self.MAX_ROWS) + "─" * 150]
             body = ["  " + r for r in rows[-self.MAX_ROWS:]]
+            body = body[:-1] if self.lag else body
         else:
             top = ["─" * self.COLS]
             body = ["❯\xa0" + rows[0]] + ["  " + r for r in rows[1:]]
@@ -216,6 +281,10 @@ class CollapsingBoxFake(DeliverGoalFakeTmux):
             self.sent.append(argv)
             self.box += bytes.fromhex("".join(argv[argv.index("-H") + 1:])).decode()
             return ""
+        if "display-message" in argv and argv[-1] == "#{pane_width}":
+            return "%d\n" % self.COLS
+        if "list-clients" in argv:
+            return "" if self.client_activity is None else "%d\n" % self.client_activity
         return super().__call__(argv, timeout)
 
 
@@ -234,11 +303,19 @@ def _project(testcase, human_prompt=None):
     return proj, tpath
 
 
-def _deliver(testcase, fake, proj, origin="self-callback"):
-    now = time.time()
+def _deliver(testcase, fake, proj, origin="self-callback", state=None, now=None):
+    now = time.time() if now is None else now
     return goal.deliver_goal(SID, CWD, TEXT, "full", run=fake, projects_dir=proj,
-                             now=now, state={}, request_ts=now - 60,
-                             sleep_fn=lambda *_: None, origin=origin)
+                             now=now, state={} if state is None else state,
+                             request_ts=now - 60, sleep_fn=lambda *_: None, origin=origin)
+
+
+def _typed_state(now, text=TEXT, ago=120):
+    """The first-person record our own earlier (head-checkpointed) type left."""
+    from watchdog import collapsed_box
+    state = {}
+    collapsed_box.note_typed(state, PID, text, now - ago)
+    return state
 
 
 class DeliverGoalArmsThroughACollapsedBox(unittest.TestCase):
@@ -247,7 +324,8 @@ class DeliverGoalArmsThroughACollapsedBox(unittest.TestCase):
     def setUp(self):
         _isolate_goal_state(self)
 
-    def test_the_payload_really_collapses_at_the_fleet_geometry(self):
+    def test_the_fake_collapses_the_full_payload(self):
+        # the FAKE's own wrap (CC's real render is locked in test_goal_box_rows_1381)
         self.assertGreater(len(_cc_rows(TEXT, 176)), CollapsingBoxFake.MAX_ROWS)
 
     def test_a_fresh_arm_is_verified_and_submitted_once(self):
@@ -261,10 +339,67 @@ class DeliverGoalArmsThroughACollapsedBox(unittest.TestCase):
 
     def test_our_stranded_collapsed_goal_is_submitted_not_retyped(self):
         proj, tpath = _project(self, human_prompt="/autopilot")
-        fake = CollapsingBoxFake(transcript_path=str(tpath), initial_box=TEXT)
-        word = _deliver(self, fake, proj)
+        now = time.time()
+        fake = CollapsingBoxFake(transcript_path=str(tpath), initial_box=TEXT,
+                                 client_activity=now - 600)   # last key before we typed
+        word = _deliver(self, fake, proj, state=_typed_state(now), now=now)
         self.assertEqual(word, "sent", fake.keys())
         self.assertEqual(fake.keys(), ["Enter"])     # no C-s, no retype, no clear
+
+    def _refused(self, box, state, client_activity=None):
+        proj, tpath = _project(self, human_prompt="/autopilot")
+        fake = CollapsingBoxFake(transcript_path=str(tpath), initial_box=box,
+                                 client_activity=client_activity)
+        word = _deliver(self, fake, proj, state=state, now=self.now)
+        self.assertEqual(word, "skip:collapsed-unsubmitted", fake.keys())
+        self.assertEqual(fake.sent, [])               # no Enter, and never a C-s stash
+        self.assertIn(word, goal._GOAL_KEYSTROKE_SKIPS)   # counted: no livelock
+
+    def test_without_our_typed_record_a_collapsed_goal_gets_no_key(self):
+        self.now = time.time()
+        self._refused(TEXT, {})
+
+    def test_a_head_swallowed_collapsed_box_gets_no_key(self):
+        self.now = time.time()                   # #720: a junk prompt, never submitted
+        self._refused(TEXT[1:], {})
+
+    def test_any_client_input_since_we_typed_vetoes_the_hidden_head(self):
+        self.now = time.time()                   # the owner may have edited the head
+        self._refused("NIE, toto nespúšťaj, chcem iné zadanie: " + TEXT,
+                      _typed_state(self.now), client_activity=self.now - 60)
+        self._refused(TEXT, _typed_state(self.now), client_activity=self.now - 60)
+
+    def test_a_doubled_goal_fails_the_hidden_row_count(self):
+        self.now = time.time()
+        self._refused(TEXT + " " + TEXT, _typed_state(self.now))
+
+    def test_an_unconfirmed_type_records_it_and_the_next_sweep_submits(self):
+        proj, tpath = _project(self, human_prompt="/autopilot")
+        state, now = {}, time.time()
+        fake = CollapsingBoxFake(transcript_path=str(tpath), lag=True)
+        self.assertEqual(_deliver(self, fake, proj, state=state, now=now),
+                         "skip:verify-failed")
+        self.assertNotIn("Enter", fake.keys())        # never an Enter on an unproven box
+        self.assertIn(PID, state.get("goal_collapsed_typed", {}))
+        fake.lag, fake.sent = False, []               # the redraw caught up
+        self.assertEqual(_deliver(self, fake, proj, state=state, now=now + 300), "sent")
+        self.assertEqual(fake.keys(), ["Enter"])
+        self.assertNotIn(PID, state["goal_collapsed_typed"])
+
+    def test_a_swallowed_enter_gets_one_corrective_escape_enter(self):
+        proj, tpath = _project(self, human_prompt="/autopilot")
+        fake = CollapsingBoxFake(transcript_path=str(tpath), enters_swallowed=1)
+        self.assertEqual(_deliver(self, fake, proj), "sent", fake.keys())
+        self.assertEqual(fake.keys().count("Escape"), 1)
+
+    def test_a_twice_swallowed_enter_backs_our_own_text_out(self):
+        # #306 kept for a collapsed box: it was verified bare before our type, so
+        # every char is ours; the box ends bare, never two Escapes.
+        proj, tpath = _project(self, human_prompt="/autopilot")
+        fake = CollapsingBoxFake(transcript_path=str(tpath), enters_swallowed=2)
+        self.assertEqual(_deliver(self, fake, proj), "skip:verify-failed")
+        self.assertEqual(fake.box, "")
+        self.assertEqual(fake.keys().count("Escape"), 1)
 
     def test_a_foreign_collapsed_draft_gets_no_keystroke(self):
         proj, tpath = _project(self)

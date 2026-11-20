@@ -9,6 +9,7 @@ except the four full-authority variants pinned at their measured rows (a
 down-only ratchet: growth fails, a shorter text must lower its pin).
 """
 
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -20,6 +21,9 @@ import cli_tmux_provisioning  # noqa: E402
 import goal_registry  # noqa: E402
 
 FIX = REPO / "tests" / "fixtures" / "collapsed_box_1381"
+# The four over-budget variants' pins as merged (#1381): a pin may only go DOWN.
+FROZEN_PINS = {("full", None): 22, ("full", "infra"): 23,
+               ("full", "review"): 22, ("full", "quality"): 21}
 CAPTURES = {                       # fixture -> pane width it was captured at
     "own_full_176x50": 176, "own_review_100x50": 100, "own_quality_176x50": 176,
     "fits_fnm_infra_176x50": 176, "foreign_176x50": 176, "fits_foreign_176x50": 176,
@@ -45,7 +49,17 @@ def _real_rows(cap):
 
 
 class BoxRowsMatchesRealClaudeCode(unittest.TestCase):
-    def test_box_rows_reproduces_every_real_capture_row_exact(self):
+    def test_box_rows_matches_every_full_render_row_exact(self):
+        """Real CC 2.1.327 boxes drawn WHOLE (no collapse): the 8 shipped variants
+        at 176 cols and width / wrap probes (a full row carrying the next row's
+        space, hard breaks, wide chars, `→ ≤ —` narrow, `⚠️` wide)."""
+        renders = json.loads((FIX / "full_renders.json").read_text(encoding="utf-8"))
+        self.assertGreaterEqual(len(renders), 60)
+        for r in renders:
+            with self.subTest(render=r["name"]):
+                self.assertEqual(_gb().box_rows(r["text"], r["cols"]), r["rows"])
+
+    def test_box_rows_matches_the_collapsed_captures_tail_and_count(self):
         for name, cols in CAPTURES.items():
             cap = (FIX / (name + ".txt")).read_text(encoding="utf-8")
             text = (FIX / (name + ".payload")).read_text(encoding="utf-8")
@@ -65,7 +79,16 @@ class BoxRowsMatchesRealClaudeCode(unittest.TestCase):
 
     def test_display_cells(self):
         cells = _gb().cells
-        self.assertEqual([cells(c) for c in "a—é✅❓🏁→"], [1, 1, 1, 2, 2, 2, 2])
+        self.assertEqual([cells(c) for c in "a—é→≤✅❓🏁"], [1, 1, 1, 1, 1, 2, 2, 2])
+        self.assertEqual((cells("⚠"), cells("⚠\ufe0f")), (1, 2))
+
+    def test_the_row_cap_follows_the_pane_height(self):
+        gb = _gb()
+        self.assertEqual([gb.box_max_rows(h, f) for h, f in
+                          ((50, 2), (50, 3), (40, 3), (30, 3), (24, 3))],
+                         [20, 19, 14, 9, 6])           # measured on CC 2.1.327
+        self.assertEqual(gb.GOAL_BOX_ROWS,
+                         int(cli_tmux_provisioning.TMUX_DEFAULT_SIZE.split("x")[1]))
 
 
 class EveryVariantFitsTheBox(unittest.TestCase):
@@ -88,6 +111,13 @@ class EveryVariantFitsTheBox(unittest.TestCase):
                     self.assertEqual(n, pin)
                     self.assertGreater(pin, gb.GOAL_BOX_MAX_ROWS)
         self.assertLessEqual(set(gb.OVER_BUDGET_ROWS), set(goal_registry.variant_specs()))
+
+    def test_pins_only_go_down(self):
+        pins = _gb().OVER_BUDGET_ROWS
+        self.assertLessEqual(set(pins), set(FROZEN_PINS))
+        for key, pin in pins.items():
+            with self.subTest(variant=key):
+                self.assertLessEqual(pin, FROZEN_PINS[key])
 
     def test_a_growing_clause_fails_variant_check(self):
         night = next(c for c in goal_registry.CLAUSES if c.id == "night")
