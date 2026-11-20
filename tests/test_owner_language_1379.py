@@ -177,6 +177,33 @@ class TestPromptLanguage(unittest.TestCase):
             with self.subTest(prompt=p):
                 self.assertEqual(ol.prompt_language(p), "sk")
 
+    def test_owner_corpus_prompts_are_slovak(self):
+        # real owner prompts from the controller's main session that a first
+        # cut read as "unknown" (corpus replay before shipping)
+        for p in ("pokracuj", "cize co dalej?", "zopakuj otazku", "hotovo, over",
+                  "goal nechcem", "ty neries"):
+            with self.subTest(prompt=p):
+                self.assertEqual(ol.prompt_language(p), "sk")
+
+    def test_english_instruction_wrapping_a_slovak_ticket_is_english(self):
+        # corpus replay: an eval wrapper with a pasted Slovak ticket body
+        ticket = ("Ticket: relokácia dát na nový disk, dopočet swapu a deklarácia "
+                  "v zázname. Je to potrebné preto, lebo disk je plný a služby "
+                  "padajú; riešenie musí byť idempotentné, bez straty dát, a ešte "
+                  "pred tým, ako sa spustí ďalší krok, musí overiť cieľ. ") * 3
+        p = ("You are the design author for a ticket in a Python (stdlib-only) "
+             "operations repo. Read the ticket below, trace the root cause in the "
+             "code and write the design with the chosen approach and the rejected "
+             "alternative. The ticket:\n\n" + ticket)
+        sk, en = ol.scores(ol.prose_words(p))
+        self.assertGreater(sk, en)                  # Slovak by volume ...
+        self.assertEqual(ol.prompt_language(p), "en")   # ... English by its lead
+
+    def test_hyphenated_and_dotted_tokens_are_not_words(self):
+        words = ol.prose_words("run the pre-commit hook on v0.1.688 and e-mail it")
+        for w in ("pre", "commit", "e", "mail"):
+            self.assertNotIn(w, words)
+
     def test_english_prompt(self):
         self.assertEqual(ol.prompt_language("Please fix the build and push it"), "en")
 
@@ -250,10 +277,33 @@ class TestEvaluate(unittest.TestCase):
         t = _Transcript(self).user([{"type": "text", "text": OWNER_PROMPTS[1]}])
         self.assertEqual(self._eval(t.assistant(EN_SORRY), EN_SORRY), "block")
 
-    def test_image_only_prompt_is_not_checked(self):
-        t = _Transcript(self).prompt(OWNER_PROMPTS[0]).assistant("…").user(
-            [{"type": "image", "source": {"type": "base64", "data": "AAAA"}}])
+    def test_signal_free_prompt_inherits_the_owner_language(self):
+        image = [{"type": "image", "source": {"type": "base64", "data": "AAAA"}}]
+        for later in ("1", image, "continue"):
+            with self.subTest(later=str(later)[:20]):
+                t = _Transcript(self).prompt(OWNER_PROMPTS[0]).assistant("…").user(later)
+                self.assertEqual(self._eval(t.assistant(EN_ANSWER), EN_ANSWER), "block")
+                t = _Transcript(self).prompt("Please check the card reader and the logs")
+                t.assistant("…").user(later)
+                self.assertEqual(self._eval(t.assistant(EN_ANSWER), EN_ANSWER), "allow")
+
+    def test_signal_free_prompt_alone_is_not_checked(self):
+        t = _Transcript(self).prompt("1")
         self.assertEqual(self._eval(t.assistant(EN_ANSWER), EN_ANSWER), "allow")
+
+    def test_inheritance_stops_at_a_compact_summary(self):
+        t = _Transcript(self).prompt(OWNER_PROMPTS[0]).user(
+            "Táto relácia pokračuje z predchádzajúcej konverzácie.",
+            isCompactSummary=True).assistant("…").prompt("1")
+        self.assertEqual(self._eval(t.assistant(EN_ANSWER), EN_ANSWER), "allow")
+
+    def test_inheritance_is_bounded(self):
+        for n, want in ((ol.PROMPT_LOOKBACK - 1, "block"), (ol.PROMPT_LOOKBACK, "allow")):
+            with self.subTest(n=n):
+                t = _Transcript(self).prompt(OWNER_PROMPTS[0])
+                for _ in range(n):
+                    t.assistant("…").prompt("1")
+                self.assertEqual(self._eval(t.assistant(EN_ANSWER), EN_ANSWER), want)
 
     def test_compact_summary_last_is_not_checked(self):
         t = _Transcript(self).prompt(OWNER_PROMPTS[0]).user(
