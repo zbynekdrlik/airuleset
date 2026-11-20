@@ -11,6 +11,9 @@ paths:
   - "cli_logrotate_owner.py"
   - "cli_fail2ban.py"
   - "cli_sshd_maxstartups.py"
+  - "cli_controller_fleetbackup.py"
+  - "tests/test_fleetbackup*.py"
+  - "tests/_fleetbackup_1387_helpers.py"
 ---
 
 ### airuleset internals — per-user quota on shared-stream boxes (#950 / #1140)
@@ -49,3 +52,13 @@ paths:
 - **OpenSSH 9.6 keeps the LAST `MaxStartups` it reads but the FIRST `PerSourceMaxStartups` (measured with `sshd -T` on two lines, 19.11.).** The first rollout assumed first-wins, named the file `50-`, and lost on gk to a hand-made `60-airuleset-maxstartups.conf` (30:30:150, #358); the live read-back caught it. The file is now `90-` and retires our own marked `50-`. Never assume one sshd directive's precedence from another: test the pair. The read-back therefore compares the value `sshd -T` resolves (root only: a non-root `sshd -T` prints nothing). `sshd -T` parses the files, not the running daemon, so a sha256 stamp in `/run/airuleset` records what the daemon last reloaded: an unchanged file whose earlier reload failed reloads again (review 🟡).
 - **Validate, then reload only on change.** `cli_sshd_maxstartups` writes through `_install`, which sets `DGROOT_WROTE` when it really replaced a file. `sshd -t` gates the reload; a refused config this run wrote is removed and fails the leg, one a foreign file broke fails the leg and leaves ours alone. A full-apply harness (`test_disk_guard_root_apply_1223`) stubs every system tool the script calls, so a new tool in the apply needs a new stub there.
 - **#1355 — the controller is outside the #841 root fan-out, so its root config is a LOCAL `cmd_install` provisioner (`cli_controller_journal`, journald `SystemMaxUse=1G`).** Idempotence on file BYTES alone hides a failed `try-restart`: the cap sits on disk but is never live, and every later install says `unchanged`. So compare journald's `ActiveEnterTimestamp --timestamp=unix` with the drop-in mtime and re-restart + rotate when journald is older. Same ticket: the daily `sweep_claude_scratch` now consumes the live-session `stale_children` (`cli_scratch_children`), not only the >= 80 % drain. A scripted `str.replace` on a multi-line block that recurs in the same file (`discovery error` + `for c in candidates:` exists in BOTH the scratch and transcript sweeps) edits every site: assert `s.count(old) == 1` first.
+
+### fleetbackup read-only ACLs on subdev (#1387)
+
+- **A named-ACL traversal grant opens every sibling through ACL_OTHER, and a named `---` on each sibling is not enough.** A file rewritten as temp file + rename is a NEW inode with no entry. systemd `--user` units run with UMask 0022 whatever the shell umask (watchdog state every 60 s, `git config`, `settings.json`, shell history), so those names were readable almost all the time. Two reviews reproduced it. Fix: a default `d:u:<x>:---,d:g::---,d:o::---` on every traversed dir, so new children are born closed. Pre-create the granted subtrees: a file born under the closed default has mask `---`, and a `-n` grant can never open it.
+- **A recalculating `setfacl -m u:x:r-x` widens.** On a dir whose owner ran `chmod 700` after an ACL existed, it restores group rwx (measured). In the same call, set `g::---` on granted trees and `g::<effective>` on traversal dirs. Refuse a dir that carries any other named entry.
+- **Root may only add a deny, `setfacl -P -n -m u:x:---`.** `-P` skips a symlink argument even without `-R` (acl 2.3.2, measured). Grants run as the account (`runuser -u <u> -- env -i …`).
+- **`rrsync -ro` still accepts `--copy-unsafe-links`**, so a symlink planted in a granted tree served `/etc`. The forced command is a wrapper that refuses the symlink-following options and then execs rrsync.
+- **Fail-closed has to be proven.** Withdrawal = `usermod --expiredate 1` (pam_unix account) + key removal, only when the key dir is root-owned + read-back; the key also carries `expiry-time`. Withdraw only on OUR failure. An owner who re-opens its own data fails only its own account, otherwise one tenant switches off everyone's backup.
+- **A root loop reading an account-owned file needs `[ -f ] && [ ! -L ] && timeout 5 …`.** A FIFO marker hung a plain `grep` (the quota loops too).
+- **Tests:** a non-root test cannot probe as another uid. Run real setfacl with `nobody`/`daemon` as stand-ins, owner-permission proxies for the checker, and SAVE every record stream the read-back receives. Round-1 mutants survived because the stub discarded them.
