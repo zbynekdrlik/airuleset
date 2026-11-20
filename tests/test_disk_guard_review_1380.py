@@ -272,7 +272,6 @@ def test_an_orphan_gitdir_tree_is_kept(repo):
     (orphan / "uncommitted-work.py").write_text("x = 1\n")
     rows = discover_reclaimable_worktrees(home=str(repo.home), now=_LATER,
                                           in_live_use=lambda _p: False,
-                                          recency_fn=lambda *_a: 5 * 86400,
                                           live_gate=LiveLaneGate(ids=set(), now=_LATER))
     row = [r for r in rows if r["path"] == str(orphan)][0]
     assert row["reason"] and "orphan" in row["reason"], row
@@ -280,19 +279,22 @@ def test_an_orphan_gitdir_tree_is_kept(repo):
 
 # --- 🔵 the lane source must not take the agent rows down with it -------- #
 def test_a_lane_source_error_keeps_the_agent_rows(repo, monkeypatch, tmp_path):
-    agent = _lane(repo, "agent-ok", where="devel/x/.claude/worktrees")
+    agent = _lane(repo, "agent-ok", where="devel/x/.claude/worktrees", push=False)
     _lane(repo, "10028")
 
     def boom(*_a, **_k):
         raise RuntimeError("lane reader broke")
     monkeypatch.setattr(lane, "_repo_lane_rows", boom)
+    from watchdog import disk_guard_wt_cache as wtc
+    saved = []
+    monkeypatch.setattr(wtc.VerdictCache, "save", lambda self, seen: saved.append(list(seen)))
     rows = dgw.discover_stale_agent_worktrees(
         home=str(repo.home), now=_LATER, live_check_fn=lambda _p: False,
         live_gate=LiveLaneGate(ids=set(), now=_LATER), cache_path=tmp_path / "v.json")
-    assert _row(rows, agent)["kind"] == "worktree-remove"
+    assert "not contained" in _row(rows, agent)["reason"]       # a cacheable agent verdict
     assert [r for r in rows if r.get("cls") == "lane-worktree" and r["kind"] == "skip"
             and "lane source error" in r["reason"]], rows
-    assert (tmp_path / "v.json").exists()
+    assert saved and str(agent) in saved[0], "the cache must still be saved"
 
 
 # --- 🔵 a protected row is no runnable action ----------------------------- #

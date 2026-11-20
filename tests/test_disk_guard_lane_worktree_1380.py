@@ -127,7 +127,7 @@ def test_clean_pushed_idle_lanes_are_planned(box, sleeper):
 
 @pytest.mark.parametrize("name,why", [
     ("dirty", "dirty"), ("unpushed", "not contained"), ("locked", "locked"),
-    ("secret", "precious"), ("busy", "live process")])
+    ("secret", "ignored file"), ("busy", "live process")])
 def test_unsafe_lanes_are_never_planned(box, sleeper, name, why):
     row = _lanes(_discover(box))[name]
     assert row["kind"] == "skip", row
@@ -193,10 +193,15 @@ def test_a_tree_that_turns_dirty_after_planning_is_refused(box):
 
 def test_worktree_rung_keeps_a_dirty_reachable_tree(box):
     """#939 reclaimed a dirty tree when HEAD was reachable (``--force``); a
-    dirty tree is uncommitted work and is kept now."""
+    dirty tree is uncommitted work and is kept now. (The #834 rung judges only
+    ``.claude/worktrees`` entries since review round 1, so the agent tree.)"""
     from cli_worktree_reclaim import discover_reclaimable_worktrees
+    agent = box["agent"]
+    _commit(agent, "w.txt")
+    _git(agent, "push", "-q", "origin", "worktree-agent-abc")
+    (agent / "notes.md").write_text("uncommitted\n")
     rows = discover_reclaimable_worktrees(
         home=str(box["home"]), now=_LATER, in_live_use=lambda _p: False,
         live_gate=LiveLaneGate(ids=set(), now=_LATER))
-    row = [r for r in rows if r["path"] == str(box["wts"]["dirty"])][0]
+    row = [r for r in rows if r["path"] == str(agent)][0]
     assert row["reason"] is not None and "dirty" in row["reason"], row
