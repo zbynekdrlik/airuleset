@@ -2071,23 +2071,22 @@ def cmd_push(args):
 
     _deploy_to_all_remotes(failed, auth_failed)
 
-    # 4. Shared-stream resource guardrails (#775) — apply per-user systemd cgroup
-    # ceilings on the shared-stream boxes (subdev) over `ssh root@<host>`, so a
-    # single runaway stream can never OOM-collapse the whole box. This is a
-    # SEPARATE root connection from the per-user deploy loop above (stream
-    # accounts are sudo-less). NON-FATAL + LOUD by construction: until the
-    # dev1→root@subdev operator key is authorized (a one-time GATEKEEPER-ACTION)
-    # it is a fail-loud no-op, and the `watchdog.resource_guard` verify job is
-    # the standing backstop. `_deploy_to_all_remotes` already `sys.exit(1)`s on a
-    # failed deploy, so this runs on a clean deploy; a guard failure never fails
-    # the push (best-effort like `provision_owner_sudo`, #659).
+    # 4. Per-user resource guardrails, NON-FATAL + LOUD (`⚠ RESOURCE-GUARDS FAILED
+    # (<name>)`, never fails the push; runs after a clean deploy): #775 cgroup
+    # ceilings on the shared-stream box (root ssh to subdev, `watchdog.resource_guard`
+    # is the backstop) and #1384 the workstation MemoryHigh throttle (dev1, as
+    # `newlevel` + `sudo -n`, #1223). Separate from the per-user deploy loop above.
     print(f"\n{'=' * 50}")
-    print("Applying shared-stream resource guardrails (#775)...")
+    print("Applying resource guardrails (#775 shared-stream, #1384 workstation)...")
     try:
         airuleset.provision_shared_stream_guards()
     except Exception as e:  # noqa: BLE001 — best-effort, never break the push
         print("  ⚠ RESOURCE-GUARDS step error (non-fatal): %r" % e,
               file=sys.stderr)
+    try:
+        __import__("cli_resource_guards").provision_workstation_guards()
+    except Exception as e:  # noqa: BLE001 — best-effort, never break the push
+        print("  ⚠ WORKSTATION-GUARDS step error (non-fatal): %r" % e, file=sys.stderr)
 
     # 5. Root/system legs, NON-FATAL + LOUD like step 4 (`⚠ … FAILED (<name>)`, never
     # fails the push): the #841 disk guard (log ROTATION + report-only reporter; root

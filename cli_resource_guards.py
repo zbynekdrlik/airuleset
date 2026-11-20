@@ -45,9 +45,17 @@ gatekeeper); until a GATEKEEPER-ACTION authorizes it, this step is a fail-LOUD
 no-op. The `watchdog.resource_guard` verify-only job is the standing backstop
 that surfaces "subdev still runs without guardrails".
 
+#1384 adds a WORKSTATION profile (dev1, `WORKSTATION_GUARD_HOSTS`): the same
+template path with `MemoryHigh` only and `MemoryMax=infinity` (a throttle, never
+a cgroup kill: the box hosts the owner's own sessions), the root exemption and
+the ssh/tailscaled OOM drop-ins, swap reported only. It shares the installer
+and the ssh loop (`_apply_guards`); a host entry with `sudo` is reached as its
+account with `sudo -n` (#1223), so dev1 needs no root ssh.
+
 ZERO couplings by design — a pure leaf: `provision_shared_stream_guards` reads
 `airuleset.SHARED_STREAM_GUARD_HOSTS` (the facade re-export) LAZILY inside the
-function body, the same L-E convention `cli_remote.cmd_push` uses.
+function body, the same L-E convention `cli_remote.cmd_push` uses;
+`provision_workstation_guards` reads the pure-data `cli_fleet` lazily.
 """
 import os
 import shlex
@@ -263,6 +271,166 @@ def guard_files():
 _HEREDOC_MARK = "AIRULESET_GUARD_EOF"
 
 
+def _render_install_fn() -> str:
+    """The atomic idempotent installer both apply scripts share: content on
+    stdin (a quoted heredoc), written to a dotted mktemp in the destination dir
+    and mv'd into place only once fully written — the SAME never-a-truncating-
+    write discipline as #659."""
+    return (
+        '_install() {\n'
+        '    dest="$1"; dir=$(dirname "$dest")\n'
+        '    mkdir -p "$dir"\n'
+        '    tmp=$(mktemp "$dir/.airuleset-guard-XXXXXX")\n'
+        "    trap 'rm -f \"$tmp\"' EXIT\n"
+        '    cat > "$tmp"\n'
+        '    chmod 0644 "$tmp"\n'
+        '    mv -f "$tmp" "$dest"\n'
+        '    trap - EXIT\n'
+        '    echo "  resource-guards: wrote $dest"\n'
+        '}'
+    )
+
+
+def _render_install_calls(files) -> list:
+    """One `_install <path> <<'MARK'` heredoc per (path, content) pair."""
+    return ["_install %s <<'%s'\n%s%s"
+            % (shlex.quote(path), _HEREDOC_MARK, content.rstrip("\n") + "\n", _HEREDOC_MARK)
+            for path, content in files]
+
+
+# ---------------------------------------------------------------------------
+# #1384: the WORKSTATION profile (dev1). A multi-account workstation also hosts
+# the OWNER's own sessions, so its template is a THROTTLE only: MemoryHigh (the
+# kernel reclaims and delays the slice's allocations) with an explicit
+# MemoryMax=infinity — never a cgroup kill of an owner session or a running
+# Claude. Nothing subdev-only rides along: no swappiness file (dev1's hand-made
+# 99-dev1-swappiness.conf would shadow a 50- one), no journald cap (it would
+# override #1223's 2G), no quota / rsyslog / Playwright / swap resize. 20 % of
+# RAM keeps three accounts at the throttle point plus every idle session below
+# RAM (sizing in the #1384 design comment). Reached as `newlevel` + `sudo -n`.
+# ---------------------------------------------------------------------------
+WORKSTATION_MEMORY_HIGH_PCT = 20
+
+_USER_SLICES = ("$(systemctl list-units --plain --no-legend 'user-*.slice' "
+                "2>/dev/null | awk '{print $1}')")
+
+
+def render_workstation_guard_dropin() -> str:
+    """The workstation `user-.slice` TEMPLATE: throttle, never kill."""
+    return (
+        "# Managed by airuleset (#1384) - per-account memory THROTTLE on a\n"
+        "# multi-account workstation. TEMPLATE drop-in: every user-<uid>.slice.\n"
+        "# MemoryHigh slows a runaway account (the kernel reclaims and delays its\n"
+        "# allocations); MemoryMax stays infinity, so no owner session or running\n"
+        "# Claude is ever cgroup-killed. user-0.slice is exempted separately.\n"
+        "[Slice]\n"
+        "MemoryHigh=%d%%\n"
+        "MemoryMax=infinity\n" % WORKSTATION_MEMORY_HIGH_PCT
+    )
+
+
+def render_workstation_root_exempt_dropin() -> str:
+    """uid 0 also matches the template: keep a root recovery session unlimited."""
+    return (
+        "# Managed by airuleset (#1384) - the user-.slice template also matches\n"
+        "# uid 0; a root recovery session keeps unlimited memory.\n"
+        "[Slice]\n"
+        "MemoryHigh=infinity\n"
+        "MemoryMax=infinity\n"
+    )
+
+
+def workstation_guard_files():
+    """The (path, content) pairs of the workstation profile: the same paths as
+    the stream profile for the template + root exemption, the same OOM bodies."""
+    return [
+        (GUARD_DROPIN_PATH, render_workstation_guard_dropin()),
+        (ROOT_EXEMPT_PATH, render_workstation_root_exempt_dropin()),
+        (SSH_OOM_PATH, render_service_oom_dropin()),
+        (TAILSCALED_OOM_PATH, render_service_oom_dropin()),
+    ]
+
+
+def _render_workstation_expect_block() -> str:
+    """`exp_high` in bytes from MemTotal (systemd resolves `%` against physical
+    RAM, slightly above MemTotal, hence the read-back BAND, not equality)."""
+    return ('memtotal_kb=$(awk \'/^MemTotal:/{print $2}\' /proc/meminfo)\n'
+            'exp_high=$((memtotal_kb * 1024 * %d / 100))' % WORKSTATION_MEMORY_HIGH_PCT)
+
+
+def _render_workstation_live_apply_block() -> str:
+    """MemoryHigh on every running user slice but root's. A throttle never kills,
+    so unlike the stream MemoryMax there is no over-the-limit skip."""
+    return (
+        'for slice in %s; do\n'
+        '    [ "$slice" = "user-0.slice" ] && continue\n'
+        '    systemctl set-property --runtime "$slice" MemoryHigh=%d%% '
+        '|| echo "  WARN resource-guards: set-property failed for $slice" >&2\n'
+        'done' % (_USER_SLICES, WORKSTATION_MEMORY_HIGH_PCT)
+    )
+
+
+def _render_workstation_readback_block() -> str:
+    """Fail-loud read-back: every running user slice but root's must show a
+    finite MemoryHigh inside the band AND MemoryMax=infinity (exit 4 otherwise,
+    which turns the push step LOUD)."""
+    return (
+        'lo_high=$((exp_high * 3 / 4)); hi_high=$((exp_high * 3 / 2))\n'
+        'fail=0\n'
+        'for slice in ' + _USER_SLICES + '; do\n'
+        '    [ "$slice" = "user-0.slice" ] && continue\n'
+        '    mhigh=$(systemctl show -p MemoryHigh --value "$slice" 2>/dev/null || echo "")\n'
+        '    mmax=$(systemctl show -p MemoryMax --value "$slice" 2>/dev/null || echo "")\n'
+        '    if [ "$mmax" != infinity ]; then\n'
+        '        echo "  RESOURCE-GUARDS VERIFY FAIL: $slice MemoryMax=$mmax (expected '
+        'infinity: a workstation never cgroup-kills)" >&2; fail=1\n'
+        '    fi\n'
+        '    case "$mhigh" in\n'
+        '        ""|*[!0-9]*) echo "  RESOURCE-GUARDS VERIFY FAIL: $slice MemoryHigh=$mhigh '
+        '(expected ~$exp_high)" >&2; fail=1 ;;\n'
+        '        *) if [ "$mhigh" -lt "$lo_high" ] || [ "$mhigh" -gt "$hi_high" ]; then\n'
+        '               echo "  RESOURCE-GUARDS VERIFY FAIL: $slice MemoryHigh=$mhigh out of '
+        'band [$lo_high,$hi_high]" >&2; fail=1\n'
+        '           fi ;;\n'
+        '    esac\n'
+        'done\n'
+        'if [ "$fail" -ne 0 ]; then\n'
+        '    echo "  RESOURCE-GUARDS FAILED read-back verify (workstation)" >&2\n'
+        '    exit 4\n'
+        'fi\n'
+        'echo "  resource-guards: workstation applied + verified (MemoryHigh~${exp_high}B, '
+        'MemoryMax=infinity)"'
+    )
+
+
+def _render_swap_report_block() -> str:
+    """Swap use + swappiness as REPORT lines only: the workstation apply never
+    writes a sysctl and never touches swap (reshaping a full swap needs a
+    swapoff; the box's own sysctl file keeps owning the value)."""
+    return (
+        'swap_total_kb=$(awk \'/^SwapTotal:/{print $2}\' /proc/meminfo)\n'
+        'swap_free_kb=$(awk \'/^SwapFree:/{print $2}\' /proc/meminfo)\n'
+        'echo "  resource-guards: swap $(( (swap_total_kb - swap_free_kb) / 1024 ))/'
+        '$((swap_total_kb / 1024)) MiB used, vm.swappiness=$(cat /proc/sys/vm/swappiness) '
+        '(report only, #1384)"\n'
+        'if [ "${swap_total_kb:-0}" -eq 0 ]; then\n'
+        '    echo "  WARN resource-guards: NO SWAP present (report only)" >&2\n'
+        'fi'
+    )
+
+
+def build_workstation_apply_script() -> str:
+    """The workstation profile's `bash -eo pipefail` apply script (run as
+    `sudo -n bash -c <script>`): install the four drop-ins atomically, reload,
+    live-apply MemoryHigh, report swap, read back. Pure string builder."""
+    parts = ["set -euo pipefail", "", _render_install_fn(), ""]
+    parts.extend(_render_install_calls(workstation_guard_files()))
+    parts += ["", "systemctl daemon-reload", "", _render_workstation_expect_block(), "",
+              _render_workstation_live_apply_block(), "", _render_swap_report_block(), "",
+              _render_workstation_readback_block()]
+    return "\n".join(parts) + "\n"
+
+
 def _render_swap_policy_block() -> str:
     """#925-C: swap policy bash snippet — idempotent swap management.
 
@@ -428,32 +596,8 @@ def build_apply_script() -> str:
     The heavy bash snippets are rendered by dedicated helpers
     (_render_swap_policy_block, _render_quota_apply_block,
     _render_playwright_shared_block) — this function only assembles them."""
-    parts = []
-    parts.append("set -euo pipefail")
-    parts.append("")
-    # Atomic idempotent installer: content on stdin (a quoted heredoc), written
-    # to a dotted mktemp in the destination dir and mv'd into place only once
-    # fully written — the SAME never-a-truncating-write discipline as #659.
-    parts.append(
-        '_install() {\n'
-        '    dest="$1"; dir=$(dirname "$dest")\n'
-        '    mkdir -p "$dir"\n'
-        '    tmp=$(mktemp "$dir/.airuleset-guard-XXXXXX")\n'
-        "    trap 'rm -f \"$tmp\"' EXIT\n"
-        '    cat > "$tmp"\n'
-        '    chmod 0644 "$tmp"\n'
-        '    mv -f "$tmp" "$dest"\n'
-        '    trap - EXIT\n'
-        '    echo "  resource-guards: wrote $dest"\n'
-        '}'
-    )
-    parts.append("")
-    for path, content in guard_files():
-        parts.append(
-            "_install %s <<'%s'\n%s%s"
-            % (shlex.quote(path), _HEREDOC_MARK, content.rstrip("\n") + "\n",
-               _HEREDOC_MARK)
-        )
+    parts = ["set -euo pipefail", "", _render_install_fn(), ""]
+    parts.extend(_render_install_calls(guard_files()))
     parts.append("")
     # daemon-reload MUST precede any set-property (systemd must re-read the
     # template drop-in first). sysctl is best-effort LOUD.
@@ -622,12 +766,34 @@ def provision_shared_stream_guards(hosts=None, run=None, control_opts=None):
     if hosts is None:
         import airuleset  # L-E: SHARED_STREAM_GUARD_HOSTS lives in cli_fleet, via facade
         hosts = airuleset.SHARED_STREAM_GUARD_HOSTS
-    script = build_apply_script()
-    # Passed as a single `bash -c <quoted script>` remote command (NOT via
-    # stdin) so the heredocs inside the script keep an unconsumed stdin.
-    remote_cmd = "bash -c " + shlex.quote(script)
+    return _apply_guards(hosts, build_apply_script(), run, control_opts)
+
+
+def provision_workstation_guards(hosts=None, run=None, control_opts=None):
+    """#1384: apply the WORKSTATION profile on every `WORKSTATION_GUARD_HOSTS`
+    target (dev1), reached as its sudo account (`newlevel` + `sudo -n`, the
+    #1223 path the disk-guard leg already uses). The same ssh loop as the stream
+    profile: NON-FATAL + LOUD, returns the `(name, reason)` failures. Inert with
+    the real runner under pytest (never a real ssh from a test)."""
+    if run is None and "PYTEST_CURRENT_TEST" in os.environ:
+        print("  workstation guards: skipped under pytest (no real ssh)")
+        return []
+    run = run or subprocess.run
+    if hosts is None:
+        import cli_fleet  # lazy: a pure data module, keeps this a leaf
+        hosts = cli_fleet.WORKSTATION_GUARD_HOSTS
+    return _apply_guards(hosts, build_workstation_apply_script(), run, control_opts)
+
+
+def _apply_guards(hosts, script, run, control_opts):
+    """The ONE ssh loop of both profiles. The script goes as a single `bash -c
+    <quoted script>` remote command (NOT via stdin) so its heredocs keep an
+    unconsumed stdin; an entry with `sudo` is reached as its account with
+    `sudo -n` (#1223), never root ssh."""
+    remote_bash = "bash -c " + shlex.quote(script)
     failed = []
     for h in hosts:
+        remote_cmd = ("sudo -n " if h.get("sudo") else "") + remote_bash
         name = h.get("name", h.get("host", "?"))
         host = h.get("host")
         identity = h.get("identity")

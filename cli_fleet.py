@@ -1145,28 +1145,28 @@ RETIRED_STREAM_LABELS = frozenset(
 
 
 # --- #775: shared-stream resource-guard apply targets ----------------------
-# The box(es) that run N isolated reduced-authority Claude stream users
-# (`AUTHORITY_BY_USER`) and therefore need per-user systemd cgroup ceilings so a
-# single stream can never OOM-collapse the whole box (subdev incident
-# 2026-08-31). DATA-ONLY, like REMOTE_HOSTS above.
-#
-# `admin_user`/`identity` = the ROOT apply path: stream accounts are sudo-less,
-# so the guardrail drop-ins (which live in /etc/systemd/system) can only be
-# installed over `ssh root@<host>` — a DIFFERENT connection from the per-user
-# deploy loop. The identity is the SAME pinned operator key the gatekeeper VPS
-# uses; the dev1→root@subdev authorization for it is a one-time GATEKEEPER-ACTION
-# bootstrap (until it lands, `provision_shared_stream_guards` is a fail-loud
-# no-op and the `watchdog.resource_guard` verify job is the backstop).
-#
-# `host` is subdev's TAILSCALE IP (the same 100.118.174.27 the montalu*/david*/
-# simap1/miva1 REMOTE_HOSTS entries above all share) — stable across LAN
-# switches (#1). Every reduced-authority stream in AUTHORITY_BY_USER lives on
-# THIS box, so this single entry covers the whole shared-stream fleet;
-# `tests/test_resource_guards.py` drift-locks that (a new shared-stream host
-# cannot be added to REMOTE_HOSTS without a matching guard entry here).
+# The box(es) running N isolated reduced-authority Claude stream users
+# (`AUTHORITY_BY_USER`): per-user systemd cgroup ceilings so one stream can never
+# OOM-collapse the box (subdev incident 2026-08-31). DATA-ONLY. `admin_user`/
+# `identity` = the ROOT apply path: stream accounts are sudo-less, so the
+# /etc/systemd/system drop-ins go over `ssh root@<host>` (separate from the
+# per-user deploy loop) on the pinned gatekeeper operator key; until its one-time
+# GATEKEEPER-ACTION authorization the step is a fail-loud no-op and
+# `watchdog.resource_guard` is the backstop. `host` = subdev's TAILSCALE IP,
+# shared by every stream REMOTE_HOSTS entry (#1); `tests/test_resource_guards.py`
+# drift-locks that no shared-stream host enters REMOTE_HOSTS without an entry.
 SHARED_STREAM_GUARD_HOSTS = [
     {"name": "subdev", "host": "100.118.174.27", "admin_user": "root",
      "identity": "~/.secrets/gatekeeper_access_ed25519"},
+]
+
+
+# --- #1384: workstation memory-throttle targets (MemoryHigh only, never a kill:
+# the box hosts the owner's own sessions), reached like their DISK_GUARD_ROOT_HOSTS
+# entry as `newlevel` + `sudo -n` (#1223). Not dev2: one human account there.
+WORKSTATION_GUARD_HOSTS = [
+    {"name": "dev1", "host": "100.104.8.125", "admin_user": "newlevel",
+     "sudo": True, "identity": "~/.secrets/airuleset_push_ed25519"},
 ]
 
 

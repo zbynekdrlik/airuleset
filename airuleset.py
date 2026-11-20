@@ -1759,13 +1759,13 @@ def cmd_install(args):
         print(f"  journal cap error (non-fatal): {e}", file=sys.stderr)
     from cli_controller_fleetbackup import install_step as fleetbackup_login_step
     fleetbackup_login_step()  # 3b-quinque-bis-5: dev1 fleet-backup manager login (#1351), non-fatal
+    __import__("cli_cargo_jobs").install_step()  # 3b-quinque-bis-6: cargo jobs cap (#1384), non-fatal
 
     # --- 3b-quinque-quater-pre. Managed volume (#999): install is idempotent
     # CONFIGURATION and NEVER moves data or stops services — it PRINTS a
     # status/plan line only. A box with a `volume` declaration (gk-vol1 on the
-    # gatekeeper box) that is not yet applied prints the explicit-command
-    # pointer; a fully-applied box prints the normal status row; a box with no
-    # `volume` key prints a no-op line. The actual mount + relocation (which
+    # gatekeeper box) not yet applied prints the explicit-command pointer, a
+    # fully-applied box the status row, no `volume` key a no-op line. The actual mount + relocation (which
     # stops runners one at a time and moves the docker data-root) is the
     # EXPLICIT operator command `python3 airuleset.py volume --apply`, run by
     # the gk-infra window with the owner present (odoo-erp#6989). MAIN REVIEW
