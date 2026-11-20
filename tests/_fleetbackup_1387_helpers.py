@@ -62,6 +62,14 @@ done < "$FBT_SHADOW" > "$tmp"
 mv "$tmp" "$FBT_SHADOW"
 '''
 
+# stat: FBT_STAT_OWNER="<path>=<name>" reports that path's owner name as <name>
+_STAT = r'''#!/bin/bash
+if [ -n "${FBT_STAT_OWNER:-}" ] && [ "$*" = "-c %U -- ${FBT_STAT_OWNER%%=*}" ]; then
+    echo "${FBT_STAT_OWNER#*=}"; exit 0
+fi
+exec /usr/bin/stat "$@"
+'''
+
 # root-side find: fails a -print* walk whose arguments contain FBT_FAIL_FIND
 _FIND = r'''#!/bin/bash
 rc=0; /usr/bin/find "$@" || rc=$?
@@ -99,7 +107,6 @@ exec /usr/bin/setfacl "$@"
 '''
 
 _ID = r'''#!/bin/bash
-if [ "$*" = -un ] && [ -n "${FBT_ID_UN:-}" ]; then echo "$FBT_ID_UN"; exit 0; fi
 for a in "$@"; do
     if [ "$a" = "$FBT_FB" ]; then
         case "$1" in
@@ -164,6 +171,7 @@ class Box:
         write_exe(os.path.join(self.bindir, "setfacl"), _SETFACL)
         write_exe(os.path.join(self.bindir, "chage"), _CHAGE)
         write_exe(os.path.join(self.bindir, "find"), _FIND)
+        write_exe(os.path.join(self.bindir, "stat"), _STAT)
         write_exe(os.path.join(self.bindir, "id"), _ID)
         write_exe(os.path.join(self.bindir, "pkill"), 'echo "pkill $*" >> "$FBT_LOG"; exit 1')
         write_exe(os.path.join(self.bindir, "passwd"),
