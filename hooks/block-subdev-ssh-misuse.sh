@@ -413,6 +413,14 @@ def check_target(user, host, tokens, label):
             return None
         return ("%s as root@subdev without -i .../%s"
                 % (label, SUBDEV_ADMIN_KEY_BASENAME))
+    # #1387: the read-only backup login. Its own default key, a forced rrsync
+    # wrapper and from=dev1 are enforced on subdev itself; fail2ban there
+    # ignores the tailnet, so only the tailnet addresses are allowed.
+    if user == "fleetbackup":
+        if host.lower() in ("subdev", "100.118.174.27"):
+            return None
+        return ("%s as fleetbackup@%s: the backup login goes over the tailnet "
+                "only (subdev / 100.118.174.27)" % (label, host))
     # #869: derive the allow-list from the conf (or hardcoded fallback)
     if user not in _SUBDEV_ACCOUNTS:
         return "%s as unauthorized user '%s'@subdev" % (label, user)
