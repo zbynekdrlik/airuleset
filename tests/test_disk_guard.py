@@ -151,7 +151,8 @@ def test_reclaimable_classes_is_the_fence():
     # bare/ambiguous root-level names stay OUT — the executor acts only on the
     # specific bounded classes, never a raw "docker"/"runner"/"var-log".
     fence = dg.RECLAIMABLE_CLASSES
-    assert "worktree" in fence and "cli-version" in fence and "uploads" in fence
+    assert "worktree" in fence and "cli-version" in fence
+    assert "uploads" not in fence   # owner data, never a drain class (#1380)
     assert "transcript" in fence and "toolchain" in fence and "scratch" in fence
     for forbidden in ("runner", "var-log", "other-home", "gh-runner", "docker"):
         assert forbidden not in fence
@@ -234,9 +235,9 @@ def test_decision_log_records_action_and_skip(tmp_path):
 
     def planner():
         return [
-            {"cls": "uploads", "path": "/h/uploads/old.mp4", "bytes": 500,
+            {"cls": "user-cache", "path": "/h/.cache/old.bin", "bytes": 500,
              "kind": "delete", "reason": None},
-            {"cls": "uploads", "path": "/h/uploads/new.mp4", "bytes": 5,
+            {"cls": "user-cache", "path": "/h/.cache/new.bin", "bytes": 5,
              "kind": "skip", "reason": "too recent (2.0d < 14d)"},
         ]
 
@@ -244,7 +245,7 @@ def test_decision_log_records_action_and_skip(tmp_path):
         status={"worst_pct": 82, "dim": "bytes", "level": "drain",
                 "mounts": [{"mount": "/", "worst_pct": 82}]},
         home=str(tmp_path),
-        planners=[("uploads", planner)],
+        planners=[("user-cache", planner)],
         recheck_fn=lambda: 82,
         do_action_fn=lambda a: a["bytes"],
         geteuid_fn=lambda: 1000,
@@ -252,7 +253,7 @@ def test_decision_log_records_action_and_skip(tmp_path):
         now=1.0,
     )
     text = logp.read_text()
-    assert "old.mp4" in text and "new.mp4" in text
+    assert "old.bin" in text and "new.bin" in text
     assert "SKIP" in text and "too recent" in text
     # the acted line records the planned bytes
     assert "500" in text
@@ -264,14 +265,14 @@ def test_dry_run_action_lines_are_tagged_would(tmp_path):
     logp = tmp_path / "disk-guard.log"
 
     def planner():
-        return [{"cls": "uploads", "path": "/h/uploads/old.mp4", "bytes": 500,
+        return [{"cls": "user-cache", "path": "/h/.cache/old.bin", "bytes": 500,
                  "kind": "delete", "reason": None}]
 
     dg.execute_drain(
         status={"worst_pct": 82, "dim": "bytes", "level": "drain",
                 "mounts": [{"mount": "/", "worst_pct": 82}]},
         home=str(tmp_path),
-        planners=[("uploads", planner)],
+        planners=[("user-cache", planner)],
         recheck_fn=lambda: 82,
         do_action_fn=lambda a: a["bytes"],
         geteuid_fn=lambda: 1000,
@@ -282,31 +283,6 @@ def test_dry_run_action_lines_are_tagged_would(tmp_path):
     text = logp.read_text()
     assert "WOULD-DELETE" in text
     assert "\nDELETE " not in text and not text.startswith("DELETE ")
-
-
-# --------------------------------------------------------------------------- #
-# uploads age-out planner
-# --------------------------------------------------------------------------- #
-def test_discover_stale_uploads(tmp_path):
-    up = tmp_path / "uploads"
-    up.mkdir()
-    old = up / "old-call.mp4"
-    old.write_bytes(b"x" * 100)
-    new = up / "fresh.wav"
-    new.write_bytes(b"y" * 100)
-    now = 1_000_000_000.0
-    os.utime(old, (now - 30 * 86400, now - 30 * 86400))   # 30d old
-    os.utime(new, (now - 2 * 86400, now - 2 * 86400))      # 2d old
-    rows = dg.discover_stale_uploads(home=str(tmp_path), now=now, max_age_days=14)
-    by = {os.path.basename(r["path"]): r for r in rows}
-    assert by["old-call.mp4"]["reason"] is None            # reclaimable
-    assert by["fresh.wav"]["reason"] is not None           # too recent
-    assert by["old-call.mp4"]["cls"] == "uploads"
-
-
-def test_discover_stale_uploads_no_dir(tmp_path):
-    # No ~/uploads at all → simply nothing to do, not an error.
-    assert dg.discover_stale_uploads(home=str(tmp_path), now=1.0) == []
 
 
 # --------------------------------------------------------------------------- #
