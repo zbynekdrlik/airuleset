@@ -509,8 +509,10 @@ def test_worktree_NOT_reclaimable_when_live_cwd(tmp_path):
     assert "live" in row["reason"].lower()
 
 
-def test_worktree_orphan_gitdir_is_reclaimable(tmp_path):
+def test_worktree_orphan_gitdir_is_kept(tmp_path):
     # A #537 rename-litter dir: .git points nowhere → git can't read it at all.
+    # #1380 (owner 20.11.2026): its content cannot be measured, so it is never
+    # proven regenerable and is kept (report only) — reverses the #537 reclaim.
     p = tmp_path / "agent-orphan"
     p.mkdir()
     (p / ".git").write_text("gitdir: /home/david/gone/.git/worktrees/agent-orphan\n")
@@ -525,14 +527,13 @@ def test_worktree_orphan_gitdir_is_reclaimable(tmp_path):
         recency_fn=lambda _r, _p, _n: 30 * 86400,
         precious_fn=lambda _p: False,
     )
-    assert row["reason"] is None
-    assert row["kind"] == "orphan-gitdir"
+    assert row["reason"] and "orphan-gitdir" in row["reason"]
+    assert row["kind"] == "worktree"
 
 
-def test_worktree_orphan_gitdir_reclaimable_with_REAL_default_precious_fn(tmp_path):
-    # #834 review 🟡: the orphan branch must run BEFORE the precious check AND the
-    # real default precious-check must not fail-True on an orphan (git is
-    # unreadable → fs-walk fallback). No precious file present → reclaimed.
+def test_worktree_orphan_gitdir_kept_with_REAL_default_precious_fn(tmp_path):
+    # #1380: with the real default gates too, an orphan with harmless content
+    # is kept (it was reclaimed under #537/#834).
     p = tmp_path / "agent-orphan"
     p.mkdir()
     (p / ".git").write_text("gitdir: /home/david/gone/.git/worktrees/agent-orphan\n")
@@ -543,8 +544,8 @@ def test_worktree_orphan_gitdir_reclaimable_with_REAL_default_precious_fn(tmp_pa
         in_live_use=lambda _p: False,
         recency_fn=lambda _r, _p, _n: 30 * 86400,
     )
-    assert row["reason"] is None
-    assert row["kind"] == "orphan-gitdir"
+    assert row["reason"] and "orphan-gitdir" in row["reason"]
+    assert row["kind"] == "worktree"
 
 
 def test_worktree_orphan_gitdir_kept_when_precious_file_present(tmp_path):
@@ -561,7 +562,7 @@ def test_worktree_orphan_gitdir_kept_when_precious_file_present(tmp_path):
         recency_fn=lambda _r, _p, _n: 30 * 86400,
     )
     assert row["reason"] is not None
-    assert "precious" in row["reason"].lower()
+    assert "orphan-gitdir" in row["reason"]          # #1380: kept before any probe
 
 
 # --------------------------------------------------------------------------- #
