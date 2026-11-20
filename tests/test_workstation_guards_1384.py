@@ -156,6 +156,12 @@ class TestWorkstationLiveApplyAndReadBack(_Stubbed):
         r, _ = self._run(self._block(), {"user-1002.slice": ("infinity", "infinity")})
         self.assertEqual(r.returncode, 4, r.stdout + r.stderr)
 
+    def test_no_user_slice_listed_is_not_a_vacuous_pass(self):
+        # the apply runs inside newlevel's own ssh session, so its slice always
+        # exists: an empty list means the read failed, never "all verified".
+        r, _ = self._run(self._block(), {"user-0.slice": ("infinity", "infinity")})
+        self.assertEqual(r.returncode, 4, r.stdout + r.stderr)
+
     def test_a_memoryhigh_out_of_band_fails_loud(self):
         r, _ = self._run(self._block(), {
             "user-1002.slice": (str(_memtotal_bytes() * 90 // 100), "infinity")})
