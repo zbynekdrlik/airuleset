@@ -125,6 +125,11 @@ from cli_resource_guards_quota import (  # noqa: E402, F401
 )
 
 from cli_resource_guards_conflicts import render_stale_fairness_removal  # noqa: E402 (#1321)
+# #1387: read-only fleetbackup access to ~/uploads + ~/.claude/work-products
+from cli_resource_guards_fleetbackup import (  # noqa: E402
+    FLEETBACKUP_ACL_SCRIPT_PATH, FLEETBACKUP_DEFERRED_EXIT,
+    render_fleetbackup_acl_script, render_fleetbackup_push_block,
+)
 
 # Shared Playwright browser install path (#950-B)
 PLAYWRIGHT_SHARED_PATH = "/opt/ms-playwright"
@@ -254,6 +259,8 @@ def guard_files():
         (QUOTA_CEILING_SCRIPT_PATH, render_quota_ceiling_script()),
         (QUOTA_CEILING_SERVICE_PATH, render_quota_ceiling_service()),
         (QUOTA_CEILING_TIMER_PATH, render_quota_ceiling_timer()),
+        # #1387: the ONE fleetbackup ACL refresh (push + the hourly ceiling unit)
+        (FLEETBACKUP_ACL_SCRIPT_PATH, render_fleetbackup_acl_script()),
     ]
 
 
@@ -584,12 +591,11 @@ def build_apply_script() -> str:
            CPU_WEIGHT, CPU_QUOTA_PCT)
     )
     parts.append("")
-    # #950: per-user disk quota (rendered by _render_quota_apply_block).
-    parts.append(_render_quota_apply_block())
-    parts.append("")
-    # #950-B: shared Playwright browser install (rendered by
-    # _render_playwright_shared_block).
-    parts.append(_render_playwright_shared_block())
+    # #950 quota; #1387 fleetbackup (own subshell after the quota lock is
+    # released, its exit deferred to the very end); #950-B shared Playwright.
+    parts += [_render_quota_apply_block(), "",
+              render_fleetbackup_push_block(QUOTA_LOCK_PATH), "",
+              _render_playwright_shared_block(), FLEETBACKUP_DEFERRED_EXIT]
     return "\n".join(parts) + "\n"
 
 

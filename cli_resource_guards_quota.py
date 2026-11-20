@@ -21,7 +21,10 @@ the files through its ``guard_files()`` + atomic ``_install``, and embeds
 * #1315: that cap was per user, so N accounts were promised N x half the free
   space (subdev at 95 %, no account at its quota). The 50 % is now split in
   EQUAL shares over the shared-stream homes: all ceilings together fit the disk.
+* #1387: the hourly ceiling unit also runs the fleetbackup ACL refresh under
+  the same lock (``cli_resource_guards_fleetbackup``).
 """
+from cli_resource_guards_fleetbackup import render_fleetbackup_hourly_call
 
 # #950: per-user disk quota on shared-stream boxes.  ext4 usrquota via legacy
 # journaled quota (NOT `tune2fs -O quota` which is REFUSED on a mounted root
@@ -237,8 +240,10 @@ def render_quota_ceiling_script() -> str:
     Same shape as ``render_quota_refresh_script()``: ``set -euo pipefail``,
     ``/aquota.user`` missing → exit 3, then ``QUOTA_LOCK_PATH`` (shared with
     the daily refresh and the push apply; busy → exit 4 touching nothing).
-    Exits 1 (LOUD in ``systemctl status``) when the limits block reported a
-    failure (``qfail``). Pure renderer."""
+    #1387: then the fleetbackup ACL refresh, still under the lock (decided:
+    the same idempotent refresh as the push, hourly). Exits 1 (LOUD in
+    ``systemctl status``) when the limits block reported a failure (``qfail``)
+    or the refresh failed. Pure renderer."""
     return (
         "#!/bin/bash\n"
         "# Managed by airuleset (#1140 D) — hourly usage-aware quota ceilings.\n"
@@ -246,7 +251,8 @@ def render_quota_ceiling_script() -> str:
         + _render_quota_script_preamble(
             "quota-ceiling", "a refresh or push apply", "ceilings")
         + _render_quota_limits_block() + "\n"
-        "if [ \"$qfail\" -ne 0 ]; then exit 1; fi\n"
+        + render_fleetbackup_hourly_call()
+        + "if [ \"$qfail\" -ne 0 ] || [ \"$fb_rc\" -ne 0 ]; then exit 1; fi\n"
         "exit 0\n"
     )
 
