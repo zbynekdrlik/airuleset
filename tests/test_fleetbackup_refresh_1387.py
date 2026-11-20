@@ -560,6 +560,26 @@ class TestRefresh(unittest.TestCase):
         self.assertIn("could not close", r.stderr)
         self.assert_not_withdrawn(box)
 
+    def test_a_hidden_entry_of_home_is_closed_too(self):
+        box, _h = self.box()
+        hidden = os.path.join(box.root, ".hidden")
+        os.makedirs(hidden)
+        os.chmod(hidden, 0o755)
+        box.answers(PRE0, CLEAN, NONE)
+        r = box.run()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(entry(hidden, "user:nobody:"), "user:nobody:---")
+        self.assertIn(("C", hidden), box.checked(2))
+
+    def test_a_home_read_back_that_does_not_run_fails_without_withdrawal(self):
+        box, _h = self.box()
+        box.home("otherdir", stream=False)
+        box.answers(PRE0, CLEAN, "")
+        r = box.run()
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("did not run — failed", r.stderr)
+        self.assert_not_withdrawn(box)
+
     def test_a_non_stream_entry_that_stays_reachable_never_withdraws(self):
         box, _h = self.box()
         other = box.home("otherdir", stream=False)
@@ -640,6 +660,7 @@ class TestRefresh(unittest.TestCase):
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
         self.assertIn("is a symlink", r.stderr)
         self.assertIsNone(entry(real, "user:nobody:"))
+        self.assertNotIn(("C", os.path.join(box.root, "lnk")), box.checked(2))   # never followed
 
     def test_a_symlinked_marker_is_not_a_stream(self):
         box, _h = self.box()

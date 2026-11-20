@@ -348,6 +348,19 @@ class TestCheck(unittest.TestCase):
         out, _ = self.check(("F", "9z", f_ok), ("Q", "-", f_ok))
         self.assertEqual(out, "leak=0 miss=2 readable=0 private=0")
 
+    def raw_check(self, data):
+        argv = ["bash", self.script, "check"]
+        if self.root_run:
+            argv = ["runuser", "-u", "nobody", "--"] + argv
+        r = subprocess.run(argv, input=data, capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return r.stdout.strip()
+
+    def test_a_cut_stream_is_a_miss_and_a_last_record_needs_no_nul(self):
+        open_f = self.node("of", 0o644)
+        self.assertEqual(self.raw_check("C\0-\0"), "leak=0 miss=1 readable=0 private=0")
+        self.assertEqual(self.raw_check("C\0-\0%s" % open_f), "leak=1 miss=0 readable=0 private=0")
+
     def test_odd_names_survive_the_record_stream(self):
         odd = self.node("a b\nc", 0o644)
         out, _ = self.check(("C", "-", odd))
