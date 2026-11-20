@@ -177,8 +177,14 @@ def test_a_foreign_tree_behind_a_stale_entry_is_never_planned(repo):
 
 # --- 🟡 submodules make `git worktree remove` refuse --------------------- #
 def test_a_lane_with_submodules_is_a_cacheable_skip(repo, tmp_path):
+    """Round 2: git refuses only a POPULATED submodule (a bare .gitmodules is
+    removable), so the fixture populates one."""
+    sub = repo.tmp / "subrepo"
+    _git(repo.tmp, "init", "-q", "subrepo")
+    _commit(sub, "s.txt")
     path = _lane(repo, "subm", push=False)
-    _commit(path, ".gitmodules", '[submodule "x"]\n\tpath = x\n\turl = ../x\n')
+    _git(path, "-c", "protocol.file.allow=always", "submodule", "add", "-q", str(sub), "x")
+    _git(path, "commit", "-q", "-m", "submodule")
     _git(path, "push", "-q", "origin", "t-subm")
     rows = dgw.discover_stale_agent_worktrees(
         home=str(repo.home), now=_LATER, live_check_fn=lambda _p: False,

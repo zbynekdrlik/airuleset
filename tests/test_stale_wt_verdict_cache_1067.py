@@ -298,12 +298,12 @@ def test_cached_reclaimable_verdict_is_revalidated_fresh(box):
 
 
 def test_reclaimable_verdict_reruns_every_check_and_the_size_walk(box):
-    """#1380: a would-be reclaim also runs the ignored-entry gate
-    (``git status --ignored=matching``), so 4 git calls, not 3."""
+    """#1380: a would-be reclaim also runs the final gate (``git ls-files
+    -s -v`` + ``git status --ignored=matching``), so 5 git calls, not 3."""
     _pass(box, FakeGit(contains="  origin/main\n"))
     git, sizes = FakeGit(contains="  origin/main\n"), []
     rows, _ = _pass(box, git, sizes=sizes)
-    assert len(git.calls) == 4 and sizes
+    assert len(git.calls) == 5 and sizes
     assert "--ignored=matching" in git.calls[-1][0]
     r = _row(rows)
     assert r["kind"] == "worktree-remove" and r["contained_in"] == "origin/main"
