@@ -21,8 +21,9 @@ the files through its ``guard_files()`` + atomic ``_install``, and embeds
 * #1315: that cap was per user, so N accounts were promised N x half the free
   space (subdev at 95 %, no account at its quota). The 50 % is now split in
   EQUAL shares over the shared-stream homes: all ceilings together fit the disk.
-* #1387: the hourly ceiling unit also runs the fleetbackup ACL refresh under
-  the same lock (``cli_resource_guards_fleetbackup``).
+* #1387: after its limits block the hourly ceiling unit releases the quota lock
+  and runs the fleetbackup ACL refresh, which takes its own lock
+  (``cli_resource_guards_fleetbackup``). The quota lock file is root-only.
 """
 from cli_resource_guards_fleetbackup import (
     FLEETBACKUP_REFRESH_BUDGET_S, render_fleetbackup_hourly_call,
@@ -116,20 +117,27 @@ def _render_quota_script_preamble(tag: str, holders: str, what: str) -> str:
     the hourly ceilings): ``set -euo pipefail``; ``/aquota.user`` missing →
     exit 3; then ``QUOTA_LOCK_PATH`` on fd 9 — ONE quota writer at a time
     (the refresh, the ceilings and the push apply all take it); busy or
-    unopenable → exit 4 touching nothing."""
+    unopenable → exit 4 touching nothing. #1387 review: the lock file is
+    root-only (created under umask 077, chmod 0600 before the flock) — any
+    local user could flock a world-readable one and stall every writer."""
     return (
         "set -euo pipefail\n"
         "if [ ! -f /aquota.user ]; then\n"
         "    echo \"  ⚠ %s: /aquota.user missing — quota not provisioned\" >&2\n"
         "    exit 3\n"
         "fi\n"
-        "# one quota writer at a time — shared with the other quota writers\n"
-        "if ! { exec 9>>%s; } 2>/dev/null || ! flock -w %d 9; then\n"
+        "# one quota writer at a time — shared with the other quota writers;\n"
+        "# root-only, so no other user can open (and flock) it\n"
+        "_um=$(umask); umask 077\n"
+        "if ! { exec 9>>%s; } 2>/dev/null || ! chmod 0600 %s 2>/dev/null \\\n"
+        "        || ! flock -w %d 9; then\n"
+        "    umask \"$_um\"\n"
         "    echo \"  ⚠ %s: quota lock %s busy/unopenable\" \\\n"
         "        \"(%s running?) — %s SKIPPED, quota untouched\" >&2\n"
         "    exit 4\n"
         "fi\n"
-        % (tag, QUOTA_LOCK_PATH, QUOTA_LOCK_WAIT_S, tag, QUOTA_LOCK_PATH,
+        "umask \"$_um\"\n"
+        % (tag, QUOTA_LOCK_PATH, QUOTA_LOCK_PATH, QUOTA_LOCK_WAIT_S, tag, QUOTA_LOCK_PATH,
            holders, what)
     )
 
@@ -206,6 +214,7 @@ def render_quota_refresh_service() -> str:
         "\n"
         "[Service]\n"
         "Type=oneshot\n"
+        "UMask=0077\n"
         "TimeoutStartSec=%d\n"
         "ExecStart=/bin/bash %s\n"
         "ExecStopPost=-/usr/bin/flock -w 60 %s /sbin/quotaon -u /\n"
@@ -242,8 +251,9 @@ def render_quota_ceiling_script() -> str:
     Same shape as ``render_quota_refresh_script()``: ``set -euo pipefail``,
     ``/aquota.user`` missing → exit 3, then ``QUOTA_LOCK_PATH`` (shared with
     the daily refresh and the push apply; busy → exit 4 touching nothing).
-    #1387: then the fleetbackup ACL refresh, still under the lock (decided:
-    the same idempotent refresh as the push, hourly). Exits 1 (LOUD in
+    #1387: then it releases the quota lock and runs the fleetbackup ACL
+    refresh (decided: the same idempotent refresh as the push, hourly; it takes
+    its own lock). Exits 1 (LOUD in
     ``systemctl status``) when the limits block reported a failure (``qfail``)
     or the refresh failed. Pure renderer."""
     return (
@@ -277,6 +287,7 @@ def render_quota_ceiling_service() -> str:
         "\n"
         "[Service]\n"
         "Type=oneshot\n"
+        "UMask=0077\n"
         "TimeoutStartSec=%d\n"
         "ExecStart=/bin/bash %s\n"
         % (QUOTA_LOCK_WAIT_S + 300 + FLEETBACKUP_REFRESH_BUDGET_S, QUOTA_CEILING_SCRIPT_PATH)
@@ -529,20 +540,25 @@ def _render_quota_apply_lock_block() -> str:
     lock as the daily refresh, so it never ``quotaon``s under a running
     recount (busy → the quota part of this push is SKIPPED, LOUD). An
     unopenable lock (non-root, never in production) proceeds unserialized,
-    LOUD. The fd is closed at the end of the apply block."""
+    LOUD. The fd is closed at the end of the apply block. #1387 review: the
+    lock file is root-only (umask 077 + chmod 0600 before the flock)."""
     return (
         '    if [ "$quota_fail" -eq 0 ]; then\n'
+        '        _um=$(umask); umask 077\n'
         '        if { exec 9>>%s; } 2>/dev/null; then\n'
+        '            umask "$_um"\n'
+        '            chmod 0600 %s 2>/dev/null || true\n'
         '            if ! flock -w %d 9; then\n'
         '                echo "  ⚠ quota: quota lock busy (a refresh recount running?)" \\\n'
         '                    "— quota apply SKIPPED this push" >&2\n'
         '                quota_fail=1\n'
         '            fi\n'
         '        else\n'
+        '            umask "$_um"\n'
         '            echo "  ⚠ quota: cannot open the quota lock — applying unserialized" >&2\n'
         '        fi\n'
         '    fi'
-        % (QUOTA_LOCK_PATH, QUOTA_APPLY_LOCK_WAIT_S)
+        % (QUOTA_LOCK_PATH, QUOTA_LOCK_PATH, QUOTA_APPLY_LOCK_WAIT_S)
     )
 
 
