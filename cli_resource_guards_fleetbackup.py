@@ -531,8 +531,8 @@ fb_access_entry() { # $1 path: fleetbackup's ACCESS entry perms ("" when none; d
     getfacl -p -c -- "$1" 2>/dev/null | awk -F: -v fb="$FB" '$1 == "user" && $2 == fb { print substr($3, 1, 3) }'
 }
 
-fb_close_home() { # $1 account, $2 home -> 1 always: the account failed this run. Never a
-    #               withdrawal: every inode that carries a grant of ours is the account's own
+fb_close_home() { # $1 account, $2 home: the account failed this run (the caller returns 1). Never
+    #               a withdrawal: every inode that carries a grant of ours is the account's own
     #               (grants run as the account), so what root cannot close here is open by the
     #               account's own doing, or through "other" bits every local user has (round 4)
     local u="$1" h="$2" c=0
@@ -543,7 +543,6 @@ fb_close_home() { # $1 account, $2 home -> 1 always: the account failed this run
         1) fb_warn "$u: its home stays reachable after root closed it — its own doing; failed for $u only" ;;
         *) fb_warn "$u: the read-back of the closed home did not run — failed for $u only" ;;
     esac
-    return 1
 }
 
 fb_account() { # $1 account, $2 home -> 0 ok | 1 failed (a reachable home is left closed) | 3 not a
@@ -557,7 +556,7 @@ fb_account() { # $1 account, $2 home -> 0 ok | 1 failed (a reachable home is lef
     fi
     if [ "$(fb_left)" -le 0 ]; then
         fb_warn "$u: over the refresh budget (${FB_BUDGET}s) — home closed, not granted this run"
-        fb_close_home "$u" "$h" || true
+        fb_close_home "$u" "$h"
         return 1
     fi
     # visibility: how much was open BEFORE this refresh (moved-in children, owner edits)
@@ -586,7 +585,7 @@ fb_account() { # $1 account, $2 home -> 0 ok | 1 failed (a reachable home is lef
     read -r l m r p <<<"$v"
     if [ "$l" -ne 0 ]; then
         fb_warn "$u: $l path(s) reachable that must not be — home closed to $FB"
-        fb_close_home "$u" "$h" || true
+        fb_close_home "$u" "$h"
         return 1
     fi
     if [ "$m" -ne 0 ]; then fb_warn "$u: $m path(s) under the two dirs are not readable (listed above)"; rc=1; fi
