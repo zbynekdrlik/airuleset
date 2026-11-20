@@ -169,8 +169,10 @@ def _drop_reminders(text):
 
 
 def _has_sk(text):
-    """True when ``text`` carries a Slovak signal."""
-    return scores(_line_words(text))[0] > 0
+    """True when ``text`` carries a Slovak word of two letters or more: a lone
+    ``u`` / ``v`` / ``s`` is no evidence a cut-able segment is Slovak (``the U
+    bucket``, a shell flag)."""
+    return scores([w for w in _line_words(text) if len(w) > 1])[0] > 0
 
 
 def _cut_refs(line):
