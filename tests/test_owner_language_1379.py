@@ -850,10 +850,12 @@ class TestRound2Prose(unittest.TestCase):
         self.assertNotIn("reader", words)
 
     def test_quote_stripping_is_linear(self):
+        # 100k unpaired openers: the bounded-regex cut took ~2.3 s here (n x 600
+        # backtracking), the find loop ~0.2 s; 1.5 s leaves room for a loaded box
+        # (a 1.0 s bound with a second, linear-anyway case flaked once at load 3)
         t0 = time.monotonic()
         ol.message_is_mainly_english("„" * 100000)
-        ol.message_is_mainly_english('"x ' * 50000)
-        self.assertLess(time.monotonic() - t0, 1.0)
+        self.assertLess(time.monotonic() - t0, 1.5)
 
 
 class TestRound2Prompt(unittest.TestCase):
