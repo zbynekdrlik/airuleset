@@ -288,6 +288,20 @@ class TestScriptInvariants(unittest.TestCase):
         self.assertEqual(self.fn["fb_deny_foreign"].strip().splitlines()[-1].strip(),
                          '| xargs -0 -r setfacl -P -n -m "u:$FB:---" --')
 
+    def test_the_account_side_never_touches_another_users_inode(self):
+        """Round 5: a test cannot create another user's inode without root,
+        so this pins the shape: every walk of a tree the account side makes
+        prunes what the account does not own, and it closes only its own
+        children; root denies the rest (deny-foreign)."""
+        tree = self.fn["fb_tree"]
+        walks = re.findall(r'find "\$2" [^\n]*', tree)
+        self.assertEqual(len(walks), 4, walks)
+        for w in walks:
+            self.assertIn('! -user "$me" -prune -o ', w)
+        self.assertIn('[ "$(stat -c %U -- "$2" 2>/dev/null || true)" != "$me" ]', tree)
+        self.assertIn('-user "$3" -print0', self.fn["fb_close_kids"])
+        self.assertIn('me=$(stat -c %U -- "$h" 2>/dev/null)', self.fn["fb_apply"])
+
     def test_a_cut_timeout_is_never_zero(self):
         """`timeout 0` means NO limit: past the budget every cut is 1 s."""
         left = re.search(r"^fb_left\(\) \{.*$", self.s, re.M).group(0)
