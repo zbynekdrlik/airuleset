@@ -54,7 +54,8 @@ def _cargo_targets(home):
         keep = []
         for name in dirnames:
             full = os.path.join(dirpath, name)
-            if name.startswith(".") or name in _PRUNE or os.path.islink(full):
+            if (name.startswith(".") or name in _PRUNE or os.path.islink(full)
+                    or (depth == 0 and name == "uploads")):     # owner data (#1380)
                 continue
             if _is_cargo_target(full):
                 found.append(full)

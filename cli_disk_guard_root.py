@@ -322,9 +322,9 @@ def render_drain_script():
     (c) npm ``_cacache`` + pip cache of OTHER accounts (never the calling user's
         own — they manage it themselves): files older than CACHE_MAX_AGE_DAYS.
     (d) Redundant pull ``.tgz`` archives: a ``.tgz`` file older than
-        TGZ_MAX_AGE_HOURS with a same-stem directory present alongside → the
-        archive is redundant (the extraction succeeded). Scans /home/*/
-        directories only.
+        TGZ_MAX_AGE_HOURS with a same-stem directory alongside (the extraction
+        succeeded). #1380: only in a pull tool's ``/home/*/*-pull/`` dir (elsewhere
+        it can be the only pristine copy), never in ``uploads/`` or work-products.
 
     The script uses ``set -uo pipefail`` (NOT ``-e``: a ``find`` on a missing
     path must not abort). Every action is logged. ``AIRULESET_DGROOT_DRAIN_DRY``
@@ -432,7 +432,7 @@ def render_drain_script():
         "    [ -d \"$home\" ] || continue\n"
         "    u=$(basename \"$home\")\n"
         "    _is_paused \"$u\" && { _log \"SKIP-D $home (paused #851)\"; continue; }\n"
-        "    find \"$home\" -name '*.tgz' -type f -not -type l -mmin +%d "
+        "    find \"$home\" -name '*.tgz' -type f -not -type l -mmin +%d -regex \"$home/[^/]*-pull/.*\" -not -path \"$home/uploads/*\" -not -path \"$home/.claude/work-products/*\" "
         "-print0 2>/dev/null | "
         "while IFS= read -r -d '' f; do\n"
         "        stem=\"${f%%.tgz}\"\n"

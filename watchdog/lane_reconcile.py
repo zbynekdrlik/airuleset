@@ -15,21 +15,16 @@ Code decides its own dispatch and integration; only the prune stays.
 # — so a lane handed off / merged moments ago (or a fresh intra-sweep race) is
 # never removed while a worker may still be settling.
 #
-# COMMIT-age, deliberately NOT the #513 ACTIVITY-recency helper
-# (`_worktree_recency_age_s`) here (#1103 review): recency reads the worktree
-# INDEX mtime among its signals, and this sweep's OWN clean-check
-# (`git status --porcelain`, run every sweep) REFRESHES that index mtime to now
-# — empirically verified (3h -> 0h after one `git status`). So a finished
-# worktree re-checked each sweep would perpetually read "just active" and NEVER
-# age out. Commit history is untouched by `git status`, and the prune's
-# candidate set is only FINISHED/MERGED lanes (which by definition stop getting
-# commits — a live lane is excluded by the classifier BEFORE the age check), so
-# time-since-last-commit == time-since-hand-off, exactly the signal we want.
+# COMMIT-age, deliberately NOT the #513 ACTIVITY-recency helper (#1103 review):
+# recency reads the worktree INDEX mtime, and this sweep's OWN clean-check (`git
+# status`, every sweep) refreshes it to now (verified: 3h -> 0h), so a finished
+# worktree would never age out. Commit history is untouched by `git status`, and
+# the candidates are only FINISHED/MERGED lanes (no new commits; a live lane is
+# excluded BEFORE the age check): time-since-last-commit == time-since-hand-off.
 WORKTREE_PRUNE_MIN_AGE_S = 2 * 3600
 
-# The sweep self-gates per repo at this cadence (git-heavy `worktree list` +
-# `status` reads), mirroring the hourly self-gate of the sibling per-repo jobs
-# (stuck_main / wip_ref). > age-threshold, so a skipped sweep loses nothing.
+# The sweep self-gates per repo at this cadence (git-heavy `worktree list` + `status`
+# reads), like the sibling per-repo jobs; > age-threshold, a skipped sweep loses nothing.
 WORKTREE_PRUNE_CADENCE_S = 3600
 
 
@@ -85,6 +80,7 @@ def prune_finished_worktrees(repo_root, run=None, *, now=None, dry_run=False,
     import cli_lane_liveness as lo
     import cli_worktree_sweep as ws
     from cli_lane_live_gate import LiveLaneGate
+    from watchdog import disk_guard_lane_wt as dlw
     run = run or _prune_run_default
     now = _time.time() if now is None else now
     logs = []
@@ -100,7 +96,7 @@ def prune_finished_worktrees(repo_root, run=None, *, now=None, dry_run=False,
 
     def _git_run(args, wt_cwd):
         try:
-            r = run(["git", "-C", str(wt_cwd)] + list(args))
+            r = run(["git", "-c", "status.showUntrackedFiles=normal", "-C", str(wt_cwd)] + list(args))
         except Exception:  # noqa: BLE001 — unmeasurable, never a false "clean"
             return None
         return r.stdout if getattr(r, "returncode", 1) == 0 else None
@@ -150,12 +146,15 @@ def prune_finished_worktrees(repo_root, run=None, *, now=None, dry_run=False,
             logs.append("worktree-prune kept (<%dh since last commit): %s"
                         % (age_min_s // 3600, path))
             continue
+        if kept := (dlw.final_reason(path, _git_run) or (None,))[0]:   # #1380, after the cheap gates
+            logs.append("worktree-prune kept (%s): %s" % (kept, path))
+            continue
         if dry_run:
             logs.append("worktree-prune would remove (%s, branch kept): %s"
                         % (lane.get("state"), path))
             continue
         try:
-            r = run(["git", "-C", repo_root, "worktree", "remove", path])
+            r = run(["git", "-c", "status.showUntrackedFiles=normal", "-C", repo_root, "worktree", "remove", path])
         except Exception as e:  # noqa: BLE001
             logs.append("worktree-prune kept (remove error %r): %s" % (e, path))
             continue

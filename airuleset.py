@@ -5780,15 +5780,15 @@ _CHECKOUT_SKIP = {"node_modules", ".cache", ".local", "venv", ".venv",
 
 
 def _checkout_roots(home=None):
-    """Every checkout root under `home` — `.git` as a directory OR a file."""
+    """Every checkout root under `home` (`.git` a dir OR a file), never inside owner data (#1380)."""
     home = home or os.environ.get("HOME") or os.path.expanduser("~")
-    roots, base = [], str(home).rstrip("/").count("/")
+    roots, base, owner = [], str(home).rstrip("/").count("/"), {os.path.join(str(home), "uploads"), os.path.join(str(home), ".claude", "work-products")}
     for dirpath, dirnames, filenames in os.walk(home, topdown=True,
                                                 onerror=lambda e: None):
         if dirpath.rstrip("/").count("/") - base >= _CHECKOUT_MAX_DEPTH:
             dirnames[:] = []
             continue
-        dirnames[:] = [d for d in dirnames if d not in _CHECKOUT_SKIP]
+        dirnames[:] = [d for d in dirnames if d not in _CHECKOUT_SKIP and os.path.join(dirpath, d) not in owner]
         if ".git" in dirnames:
             roots.append(dirpath)
             dirnames.remove(".git")          # never descend into .git itself

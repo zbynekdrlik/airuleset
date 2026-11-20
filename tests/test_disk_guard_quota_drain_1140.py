@@ -56,7 +56,7 @@ def no_prevention(monkeypatch):
     """The prevention pass (real age-out rungs) is replaced by a recorder."""
     ran = []
 
-    def _prev(_home, _now, scratch_rows=None):
+    def _prev(_home, _now, scratch_rows=None, **_k):
         return [("prev", lambda: ran.append("prev") or [])]
     monkeypatch.setattr(dg, "_prevention_planners", _prev)
     return ran

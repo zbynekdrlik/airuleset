@@ -604,7 +604,7 @@ def nudges_off_segment(home=None):
 
 def quota_segment(home=None, now=None):
     """#950: the ``quota NN%`` footer segment — per-account disk quota usage
-    on shared-stream boxes.  Shown at >= 90 % of the hard quota, hidden below.
+    on shared-stream boxes.  Shown at >= 90 % of the hard quota AND < 1 GiB room.
     Also hidden when the disk-guard cache is stale (> DISK_SEGMENT_STALE_S) or
     has no ``quota_pct`` (quota not enabled / non-shared-stream box).  Reads ONLY
     the machine-local cache the watchdog Job 40 writes; never touches the
@@ -620,8 +620,8 @@ def quota_segment(home=None, now=None):
         return ""
     if not isinstance(ts, (int, float)) or (now - ts) > DISK_SEGMENT_STALE_S:
         return ""
-    if qpct < 90:
-        return ""
+    if qpct < 90 or isinstance(cache.get("quota_room_mb"), int) and cache["quota_room_mb"] >= 1024:
+        return ""   # #1380: >= 1 GiB real room under a ceiling that follows usage
     return "\033[38;5;196mquota %d%%\033[0m" % int(qpct)
 
 

@@ -152,14 +152,16 @@ def _worktree_reclaimable(root, path, branch, base, git_run, now,
     guards, cheapest-first: NOT locked (a locked worktree is a live session's,
     #348 — review 🔴), not a live lane (``live_gate``, #1193), not in live use,
     idle > `min_idle_s`, HEAD readable (else classified `orphan-gitdir` when the
-    gitdir points nowhere), no precious ignored file, clean tree, and HEAD
-    reachable from an origin ref. The precious check runs AFTER the HEAD-read so
-    an orphan (unreadable git) is never falsely kept by a git-error fail-safe
-    (review 🟡)."""
+    gitdir points nowhere), no precious ignored file, HEAD reachable from an
+    origin ref, and (#1380) a CLEAN tree. The precious check runs AFTER the
+    HEAD-read so an orphan (unreadable git) is never falsely kept by a
+    git-error fail-safe (review 🟡)."""
     git_run = git_run or _worktree_git
     in_live_use = in_live_use or _worktree_in_live_use
     recency_fn = recency_fn or _worktree_recency_age_s
-    precious_fn = precious_fn or _worktree_has_precious_ignored
+    if precious_fn is None:      # #1380: build output only among ignored files, no submodules
+        from watchdog.disk_guard_lane_wt import final_reason
+        precious_fn = lambda p: (final_reason(p, git_run) or (None,))[0]  # noqa: E731
     row = {"path": path, "branch": branch, "repo": root, "reason": None,
            "kind": "worktree", "reachable_via": None}
 
@@ -180,27 +182,19 @@ def _worktree_reclaimable(root, path, branch, base, git_run, now,
         # git cannot resolve HEAD. A #537 orphan-gitdir (gitdir points nowhere)
         # is reclaimable litter — but only after a precious-file fs scan (review
         # 🟡: the orphan branch must precede + still run the precious check).
-        if _is_orphan_gitdir(path):
-            if precious_fn(path):
-                row["reason"] = "orphan-gitdir but precious ignored file present — kept"
-                return row
-            row["kind"] = "orphan-gitdir"
-            row["reason"] = None
+        if _is_orphan_gitdir(path):      # #1380: never proven regenerable
+            row["reason"] = "orphan-gitdir: content unmeasurable — kept (report only)"
             return row
         row["reason"] = "HEAD unresolvable and not an orphan-gitdir — kept (uncertain)"
         return row
     head = head.strip()
 
-    if precious_fn(path):
-        row["reason"] = "precious ignored file present (.env/*.key/local.settings) — kept"
+    if why := precious_fn(path):
+        row["reason"] = why if isinstance(why, str) else "precious ignored file present — kept"
         return row
 
-    # #939: check reachability BEFORE the clean-tree gate. A returned worker's
-    # worktree is typically dirty (scratch/temp/build files) but its HEAD is fully
-    # preserved on origin — the DIRECTORY is safe to free (the branch ref is always
-    # kept). Only when HEAD is NOT reachable do we need the tree for salvage. The
-    # old order (clean-tree BEFORE reachability) permanently blocked 100% of
-    # returned workers' worktrees (55 worktrees / 20G on david3).
+    # #939: reachability BEFORE the clean-tree gate, so the log says WHY a tree
+    # is kept; #939's dirty-but-reachable reclaim is gone (#1380, below).
     via = _worktree_head_reachable_from_origin(path, branch, base, head, git_run)
     if via is None:
         row["reason"] = ("HEAD not reachable from any origin ref "
@@ -208,9 +202,12 @@ def _worktree_reclaimable(root, path, branch, base, git_run, now,
         return row
     row["reachable_via"] = via
 
+    # #1380 (owner 20.11.2026): a drain deletes only regenerable bytes, and a
+    # dirty tree's files are uncommitted work. Unmeasurable is never clean.
     clean = _worktree_is_clean(path, git_run)
-    if clean is False:
-        row["dirty"] = True                # decision-logged: dirty but reachable
+    if clean is not True:
+        row["reason"] = ("dirty worktree (uncommitted work is never discarded, #1380) — kept"
+                         if clean is False else "git status unreadable — kept")
     return row                             # reason None → directory reclaimable
 
 
@@ -230,6 +227,7 @@ def discover_reclaimable_worktrees(home=None, git_run=None, now=None,
     out = []
     import airuleset
     from cli_lane_live_gate import LiveLaneGate
+    from watchdog.disk_guard_lane_wt import in_claude_worktrees
     gate = live_gate or LiveLaneGate(home=home, now=now)
     for root in airuleset._checkout_roots(home):
         if not (Path(root) / ".git").is_dir():
@@ -249,8 +247,8 @@ def discover_reclaimable_worktrees(home=None, git_run=None, now=None,
             branch = e.get("branch")
             if branch in _STALE_WORKTREE_PROTECTED_BRANCHES or not path:
                 continue
-            if branch is None:
-                continue                   # detached HEAD — no branch ref to keep, never guessed (review 🔵)
+            if branch is None or not in_claude_worktrees(path):
+                continue    # detached (never guessed) / out of tree: the lane source's (#1380)
             out.append(_worktree_reclaimable(
                 root, path, branch, base, git_run, now, min_idle_s=min_idle_s,
                 in_live_use=in_live_use, locked=bool(e.get("locked")), live_gate=gate))

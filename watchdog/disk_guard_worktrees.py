@@ -12,7 +12,8 @@ its one side effect is the #1067 1g verdict-cache file, never a delete.
 
 Also extends the #965 scratch-worktrees discovery with a containment
 criterion (HEAD on origin as an ALTERNATIVE to zero-ahead) so merged PRs
-whose upstream ref was deleted are still reclaimable.
+whose upstream ref was deleted are still reclaimable. #1380: the second
+source (lanes outside ``.claude/worktrees``) is ``disk_guard_lane_wt``.
 """
 # airuleset:script-ok helper module, imported from disk_guard
 from __future__ import annotations
@@ -21,6 +22,8 @@ import os
 import subprocess
 import time
 from pathlib import Path
+
+from watchdog import disk_guard_lane_wt as lane
 
 
 def _safe_dir_size(path, dir_stats_fn=None):
@@ -34,12 +37,8 @@ def _safe_dir_size(path, dir_stats_fn=None):
         return 0
 
 
-# --------------------------------------------------------------------------- #
-# stale agent worktrees (drain rung — every box class)
-# --------------------------------------------------------------------------- #
-
-# Protected branches — never removed by the agent-worktree rung.
-_PROTECTED_BRANCHES = frozenset({"main", "dev", "master", "develop"})
+# --- stale agent worktrees (drain rung — every box class) ------------------ #
+_PROTECTED_BRANCHES = frozenset({"main", "dev", "master", "develop", "staging"})  # kept
 _NOT_ON_ORIGIN = "HEAD not contained in any origin ref — kept"
 
 
@@ -158,6 +157,8 @@ def _classify(path, git_run_fn=None, dir_stats_fn=None):
         return _skip("git branch --contains unreadable — kept", error=True)
     if via is None:
         return _skip(_NOT_ON_ORIGIN)
+    if (kept := lane.final_reason(path, git_run_fn)) is not None:   # #1380: a reclaim only
+        return _skip(kept[0], error=kept[1])
     return {"bytes": _safe_dir_size(path, dir_stats_fn), "kind": "worktree-remove",
             "reason": None, "branch": branch, "contained_in": via}
 
@@ -165,7 +166,7 @@ def _classify(path, git_run_fn=None, dir_stats_fn=None):
 def discover_stale_agent_worktrees(home=None, now=None,
                                     git_run_fn=None, dir_stats_fn=None,
                                     live_check_fn=None, cache_path=None,
-                                    live_gate=None):
+                                    live_gate=None, **lane_kw):
     """Discover ``<repo>/.claude/worktrees/agent-*`` worktrees ready for
     reclaim.  A worktree is reclaimable (``reason is None``) when:
     (a) unlocked (no ``locked`` file in gitdir), (b) ``git status
@@ -176,7 +177,8 @@ def discover_stale_agent_worktrees(home=None, now=None,
     names it; unreadable transcript evidence keeps it, fail-safe).
 
     (e) also keeps a FINISHED lane for the 6 h resume grace (#1195; waived
-    at ``critical``). #1067 1g: with ``cache_path`` (the guard dir's verdict
+    at ``critical``). #1380: plus the lane rows (``disk_guard_lane_wt``,
+    ``lane_kw``). #1067 1g: with ``cache_path`` (the guard dir's verdict
     file; None on a dry-run poll) an unchanged worktree reuses its last
     non-reclaimable verdict without any git call (``disk_guard_wt_cache``);
     (a), (d) and (e) always run fresh, before the cache.
@@ -193,7 +195,8 @@ def discover_stale_agent_worktrees(home=None, now=None,
     seen: list[str] = []
 
     import airuleset
-    for root in airuleset._checkout_roots(home):
+    roots = airuleset._checkout_roots(home)
+    for root in roots:
         wt_root = Path(root) / ".claude" / "worktrees"
         if not wt_root.is_dir():
             continue
@@ -222,14 +225,15 @@ def discover_stale_agent_worktrees(home=None, now=None,
                     lambda p=path: _classify(p, git_run_fn, dir_stats_fn),
                     refs_dep=lambda v: v.get("reason") == _NOT_ON_ORIGIN))
             out.append(row)
+    out += lane.lane_rows(roots, gate=gate, cache=cache, git_run_fn=git_run_fn,
+                          dir_stats_fn=dir_stats_fn, live_check_fn=live_check_fn,
+                          now=now, seen=seen, **lane_kw)
     if cache is not None:
         cache.save(seen)
     return out
 
 
-# --------------------------------------------------------------------------- #
-# scratch-worktree containment extension (#968)
-# --------------------------------------------------------------------------- #
+# --- scratch-worktree containment extension (#968) ------------------------- #
 
 def head_contained_in_origin_scratch(wt_path: str, contained_fn=None) -> bool:
     """For a scratch worktree, check whether HEAD is contained in any origin
@@ -240,9 +244,7 @@ def head_contained_in_origin_scratch(wt_path: str, contained_fn=None) -> bool:
     return _origin_containment(wt_path)[0] is not None
 
 
-# --------------------------------------------------------------------------- #
-# dynamic critical threshold (#968 item 3)
-# --------------------------------------------------------------------------- #
+# --- dynamic critical threshold (#968 item 3) ------------------------------ #
 
 SMALL_DISK_BYTES = 64 * 1024 * 1024 * 1024   # 64 GB
 SMALL_DISK_CRITICAL_PCT = 85
@@ -263,9 +265,7 @@ def effective_critical_pct(statvfs_fn=None):
     return CRITICAL_PCT
 
 
-# --------------------------------------------------------------------------- #
-# swap warning (#968 item 5)
-# --------------------------------------------------------------------------- #
+# --- swap warning (#968 item 5) -------------------------------------------- #
 
 def check_swap_warning(meminfo_path="/proc/meminfo", swapfile_path="/swapfile"):
     """Return a warning dict when ``/swapfile`` > 2x MemTotal, else None.

@@ -298,10 +298,13 @@ def test_cached_reclaimable_verdict_is_revalidated_fresh(box):
 
 
 def test_reclaimable_verdict_reruns_every_check_and_the_size_walk(box):
+    """#1380: a would-be reclaim also runs the final gate (``git ls-files
+    -s -v`` + ``git status --ignored=matching``), so 5 git calls, not 3."""
     _pass(box, FakeGit(contains="  origin/main\n"))
     git, sizes = FakeGit(contains="  origin/main\n"), []
     rows, _ = _pass(box, git, sizes=sizes)
-    assert len(git.calls) == 3 and sizes
+    assert len(git.calls) == 5 and sizes
+    assert "--ignored=matching" in git.calls[-1][0]
     r = _row(rows)
     assert r["kind"] == "worktree-remove" and r["contained_in"] == "origin/main"
     assert r["branch"] == "worktree-agent-one"
@@ -422,7 +425,7 @@ def test_dry_run_poll_never_uses_the_cache(tmp_path, monkeypatch, dry_run):
     monkeypatch.setattr(dg, "_default_planners",
                         lambda _h, _n, scratch_rows=None, **kw: kws.append(kw) or [])
     monkeypatch.setattr(dg, "_prevention_planners",
-                        lambda _h, _n, scratch_rows=None: [])
+                        lambda _h, _n, scratch_rows=None, **_k: [])
     monkeypatch.setattr(dg, "_collect_top_consumers", lambda *a, **k: [])
     dg.run_disk_guard(
         now=10_000.0, home=str(tmp_path), dry_run=dry_run, statvfs_fn=_sv(82),
