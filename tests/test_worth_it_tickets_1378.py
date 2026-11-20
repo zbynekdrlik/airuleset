@@ -642,3 +642,18 @@ class TestUntrackedWorkHookDrop1378(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestBrakeWordingMatchesRule1378(unittest.TestCase):
+    """The block wall and the deep doctrine must state the shipped rule
+    (brake only when a stream filed MORE than it closed), never the first
+    cut's "at least as many"."""
+
+    def test_block_message_and_doctrine_say_more_than(self):
+        from gates.filing import render
+        deep = (Path(__file__).resolve().parents[1] / "skills" / "no-dropped-work-deep"
+                / "DEEP.md").read_text(encoding="utf-8")
+        for text in (render.BLOCK_MSG, deep):
+            self.assertNotIn("at least as many", text)
+        self.assertIn("filed more Claude-born tickets than it closed", render.BLOCK_MSG)
+        self.assertIn("filed more Claude-born tickets than it closed", deep)

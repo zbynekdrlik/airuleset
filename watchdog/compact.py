@@ -241,8 +241,7 @@ COMPACT_REQUEST_MAX_AGE_S = 30 * 60
 # Reuses job 9's own dual-signal primitive rather than duplicating it.
 COMPACT_RECENT_HUMAN_ACTIVITY_S = 120   # env AIRULESET_COMPACT_RECENT_HUMAN_S
 
-_COMPACT_DISCORD_ANSWER_PREFIXES = (
-    "Odpoveď z Discordu:", "Odpoveď užívateľa na tvoju otázku")
+from machine_prompts import DISCORD_ANSWER_PREFIXES as _COMPACT_DISCORD_ANSWER_PREFIXES  # noqa: E402,E501 (#1379)
 
 def _compact_recent_human_window(window_s=None):
     """An explicit `window_s=` is returned verbatim. The CONSTANT/ENV
