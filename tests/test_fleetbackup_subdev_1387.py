@@ -6,7 +6,6 @@ The push leg is executed against stub useradd/getent/passwd/usermod/install
 (never root, never a real account); the installed ACL script is a stub here
 (it has its own suite, test_fleetbackup_acl_1387.py).
 """
-import fcntl
 import os
 import re
 import subprocess
