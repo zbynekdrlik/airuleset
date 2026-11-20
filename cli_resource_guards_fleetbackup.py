@@ -119,7 +119,10 @@ def render_fleetbackup_rrsync_wrapper(rrsync=RRSYNC_PATH, root=RRSYNC_ROOT):
     LANG LC_*`` lets the client pick the locale the pattern runs in. Then:
     ``rsync --server --sender``, options minus ``FLEETBACKUP_REFUSED_OPTIONS``,
     ``.``, and one or more paths that each lie inside ``<account>/uploads`` or
-    ``<account>/.claude/work-products`` (no ``..``) of ONE account. rrsync is
+    ``<account>/.claude/work-products`` (no ``..``) of ONE account. The one
+    exception is fleet-backup's account discovery, ``--list-only`` of ``./``
+    alone, served at the ``/home`` root (it names no tree, so no tree can be
+    swapped under it). rrsync is
     rooted at that account's home (the account prefix is stripped): rrsync
     only checks that a path resolves inside its root, so with ``/home`` as the
     root a tree swapped for a symlink to ANOTHER account's tree was served
@@ -141,6 +144,8 @@ def render_fleetbackup_rrsync_wrapper(rrsync=RRSYNC_PATH, root=RRSYNC_ROOT):
         '    || fb_refuse "not a read-only rsync pull"\n'
         "paths=0\n"
         "dot=0\n"
+        "listing=0\n"
+        "top=0\n"
         "n=0\n"
         'one=""\n'
         'cmd="$1 $2 $3"\n'
@@ -151,12 +156,19 @@ def render_fleetbackup_rrsync_wrapper(rrsync=RRSYNC_PATH, root=RRSYNC_ROOT):
         '        case "$a" in\n'
         "            .) dot=1 ;;\n"
         '            %s) fb_refuse "option $a" ;;\n'
+        "            --list-only) listing=1 ;;\n"
         "            -*) ;;\n"
         '            *) fb_refuse "argument before the transfer root" ;;\n'
         "        esac\n"
         '        cmd="$cmd $a"\n'
         "        continue\n"
         "    fi\n"
+        '    if [ "$listing" -eq 1 ] && [ "$paths" -eq 0 ] && [ "$top" -eq 0 ] && { [ "$a" = . ] || [ "$a" = ./ ]; }; then\n'
+        '        top=1\n'
+        '        cmd="$cmd $a"\n'
+        "        continue\n"
+        "    fi\n"
+        '    [ "$top" -eq 0 ] || fb_refuse "the account listing takes no other path"\n'
         '    case "$a" in */../*|*/..|../*|..) fb_refuse "a .. path" ;; esac\n'
         '    acct=${a%%%%/*}\n'
         '    rest=${a#*/}\n'
@@ -171,12 +183,15 @@ def render_fleetbackup_rrsync_wrapper(rrsync=RRSYNC_PATH, root=RRSYNC_ROOT):
         '    cmd="$cmd $rest"\n'
         "    paths=$((paths + 1))\n"
         "done\n"
-        '[ "$dot" -eq 1 ] && [ "$paths" -ge 1 ] || fb_refuse "no path"\n'
+        '[ "$dot" -eq 1 ] || fb_refuse "no path"\n'
         "# rrsync reads the words checked above, the account prefix stripped (sshd\n"
         "# exported the variable already)\n"
         'SSH_ORIGINAL_COMMAND=$cmd\n'
+        "# fleet-backup's account discovery: the names under the root, no tree named\n"
+        '[ "$top" -eq 0 ] || exec %s -ro %s\n'
+        '[ "$paths" -ge 1 ] || fb_refuse "no path"\n'
         'exec %s -ro %s/"$one"\n'
-        % (refused, shlex.quote(rrsync), shlex.quote(root))
+        % (refused, shlex.quote(rrsync), shlex.quote(root), shlex.quote(rrsync), shlex.quote(root))
     )
 
 
@@ -353,9 +368,15 @@ fb_traverse() { # $1 fb, $2 dir: u:<fb>:--x, the owning group keeps exactly its 
     esac
 }
 
-fb_tree() { # $1 fb, $2 tree root -> 0 granted | 1 granted with failures | 2 refused
-    local v rc=0
-    v=$({ find "$2" -ignore_readdir_race -xdev -type d -exec getfacl -p -c -- {} + 2>/dev/null || true; } \
+fb_tree() { # $1 fb, $2 tree root, $3 the account -> 0 granted | 1 granted with failures | 2 refused.
+    #          Only the account's OWN inodes: another user's file in a tree dir it can write into
+    #          gets root's deny (fb_deny_foreign), never a grant the account could not even make
+    local v rc=0 me="$3"
+    if [ "$(stat -c %U -- "$2" 2>/dev/null || true)" != "$me" ]; then
+        fb_warn "$(printf '%q' "$2") is not owned by $me — tree not granted (root closes it)"
+        return 2
+    fi
+    v=$({ find "$2" -ignore_readdir_race -xdev ! -user "$me" -prune -o -type d -exec getfacl -p -c -- {} + 2>/dev/null || true; } \
         | awk -v fb="$1" -v scope=all "$FB_ACL_AWK") || v=refuse
     case "$v" in
         "ok "???) ;;
@@ -363,12 +384,13 @@ fb_tree() { # $1 fb, $2 tree root -> 0 granted | 1 granted with failures | 2 ref
            return 2 ;;
     esac
     # g::--- first: a recalculated mask must never re-widen a group the owner closed
-    fb_twice find "$2" -ignore_readdir_race -xdev -type d \
+    fb_twice find "$2" -ignore_readdir_race -xdev ! -user "$me" -prune -o -type d \
         -exec setfacl -P -m "g::---,u:$1:r-x,d:u:$1:r-x,d:g::---,d:o::---" -- {} + || rc=1
-    { find "$2" -ignore_readdir_race -xdev -type f -exec getfacl -p -- {} + 2>/dev/null || true; } \
+    { find "$2" -ignore_readdir_race -xdev ! -user "$me" -prune -o -type f -exec getfacl -p -- {} + 2>/dev/null || true; } \
         | awk -v fb="$1" "$FB_CLOSED_AWK" >&2 || true   # report only
     # files: r--, mask untouched (-n); -P never follows a file swapped for a symlink
-    fb_twice find "$2" -ignore_readdir_race -xdev -type f -exec setfacl -P -n -m "u:$1:r--" -- {} + || rc=1
+    fb_twice find "$2" -ignore_readdir_race -xdev ! -user "$me" -prune -o -type f \
+        -exec setfacl -P -n -m "u:$1:r--" -- {} + || rc=1
     return "$rc"
 }
 
@@ -378,14 +400,15 @@ fb_close() { # $1 fb, rest: paths — a named deny, mask untouched
     setfacl -P -n -m "u:$fb:---" -- "$@"
 }
 
-fb_close_kids() { # $1 fb, $2 home: every child the account owns and no tree
-    { fb_home_kids "$2" -user "$(id -un)" -print0; fb_claude_kids "$2" -user "$(id -un)" -print0; } \
+fb_close_kids() { # $1 fb, $2 home, $3 the account: every child the account owns and no tree
+    { fb_home_kids "$2" -user "$3" -print0; fb_claude_kids "$2" -user "$3" -print0; } \
         | xargs -0 -r setfacl -P -n -m "u:$1:---" --
 }
 
 fb_apply() { # as the account: $1 fb, $2 home, $3 grant|hold
-    local fb="$1" h="$2" mode="$3" rc=0 t granted=0
+    local fb="$1" h="$2" mode="$3" rc=0 t granted=0 me
     cd /
+    me=$(stat -c %U -- "$h" 2>/dev/null) || me=""   # the account (fb_account checked the home is its)
     # every new child of the home and .claude is born closed (rename-over included);
     # -n: an existing default mask is never recalculated (no default entry widens)
     setfacl -P -n -d -m "u:$fb:---,g::---,o::---" -- "$h" || rc=1
@@ -398,17 +421,17 @@ fb_apply() { # as the account: $1 fb, $2 home, $3 grant|hold
             mkdir -m 0700 -- "$h/.claude/work-products" || true
         fi
     fi
-    if ! fb_twice fb_close_kids "$fb" "$h"; then
-        fb_warn "$(id -un): a child of the home could not be closed — home HELD"
+    if ! fb_twice fb_close_kids "$fb" "$h" "$me"; then
+        fb_warn "${me:-?}: a child of the home could not be closed — home HELD"
         mode=hold; rc=1
     fi
     if [ "$mode" = grant ] && fb_realdir "$h/uploads"; then
-        t=0; fb_tree "$fb" "$h/uploads" || t=$?
+        t=0; fb_tree "$fb" "$h/uploads" "$me" || t=$?
         [ "$t" -eq 0 ] || rc=1
         [ "$t" -eq 2 ] || granted=1
     fi
     if [ "$mode" = grant ] && fb_claude_traversed "$h"; then
-        t=0; fb_tree "$fb" "$h/.claude/work-products" || t=$?
+        t=0; fb_tree "$fb" "$h/.claude/work-products" "$me" || t=$?
         [ "$t" -eq 0 ] || rc=1
         if [ "$t" -ne 2 ] && fb_traverse "$fb" "$h/.claude"; then
             granted=1
@@ -430,26 +453,40 @@ fb_apply() { # as the account: $1 fb, $2 home, $3 grant|hold
 fb_check() { cd /; exec python3 -I -S -c "$FB_CHECK_PY"; }   # NUL records on stdin
 
 # ------------------------------------------------------------------- root side
-fb_tree_records() {
-    find "$1" -ignore_readdir_race -xdev \( -type d -printf 'D\0%m\0%p\0' \) -o \( -type f -printf 'F\0%m\0%p\0' \)
+fb_tree_records() { # $1 tree, $2 account: D/F for the account's own inodes, C (must stay closed)
+    #                 for another user's, not descended into
+    find "$1" -ignore_readdir_race -xdev \( ! -user "$2" -prune -printf 'C\0%m\0%p\0' \) \
+        -o \( -type d -printf 'D\0%m\0%p\0' \) -o \( -type f -printf 'F\0%m\0%p\0' \)
+}
+
+fb_tree_foreign() { # $1 home, $2 account: NUL list of the topmost inodes in the two trees it does not own
+    if fb_realdir "$1/uploads"; then
+        find "$1/uploads" -ignore_readdir_race -xdev ! -user "$2" -prune -print0 || return 1
+    fi
+    if fb_claude_traversed "$1"; then
+        find "$1/.claude/work-products" -ignore_readdir_race -xdev ! -user "$2" -prune -print0 || return 1
+    fi
 }
 
 fb_records() { # $1 home [siblings]: what fleetbackup may and may not reach, as NUL records
-    local h="$1" scope="${2:-all}" rc=0
+    local h="$1" scope="${2:-all}" rc=0 u="${1##*/}"   # the account is named after its home
     printf 'T\0-\0%s\0' "$h"
     fb_home_kids "$h" -printf 'C\0%m\0%p\0' || rc=1
     if fb_claude_traversed "$h"; then printf 'T\0-\0%s\0' "$h/.claude"; fi
     fb_claude_kids "$h" -printf 'C\0%m\0%p\0' || rc=1
     if [ "$scope" = all ]; then
-        if fb_realdir "$h/uploads"; then fb_tree_records "$h/uploads" || rc=1; fi
-        if fb_claude_traversed "$h"; then fb_tree_records "$h/.claude/work-products" || rc=1; fi
+        if fb_realdir "$h/uploads"; then fb_tree_records "$h/uploads" "$u" || rc=1; fi
+        if fb_claude_traversed "$h"; then fb_tree_records "$h/.claude/work-products" "$u" || rc=1; fi
     fi
     return "$rc"   # an incomplete record stream must never pass as a clean read-back
 }
 
-fb_deny_foreign() { # root, $1 home, $2 account: `---` on every child the account does not own,
-    #                 batched (one setfacl per child let a second account stall the refresh)
-    { fb_home_kids "$1" ! -user "$2" -print0; fb_claude_kids "$1" ! -user "$2" -print0; } \
+fb_deny_foreign() { # root, $1 home, $2 account: `---` on every inode the account does not own among
+    #                 the children of the home and .claude and in the two trees (a tree dir another
+    #                 user can write into hands its files our DEFAULT grant, umask or not), batched
+    #                 (one setfacl per inode let a second account stall the refresh)
+    { fb_home_kids "$1" ! -user "$2" -print0; fb_claude_kids "$1" ! -user "$2" -print0
+      fb_tree_foreign "$1" "$2"; } \
         | xargs -0 -r setfacl -P -n -m "u:$FB:---" --
 }
 
