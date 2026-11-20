@@ -51,8 +51,8 @@ class TestMikrotikPzAccount(unittest.TestCase):
         self.assertEqual(drop._GENERATED_DROP_PORTS[("dev1", ACCT)], 8908)
         hosts = json.loads((ROOT / "peer-links.json").read_text(encoding="utf-8"))["hosts"]
         pairs = sorted(sorted(p) for p in hosts["dev1"]["links"] if ACCT in p)
-        # #1375 (owner 19.11.2026) added the mikrotik-pz <-> remoteos-mcp link.
-        self.assertEqual(pairs, [["airuleset", ACCT], [ACCT, "remoteos-mcp"]])
+        # The cutover's own link must exist; later links (#1375 remoteos-mcp) may join it.
+        self.assertIn(["airuleset", ACCT], pairs)
         self.assertIn("airuleset|mikrotik-pz", hosts["dev1"]["topics"])
         reg = json.loads((ROOT / "projects-registry.json").read_text(encoding="utf-8"))
         (row,) = [r for r in reg if r["name"] == ACCT]

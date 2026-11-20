@@ -121,7 +121,8 @@ class TestFleetBackupAccount(unittest.TestCase):
         self.assertEqual((row["account"], row["path"], row["host"]),
                          (ACCT, "/home/fleet-backup/devel/fleet-backup", "dev1"))
         dev1 = json.loads((ROOT / "peer-links.json").read_text(encoding="utf-8"))["hosts"]["dev1"]
-        self.assertEqual([p for p in dev1["links"] if ACCT in p], [["airuleset", ACCT]])
+        # The cutover's own link must exist; later owner-requested links (#1386) may join it.
+        self.assertIn(["airuleset", ACCT], [sorted(p) for p in dev1["links"] if ACCT in p])
         self.assertIn("airuleset|" + ACCT, dev1["topics"])
         self.assertEqual(cpc.validate_links(cpc.load_links(), cpc.load_registry()), [])
 
