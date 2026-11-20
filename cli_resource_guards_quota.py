@@ -252,8 +252,8 @@ def render_quota_ceiling_script() -> str:
     ``/aquota.user`` missing → exit 3, then ``QUOTA_LOCK_PATH`` (shared with
     the daily refresh and the push apply; busy → exit 4 touching nothing).
     #1387: then it releases the quota lock and runs the fleetbackup ACL
-    refresh (decided: the same idempotent refresh as the push, hourly; it takes
-    its own lock). Exits 1 (LOUD in
+    refresh (decided: one idempotent refresh, hourly and queued by every push;
+    it takes its own lock). Exits 1 (LOUD in
     ``systemctl status``) when the limits block reported a failure (``qfail``)
     or the refresh failed. Pure renderer."""
     return (
