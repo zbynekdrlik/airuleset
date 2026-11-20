@@ -556,6 +556,9 @@ class TestAirulesetWiring(unittest.TestCase):
         self.assertIn("Environment=FILEDROP_PORT=8791", unit)
 
 
+_ALL_FREE = lambda ip, port: True  # noqa: E731  #1388: hermetic port probe (claudy's uvicorn holds :8791 on the controller)
+
+
 class TestChooseFiledropPort(unittest.TestCase):
     """A second airuleset user on ONE host (montalu@dev1, marek@gatekeeper) must
     not restart-loop on the first user's :8788 (Errno 98, observed on
@@ -592,7 +595,8 @@ class TestChooseFiledropPort(unittest.TestCase):
 
     def test_persisted_choice_is_stable(self):
         # a previously persisted port is reused verbatim — the URL never moves
-        with self.m.patch.object(self.fw, "filedrop_persisted_port", lambda: 8791):
+        with self.m.patch.object(self.fw, "filedrop_persisted_port", lambda: 8791), \
+                self.m.patch.object(self.fw, "_filedrop_port_bindable", _ALL_FREE):
             self.assertEqual(self.ar._choose_filedrop_port("127.0.0.1"), 8791)
 
     def test_own_active_service_keeps_its_deterministic_port(self):
@@ -676,7 +680,8 @@ class TestChooseFiledropPort(unittest.TestCase):
         with self.m.patch.object(self.fw, "filedrop_persisted_port",
                                  lambda: 8791), \
                 self.m.patch.object(self.fw, "_run_systemctl",
-                                    lambda a: (0, "active\n", "")):
+                                    lambda a: (0, "active\n", "")), \
+                self.m.patch.object(self.fw, "_filedrop_port_bindable", _ALL_FREE):
             self.assertEqual(self.ar._choose_filedrop_port("127.0.0.1"), 8791)
 
     def test_distinct_uids_get_distinct_ports(self):
@@ -689,7 +694,8 @@ class TestChooseFiledropPort(unittest.TestCase):
         # setUp already pins the service inactive + no persisted port.
         ports = []
         for uid in (1002, 1004):        # real subdev uids (montalu, montalu2)
-            with self.m.patch("os.getuid", lambda u=uid: u):
+            with self.m.patch("os.getuid", lambda u=uid: u), \
+                    self.m.patch.object(self.fw, "_filedrop_port_bindable", _ALL_FREE):
                 ports.append(self.ar._choose_filedrop_port("127.0.0.1"))
         self.assertNotEqual(
             ports[0], ports[1],

@@ -156,7 +156,8 @@ class TestBackRefSeamTeeth(unittest.TestCase):
         self.addCleanup(port_file_patch.stop)
         leaf_mock = m.Mock(return_value=8791)
         with m.patch.object(fw, "filedrop_persisted_port", leaf_mock), \
-             m.patch.object(fw, "_run_systemctl", lambda a: (3, "inactive", "")):
+             m.patch.object(fw, "_run_systemctl", lambda a: (3, "inactive", "")), \
+             m.patch.object(fw, "_filedrop_port_bindable", lambda ip, port: True):  # hermetic, #1388
             self.assertEqual(fw._choose_filedrop_port("127.0.0.1"), 8791)
         self.assertTrue(leaf_mock.called,
                         "leaf-patched filedrop_persisted_port was not consulted -> back-ref not via leaf")
