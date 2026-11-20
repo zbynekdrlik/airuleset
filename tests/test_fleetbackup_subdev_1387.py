@@ -264,6 +264,14 @@ class TestScriptInvariants(unittest.TestCase):
         self.assertEqual(self.fn["fb_deny_foreign"].strip().splitlines()[-1].strip(),
                          '| xargs -0 -r setfacl -P -n -m "u:$FB:---" --')
 
+    def test_a_cut_timeout_is_never_zero(self):
+        """`timeout 0` means NO limit: past the budget every cut is 1 s."""
+        left = re.search(r"^fb_left\(\) \{.*$", self.s, re.M).group(0)
+        prog = "%s\nfb_cut() {\n%s\n}\n" % (left, self.fn["fb_cut"])
+        prog += "FB_BUDGET=0; FB_T0=$(date +%s); fb_cut 60; FB_BUDGET=100000; fb_cut 60; fb_cut 7\n"
+        r = subprocess.run(["bash", "-c", prog], capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.stdout.split(), ["1", "60", "7"], r.stderr)
+
     def test_root_walks_and_denies_run_timed(self):
         """Round 4: the size of a tenant's trees (and of its home) is the
         tenant's choice, so root's walks and batched denies are timed too."""
