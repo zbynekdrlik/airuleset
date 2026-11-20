@@ -190,6 +190,13 @@ class TestCheck(unittest.TestCase):
         self.assertEqual(out, "leak=1 miss=0 readable=0 private=0")
         self.assertIn("LEAK reachable", err)
 
+    def test_traverse_or_write_alone_is_a_leak_too(self):
+        """A child fleetbackup can only ENTER still exposes every file below it
+        by name; any access bit at all is a leak."""
+        x_only, w_only = self.node("xd", 0o100, "d"), self.node("wf", 0o200)
+        out, _ = self.check(("C", "-", x_only), ("C", "-", w_only))
+        self.assertEqual(out, "leak=2 miss=0 readable=0 private=0")
+
     def test_a_listable_home_is_a_leak_a_traverse_only_one_is_not(self):
         listable, trav = self.node("l", 0o700, "d"), self.node("t", 0o100, "d")
         out, _ = self.check(("T", "-", listable), ("T", "-", trav))
