@@ -267,7 +267,7 @@ class TestScriptInvariants(unittest.TestCase):
     def test_root_walks_and_denies_run_timed(self):
         """Round 4: the size of a tenant's trees (and of its home) is the
         tenant's choice, so root's walks and batched denies are timed too."""
-        self.assertIn('timeout -k 10 "$(fb_cut "$FB_CHECK_TIMEOUT" 30)" /bin/bash "$FB_SELF" records',
+        self.assertIn('timeout -k 10 "$(fb_cut "$FB_CHECK_TIMEOUT")" /bin/bash "$FB_SELF" records',
                       self.fn["fb_walk"])
         self.assertIn('/bin/bash "$FB_SELF" deny-foreign "$h" "$u"', self.fn["fb_account"])
         self.assertNotIn("fb_records", self.fn["fb_account"])
@@ -300,9 +300,9 @@ class TestScriptInvariants(unittest.TestCase):
             self.assertRegex(line, r"timeout -k 10 \"\$t\" runuser -u ")
             self.assertIn("-- env -i PATH=", line)
         self.assertIn('runuser -u "$u"', self.fn["fb_run_account"])
-        self.assertIn('t=$(fb_cut "$FB_ACCOUNT_TIMEOUT" 1)', self.fn["fb_run_account"])
+        self.assertIn('t=$(fb_cut "$FB_ACCOUNT_TIMEOUT")', self.fn["fb_run_account"])
         self.assertIn('runuser -u "$FB"', self.fn["fb_as_fb"])
-        self.assertIn('t=$(fb_cut "$1" 30)', self.fn["fb_as_fb"])
+        self.assertIn('t=$(fb_cut "$1")', self.fn["fb_as_fb"])
         calls = re.findall(r"fb_as_fb [^\n]*", self.s)
         self.assertEqual(len(calls), 4, calls)
         for c in calls:

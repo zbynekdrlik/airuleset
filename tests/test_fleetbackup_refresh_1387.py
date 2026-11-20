@@ -183,14 +183,18 @@ class TestRefresh(unittest.TestCase):
         self.assertEqual(box.checked(0), {("C", h)})
         self.assert_live_key(box)
 
-    def test_a_check_past_the_budget_still_gets_its_floor(self):
-        """Only root can stop fleetbackup's processes: a check past the budget
-        keeps a 30 s floor, so a slow check never reads as `unverifiable`."""
+    def test_past_the_budget_every_check_is_cut_to_a_second(self):
+        """Round 4: no withdrawal hangs on a check any more, so past the budget
+        a check gets 1 s (`timeout 0` would be NO limit) and a slow one fails
+        the home."""
         box, h = self.box(budget_s=0)
-        box.extra_env["FBT_CHECK_DELAY"] = "3"
+        box.extra_env["FBT_CHECK_DELAY"] = "5"
         box.answers(NONE, NONE)
+        t0 = time.monotonic()
         r = box.run()
+        self.assertLess(time.monotonic() - t0, 8)          # two 5 s checks, each cut at 1 s
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("did not run", r.stderr)
         self.assertEqual(entry(h, "user:nobody:"), "user:nobody:---")
         self.assert_not_withdrawn(box)
 
