@@ -39,6 +39,14 @@ one), and one-off numbered lint/ruff/mcp venvs (``~/.venvs/*-<pid>`` +
 stance is thus DELIBERATELY narrowed by #854 to these bounded cache-class cases;
 each drain logs ``disk-guard: NN% -> drain rung=<name> freed=<bytes> -> MM%``.
 
+#1380 (owner 20.11.2026, david3): the ladder had deleted the owner's documents
+from ``~/uploads`` and a whole ``~/.claude/work-products/<x>``. A drain deletes
+ONLY regenerable bytes (caches, build output, test tmp, clean pushed worktrees,
+dead-session scratch). The ``uploads``, ``work-products-snapshot`` and
+``home-snapshot`` rungs are gone, and :func:`execute_drain` refuses any action
+inside or above ``~/uploads`` or ``~/.claude/work-products``
+(:func:`_protected_owner_path`), whatever rung emits it.
+
 PERMISSION NOTE (#854): the drain still runs per-USER (``euid==0`` refuses the
 whole ladder). The ROOT-owned cache classes (:data:`SUDO_CLASSES` — apt cache,
 rotated ``/var/log``, another user's ``/home/gh-runner`` ``_update``/``_temp``/
@@ -96,7 +104,7 @@ MOUNTS = ("/", "/home", "/tmp")
 # in-use image, user data) stays out of the fence and is never touched.
 RECLAIMABLE_CLASSES = frozenset({
     "scratch", "tmp-stray", "worktree", "cli-version",
-    "uploads", "transcript", "toolchain", "journal",
+    "transcript", "toolchain", "journal",
     # #854 cache-class additions:
     "apt-cache", "rotated-log", "runner-update", "docker-image",
     "runner-checkout", "user-cache", "claude-version", "oneoff-venv",
@@ -110,14 +118,12 @@ RECLAIMABLE_CLASSES = frozenset({
     "home-worktree",
     # #920 — test runner /tmp leftovers, runner _diag logs, npm/uv cache:
     "tmp-test", "runner-diag", "npm-uv-cache",
-    # #935-B — work-products snapshot backstop:
-    "work-products-snapshot",
-    # #950 — generalized home-directory snapshot backstop:
-    "home-snapshot",
     # #965 — android build intermediates + scratch worktrees:
     "android-build", "scratch-worktree",
     # #968 — stale agent worktrees (drain rung, every box class):
     "stale-agent-worktree",
+    # #1380 — stale lane worktrees outside .claude/worktrees (same rung):
+    "lane-worktree",
     # #980 — dead-session /tmp/claude-<uid>/ scratchpad dirs:
     "session-scratch",
     # #1286 — Cargo output outside an agent worktree:
@@ -143,8 +149,6 @@ LAST_PREVENTION_NAME = "last-prevention"    # #1067 1f: the prevention pass's ow
 LOCK_NAME = ".lock"
 LOG_MAX_BYTES = 512 * 1024                  # self-bounding (#834 review-bite 7)
 MIN_DRAIN_INTERVAL_S = 10 * 60              # du-heavy ladder runs at most this often
-UPLOADS_MAX_AGE_DAYS = 14
-UPLOADS_KEEP_MARKERS = (".airuleset-keep", ".no-sweep")  # #861 opt-out
 DELETIONS_JOURNAL_PREFIX = "deletions-"                   # #861 durable journal
 TRANSCRIPT_PRESSURE_MIN_AGE_DAYS = 7        # owner-authorised pressure path (#834 rung e)
 TRANSCRIPT_PRESSURE_MIN_AGE_DAYS_SHARED_STREAM = 2  # #925: tighter on shared-stream
@@ -228,22 +232,9 @@ LOW_YIELD_SKIP_COUNT = 3             # 3 consecutive low yields → skip
 LOW_YIELD_SKIP_S = 6 * 3600          # skip for 6 hours
 LOW_YIELD_STATE_NAME = "low-yield.json"
 
-# #935-B — work-products snapshot backstop
-WORK_PRODUCTS_SUBDIR = os.path.join(".claude", "work-products")
-WORK_PRODUCTS_SNAPSHOT_FILE_THRESHOLD = 10000   # >10k files = snapshot
-WORK_PRODUCTS_SNAPSHOT_SIZE_THRESHOLD = 1_000_000_000  # >1G = snapshot
-WORK_PRODUCTS_SNAPSHOT_MIN_AGE_DAYS = 7
-
-# #950 — generalized home-directory snapshot backstop (shared-stream only)
-HOME_SNAPSHOT_FILE_THRESHOLD = WORK_PRODUCTS_SNAPSHOT_FILE_THRESHOLD   # >10k files
-HOME_SNAPSHOT_SIZE_THRESHOLD = WORK_PRODUCTS_SNAPSHOT_SIZE_THRESHOLD   # >1G
-HOME_SNAPSHOT_MIN_AGE_DAYS = 7
-# Top-level $HOME entries EXCLUDED from the sweep — everything else that is
-# snapshot-shaped AND old enough is a candidate. Dot-entries are excluded as a
-# category (rule 1); these named entries are the non-dot allowlist.
-HOME_SNAPSHOT_SAFE_NAMES = frozenset({
-    "devel", "uploads", "snap", "bin",
-})
+# #1380 — owner data no drain may touch: a path inside, or an ancestor of, one
+# of these (relative to a home) is refused by execute_drain.
+PROTECTED_OWNER_SUBDIRS = ("uploads", os.path.join(".claude", "work-products"))
 
 
 def _dbg(msg):
@@ -267,7 +258,7 @@ def _log_path(home=None):
     return str(_guard_dir(home) / LOG_NAME)
 
 
-def _append_deletion_journal(home, now, rung, path, nbytes, mtime, level):
+def _append_deletion_journal(home, now, rung, path, nbytes, mtime, level, **extra):
     """Append one deletion record to the durable monthly journal (#861).
     ``~/.claude/disk-guard/deletions-YYYYMM.jsonl`` — append-only, monthly
     files. The guard NEVER deletes or truncates these (they are outside
@@ -280,6 +271,9 @@ def _append_deletion_journal(home, now, rung, path, nbytes, mtime, level):
         jp = gd / ("%s%s.jsonl" % (DELETIONS_JOURNAL_PREFIX, month))
         entry = {"ts": now, "rung": rung, "path": path,
                  "bytes": nbytes, "mtime": mtime, "level": level}
+        # #1380: a removed (possibly detached) worktree's HEAD and the ref that
+        # holds it, so the commit stays findable after the directory is gone
+        entry.update({k: v for k, v in extra.items() if v})
         with open(jp, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
     except OSError as e:
@@ -310,9 +304,11 @@ def _lane_grace_level(status, q, statvfs_fn=None):
     worst mount is at the #968 effective critical threshold (85 % on a small
     root fs), or when this account's quota is at ``CRITICAL_PCT`` — the quota
     drain threshold, so any quota drain waives the grace (a nearly full hard
-    limit is low disk for this account). Else the fs level."""
+    limit is low disk for this account). Else the fs level. #1380: quota
+    pressure is room-based now (``disk_guard_quota.quota_state``), so a busy
+    account near its moving ceiling is no longer critical by construction."""
     from watchdog.disk_guard_worktrees import effective_critical_pct
-    if q.pressure and isinstance(q.pct, (int, float)) and q.pct >= CRITICAL_PCT:
+    if q.pressure:
         return "critical"
     if (status.get("worst_pct") or 0) >= effective_critical_pct(statvfs_fn):
         return "critical"
@@ -443,105 +439,8 @@ def _largest_live_scratch_changed(home, lls):
 
 
 # --------------------------------------------------------------------------- #
-# NEW planners (uploads, toolchain)
+# box class + toolchain planners
 # --------------------------------------------------------------------------- #
-def _uploads_dir_has_keep_marker(dirpath):
-    """Check whether `dirpath` contains a keep marker (#861). Fail-safe: if
-    the marker cannot be stat'd (e.g. permissions) → return True (KEEP,
-    never delete possibly-live data)."""
-    for marker_name in UPLOADS_KEEP_MARKERS:
-        marker = os.path.join(dirpath, marker_name)
-        try:
-            os.lstat(marker)
-            return True   # marker exists
-        except FileNotFoundError:
-            continue       # not in this dir, try next name
-        except OSError:
-            return True    # fail-safe KEEP: can't stat → assume protected
-    return False
-
-
-def discover_stale_uploads(home=None, now=None, max_age_days=UPLOADS_MAX_AGE_DAYS,
-                           uploads_dir=None):
-    """Own-home ``~/uploads`` files older than `max_age_days` (#834 rung d — the
-    upload inbox is a delivery CHANNEL, not storage; consumed recordings/dumps
-    age out). Rows ``{cls, path, size, age_days, reason}`` — ``reason`` is None
-    for a genuine candidate, else why it was kept. No ``~/uploads`` at all is
-    simply nothing to do, not an error.
-
-    #861: subtrees containing a ``.airuleset-keep`` or ``.no-sweep`` marker
-    file are PROTECTED — every file under such a subtree gets
-    ``reason="protected by <marker>"``. Fail-safe: unreadable marker → KEEP.
-    """
-    now = time.time() if now is None else now
-    up = Path(uploads_dir) if uploads_dir else (Path(home or os.path.expanduser("~")) / "uploads")
-    if not up.is_dir():
-        return []
-    cutoff = max_age_days * 86400
-    out = []
-    # Track which directories have a keep marker (cache for efficiency)
-    _keep_cache = {}  # dirpath -> bool
-
-    def _is_protected(dirpath):
-        """Check if dirpath, the uploads root, or any ancestor between them
-        has a keep marker. Caches per directory."""
-        dp = os.path.normpath(dirpath)
-        up_norm = os.path.normpath(str(up))
-        if dp in _keep_cache:
-            return _keep_cache[dp]
-        # Build the chain from dirpath up to AND INCLUDING the uploads root
-        chain = []
-        cur = dp
-        while cur != up_norm and len(cur) > len(up_norm):
-            chain.append(cur)
-            cur = os.path.dirname(cur)
-        # Include the uploads root itself (#861 review: a marker at the root
-        # must protect the entire tree)
-        chain.append(up_norm)
-        # Check from shallowest (closest to root) to deepest for cache reuse
-        for d in reversed(chain):
-            parent = os.path.dirname(d)
-            if parent in _keep_cache and _keep_cache[parent]:
-                _keep_cache[d] = True
-                continue
-            if _uploads_dir_has_keep_marker(d):
-                _keep_cache[d] = True
-            else:
-                _keep_cache[d] = False
-        return _keep_cache.get(dp, False)
-
-    try:
-        for dirpath, _dirs, files in os.walk(up, onerror=lambda e: None):
-            protected = _is_protected(dirpath)
-            for f in files:
-                # Skip the marker files themselves
-                if f in UPLOADS_KEEP_MARKERS:
-                    continue
-                fp = os.path.join(dirpath, f)
-                try:
-                    st = os.lstat(fp)
-                except OSError as e:
-                    out.append({"cls": "uploads", "path": fp, "size": 0,
-                                "reason": "could not stat: %s" % e})
-                    continue
-                if os.path.islink(fp):
-                    out.append({"cls": "uploads", "path": fp, "size": st.st_size,
-                                "reason": "symlink — never followed"})
-                    continue
-                age = now - st.st_mtime
-                row = {"cls": "uploads", "path": fp, "size": st.st_size,
-                       "age_days": age / 86400.0, "mtime": st.st_mtime,
-                       "reason": None}
-                if protected:
-                    row["reason"] = "protected by keep marker (#861)"
-                elif age < cutoff:
-                    row["reason"] = "too recent (%.1fd < %dd)" % (age / 86400.0, max_age_days)
-                out.append(row)
-    except OSError as e:
-        return [{"cls": "uploads", "path": None, "reason": "could not walk %s: %s" % (up, e)}]
-    return out
-
-
 def _default_box_class():
     try:
         from watchdog.reaper import default_box_class
@@ -628,10 +527,42 @@ def discover_toolchain_dirs(home=None, box_class_fn=None, pgrep_fn=None,
         elif live.strip():
             out.append({"cls": "toolchain", "path": p, "size": size, "kind": "skip",
                         "reason": "live java/gradle/emulator process present — kept"})
+        elif keys := _signing_material(p):
+            out.append({"cls": "toolchain", "path": p, "size": size, "kind": "report",
+                        "reason": "signing material %s — reported, never removed (#1380)"
+                        % ", ".join(keys[:3])})
         else:
             out.append({"cls": "toolchain", "path": p, "size": size, "kind": "delete",
                         "reason": None})
     return out
+
+
+_SIGNING_GLOBS = ("*.jks", "*.keystore", "*.p12", "*.pfx")
+_SIGNING_PROPS = ("password", "signing.")      # storePassword, MYAPP_UPLOAD_STORE_PASSWORD
+
+
+def _signing_material(path, max_depth=3):
+    """#1380: release keys or signing passwords inside a toolchain dir are not
+    regenerable (an auto-made ``debug.keystore`` is). Bounded walk."""
+    import fnmatch
+    found, base = [], path.rstrip(os.sep).count(os.sep)
+    for dp, dns, fns in os.walk(path, onerror=lambda e: None):
+        if dp.count(os.sep) - base >= max_depth:
+            dns[:] = []
+        for f in fns:
+            fp = os.path.join(dp, f)
+            if f != "debug.keystore" and any(fnmatch.fnmatch(f, g) for g in _SIGNING_GLOBS):
+                found.append(fp)
+            elif f == "gradle.properties":
+                try:
+                    with open(fp, encoding="utf-8", errors="replace") as fh:
+                        text = fh.read(65536).lower()
+                except OSError:
+                    found.append(fp)          # unreadable: never proven harmless
+                    continue
+                if any(k in text for k in _SIGNING_PROPS):
+                    found.append(fp)
+    return found
 
 
 # --------------------------------------------------------------------------- #
@@ -2027,196 +1958,6 @@ def _should_skip_low_yield_rung(home, rung, now=None):
     return True
 
 
-# #935-B — work-products SNAPSHOT backstop
-# --------------------------------------------------------------------------- #
-def _count_files_bounded(path, limit):
-    """Count regular files under ``path``, stopping at ``limit+1``.
-    Returns (count, total_size_bytes, newest_mtime_or_None). Computes ALL
-    three in a single walk (#935 Fable review M3: avoid a second walk).
-    Best-effort: walk errors are silent."""
-    count = 0
-    total = 0
-    newest = None
-    for dirpath, _dns, fns in os.walk(path, topdown=True, onerror=lambda e: None):
-        for f in fns:
-            fp = os.path.join(dirpath, f)
-            try:
-                st = os.lstat(fp)
-                total += st.st_size
-                if newest is None or st.st_mtime > newest:
-                    newest = st.st_mtime
-                count += 1
-            except OSError:
-                count += 1      # count it even if we can't stat it
-            if count > limit:
-                return count, total, newest
-    return count, total, newest
-
-
-def discover_snapshot_work_products(home=None, now=None,
-                                    min_age_days=WORK_PRODUCTS_SNAPSHOT_MIN_AGE_DAYS,
-                                    file_threshold=WORK_PRODUCTS_SNAPSHOT_FILE_THRESHOLD,
-                                    size_threshold=WORK_PRODUCTS_SNAPSHOT_SIZE_THRESHOLD,
-                                    dir_stats_fn=None):
-    """#935-B: first-level subtrees under ``~/.claude/work-products/`` that look
-    like full-tree snapshots (>10k files OR >1G). Only subtrees older than
-    ``min_age_days`` (newest file) are candidates. Small/doc-like content is
-    never touched. ``.airuleset-keep`` / ``.no-sweep`` at the subtree root opts
-    out (mirrors #861 uploads rung). Fail-safe: uncertain → keep + log.
-    Returns ``[{cls:"work-products-snapshot", path, bytes, kind, reason}]``."""
-    now = time.time() if now is None else now
-    home = home or os.path.expanduser("~")
-    wp = Path(home) / WORK_PRODUCTS_SUBDIR
-    if not wp.is_dir() or wp.is_symlink():
-        return []
-    out = []
-    try:
-        for entry in sorted(wp.iterdir()):
-            if entry.is_symlink() or not entry.is_dir():
-                continue
-            path_s = str(entry)
-            # .airuleset-keep / .no-sweep opt-out (#935 Fable review H3)
-            if _uploads_dir_has_keep_marker(path_s):
-                out.append({"cls": "work-products-snapshot", "path": path_s,
-                            "bytes": 0, "kind": "skip",
-                            "reason": "keep marker — never touched"})
-                continue
-            # Single bounded walk: count + size + newest_mtime (#935 review M3)
-            fcount, fsize, newest = _count_files_bounded(path_s, file_threshold)
-            is_snapshot = (fcount > file_threshold or fsize > size_threshold)
-            if not is_snapshot:
-                continue          # small/doc-like — never touched
-            # empty-tree fallback (#355 pattern)
-            if newest is None:
-                try:
-                    newest = os.lstat(path_s).st_mtime
-                except OSError:
-                    out.append({"cls": "work-products-snapshot", "path": path_s,
-                                "bytes": fsize, "kind": "skip",
-                                "reason": "could not determine age — kept (#935-B fail-safe)"})
-                    continue
-            age_s = now - newest
-            age_d = age_s / 86400.0
-            if age_d < min_age_days:
-                out.append({"cls": "work-products-snapshot", "path": path_s,
-                            "bytes": fsize, "kind": "skip",
-                            "reason": "snapshot too recent (%.1fd < %dd) — kept"
-                            % (age_d, min_age_days)})
-                continue
-            out.append({"cls": "work-products-snapshot", "path": path_s,
-                        "bytes": fsize, "kind": "delete", "reason": None,
-                        "why": "snapshot: %d files, %s, %.1fd old"
-                        % (fcount, _human(fsize), age_d)})
-    except OSError as e:
-        out.append({"cls": "work-products-snapshot", "path": "-", "bytes": 0,
-                    "kind": "skip",
-                    "reason": "work-products walk error: %s" % e})
-    return out
-
-
-# --------------------------------------------------------------------------- #
-# #950 — generalized home-directory SNAPSHOT backstop (shared-stream only)
-# --------------------------------------------------------------------------- #
-def discover_snapshot_home_dirs(home=None, now=None, box_class_fn=None,
-                                min_age_days=HOME_SNAPSHOT_MIN_AGE_DAYS,
-                                file_threshold=HOME_SNAPSHOT_FILE_THRESHOLD,
-                                size_threshold=HOME_SNAPSHOT_SIZE_THRESHOLD):
-    """#950: top-level $HOME entries that look like full-tree snapshots on a
-    shared-stream box.  Structural exclusions (cheapest-first):
-
-    1. Dot-entries (``.*``) — covers .ssh .config .local .cache .claude etc.
-    2. Named safe dirs — ``devel`` (checkouts), ``uploads``, ``snap``, ``bin``.
-    3. Not a real directory (files, symlinks — never followed).
-    4. Different ``st_dev`` than ``$HOME`` (never cross a filesystem mount).
-    5. Live cwd/fd inside (``_target_in_live_use``).
-    6. ``.airuleset-keep``/``.no-sweep`` at the candidate root.
-    7. Git-shaped (``.git`` file or dir at root) — routed to the worktree rung.
-    8. Snapshot-shaped (>10k files OR >1G) AND newest mtime > min_age_days → delete.
-
-    Gated to ``shared-stream`` box class (a workstation home is owner data).
-    Returns ``[{cls:"home-snapshot", path, bytes, kind, reason}]``."""
-    now = time.time() if now is None else now
-    home = home or os.path.expanduser("~")
-    bcfn = box_class_fn or _default_box_class
-    try:
-        if bcfn() != "shared-stream":
-            return []
-    except Exception:
-        return []       # box-class unknown → never sweep
-    out = []
-    try:
-        home_dev = os.lstat(home).st_dev
-    except OSError:
-        return []
-    try:
-        for entry in sorted(Path(home).iterdir()):
-            name = entry.name
-            # Rule 1: skip dot-entries
-            if name.startswith("."):
-                continue
-            # Rule 2: named safe dirs
-            if name in HOME_SNAPSHOT_SAFE_NAMES:
-                continue
-            # Rule 3: not a real directory / symlink
-            if entry.is_symlink() or not entry.is_dir():
-                continue
-            path_s = str(entry)
-            # Rule 4: different filesystem
-            try:
-                if os.lstat(path_s).st_dev != home_dev:
-                    continue
-            except OSError:
-                continue
-            # Rule 5: live use
-            if _target_in_live_use_pw(path_s):
-                out.append({"cls": "home-snapshot", "path": path_s,
-                            "bytes": 0, "kind": "skip",
-                            "reason": "in live use — kept"})
-                continue
-            # Rule 6: keep marker
-            if _uploads_dir_has_keep_marker(path_s):
-                out.append({"cls": "home-snapshot", "path": path_s,
-                            "bytes": 0, "kind": "skip",
-                            "reason": "keep marker — never touched"})
-                continue
-            # Rule 7: git-shaped → skip (handled by worktree rung)
-            git_path = os.path.join(path_s, ".git")
-            if os.path.exists(git_path):
-                out.append({"cls": "home-snapshot", "path": path_s,
-                            "bytes": 0, "kind": "skip",
-                            "reason": "git-shaped — deferred to worktree rung"})
-                continue
-            # Rule 8: snapshot check
-            fcount, fsize, newest = _count_files_bounded(path_s, file_threshold)
-            is_snapshot = (fcount > file_threshold or fsize > size_threshold)
-            if not is_snapshot:
-                continue        # small dir — not a snapshot, not touched
-            if newest is None:
-                try:
-                    newest = os.lstat(path_s).st_mtime
-                except OSError:
-                    out.append({"cls": "home-snapshot", "path": path_s,
-                                "bytes": fsize, "kind": "skip",
-                                "reason": "could not determine age — kept"})
-                    continue
-            age_d = (now - newest) / 86400.0
-            if age_d < min_age_days:
-                out.append({"cls": "home-snapshot", "path": path_s,
-                            "bytes": fsize, "kind": "skip",
-                            "reason": "snapshot too recent (%.1fd < %dd) — kept"
-                            % (age_d, min_age_days)})
-                continue
-            out.append({"cls": "home-snapshot", "path": path_s,
-                        "bytes": fsize, "kind": "delete", "reason": None,
-                        "why": "home snapshot: %d files, %s, %.1fd old"
-                        % (fcount, _human(fsize), age_d)})
-    except OSError as e:
-        out.append({"cls": "home-snapshot", "path": "-", "bytes": 0,
-                    "kind": "skip",
-                    "reason": "home walk error: %s" % e})
-    return out
-
-
 # --------------------------------------------------------------------------- #
 # rung PLANNERS (adapters over the existing per-class discovery functions)
 # --------------------------------------------------------------------------- #
@@ -2299,12 +2040,11 @@ def _plan_worktrees(home, now, level=None):
                             "kind": "skip", "reason": reason})
             continue
         kind = "worktree-remove" if r.get("kind") == "worktree" else "delete"
-        # #939: carry dirty+reachable_via for decision-log (reason stays None = reclaimable)
+        # #939: carry reachable_via for the decision log (#1380: a dirty tree is
+        # never reclaimable now, so no "dirty tree discarded" note exists)
         info = ""
         if r.get("reachable_via"):
             info = "reachable via %s" % r["reachable_via"]
-            if r.get("dirty"):
-                info += ", dirty tree discarded"
         actions.append({"cls": "worktree", "path": path, "bytes": size, "kind": kind,
                         "reason": None, "branch": r.get("branch"), "repo": r.get("repo"),
                         "info": info or None})
@@ -2319,11 +2059,6 @@ def _plan_cli_versions(home, now):
         return [{"cls": "cli-version", "path": "-", "bytes": 0, "kind": "skip",
                  "reason": "cli-version discovery error: %r" % e}]
     return [_row_to_action("cli-version", r, "delete") for r in rows]
-
-
-def _plan_uploads(home, now):
-    return [_row_to_action("uploads", r, "delete")
-            for r in discover_stale_uploads(home=home, now=now)]
 
 
 def _plan_claude_metadata(home, now):
@@ -2500,14 +2235,39 @@ def _plan_idle_incremental(home, now, level=None):
 
 
 def _plan_scratch_worktrees(home, now):
-    """#965 — scratch worktrees under /tmp scratchpads."""
+    """#965 — scratch worktrees under /tmp scratchpads. #1380: every
+    reclaimable row passes :func:`_gate_scratch_worktrees`."""
     try:
         rows = discover_scratch_worktrees(now=now)
     except Exception as e:
         return [{"cls": "scratch-worktree", "path": "-", "bytes": 0, "kind": "skip",
                  "reason": "scratch-worktree discovery error: %r" % e}]
-    return [_norm_action("scratch-worktree", r, r.get("kind", "delete"))
-            for r in rows]
+    return _gate_scratch_worktrees([_norm_action("scratch-worktree", r, r.get("kind", "delete"))
+                                    for r in rows], now)
+
+
+def _scratch_worktree_kept(path, now):
+    """#1380: why a scratch worktree must stay, or None. A scratchpad child
+    read/written within the #1195 child floor (or held open) is a live
+    session's (the 2 h dir-mtime gate never saw its files); else the one
+    worktree ``final_reason`` (ignored secrets, hidden edits, nested repos)."""
+    from watchdog.disk_guard_lane_wt import final_reason
+    try:
+        if _default_scratch_live(path, now):
+            return "scratch worktree in use (used within the child floor or held open)"
+    except Exception as e:  # airuleset:script-ok fail-safe: unknown use = keep
+        return "scratch liveness unreadable (%r)" % e
+    kept = final_reason(path)
+    return kept[0] if kept else None
+
+
+def _gate_scratch_worktrees(rows, now):
+    out = []
+    for a in rows:
+        why = (_scratch_worktree_kept(a["path"], now)
+               if a.get("kind") == "scratch-worktree-remove" else None)
+        out.append(dict(a, kind="skip", reason=why + " — kept") if why else a)
+    return out
 
 
 def _plan_stale_agent_worktrees(home, now, wt_cache=False, level=None):
@@ -2531,28 +2291,6 @@ def _plan_stale_agent_worktrees(home, now, wt_cache=False, level=None):
         if wt_cache and gate is not None:
             from watchdog import disk_guard_lane_unknown as dgl
             dgl.record_pass(gate.outcomes(), home=home, now=now)
-
-
-def _plan_work_products_snapshot(home, now):
-    """#935-B — work-products snapshot backstop."""
-    try:
-        return discover_snapshot_work_products(home=home, now=now)
-    except Exception as e:
-        return [{"cls": "work-products-snapshot", "path": "-", "bytes": 0,
-                 "kind": "skip",
-                 "reason": "work-products-snapshot discovery error: %r" % e}]
-
-
-def _plan_home_snapshot(home, now):
-    """#950 — generalized home-directory snapshot backstop."""
-    try:
-        return discover_snapshot_home_dirs(home=home, now=now)
-    except Exception as e:
-        return [{"cls": "home-snapshot", "path": "-", "bytes": 0,
-                 "kind": "skip",
-                 "reason": "home-snapshot discovery error: %r" % e}]
-
-
 
 
 def _plan_session_scratch(home, now):
@@ -2583,9 +2321,6 @@ def _default_planners(home, now, scratch_rows=None, wt_cache=False, level=None):
         ("oneoff-venv", lambda: _plan_oneoff_venvs(home, now)),
         ("scratch", lambda: _plan_scratch(home, now, scratch_rows=scratch_rows,
                                           level=level)),
-        ("uploads", lambda: _plan_uploads(home, now)),
-        ("work-products-snapshot", lambda: _plan_work_products_snapshot(home, now)),
-        ("home-snapshot", lambda: _plan_home_snapshot(home, now)),
         ("claude-metadata", lambda: _plan_claude_metadata(home, now)),
         ("cli-version", lambda: _plan_cli_versions(home, now)),
         ("user-cache", lambda: _plan_user_cache(home, now)),
@@ -2606,12 +2341,15 @@ def _default_planners(home, now, scratch_rows=None, wt_cache=False, level=None):
     ]
 
 
-def _prevention_planners(home, now, scratch_rows=None):
+def _prevention_planners(home, now, scratch_rows=None, wt_cache=False):
     """#920 — cheapest/safest rungs for the PREVENTION pass (70-79%, or any
     level on shared-stream boxes #939). Age-out operations on disposable content
     + worktree cleanup (#939: proactive worktree reclaim on shared-stream boxes,
     not only under >=80% pressure).
-    #965: added android-build (no age gate on shared-stream) and scratch-worktree."""
+    #965: added android-build (no age gate on shared-stream) and scratch-worktree.
+    #1380: the stale-agent-worktree rung (agent lanes + the out-of-tree lane
+    source, which the #834 rung leaves to it) runs first; ``wt_cache`` is
+    ``not dry_run``, as in the drain ladder."""
     return [
         ("tmp-test", lambda: _plan_tmp_test(home, now)),
         ("scratch", lambda: _plan_scratch(home, now, scratch_rows=scratch_rows)),
@@ -2619,6 +2357,7 @@ def _prevention_planners(home, now, scratch_rows=None):
         ("npm-uv-cache", lambda: _plan_npm_uv_cache(home, now)),
         ("android-build", lambda: _plan_android_build(home, now)),
         ("scratch-worktree", lambda: _plan_scratch_worktrees(home, now)),
+        ("stale-agent-worktree", lambda: _plan_stale_agent_worktrees(home, now, wt_cache)),
         ("worktree", lambda: _plan_worktrees(home, now)),
     ]
 
@@ -2653,18 +2392,34 @@ def _rm_path(path, sudo=False, run_fn=None):
 
 
 def _remove_worktree_dir(a):
-    """`git worktree remove --force` the directory (the branch REF is kept).
-    #939: uses `--force` because the planner now classifies dirty-but-reachable
-    worktrees as reclaimable (HEAD preserved on origin, only scratch/temp files
-    lost). A git refusal is a SKIP (raise → logged FAIL), NEVER a raw `rm -rf`
-    (review 🔴). TOCTOU re-check: live-use (a `claude --resume` that cd'd in
-    between plan and act, #939 Fable review F5)."""
+    """`git worktree remove` the directory (the branch REF is kept). #1380: NO
+    `--force` — every planner hands over only CLEAN trees, so git itself
+    refuses one that turned dirty (an untracked or modified file) between plan
+    and act; `-c status.showUntrackedFiles=normal` keeps a repo's `no` setting
+    from hiding untracked files from that check. Ignored files are deleted by
+    git, so the #1380 ignored-entry gate (``final_reason``) runs again here,
+    and a row that carries its planned ``head`` (a lane, possibly detached) is
+    refused once HEAD moved: a new commit on a detached HEAD has no other ref.
+    A git refusal is a SKIP (raise → logged FAIL), NEVER a raw `rm -rf` (review
+    🔴). TOCTOU re-check: live-use (a `claude --resume` that cd'd in between
+    plan and act, #939 Fable review F5)."""
+    from cli_worktree_common import _worktree_git
+    from watchdog.disk_guard_lane_wt import final_reason
     repo, path = a.get("repo"), a.get("path")
     if not repo:
         raise OSError("worktree-remove with no repo for %s" % path)
     if _target_in_live_use_pw(path):
         raise OSError("worktree %s now in live use at remove time — SKIP" % path)
-    r = subprocess.run(["git", "-C", repo, "worktree", "remove", "--force", "--", path],
+    if a.get("head") and (_worktree_git(["rev-parse", "HEAD"], path) or "").strip() != a["head"]:
+        raise OSError("worktree %s HEAD moved since the plan — SKIP" % path)
+    from watchdog.disk_guard_lane_wt import orphan_reflog_commit
+    if a.get("branch") in ("HEAD", "(detached)") and orphan_reflog_commit(path):
+        raise OSError("worktree %s: its reflog holds a commit no ref keeps — SKIP" % path)
+    kept = final_reason(path)
+    if kept is not None:
+        raise OSError("worktree %s at remove time: %s — SKIP" % (path, kept[0]))
+    r = subprocess.run(["git", "-c", "status.showUntrackedFiles=normal", "-C", repo,
+                        "worktree", "remove", "--", path],
                        capture_output=True, text=True, timeout=120)
     if r.returncode != 0:
         raise OSError("git worktree remove refused %s: %s" % (path, (r.stderr or "").strip()))
@@ -2722,7 +2477,11 @@ def _perform_action(a, sudo_ok=False, run_fn=None, scratch_live_fn=None, now=Non
     if kind == "scratch-worktree-remove":
         # #965: scratch worktree under /tmp — parse repo from .git file, remove
         # R4 fix: no --force, no rm fallback (git refusal = SKIP, #834 invariant)
+        # #1380: the plan's gate again at act time (in use since, ignored files)
         wt = path
+        why = _scratch_worktree_kept(wt, now or time.time())
+        if why:
+            raise OSError("scratch worktree %s: %s — SKIP" % (wt, why))
         git_file = os.path.join(wt, ".git")
         repo = None
         try:
@@ -2735,7 +2494,7 @@ def _perform_action(a, sudo_ok=False, run_fn=None, scratch_live_fn=None, now=Non
         if not repo or not os.path.isdir(os.path.join(repo, ".git")):
             raise OSError("scratch-worktree repo not found for: %s" % wt)
         subprocess.run(
-            ["git", "-C", repo, "worktree", "remove", wt],
+            ["git", "-c", "status.showUntrackedFiles=normal", "-C", repo, "worktree", "remove", wt],
             check=True, capture_output=True, text=True, timeout=60)
         return nbytes
     if kind == "journal-vacuum":
@@ -2790,9 +2549,46 @@ def _make_do_action(dry_run, sudo_ok=False, run_fn=None, scratch_live_fn=None, n
     return _do
 
 
+_PATH_KINDS = frozenset({"delete", "worktree-remove", "scratch-worktree-remove", "gzip"})
+
+
+def _protected_owner_path(path, home, kind=None):
+    """The protected owner dir (#1380) that ``path`` lies in, or is an ancestor
+    of, else None: ``<home>/uploads`` and ``<home>/.claude/work-products``,
+    for ``home`` and for every ``/home/<user>/`` (the runner rungs act in
+    another account's home). A ``Path`` is judged like its string. For a
+    ``kind`` that acts on a path (:data:`_PATH_KINDS`) a non-absolute path is
+    refused outright (it would resolve against the watchdog's cwd, ``$HOME``);
+    a command kind's "path" (``journalctl --user ...``, a docker image id) is
+    never a path. Symlinks are resolved on both sides, so a link INTO
+    ``~/uploads`` is refused too. Fail-safe: an unresolvable path is protected."""
+    try:
+        path = os.fspath(path)
+    except TypeError:
+        return "an unreadable path" if kind in _PATH_KINDS else None
+    if not isinstance(path, str) or not os.path.isabs(path):
+        return ("a non-absolute path (%r)" % path) if kind in _PATH_KINDS else None
+    try:
+        target = os.path.realpath(path)
+        roots = [os.path.realpath(os.path.join(str(home), sub))
+                 for sub in PROTECTED_OWNER_SUBDIRS] if home else []
+    except (OSError, ValueError):
+        return path
+    parts = target.split(os.sep)
+    if len(parts) >= 3 and parts[1] == "home" and parts[2]:
+        user_home = os.sep.join(parts[:3])
+        roots += [os.path.join(user_home, sub) for sub in PROTECTED_OWNER_SUBDIRS]
+    above = target.rstrip(os.sep) + os.sep        # "/" stays "/"
+    for root in roots:
+        if target == root or target.startswith(root + os.sep) or root.startswith(above):
+            return root
+    return None
+
+
 def execute_drain(status, home, planners, recheck_fn, do_action_fn,
                   geteuid_fn=None, log_path=None, now=None, dry_run=False,
-                  target_pct=None, pressure=None, timer=None, ladder="fs"):
+                  target_pct=None, pressure=None, timer=None, ladder="fs",
+                  stop_fn=None):
     """Run the drain ladder. Refuses as root (per-user deletion against root's
     fs view is #841). Between rungs, re-checks the worst mount and stops once
     it is back under ``target_pct`` (default :data:`TARGET_PCT`). Every action
@@ -2807,6 +2603,10 @@ def execute_drain(status, home, planners, recheck_fn, do_action_fn,
     #1067: ``timer`` (a ``disk_guard_timing.PollTimer``) times each rung and
     defers the rest of ``ladder`` (prevention/quota/fs) past the poll budget;
     #1216: it is also checked between a rung's acted actions.
+    #1380: ``stop_fn`` (optional, called after the target check) returns a
+    reason to stop early (the quota pass: real room is back), and every
+    action on a protected owner path (:func:`_protected_owner_path`) is
+    refused, logged ``REFUSE-PROTECTED``, dry run included.
     Returns the log lines (also appended to `log_path`)."""
     target_pct = TARGET_PCT if target_pct is None else target_pct
     timer = timer or _dgt.NULL_TIMER
@@ -2862,6 +2662,12 @@ def execute_drain(status, home, planners, recheck_fn, do_action_fn,
             logs.append(line)
             _append_log(log_path, [line])
             break
+        why_stop = stop_fn() if stop_fn is not None else None
+        if why_stop:
+            line = _log_line(now, "STOP", "-", 0, "%s — drain complete" % why_stop)
+            logs.append(line)
+            _append_log(log_path, [line])
+            break
         if timer.over_budget(logs, len(planners) - i, _label, ladder):   # #1067: rest → next poll
             break
         # #965 R3 fix: skip a rung that has freed < 1 MiB three times in a row
@@ -2888,10 +2694,13 @@ def execute_drain(status, home, planners, recheck_fn, do_action_fn,
             # #1216: the budget is checked before every RUNNABLE action after
             # the first one this rung tried (a failed one counts), and a gzip
             # starts only when it can finish in the time left.
-            left = sum(1 for x in actions if x.get("cls", _label) in RECLAIMABLE_CLASSES
+            guard = [_protected_owner_path(x.get("path"), home, x.get("kind", "delete"))
+                     for x in actions]       # #1380: judged once, refused rows never "runnable"
+            left = sum(1 for x, gd in zip(actions, guard)
+                       if x.get("cls", _label) in RECLAIMABLE_CLASSES and not gd
                        and x.get("kind", "delete") not in ("skip", "report"))
             tried = False
-            for a in actions:
+            for a, guarded in zip(actions, guard):
                 acls = a.get("cls", _label)
                 path = a.get("path", "-")
                 planned = a.get("bytes", 0) or 0
@@ -2909,6 +2718,11 @@ def execute_drain(status, home, planners, recheck_fn, do_action_fn,
                 if kind == "report":
                     rung_lines.append(_log_line(now, "REPORT", path, planned,
                                                 reason or "report-only"))
+                    continue
+                if guarded:
+                    rung_lines.append(_log_line(
+                        now, "REFUSE-PROTECTED", path, planned,
+                        "owner data under %s is never deleted by a drain (#1380)" % guarded))
                     continue
                 if tried and timer.over_budget_in_rung(rung_lines, _label, ladder, left):
                     cut_in_rung = True
@@ -2953,7 +2767,8 @@ def execute_drain(status, home, planners, recheck_fn, do_action_fn,
                         home, now, rung=_label, path=path,
                         nbytes=planned if freed is None else freed,
                         mtime=a.get("mtime", 0),
-                        level=pressure or status.get("level", "drain"))
+                        level=pressure or status.get("level", "drain"),
+                        head=a.get("head"), contained_in=a.get("contained_in"))
                 rung_freed += (freed or 0)
                 rung_acted += 1
             logs.extend(rung_lines)
@@ -2974,7 +2789,7 @@ def execute_drain(status, home, planners, recheck_fn, do_action_fn,
 # --------------------------------------------------------------------------- #
 # #925-D — whole-disk survey tier (root-scope top-consumers context)
 # --------------------------------------------------------------------------- #
-# The per-user planners (scratch/worktree/uploads/…) scope to $HOME. System-
+# The per-user planners (scratch/worktree/…) scope to $HOME. System-
 # level hoards (swapfiles, /var/log, other users' big dirs) are invisible.
 # This survey READS the existing root reporter's daily JSON (#841 —
 # ``/run/airuleset/disk-guard-root.json``, already ``du -sxb`` as root, no
@@ -3148,7 +2963,6 @@ def _ranked_consumers(home, now):
     for label, plan in (("worktree", lambda: _plan_worktrees(home, now)),
                         ("transcript", lambda: _plan_transcripts(home, now)),
                         ("toolchain", lambda: _plan_toolchain(home, now)),
-                        ("uploads", lambda: _plan_uploads(home, now)),
                         ("cli-version", lambda: _plan_cli_versions(home, now)),
                         ("scratch", lambda: _plan_scratch(home, now))):
         total = 0
@@ -3171,7 +2985,6 @@ def _collect_top_consumers(home, now, limit=5, scratch_rows=None):
     #892: accepts pre-computed `scratch_rows` to avoid a doubled du-heavy walk."""
     all_actions = []
     for label, plan in (("worktree", lambda: _plan_worktrees(home, now)),
-                        ("uploads", lambda: _plan_uploads(home, now)),
                         ("cli-version", lambda: _plan_cli_versions(home, now)),
                         ("scratch", lambda: _plan_scratch(home, now, scratch_rows=scratch_rows)),
                         ("claude-metadata", lambda: _plan_claude_metadata(home, now)),
@@ -3481,7 +3294,8 @@ def _run_prevention_pass(status, home, now, dry_run, scratch_rows,
     if lock is _LOCK_UNAVAILABLE:
         logs.append("disk-guard: prevention lock uncreatable — draining lockless")
     try:
-        prev_planners = _prevention_planners(home, now, scratch_rows=scratch_rows)
+        prev_planners = _prevention_planners(home, now, scratch_rows=scratch_rows,
+                                             wt_cache=not dry_run)
 
         def prev_recheck():
             return disk_status(statvfs_fn=statvfs_fn, dev_fn=dev_fn,

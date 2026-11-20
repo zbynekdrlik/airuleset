@@ -151,7 +151,8 @@ def test_reclaimable_classes_is_the_fence():
     # bare/ambiguous root-level names stay OUT — the executor acts only on the
     # specific bounded classes, never a raw "docker"/"runner"/"var-log".
     fence = dg.RECLAIMABLE_CLASSES
-    assert "worktree" in fence and "cli-version" in fence and "uploads" in fence
+    assert "worktree" in fence and "cli-version" in fence
+    assert "uploads" not in fence   # owner data, never a drain class (#1380)
     assert "transcript" in fence and "toolchain" in fence and "scratch" in fence
     for forbidden in ("runner", "var-log", "other-home", "gh-runner", "docker"):
         assert forbidden not in fence
@@ -234,9 +235,9 @@ def test_decision_log_records_action_and_skip(tmp_path):
 
     def planner():
         return [
-            {"cls": "uploads", "path": "/h/uploads/old.mp4", "bytes": 500,
+            {"cls": "user-cache", "path": "/h/.cache/old.bin", "bytes": 500,
              "kind": "delete", "reason": None},
-            {"cls": "uploads", "path": "/h/uploads/new.mp4", "bytes": 5,
+            {"cls": "user-cache", "path": "/h/.cache/new.bin", "bytes": 5,
              "kind": "skip", "reason": "too recent (2.0d < 14d)"},
         ]
 
@@ -244,7 +245,7 @@ def test_decision_log_records_action_and_skip(tmp_path):
         status={"worst_pct": 82, "dim": "bytes", "level": "drain",
                 "mounts": [{"mount": "/", "worst_pct": 82}]},
         home=str(tmp_path),
-        planners=[("uploads", planner)],
+        planners=[("user-cache", planner)],
         recheck_fn=lambda: 82,
         do_action_fn=lambda a: a["bytes"],
         geteuid_fn=lambda: 1000,
@@ -252,7 +253,7 @@ def test_decision_log_records_action_and_skip(tmp_path):
         now=1.0,
     )
     text = logp.read_text()
-    assert "old.mp4" in text and "new.mp4" in text
+    assert "old.bin" in text and "new.bin" in text
     assert "SKIP" in text and "too recent" in text
     # the acted line records the planned bytes
     assert "500" in text
@@ -264,14 +265,14 @@ def test_dry_run_action_lines_are_tagged_would(tmp_path):
     logp = tmp_path / "disk-guard.log"
 
     def planner():
-        return [{"cls": "uploads", "path": "/h/uploads/old.mp4", "bytes": 500,
+        return [{"cls": "user-cache", "path": "/h/.cache/old.bin", "bytes": 500,
                  "kind": "delete", "reason": None}]
 
     dg.execute_drain(
         status={"worst_pct": 82, "dim": "bytes", "level": "drain",
                 "mounts": [{"mount": "/", "worst_pct": 82}]},
         home=str(tmp_path),
-        planners=[("uploads", planner)],
+        planners=[("user-cache", planner)],
         recheck_fn=lambda: 82,
         do_action_fn=lambda a: a["bytes"],
         geteuid_fn=lambda: 1000,
@@ -282,31 +283,6 @@ def test_dry_run_action_lines_are_tagged_would(tmp_path):
     text = logp.read_text()
     assert "WOULD-DELETE" in text
     assert "\nDELETE " not in text and not text.startswith("DELETE ")
-
-
-# --------------------------------------------------------------------------- #
-# uploads age-out planner
-# --------------------------------------------------------------------------- #
-def test_discover_stale_uploads(tmp_path):
-    up = tmp_path / "uploads"
-    up.mkdir()
-    old = up / "old-call.mp4"
-    old.write_bytes(b"x" * 100)
-    new = up / "fresh.wav"
-    new.write_bytes(b"y" * 100)
-    now = 1_000_000_000.0
-    os.utime(old, (now - 30 * 86400, now - 30 * 86400))   # 30d old
-    os.utime(new, (now - 2 * 86400, now - 2 * 86400))      # 2d old
-    rows = dg.discover_stale_uploads(home=str(tmp_path), now=now, max_age_days=14)
-    by = {os.path.basename(r["path"]): r for r in rows}
-    assert by["old-call.mp4"]["reason"] is None            # reclaimable
-    assert by["fresh.wav"]["reason"] is not None           # too recent
-    assert by["old-call.mp4"]["cls"] == "uploads"
-
-
-def test_discover_stale_uploads_no_dir(tmp_path):
-    # No ~/uploads at all → simply nothing to do, not an error.
-    assert dg.discover_stale_uploads(home=str(tmp_path), now=1.0) == []
 
 
 # --------------------------------------------------------------------------- #
@@ -455,9 +431,9 @@ def test_worktree_NOT_reclaimable_when_head_unreachable(tmp_path):
     assert "origin" in row["reason"].lower() or "reachable" in row["reason"].lower()
 
 
-def test_worktree_reclaimable_when_dirty_but_reachable(tmp_path):
-    """#939: dirty+reachable IS reclaimable — the work is preserved on origin,
-    only scratch/temp files are lost. The old code blocked this permanently."""
+def test_worktree_kept_when_dirty_even_if_reachable(tmp_path):
+    """#1380 (owner 20.11.2026) reverses #939: a dirty tree is uncommitted work,
+    kept even when HEAD is reachable; the log still names the reachable ref."""
     p = tmp_path / "wt"
     p.mkdir()
     gr = _git_run_factory({
@@ -472,8 +448,7 @@ def test_worktree_reclaimable_when_dirty_but_reachable(tmp_path):
         recency_fn=lambda _r, _p, _n: 5 * 86400,
         precious_fn=lambda _p: False,
     )
-    assert row["reason"] is None, "dirty+reachable should be reclaimable (#939)"
-    assert row.get("dirty") is True, "reclaimable row must carry dirty=True flag"
+    assert row["reason"] and "dirty" in row["reason"], "a dirty tree must be kept (#1380)"
     assert row.get("reachable_via") is not None
 
 
@@ -534,8 +509,10 @@ def test_worktree_NOT_reclaimable_when_live_cwd(tmp_path):
     assert "live" in row["reason"].lower()
 
 
-def test_worktree_orphan_gitdir_is_reclaimable(tmp_path):
+def test_worktree_orphan_gitdir_is_kept(tmp_path):
     # A #537 rename-litter dir: .git points nowhere → git can't read it at all.
+    # #1380 (owner 20.11.2026): its content cannot be measured, so it is never
+    # proven regenerable and is kept (report only) — reverses the #537 reclaim.
     p = tmp_path / "agent-orphan"
     p.mkdir()
     (p / ".git").write_text("gitdir: /home/david/gone/.git/worktrees/agent-orphan\n")
@@ -550,14 +527,13 @@ def test_worktree_orphan_gitdir_is_reclaimable(tmp_path):
         recency_fn=lambda _r, _p, _n: 30 * 86400,
         precious_fn=lambda _p: False,
     )
-    assert row["reason"] is None
-    assert row["kind"] == "orphan-gitdir"
+    assert row["reason"] and "orphan-gitdir" in row["reason"]
+    assert row["kind"] == "worktree"
 
 
-def test_worktree_orphan_gitdir_reclaimable_with_REAL_default_precious_fn(tmp_path):
-    # #834 review 🟡: the orphan branch must run BEFORE the precious check AND the
-    # real default precious-check must not fail-True on an orphan (git is
-    # unreadable → fs-walk fallback). No precious file present → reclaimed.
+def test_worktree_orphan_gitdir_kept_with_REAL_default_precious_fn(tmp_path):
+    # #1380: with the real default gates too, an orphan with harmless content
+    # is kept (it was reclaimed under #537/#834).
     p = tmp_path / "agent-orphan"
     p.mkdir()
     (p / ".git").write_text("gitdir: /home/david/gone/.git/worktrees/agent-orphan\n")
@@ -568,8 +544,8 @@ def test_worktree_orphan_gitdir_reclaimable_with_REAL_default_precious_fn(tmp_pa
         in_live_use=lambda _p: False,
         recency_fn=lambda _r, _p, _n: 30 * 86400,
     )
-    assert row["reason"] is None
-    assert row["kind"] == "orphan-gitdir"
+    assert row["reason"] and "orphan-gitdir" in row["reason"]
+    assert row["kind"] == "worktree"
 
 
 def test_worktree_orphan_gitdir_kept_when_precious_file_present(tmp_path):
@@ -586,7 +562,7 @@ def test_worktree_orphan_gitdir_kept_when_precious_file_present(tmp_path):
         recency_fn=lambda _r, _p, _n: 30 * 86400,
     )
     assert row["reason"] is not None
-    assert "precious" in row["reason"].lower()
+    assert "orphan-gitdir" in row["reason"]          # #1380: kept before any probe
 
 
 # --------------------------------------------------------------------------- #
@@ -2053,7 +2029,7 @@ class TestEscalationTop5Paths849:
             {"cls": "scratch", "path": "/big1", "bytes": 500, "kind": "delete", "reason": None},
             {"cls": "scratch", "path": "/big2", "bytes": 200, "kind": "delete", "reason": None},
             {"cls": "worktree", "path": "/wt3", "bytes": 100, "kind": "delete", "reason": None},
-            {"cls": "uploads", "path": "/up4", "bytes": 50, "kind": "skip", "reason": "too recent"},
+            {"cls": "user-cache", "path": "/up4", "bytes": 50, "kind": "skip", "reason": "too recent"},
         ]
         top = dg._top_consumers_by_path(actions, limit=5)
         assert len(top) == 3

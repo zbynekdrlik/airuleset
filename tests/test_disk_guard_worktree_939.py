@@ -4,8 +4,9 @@ The disk_guard worktree rung (`_worktree_reclaimable` in cli_worktree_sweep.py)
 must correctly classify three scenarios:
 
 1. LIVE-PROCESS worktree: a process has cwd inside → KEPT (never removed)
-2. PUSHED+DIRTY worktree: HEAD reachable from origin, dirty tree → DELETED
-   (the work is preserved on origin; only scratch/temp files are lost)
+2. PUSHED+DIRTY worktree: HEAD reachable from origin, dirty tree → KEPT
+   (#1380 owner ruling 20.11.2026 reversed #939's DELETE: a dirty tree is
+   uncommitted work, and a drain deletes only regenerable bytes)
 3. UNPUSHED worktree: HEAD NOT reachable from origin → KEPT (work not preserved)
 
 This test would have caught issue 935's Part A drop, which claimed the existing
@@ -119,10 +120,10 @@ def _setup_repo_with_worktrees(tmp):
 class TestWorktreeDiscriminator939(unittest.TestCase):
     """The three-worktree regression test for issue 939."""
 
-    def test_pushed_dirty_deleted_live_kept_unpushed_kept(self):
+    def test_pushed_dirty_kept_live_kept_unpushed_kept(self):
         """Build 3 worktrees in tmpdir:
         - live-process cwd → KEPT
-        - pushed+dirty → DELETED (reason=None, the discriminator's signal)
+        - pushed+dirty → KEPT (#1380: uncommitted work is never discarded)
         - unpushed → KEPT (HEAD not reachable from origin)
 
         Each with a decision-log line (reason is not None for kept ones).
@@ -154,16 +155,13 @@ class TestWorktreeDiscriminator939(unittest.TestCase):
                                  "live-process worktree should be KEPT (reason not None)")
             self.assertIn("live", row_live["reason"].lower())
 
-            # --- wt_pushed_dirty: pushed + dirty → DELETED ---
+            # --- wt_pushed_dirty: pushed + dirty → KEPT (#1380) ---
             row_pushed = _worktree_reclaimable(
                 repo, wt_pushed, "worktree-agent-pushed-dirty", base, None, now,
                 in_live_use=lambda p: False, recency_fn=fake_recency)
-            self.assertIsNone(row_pushed["reason"],
-                              "pushed+dirty worktree should be DELETED (reason=None), "
-                              "got: %s" % row_pushed.get("reason"))
-            # Verify it knows about the dirty state via the reachable_via field.
-            self.assertIsNotNone(row_pushed.get("reachable_via"),
-                                 "reclaimable row should carry reachable_via")
+            self.assertIsNotNone(row_pushed["reason"],
+                                 "pushed+dirty worktree must be KEPT (#1380)")
+            self.assertIn("dirty", row_pushed["reason"])
 
             # --- wt_unpushed: NOT pushed → KEPT ---
             row_unpushed = _worktree_reclaimable(
@@ -175,12 +173,12 @@ class TestWorktreeDiscriminator939(unittest.TestCase):
 
 
 class TestRemoveWorktreeDirForce939(unittest.TestCase):
-    """The executor must use --force and skip the clean-tree re-check."""
+    """#1380 reversed #939: the executor runs `git worktree remove` WITHOUT
+    --force, so git itself refuses a dirty tree."""
 
-    def test_dirty_worktree_removed_with_force(self):
-        """A worktree classified reclaimable (dirty but reachable) must be
-        removable by the executor — it uses --force, not the pre-#939 plain
-        `git worktree remove` that refuses dirty trees."""
+    def test_dirty_worktree_is_refused_without_force(self):
+        """A dirty worktree reaching the executor is refused by git, and its
+        uncommitted file survives."""
         from watchdog.disk_guard import _remove_worktree_dir
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -211,13 +209,12 @@ class TestRemoveWorktreeDirForce939(unittest.TestCase):
             with open(os.path.join(wt, "scratch.tmp"), "w") as f:
                 f.write("temp\n")
 
-            # The executor should succeed with --force.
+            # The executor must refuse: no --force (#1380).
             action = {"repo": repo, "path": wt}
-            _remove_worktree_dir(action)
-
-            # The worktree directory should be gone.
-            self.assertFalse(os.path.exists(wt),
-                             "dirty worktree should have been removed with --force")
+            with self.assertRaises(OSError):
+                _remove_worktree_dir(action)
+            self.assertTrue(os.path.exists(os.path.join(wt, "scratch.tmp")),
+                            "a dirty worktree's file must survive the executor")
 
 
 class TestPrevPlanners939(unittest.TestCase):

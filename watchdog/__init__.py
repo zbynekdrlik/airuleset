@@ -3286,7 +3286,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
           > 14 d — Runner.Worker-gated, never a tagged in-use image, never
           `docker system prune`), stale Claude self-update binaries (except the
           running one), one-off numbered venvs > 2 d, per-user `~/.cache` > 30 d,
-          own-home scratch/uploads/CLI-versions/worktrees/toolchain, transcripts
+          own-home scratch/CLI-versions/worktrees/toolchain (never ~/uploads or
+          ~/.claude/work-products, #1380), transcripts
           > 7 d gzip (LAST). The scratch rung classifies at
           `<cwd-key>/<session-uuid>` granularity so a DEAD session is reclaimed
           even beside a LIVE sibling (#863; liveness = the `~/.claude/sessions`
