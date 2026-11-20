@@ -172,9 +172,9 @@ def render_fleetbackup_rrsync_wrapper(rrsync=RRSYNC_PATH, root=RRSYNC_ROOT):
         "    paths=$((paths + 1))\n"
         "done\n"
         '[ "$dot" -eq 1 ] && [ "$paths" -ge 1 ] || fb_refuse "no path"\n'
-        "# rrsync reads the words checked above, the account prefix stripped\n"
+        "# rrsync reads the words checked above, the account prefix stripped (sshd\n"
+        "# exported the variable already)\n"
         'SSH_ORIGINAL_COMMAND=$cmd\n'
-        "export SSH_ORIGINAL_COMMAND\n"
         'exec %s -ro %s/"$one"\n'
         % (refused, shlex.quote(rrsync), shlex.quote(root))
     )
@@ -453,25 +453,24 @@ fb_deny_foreign() { # root, $1 home, $2 account: `---` on every child the accoun
         | xargs -0 -r setfacl -P -n -m "u:$FB:---" --
 }
 
-fb_cut() { # $1 a timeout, $2 a floor: the timeout, cut to what is left of the budget
+fb_cut() { # $1 a timeout: cut to what is left of the budget, never below 1 s (`timeout 0`
+    #        would mean NO limit; past the budget an unverifiable check fails a home, nothing more)
     local left
     left=$(fb_left)
-    [ "$left" -ge "$2" ] || left=$2
+    [ "$left" -ge 1 ] || left=1
     if [ "$left" -lt "$1" ]; then echo "$left"; else echo "$1"; fi
 }
 
-fb_as_fb() { # $1 a timeout, rest: a mode of this script AS fleetbackup, no root environment.
-    #          Only root can signal fleetbackup's processes, so a check keeps a 30 s floor
-    #          past the budget: a single-path check must never read as "unverifiable".
+fb_as_fb() { # $1 a timeout, rest: a mode of this script AS fleetbackup, no root environment
     local t
-    t=$(fb_cut "$1" 30)
+    t=$(fb_cut "$1")
     shift
     timeout -k 10 "$t" runuser -u "$FB" -- env -i PATH="$FB_PATH" LC_ALL=C \
         /bin/bash "$FB_SELF" "$@" 8>&- 9>&-
 }
 
 fb_walk() { # $1 home [siblings]: fb_records as root, timed (an account decides how big its trees are)
-    timeout -k 10 "$(fb_cut "$FB_CHECK_TIMEOUT" 30)" /bin/bash "$FB_SELF" records "$@" 8>&- 9>&-
+    timeout -k 10 "$(fb_cut "$FB_CHECK_TIMEOUT")" /bin/bash "$FB_SELF" records "$@" 8>&- 9>&-
 }
 
 fb_prefix() { # account-side output can never forge a line or a terminal escape
@@ -483,7 +482,7 @@ fb_run_account() { # $1 account, rest: a mode of this script AS the account — 
     local u="$1" out rc=0 t size
     shift
     out=$(mktemp) || return 1
-    t=$(fb_cut "$FB_ACCOUNT_TIMEOUT" 1)
+    t=$(fb_cut "$FB_ACCOUNT_TIMEOUT")
     ( ulimit -f "$FB_OUTPUT_CAP_KIB"   # KiB: a tenant cannot fill root's disk through us
       exec timeout -k 10 "$t" runuser -u "$u" -- env -i PATH="$FB_PATH" LC_ALL=C \
           /bin/bash "$FB_SELF" "$@" </dev/null >"$out" 2>&1 8>&- 9>&- ) || rc=$?
@@ -568,7 +567,7 @@ fb_account() { # $1 account, $2 home -> 0 ok | 1 failed (a reachable home is lef
         fb_warn "$u: the pre-refresh read-back did not run"
     fi
     # a child the account does not own: root adds the deny, batched and timed
-    if ! timeout -k 10 "$(fb_cut "$FB_ACCOUNT_TIMEOUT" 1)" /bin/bash "$FB_SELF" deny-foreign "$h" "$u" 8>&- 9>&-; then
+    if ! timeout -k 10 "$(fb_cut "$FB_ACCOUNT_TIMEOUT")" /bin/bash "$FB_SELF" deny-foreign "$h" "$u" 8>&- 9>&-; then
         fb_warn "$u: a child $u does not own could not be closed (above) — home HELD"
         mode=hold; rc=1
     fi
