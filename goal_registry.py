@@ -26,13 +26,13 @@ space, reproducing the original line exactly.
 import os as _os
 import re as _re
 
+from goal_box_rows import row_errors as _box_row_errors   # #1381 input-box budget
 from goal_legacy_1309 import pre_1309 as _pre_1309, prior_1309_lines
 
 PROFILES = ("full", "branch-merge", "fork-no-merge")
 
-# Claude Code refuses a `/goal` condition longer than this and never arms
-# (watchdog/goal.py:345). MIRRORS watchdog.goal.GOAL_ARM_CHAR_CAP; the two are
-# drift-locked in tests/test_goal_registry.py so they can never diverge.
+# Claude Code refuses a `/goal` condition longer than this and never arms; MIRRORS
+# watchdog.goal.GOAL_ARM_CHAR_CAP, drift-locked in tests/test_goal_registry.py.
 GOAL_ARM_CHAR_CAP = 4000
 
 # #1137 (owner 25.10.2026) — the ONE remaining dispatch sentence: an
@@ -501,11 +501,10 @@ _ROLE_PHRASE = {"infra": "INFRA ROLE", "quality": "QUALITY ROLE",
 
 def variant_check():
     """Return a list of error strings ([] == every variant is valid). Locks, per
-    variant: renders, ≤ GOAL_ARM_CHAR_CAP, NO turn cap, carries every required
-    clause, the bundle clause exactly once and its role phrase. The review and
-    quality variants SUBSTITUTE the (B) proof/obligation clauses (their own (B)
-    supersedes them); the profile-level `clause_ids()` coverage leg is
-    authority-scoped, so it is unaffected."""
+    variant: renders, ≤ GOAL_ARM_CHAR_CAP, fits the input box (#1381), NO turn
+    cap, every required clause, the bundle clause exactly once, its role phrase.
+    The review and quality variants SUBSTITUTE the (B) proof/obligation clauses
+    (their own (B) supersedes them); `clause_ids()` coverage is authority-scoped."""
     errs = []
     for authority, role in variant_specs():
         tag = "%s/%s" % (authority, role)
@@ -516,6 +515,7 @@ def variant_check():
             continue
         if len(line) > GOAL_ARM_CHAR_CAP:
             errs.append("%s over budget: %d > %d" % (tag, len(line), GOAL_ARM_CHAR_CAP))
+        errs += _box_row_errors(authority, role, line)   # #1381: never collapse the box
         if _TURN_CAP_RE.search(line):
             errs.append("%s carries a TURN CAP (banned in operational goals)" % tag)
         for cid in REQUIRED_BY_PROFILE.get(authority, REQUIRED_CLAUSES):

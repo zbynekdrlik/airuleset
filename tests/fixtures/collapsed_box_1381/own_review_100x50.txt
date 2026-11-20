@@ -1,0 +1,50 @@
+
+ ▐▛███▛█   Claude Code v2.1.327
+▝▜██████▀  Opus 5.5 · API Usage Billing
+  ~/devel/dasio
+
+▎ Auto mode is now Claude Code's default permission mode.
+▎ Auto mode lets Claude handle permission prompts automatically. Claude checks each tool call for
+▎ risky actions and prompt injection before executing, runs the ones it assesses as lower-risk, and
+▎ blocks the rest.
+▎ https://code.claude.com/docs/en/permission-modes
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                                                                ◐ medium · /effort
+─── ↑ 20 more ──────────────────────────────────────────────────────────────────────────────────────
+  core-quals --role review --count`, počet otvorených stream PR bez skorého review ≤ 1 h, stav
+  release (cut PR, shadow, main PR, posledné deploy runy s DB verziou, montalu/slovnormal/miva vs
+  main). Also stop for a genuinely-irreversible approval or a CI failure unfixable after two real
+  attempts. While NEITHER holds, work the backlog — related tickets: work them together in one
+  branch, one PR and one CI cycle when their focus allows; Never gate, classify, skip, or warn
+  based on prod-usage / events / off-air / hardware — I alone guard whether prod is live. ASK the
+  moment input is needed (it ALWAYS pings) — prefer ASK-AND-CONTINUE (`❓ ASKED` + `needs-answer`
+  comment, end `⏳ WORKING`) ASK ONCE, no repeat; `❓ NEEDS YOU` only if nothing else is workable.
+  A `needs-answer`/`needs-decision`/`needs-acceptance`/`ops-wait` ticket is parked — never
+  counted, never blocks 🏁 (paste `core-quals --waiting`/`--ops-wait`). NEVER bury a question or
+  blame my silence. No night/day difference (#791): work the backlog and ask questions 24/7 — no
+  night-hour cutoff, no time-of-day deferral. Bounce lane: open tickets labeled prio:bounce jump
+  the queue, oldest-first (never preempting running work); a named nudge gets a one-line ACK +
+  prio:bounce label, taken next turn, never worked inline. Count a ticket done ONLY after
+  verifying from primary sources — `gh pr view` (merged, closingIssuesReferences), `gh run list`
+  (main green), `gh issue view` (closed), the deployed version on the live target — never the
+  worker's claim alone; verify the LAST ticket as strictly as the first. After EVERY integration
+  END the turn with the full `## ✅ Work Complete` report (`completion-report.md`) terminating in
+  `✅ DONE:` — CONTINUE, NEVER satisfies (B). Machine compacts are REMOVED (#1084) — native
+  autocompact only; never a compact command, never a compact HOLD.
+────────────────────────────────────────────────────────────────────────────────────────────────────
+  wk 91%(3d)  F 33%(3d)  opus5.5  I 24▲  nudges workstation · recovery on  ctx 735K  caveman
+  ⏵⏵ auto mode on (shift+tab to cycle)

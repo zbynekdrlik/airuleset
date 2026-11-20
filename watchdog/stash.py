@@ -255,13 +255,11 @@ SEND_TYPE_CHECKPOINT_THRESHOLD = GOAL_TYPE_CHUNK_THRESHOLD
 # undo+retry -> give up: goal not armed / nudge `typed-undone`), NEVER a junk submit.
 GOAL_TYPE_CHECKPOINT_CHARS = 120
 
-# #670-review R2 -- the three shapes `_type_verify_class` distinguishes so the
-# undo fires ONLY where it is safe: only a CORRUPT box (readable, holding OUR
-# OWN text with a swallowed head) may be backspaced; a HOLD box (unreadable, or
-# a collapsed-paste buffer) must NEVER get keystrokes.
-_TV_LANDED = "landed"
-_TV_HOLD = "hold"
-_TV_CORRUPT = "corrupt"
+# #670-review R2 -- the shapes `_type_verify_class` distinguishes so the undo
+# fires ONLY where it is safe: only a CORRUPT box (readable, OUR OWN text with a
+# swallowed head) may be backspaced; a HOLD box (unreadable, a collapsed-paste
+# buffer) never gets keys. #1381: SETTLING is a collapsed box not yet our tail.
+_TV_LANDED, _TV_HOLD, _TV_CORRUPT, _TV_SETTLING = "landed", "hold", "corrupt", "settling"
 
 
 def _type_verify_class(pid, run, text, cap=None, allow_scrolled=False,
@@ -292,8 +290,9 @@ def _type_verify_class(pid, run, text, cap=None, allow_scrolled=False,
 
     HOLD: the box is UNREADABLE (`_input_line_text` None -- a turn/dialog started
     mid-type) OR shows the `paste again to expand` collapse hint. NO keystrokes
-    may follow (the #233 unreadable-pane discipline; the #322/#372 collapsed-
-    buffer state `_undo_typed_text` explicitly excludes) -- the caller aborts.
+    may follow (#233; #322/#372) -- the caller aborts. #1381: with `allow_scrolled`
+    a COLLAPSED box (`↑ N more`, no `❯` row) whose rows are row-exact our own
+    tail is LANDED; any other collapsed box is SETTLING (re-read, ends HOLD).
 
     CORRUPT: a READABLE box holding a variant of OUR OWN text whose head lost its
     first char, or a truncated type. The box was verified BARE before the type,
@@ -306,8 +305,11 @@ def _type_verify_class(pid, run, text, cap=None, allow_scrolled=False,
     if cap is None:
         cap = watchdog.capture_pane(pid, run, lines=40)
     tail = watchdog._input_line_text(cap)
-    if tail is None:
-        return _TV_HOLD                          # unreadable pane -> withhold (#233)
+    if tail is None:                             # unreadable pane -> withhold (#233)
+        from watchdog import collapsed_box as _cb
+        if not (allow_scrolled and _cb.rows(cap)):
+            return _TV_HOLD
+        return _TV_LANDED if _cb.own_tail(cap, text) else _TV_SETTLING   # #1381
     if _PASTED_PLACEHOLDER_RX.match(tail.strip()):
         return _TV_LANDED                        # collapsed placeholder = landed
     if _pane_shows_collapsed_paste(tail):
@@ -347,17 +349,17 @@ def _settle_type_verify(pid, run, text, sleep_fn, allow_scrolled=False,
     poll (`TYPE_VERIFY_SETTLE_*`, the 8x1s magnitude the old `_await_typed_landed`
     carried): return the FIRST non-CORRUPT verdict, so a genuinely-landed type
     read mid-render is not mistaken for a swallow and destructively undone. A
-    stable CORRUPT (every poll) settles to CORRUPT. `allow_scrolled` is forwarded
-    unchanged (#746)."""
+    stable CORRUPT settles to CORRUPT, a stable SETTLING to HOLD (#1381: the
+    last chunk of a collapsed box may still be rendering; never an undo)."""
     cls = _TV_HOLD
     for i in range(TYPE_VERIFY_SETTLE_POLLS):
         cls = _type_verify_class(pid, run, text, allow_scrolled=allow_scrolled,
                                  provenance=provenance)
-        if cls != _TV_CORRUPT:                    # LANDED or a stable HOLD -> stop settling
+        if cls not in (_TV_CORRUPT, _TV_SETTLING):   # LANDED or a stable HOLD
             break
         if i < TYPE_VERIFY_SETTLE_POLLS - 1:
             sleep_fn(TYPE_VERIFY_SETTLE_S)
-    return cls
+    return _TV_HOLD if cls == _TV_SETTLING else cls
 
 
 def _type_two_phase_head_checkpoint(pid, run, text, sleep_fn,
@@ -1357,17 +1359,14 @@ def deliver_with_stash(pid, text, run, captured=None, logs=None, sleep_fn=None,
     watchdog.keys(pid, "Enter", kind=nudge_kind, nudge=nudge, user_authored=user_authored,
                   run=run, logs=logs)
     cap = watchdog.capture_pane(pid, run, lines=30)
-    itext2 = watchdog._input_line_text(cap)
-    if watchdog._typed_landed(text, itext2):
-        # swallowed submit (#36 class) — ONE corrective Escape+Enter, never a
-        # second Escape.
+    from watchdog import collapsed_box as _cb      # #1381: a collapsed box too
+    if _cb.holds(cap, text):   # swallowed submit (#36): ONE Escape+Enter, never two
         watchdog.keys(pid, "Escape", kind=nudge_kind, nudge=nudge, user_authored=user_authored,
                       run=run, logs=logs)
         watchdog.keys(pid, "Enter", kind=nudge_kind, nudge=nudge, user_authored=user_authored,
                       run=run, logs=logs)
         cap = watchdog.capture_pane(pid, run, lines=30)
-        itext3 = watchdog._input_line_text(cap)
-        if watchdog._typed_landed(text, itext3):
+        if _cb.holds(cap, text):
             # #306 — delivery is genuinely dead here, but by construction the
             # box's ENTIRE content is exactly `text`: PARKED/NOOP means it was
             # verified bare before we typed (#852 A removed the UNRESOLVED

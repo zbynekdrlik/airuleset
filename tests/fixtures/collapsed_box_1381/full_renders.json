@@ -1,0 +1,735 @@
+[
+ {
+  "name": "176-pall2 full/None",
+  "cols": 176,
+  "text": "/goal STOP CONDITIONS — the loop is DONE the moment EITHER holds, both checkable from the transcript: (A) BLOCKED ON MY ANSWER — the latest assistant message ends with a line starting `❓ NEEDS YOU:` and there is NO user message after it; NEVER continue me past an unanswered `❓ NEEDS YOU` (after I answer, Claude resolves that ticket and re-prints this /goal line if issues remain). (A) applies only when no background agent/lane is live; with lanes live use ASK-AND-CONTINUE and let the footer U carry the question. (B) BACKLOG EMPTY — PROVEN IN THIS TURN, NEVER CLAIMED. Every open issue THIS box is OBLIGED to action — the CORE slice (not labeled autopilot-skip, not owned by a sub-dev stream) PLUS every ticket only I can action whatever stream owns it (needs-gatekeeper, a hand-off awaiting my review/merge/close) — is resolved, and (B) holds ONLY when my final message carries the pasted OUTPUT of both proof commands: `python3 ~/devel/airuleset/airuleset.py core-quals --count` printing exactly `0` under it (it counts EXACTLY that obligation set), AND `gh run list -b \"$(gh repo view --json defaultBranchRef --jq .defaultBranchRef.name)\" -L 1 --json conclusion --jq '.[0].conclusion'` printing exactly `success` under it, AND then the line `🏁 BACKLOG EMPTY: 0 open, main green` directly above the terminal `✅ DONE:` marker. HOW TO TELL A REAL COMPLETION FROM A CLAIMED ONE: real = output shown; claimed = asserted. `✅ DONE:` NEVER satisfies (B) — it is the per-ticket CONTINUE terminator, even in a turn full of `✅` rows and a merged PR. IF I CANNOT TELL — missing, unreadable, or stale output, any doubt — (B) does NOT hold: CONTINUE. There is no third answer. TO PRODUCE THE PROOF: run both, paste each output, write the `🏁` line — no proof, no stop. A stream ticket in that set is NOT mine to implement — I ACTION it (review, merge, close, unblock) and never write its code (a bare sub-dev bounce is NOT in this set — `/process-subdev`'s loop holds it). Also stop for a genuinely-irreversible approval or a CI failure unfixable after two real attempts. While NEITHER holds, work the backlog — related tickets: work them together in one branch, one PR and one CI cycle when their focus allows; Never gate, classify, skip, or warn based on prod-usage / events / off-air / hardware — I alone guard whether prod is live. ASK the moment input is needed (it ALWAYS pings) — prefer ASK-AND-CONTINUE (`❓ ASKED` + `needs-answer` comment, end `⏳ WORKING`) ASK ONCE, no repeat; `❓ NEEDS YOU` only if nothing else is workable. A `needs-answer`/`needs-decision`/`needs-acceptance`/`ops-wait` ticket is parked — never counted, never blocks 🏁 (paste `core-quals --waiting`/`--ops-wait`). NEVER bury a question or blame my silence. No night/day difference (#791): work the backlog and ask questions 24/7 — no night-hour cutoff, no time-of-day deferral. Bounce lane: open tickets labeled prio:bounce jump the queue, oldest-first (never preempting running work); a named nudge gets a one-line ACK + prio:bounce label, taken next turn, never worked inline. Count a ticket done ONLY after verifying from primary sources — `gh pr view` (merged, closingIssuesReferences), `gh run list` (main green), `gh issue view` (closed), the deployed version on the live target — never the worker's claim alone; verify the LAST ticket as strictly as the first. After EVERY integration END the turn with the full `## ✅ Work Complete` report (`completion-report.md`) terminating in `✅ DONE:` — CONTINUE, NEVER satisfies (B). Machine compacts are REMOVED (#1084) — native autocompact only; never a compact command, never a compact HOLD.",
+  "rows": [
+   "/goal STOP CONDITIONS — the loop is DONE the moment EITHER holds, both checkable from the transcript: (A) BLOCKED ON MY ANSWER — the latest assistant message ends with a",
+   "line starting `❓ NEEDS YOU:` and there is NO user message after it; NEVER continue me past an unanswered `❓ NEEDS YOU` (after I answer, Claude resolves that ticket and",
+   "re-prints this /goal line if issues remain). (A) applies only when no background agent/lane is live; with lanes live use ASK-AND-CONTINUE and let the footer U carry the",
+   "question. (B) BACKLOG EMPTY — PROVEN IN THIS TURN, NEVER CLAIMED. Every open issue THIS box is OBLIGED to action — the CORE slice (not labeled autopilot-skip, not owned by",
+   "a sub-dev stream) PLUS every ticket only I can action whatever stream owns it (needs-gatekeeper, a hand-off awaiting my review/merge/close) — is resolved, and (B) holds",
+   "ONLY when my final message carries the pasted OUTPUT of both proof commands: `python3 ~/devel/airuleset/airuleset.py core-quals --count` printing exactly `0` under it (it",
+   "counts EXACTLY that obligation set), AND `gh run list -b \"$(gh repo view --json defaultBranchRef --jq .defaultBranchRef.name)\" -L 1 --json conclusion --jq",
+   "'.[0].conclusion'` printing exactly `success` under it, AND then the line `🏁 BACKLOG EMPTY: 0 open, main green` directly above the terminal `✅ DONE:` marker. HOW TO TELL",
+   "A REAL COMPLETION FROM A CLAIMED ONE: real = output shown; claimed = asserted. `✅ DONE:` NEVER satisfies (B) — it is the per-ticket CONTINUE terminator, even in a turn",
+   "full of `✅` rows and a merged PR. IF I CANNOT TELL — missing, unreadable, or stale output, any doubt — (B) does NOT hold: CONTINUE. There is no third answer. TO PRODUCE",
+   "THE PROOF: run both, paste each output, write the `🏁` line — no proof, no stop. A stream ticket in that set is NOT mine to implement — I ACTION it (review, merge, close,",
+   "unblock) and never write its code (a bare sub-dev bounce is NOT in this set — `/process-subdev`'s loop holds it). Also stop for a genuinely-irreversible approval or a CI",
+   "failure unfixable after two real attempts. While NEITHER holds, work the backlog — related tickets: work them together in one branch, one PR and one CI cycle when their",
+   "focus allows; Never gate, classify, skip, or warn based on prod-usage / events / off-air / hardware — I alone guard whether prod is live. ASK the moment input is needed (it",
+   "ALWAYS pings) — prefer ASK-AND-CONTINUE (`❓ ASKED` + `needs-answer` comment, end `⏳ WORKING`) ASK ONCE, no repeat; `❓ NEEDS YOU` only if nothing else is workable. A",
+   "`needs-answer`/`needs-decision`/`needs-acceptance`/`ops-wait` ticket is parked — never counted, never blocks 🏁 (paste `core-quals --waiting`/`--ops-wait`). NEVER bury a",
+   "question or blame my silence. No night/day difference (#791): work the backlog and ask questions 24/7 — no night-hour cutoff, no time-of-day deferral. Bounce lane: open",
+   "tickets labeled prio:bounce jump the queue, oldest-first (never preempting running work); a named nudge gets a one-line ACK + prio:bounce label, taken next turn, never",
+   "worked inline. Count a ticket done ONLY after verifying from primary sources — `gh pr view` (merged, closingIssuesReferences), `gh run list` (main green), `gh issue view`",
+   "(closed), the deployed version on the live target — never the worker's claim alone; verify the LAST ticket as strictly as the first. After EVERY integration END the turn",
+   "with the full `## ✅ Work Complete` report (`completion-report.md`) terminating in `✅ DONE:` — CONTINUE, NEVER satisfies (B). Machine compacts are REMOVED (#1084) — native",
+   "autocompact only; never a compact command, never a compact HOLD."
+  ]
+ },
+ {
+  "name": "176-pall2 branch-merge/None",
+  "cols": 176,
+  "text": "/goal STOP CONDITIONS — the loop is DONE the moment EITHER holds, both checkable from the transcript: (A) BLOCKED ON MY ANSWER — the latest assistant message ends with a line starting `❓ NEEDS YOU:` and there is NO user message after it; NEVER continue me past an unanswered `❓ NEEDS YOU`. (A) applies only when no background agent/lane is live; with lanes live use ASK-AND-CONTINUE and let the footer U carry the question. NO BACKLOG-EMPTY END (#1128): this stream loop never ends on an empty slice — gk hand-offs, bounces, client replies and new stream tickets keep arriving; an empty slice is NEVER a stop condition — never judge this goal met on it. IDLE: when no lane is live, `python3 ~/devel/airuleset/airuleset.py slice-quals --count-dispatchable` prints 0 (or errors) and `slice-quals --bounces --unhandled` prints nothing, keep exactly ONE background `python3 ~/devel/airuleset/airuleset.py stream-wait` live (relaunch it if gone) and end ⏳ WORKING; when it exits, read what it printed, re-check `slice-quals` and work whatever arrived. `stream-wait` refuses (exit 3) while work is waiting: work the list it prints. ORDER, NEVER SCOPE (#1329): a priority order or owner line sets order only — when its head is blocked, start the next workable ticket the same turn; a blocker lives on its ticket in W (a third party: `ops-wait` + `Waiting-on:` + daily push) or U (the owner), never only in a ⏳ line. Only the OWNER ends this loop (`/goal clear`). My authority ENDS at the integration branch: never promote to staging/main, never deploy, never touch other streams'. Also stop for a genuinely-irreversible approval or a CI failure unfixable after two real attempts. While NEITHER holds, work the assigned backlog — related tickets: work them together in one branch, one PR and one CI cycle when their focus allows; ASK the moment input is needed (it ALWAYS pings) — prefer ASK-AND-CONTINUE (`❓ ASKED` + `needs-answer` comment, end `⏳ WORKING`) ASK ONCE, no repeat; `❓ NEEDS YOU` only if nothing else is workable. No night/day difference (#791): work the backlog and ask questions 24/7 — no night-hour cutoff, no time-of-day deferral. Bounce lane: my prio:bounce tickets go first, oldest-first (never preempting running work); a named nudge gets a one-line ACK + label next turn, never inline. Count a hand-off done ONLY after verifying it from primary sources — `gh pr view` (merged into integration), that branch's CI run, the READY-FOR-REVIEW comment posted — never the worker's claim alone; verify the LAST as strictly as the first. After EVERY integration END the turn with the full `## ✅ Work Complete` report (the branch-merge variant, `skills/completion-report-deep/DEEP.md`) terminating in `✅ DONE:` — CONTINUE, never a stop. Machine compacts are REMOVED (#1084) — native autocompact only; never a compact command, never a compact HOLD.",
+  "rows": [
+   "/goal STOP CONDITIONS — the loop is DONE the moment EITHER holds, both checkable from the transcript: (A) BLOCKED ON MY ANSWER — the latest assistant message ends with a",
+   "line starting `❓ NEEDS YOU:` and there is NO user message after it; NEVER continue me past an unanswered `❓ NEEDS YOU`. (A) applies only when no background agent/lane is",
+   "live; with lanes live use ASK-AND-CONTINUE and let the footer U carry the question. NO BACKLOG-EMPTY END (#1128): this stream loop never ends on an empty slice — gk",
+   "hand-offs, bounces, client replies and new stream tickets keep arriving; an empty slice is NEVER a stop condition — never judge this goal met on it. IDLE: when no lane is",
+   "live, `python3 ~/devel/airuleset/airuleset.py slice-quals --count-dispatchable` prints 0 (or errors) and `slice-quals --bounces --unhandled` prints nothing, keep exactly",
+   "ONE background `python3 ~/devel/airuleset/airuleset.py stream-wait` live (relaunch it if gone) and end ⏳ WORKING; when it exits, read what it printed, re-check",
+   "`slice-quals` and work whatever arrived. `stream-wait` refuses (exit 3) while work is waiting: work the list it prints. ORDER, NEVER SCOPE (#1329): a priority order or",
+   "owner line sets order only — when its head is blocked, start the next workable ticket the same turn; a blocker lives on its ticket in W (a third party: `ops-wait` +",
+   "`Waiting-on:` + daily push) or U (the owner), never only in a ⏳ line. Only the OWNER ends this loop (`/goal clear`). My authority ENDS at the integration branch: never",
+   "promote to staging/main, never deploy, never touch other streams'. Also stop for a genuinely-irreversible approval or a CI failure unfixable after two real attempts. While",
+   "NEITHER holds, work the assigned backlog — related tickets: work them together in one branch, one PR and one CI cycle when their focus allows; ASK the moment input is",
+   "needed (it ALWAYS pings) — prefer ASK-AND-CONTINUE (`❓ ASKED` + `needs-answer` comment, end `⏳ WORKING`) ASK ONCE, no repeat; `❓ NEEDS YOU` only if nothing else is",
+   "workable. No night/day difference (#791): work the backlog and ask questions 24/7 — no night-hour cutoff, no time-of-day deferral. Bounce lane: my prio:bounce tickets go",
+   "first, oldest-first (never preempting running work); a named nudge gets a one-line ACK + label next turn, never inline. Count a hand-off done ONLY after verifying it from",
+   "primary sources — `gh pr view` (merged into integration), that branch's CI run, the READY-FOR-REVIEW comment posted — never the worker's claim alone; verify the LAST as",
+   "strictly as the first. After EVERY integration END the turn with the full `## ✅ Work Complete` report (the branch-merge variant, `skills/completion-report-deep/DEEP.md`)",
+   "terminating in `✅ DONE:` — CONTINUE, never a stop. Machine compacts are REMOVED (#1084) — native autocompact only; never a compact command, never a compact HOLD."
+  ]
+ },
+ {
+  "name": "176-pall2 branch-merge/infra",
+  "cols": 176,
+  "text": "/goal STOP CONDITIONS — the loop is DONE the moment EITHER holds, both checkable from the transcript: (A) BLOCKED ON MY ANSWER — the latest assistant message ends with a line starting `❓ NEEDS YOU:` and there is NO user message after it; NEVER continue me past an unanswered `❓ NEEDS YOU`. (A) applies only when no background agent/lane is live; with lanes live use ASK-AND-CONTINUE and let the footer U carry the question. NO BACKLOG-EMPTY END (#1128): this stream loop never ends on an empty slice — gk hand-offs, bounces, client replies and new stream tickets keep arriving; an empty slice is NEVER a stop condition — never judge this goal met on it. IDLE: when no lane is live, `python3 ~/devel/airuleset/airuleset.py slice-quals --count-dispatchable` prints 0 (or errors) and `slice-quals --bounces --unhandled` prints nothing, keep exactly ONE background `python3 ~/devel/airuleset/airuleset.py stream-wait` live (relaunch it if gone) and end ⏳ WORKING; when it exits, read what it printed, re-check `slice-quals` and work whatever arrived. `stream-wait` refuses (exit 3) while work is waiting: work the list it prints. ORDER, NEVER SCOPE (#1329): a priority order or owner line sets order only — when its head is blocked, start the next workable ticket the same turn; a blocker lives on its ticket in W (a third party: `ops-wait` + `Waiting-on:` + daily push) or U (the owner), never only in a ⏳ line. Only the OWNER ends this loop (`/goal clear`). My authority ENDS at the integration branch: never promote to staging/main, never deploy, never touch other streams'. Also stop for a genuinely-irreversible approval or a CI failure unfixable after two real attempts. While NEITHER holds, work the assigned backlog — related tickets: work them together in one branch, one PR and one CI cycle when their focus allows; INFRA ROLE — only tickets labelled `infra`; no stream hand-offs / release ops / PROD data; never touch the review window's checkout; coordinate with the review window via tickets only; box-maintenance steps stop with `❓ NEEDS YOU` between steps. ASK the moment input is needed (it ALWAYS pings) — prefer ASK-AND-CONTINUE (`❓ ASKED` + `needs-answer` comment, end `⏳ WORKING`) ASK ONCE, no repeat; `❓ NEEDS YOU` only if nothing else is workable. No night/day difference (#791): work the backlog and ask questions 24/7 — no night-hour cutoff, no time-of-day deferral. Bounce lane: my prio:bounce tickets go first, oldest-first (never preempting running work); a named nudge gets a one-line ACK + label next turn, never inline. Count a hand-off done ONLY after verifying it from primary sources — `gh pr view` (merged into integration), that branch's CI run, the READY-FOR-REVIEW comment posted — never the worker's claim alone; verify the LAST as strictly as the first. After EVERY integration END the turn with the full `## ✅ Work Complete` report (the branch-merge variant, `skills/completion-report-deep/DEEP.md`) terminating in `✅ DONE:` — CONTINUE, never a stop. Machine compacts are REMOVED (#1084) — native autocompact only; never a compact command, never a compact HOLD.",
+  "rows": [
+   "/goal STOP CONDITIONS — the loop is DONE the moment EITHER holds, both checkable from the transcript: (A) BLOCKED ON MY ANSWER — the latest assistant message ends with a",
+   "line starting `❓ NEEDS YOU:` and there is NO user message after it; NEVER continue me past an unanswered `❓ NEEDS YOU`. (A) applies only when no background agent/lane is",
+   "live; with lanes live use ASK-AND-CONTINUE and let the footer U carry the question. NO BACKLOG-EMPTY END (#1128): this stream loop never ends on an empty slice — gk",
+   "hand-offs, bounces, client replies and new stream tickets keep arriving; an empty slice is NEVER a stop condition — never judge this goal met on it. IDLE: when no lane is",
+   "live, `python3 ~/devel/airuleset/airuleset.py slice-quals --count-dispatchable` prints 0 (or errors) and `slice-quals --bounces --unhandled` prints nothing, keep exactly",
+   "ONE background `python3 ~/devel/airuleset/airuleset.py stream-wait` live (relaunch it if gone) and end ⏳ WORKING; when it exits, read what it printed, re-check",
+   "`slice-quals` and work whatever arrived. `stream-wait` refuses (exit 3) while work is waiting: work the list it prints. ORDER, NEVER SCOPE (#1329): a priority order or",
+   "owner line sets order only — when its head is blocked, start the next workable ticket the same turn; a blocker lives on its ticket in W (a third party: `ops-wait` +",
+   "`Waiting-on:` + daily push) or U (the owner), never only in a ⏳ line. Only the OWNER ends this loop (`/goal clear`). My authority ENDS at the integration branch: never",
+   "promote to staging/main, never deploy, never touch other streams'. Also stop for a genuinely-irreversible approval or a CI failure unfixable after two real attempts. While",
+   "NEITHER holds, work the assigned backlog — related tickets: work them together in one branch, one PR and one CI cycle when their focus allows; INFRA ROLE — only tickets",
+   "labelled `infra`; no stream hand-offs / release ops / PROD data; never touch the review window's checkout; coordinate with the review window via tickets only;",
+   "box-maintenance steps stop with `❓ NEEDS YOU` between steps. ASK the moment input is needed (it ALWAYS pings) — prefer ASK-AND-CONTINUE (`❓ ASKED` + `needs-answer`",
+   "comment, end `⏳ WORKING`) ASK ONCE, no repeat; `❓ NEEDS YOU` only if nothing else is workable. No night/day difference (#791): work the backlog and ask questions 24/7 —",
+   "no night-hour cutoff, no time-of-day deferral. Bounce lane: my prio:bounce tickets go first, oldest-first (never preempting running work); a named nudge gets a one-line ACK",
+   "+ label next turn, never inline. Count a hand-off done ONLY after verifying it from primary sources — `gh pr view` (merged into integration), that branch's CI run, the",
+   "READY-FOR-REVIEW comment posted — never the worker's claim alone; verify the LAST as strictly as the first. After EVERY integration END the turn with the full `## ✅ Work",
+   "Complete` report (the branch-merge variant, `skills/completion-report-deep/DEEP.md`) terminating in `✅ DONE:` — CONTINUE, never a stop. Machine compacts are REMOVED",
+   "(#1084) — native autocompact only; never a compact command, never a compact HOLD."
+  ]
+ },
+ {
+  "name": "176-pall2 fork-no-merge/None",
+  "cols": 176,
+  "text": "/goal STOP CONDITIONS — the loop is DONE the moment EITHER holds, both checkable from the transcript: (A) BLOCKED ON MY ANSWER — the latest assistant message ends with a line starting `❓ NEEDS YOU:` and there is NO user message after it; NEVER continue me past an unanswered `❓ NEEDS YOU`. (A) applies only when no background agent/lane is live; with lanes live use ASK-AND-CONTINUE and let the footer U carry the question. NO BACKLOG-EMPTY END (#1128): this stream loop never ends on an empty slice — gk hand-offs, bounces, client replies and new stream tickets keep arriving; an empty slice is NEVER a stop condition — never judge this goal met on it. IDLE: when no lane is live, `python3 ~/devel/airuleset/airuleset.py slice-quals --count-dispatchable` prints 0 (or errors) and `slice-quals --bounces --unhandled` prints nothing, keep exactly ONE background `python3 ~/devel/airuleset/airuleset.py stream-wait` live (relaunch it if gone) and end ⏳ WORKING; when it exits, read what it printed, re-check `slice-quals` and work whatever arrived. `stream-wait` refuses (exit 3) while work is waiting: work the list it prints. ORDER, NEVER SCOPE (#1329): a priority order or owner line sets order only — when its head is blocked, start the next workable ticket the same turn; a blocker lives on its ticket in W (a third party: `ops-wait` + `Waiting-on:` + daily push) or U (the owner), never only in a ⏳ line. Only the OWNER ends this loop (`/goal clear`). My authority ENDS at the hand-off: I push MY fork branches + evidence — NEVER open/merge a PR, never push upstream, never deploy, close only per authority, never touch other streams'. Also stop for a genuinely-irreversible approval or local verification failing twice. While NEITHER holds, work the assigned backlog — related tickets: work them together in one branch, one PR and one CI cycle when their focus allows; ASK the moment input is needed (it ALWAYS pings) — prefer ASK-AND-CONTINUE (`❓ ASKED` + `needs-answer` comment, end `⏳ WORKING`) ASK ONCE, no repeat; `❓ NEEDS YOU` only if nothing else is workable. No night/day difference (#791): work the backlog and ask questions 24/7 — no night-hour cutoff, no time-of-day deferral. Bounce lane: my prio:bounce tickets go first, oldest-first (never preempting running work); a named nudge gets a one-line ACK + label (best-effort), taken next turn, never worked inline. Count a hand-off done ONLY after verifying from primary sources — the `READY-FOR-REVIEW:` comment present (`gh issue view --json comments`), the fork branch pushed, local test/lint output shown — never the worker's claim alone; verify the LAST as strictly as the first. After EVERY hand-off END the turn with the full `## ✅ Work Complete` report (the fork-no-merge variant, `skills/completion-report-deep/DEEP.md`) terminating in `✅ DONE:` — CONTINUE, never a stop. Machine compacts are REMOVED (#1084) — native autocompact only; never a compact command, never a compact HOLD.",
+  "rows": [
+   "/goal STOP CONDITIONS — the loop is DONE the moment EITHER holds, both checkable from the transcript: (A) BLOCKED ON MY ANSWER — the latest assistant message ends with a",
+   "line starting `❓ NEEDS YOU:` and there is NO user message after it; NEVER continue me past an unanswered `❓ NEEDS YOU`. (A) applies only when no background agent/lane is",
+   "live; with lanes live use ASK-AND-CONTINUE and let the footer U carry the question. NO BACKLOG-EMPTY END (#1128): this stream loop never ends on an empty slice — gk",
+   "hand-offs, bounces, client replies and new stream tickets keep arriving; an empty slice is NEVER a stop condition — never judge this goal met on it. IDLE: when no lane is",
+   "live, `python3 ~/devel/airuleset/airuleset.py slice-quals --count-dispatchable` prints 0 (or errors) and `slice-quals --bounces --unhandled` prints nothing, keep exactly",
+   "ONE background `python3 ~/devel/airuleset/airuleset.py stream-wait` live (relaunch it if gone) and end ⏳ WORKING; when it exits, read what it printed, re-check",
+   "`slice-quals` and work whatever arrived. `stream-wait` refuses (exit 3) while work is waiting: work the list it prints. ORDER, NEVER SCOPE (#1329): a priority order or",
+   "owner line sets order only — when its head is blocked, start the next workable ticket the same turn; a blocker lives on its ticket in W (a third party: `ops-wait` +",
+   "`Waiting-on:` + daily push) or U (the owner), never only in a ⏳ line. Only the OWNER ends this loop (`/goal clear`). My authority ENDS at the hand-off: I push MY fork",
+   "branches + evidence — NEVER open/merge a PR, never push upstream, never deploy, close only per authority, never touch other streams'. Also stop for a genuinely-irreversible",
+   "approval or local verification failing twice. While NEITHER holds, work the assigned backlog — related tickets: work them together in one branch, one PR and one CI cycle",
+   "when their focus allows; ASK the moment input is needed (it ALWAYS pings) — prefer ASK-AND-CONTINUE (`❓ ASKED` + `needs-answer` comment, end `⏳ WORKING`) ASK ONCE, no",
+   "repeat; `❓ NEEDS YOU` only if nothing else is workable. No night/day difference (#791): work the backlog and ask questions 24/7 — no night-hour cutoff, no time-of-day",
+   "deferral. Bounce lane: my prio:bounce tickets go first, oldest-first (never preempting running work); a named nudge gets a one-line ACK + label (best-effort), taken next",
+   "turn, never worked inline. Count a hand-off done ONLY after verifying from primary sources — the `READY-FOR-REVIEW:` comment present (`gh issue view --json comments`), the",
+   "fork branch pushed, local test/lint output shown — never the worker's claim alone; verify the LAST as strictly as the first. After EVERY hand-off END the turn with the full",
+   "`## ✅ Work Complete` report (the fork-no-merge variant, `skills/completion-report-deep/DEEP.md`) terminating in `✅ DONE:` — CONTINUE, never a stop. Machine compacts are",
+   "REMOVED (#1084) — native autocompact only; never a compact command, never a compact HOLD."
+  ]
+ },
+ {
+  "name": "176-pall2 fork-no-merge/infra",
+  "cols": 176,
+  "text": "/goal STOP CONDITIONS — the loop is DONE the moment EITHER holds, both checkable from the transcript: (A) BLOCKED ON MY ANSWER — the latest assistant message ends with a line starting `❓ NEEDS YOU:` and there is NO user message after it; NEVER continue me past an unanswered `❓ NEEDS YOU`. (A) applies only when no background agent/lane is live; with lanes live use ASK-AND-CONTINUE and let the footer U carry the question. NO BACKLOG-EMPTY END (#1128): this stream loop never ends on an empty slice — gk hand-offs, bounces, client replies and new stream tickets keep arriving; an empty slice is NEVER a stop condition — never judge this goal met on it. IDLE: when no lane is live, `python3 ~/devel/airuleset/airuleset.py slice-quals --count-dispatchable` prints 0 (or errors) and `slice-quals --bounces --unhandled` prints nothing, keep exactly ONE background `python3 ~/devel/airuleset/airuleset.py stream-wait` live (relaunch it if gone) and end ⏳ WORKING; when it exits, read what it printed, re-check `slice-quals` and work whatever arrived. `stream-wait` refuses (exit 3) while work is waiting: work the list it prints. ORDER, NEVER SCOPE (#1329): a priority order or owner line sets order only — when its head is blocked, start the next workable ticket the same turn; a blocker lives on its ticket in W (a third party: `ops-wait` + `Waiting-on:` + daily push) or U (the owner), never only in a ⏳ line. Only the OWNER ends this loop (`/goal clear`). My authority ENDS at the hand-off: I push MY fork branches + evidence — NEVER open/merge a PR, never push upstream, never deploy, close only per authority, never touch other streams'. Also stop for a genuinely-irreversible approval or local verification failing twice. While NEITHER holds, work the assigned backlog — related tickets: work them together in one branch, one PR and one CI cycle when their focus allows; INFRA ROLE — only tickets labelled `infra`; no stream hand-offs / release ops / PROD data; never touch the review window's checkout; coordinate with the review window via tickets only; box-maintenance steps stop with `❓ NEEDS YOU` between steps. ASK the moment input is needed (it ALWAYS pings) — prefer ASK-AND-CONTINUE (`❓ ASKED` + `needs-answer` comment, end `⏳ WORKING`) ASK ONCE, no repeat; `❓ NEEDS YOU` only if nothing else is workable. No night/day difference (#791): work the backlog and ask questions 24/7 — no night-hour cutoff, no time-of-day deferral. Bounce lane: my prio:bounce tickets go first, oldest-first (never preempting running work); a named nudge gets a one-line ACK + label (best-effort), taken next turn, never worked inline. Count a hand-off done ONLY after verifying from primary sources — the `READY-FOR-REVIEW:` comment present (`gh issue view --json comments`), the fork branch pushed, local test/lint output shown — never the worker's claim alone; verify the LAST as strictly as the first. After EVERY hand-off END the turn with the full `## ✅ Work Complete` report (the fork-no-merge variant, `skills/completion-report-deep/DEEP.md`) terminating in `✅ DONE:` — CONTINUE, never a stop. Machine compacts are REMOVED (#1084) — native autocompact only; never a compact command, never a compact HOLD.",
+  "rows": [
+   "/goal STOP CONDITIONS — the loop is DONE the moment EITHER holds, both checkable from the transcript: (A) BLOCKED ON MY ANSWER — the latest assistant message ends with a",
+   "line starting `❓ NEEDS YOU:` and there is NO user message after it; NEVER continue me past an unanswered `❓ NEEDS YOU`. (A) applies only when no background agent/lane is",
+   "live; with lanes live use ASK-AND-CONTINUE and let the footer U carry the question. NO BACKLOG-EMPTY END (#1128): this stream loop never ends on an empty slice — gk",
+   "hand-offs, bounces, client replies and new stream tickets keep arriving; an empty slice is NEVER a stop condition — never judge this goal met on it. IDLE: when no lane is",
+   "live, `python3 ~/devel/airuleset/airuleset.py slice-quals --count-dispatchable` prints 0 (or errors) and `slice-quals --bounces --unhandled` prints nothing, keep exactly",
+   "ONE background `python3 ~/devel/airuleset/airuleset.py stream-wait` live (relaunch it if gone) and end ⏳ WORKING; when it exits, read what it printed, re-check",
+   "`slice-quals` and work whatever arrived. `stream-wait` refuses (exit 3) while work is waiting: work the list it prints. ORDER, NEVER SCOPE (#1329): a priority order or",
+   "owner line sets order only — when its head is blocked, start the next workable ticket the same turn; a blocker lives on its ticket in W (a third party: `ops-wait` +",
+   "`Waiting-on:` + daily push) or U (the owner), never only in a ⏳ line. Only the OWNER ends this loop (`/goal clear`). My authority ENDS at the hand-off: I push MY fork",
+   "branches + evidence — NEVER open/merge a PR, never push upstream, never deploy, close only per authority, never touch other streams'. Also stop for a genuinely-irreversible",
+   "approval or local verification failing twice. While NEITHER holds, work the assigned backlog — related tickets: work them together in one branch, one PR and one CI cycle",
+   "when their focus allows; INFRA ROLE — only tickets labelled `infra`; no stream hand-offs / release ops / PROD data; never touch the review window's checkout; coordinate",
+   "with the review window via tickets only; box-maintenance steps stop with `❓ NEEDS YOU` between steps. ASK the moment input is needed (it ALWAYS pings) — prefer",
+   "ASK-AND-CONTINUE (`❓ ASKED` + `needs-answer` comment, end `⏳ WORKING`) ASK ONCE, no repeat; `❓ NEEDS YOU` only if nothing else is workable. No night/day difference",
+   "(#791): work the backlog and ask questions 24/7 — no night-hour cutoff, no time-of-day deferral. Bounce lane: my prio:bounce tickets go first, oldest-first (never",
+   "preempting running work); a named nudge gets a one-line ACK + label (best-effort), taken next turn, never worked inline. Count a hand-off done ONLY after verifying from",
+   "primary sources — the `READY-FOR-REVIEW:` comment present (`gh issue view --json comments`), the fork branch pushed, local test/lint output shown — never the worker's claim",
+   "alone; verify the LAST as strictly as the first. After EVERY hand-off END the turn with the full `## ✅ Work Complete` report (the fork-no-merge variant,",
+   "`skills/completion-report-deep/DEEP.md`) terminating in `✅ DONE:` — CONTINUE, never a stop. Machine compacts are REMOVED (#1084) — native autocompact only; never a compact",
+   "command, never a compact HOLD."
+  ]
+ },
+ {
+  "name": "176-pall2 full/quality",
+  "cols": 176,
+  "text": "/goal STOP CONDITIONS — the loop is DONE the moment EITHER holds, both checkable from the transcript: (A) BLOCKED ON MY ANSWER — the latest assistant message ends with a line starting `❓ NEEDS YOU:` and there is NO user message after it; NEVER continue me past an unanswered `❓ NEEDS YOU` (after I answer, Claude resolves that ticket and re-prints this /goal line if issues remain). (B) QUALITY CONTRACT HELD — gk-QUALITY window, PROVEN IN THIS TURN, NEVER CLAIMED: DONE only when 0 subdev hand-offs failed the gate for a class not yet root-caused into a mechanical guard AND `audit_bounce_rule_updates.py --rounds` is trending DOWN per stream AND no gk-quality ticket is workable — else CONTINUE with NO turn limit; the only other stop is (A) `❓ NEEDS YOU` on the owner's answer, which (#1007) applies only when no background agent/lane is live; with lanes live use ASK-AND-CONTINUE and let the footer U carry the question. QUALITY ROLE — I own subdev delivery QUALITY end-to-end: (a) own the review lenses (`gk-review-lenses*.md`) + the hand-off gate `subdev_handoff_gate.py` promotions — an advisory check graduates to FAIL per the 7-day policy; (b) root-cause EVERY bounce and release-break into a guard / lane / rule so the class never recurs — `audit_bounce_rule_updates.py --rounds` trends DOWN per stream; a re-introduced solved problem is a rule defect, never a fresh bounce; (c) enforce fresh-prod-copy + E2E evidence at hand-off as gate evidence — a green suite alone is not delivery; (d) give the streams a read-only PROD fact source (live PROD version / row reads) so a hand-off is verified against prod, never guessed; (e) infra tickets (label infra) are NOT worked here, only filed; (f) per cycle print `python3 ~/devel/airuleset/airuleset.py core-quals --role quality --count`, the bounce-rounds trend per stream, and the gate promotion state. Also stop for a genuinely-irreversible approval or a CI failure unfixable after two real attempts. While NEITHER holds, work the backlog — related tickets: work them together in one branch, one PR and one CI cycle when their focus allows; Never gate, classify, skip, or warn based on prod-usage / events / off-air / hardware — I alone guard whether prod is live. ASK the moment input is needed (it ALWAYS pings) — prefer ASK-AND-CONTINUE (`❓ ASKED` + `needs-answer` comment, end `⏳ WORKING`) ASK ONCE, no repeat; `❓ NEEDS YOU` only if nothing else is workable. A `needs-answer`/`needs-decision`/`needs-acceptance`/`ops-wait` ticket is parked — never counted, never blocks 🏁 (paste `core-quals --waiting`/`--ops-wait`). NEVER bury a question or blame my silence. No night/day difference (#791): work the backlog and ask questions 24/7 — no night-hour cutoff, no time-of-day deferral. Bounce lane: open tickets labeled prio:bounce jump the queue, oldest-first (never preempting running work); a named nudge gets a one-line ACK + prio:bounce label, taken next turn, never worked inline. Count a ticket done ONLY after verifying from primary sources — `gh pr view` (merged, closingIssuesReferences), `gh run list` (main green), `gh issue view` (closed), the deployed version on the live target — never the worker's claim alone; verify the LAST ticket as strictly as the first. After EVERY integration END the turn with the full `## ✅ Work Complete` report (`completion-report.md`) terminating in `✅ DONE:` — CONTINUE, NEVER satisfies (B). Machine compacts are REMOVED (#1084) — native autocompact only; never a compact command, never a compact HOLD.",
+  "rows": [
+   "/goal STOP CONDITIONS — the loop is DONE the moment EITHER holds, both checkable from the transcript: (A) BLOCKED ON MY ANSWER — the latest assistant message ends with a",
+   "line starting `❓ NEEDS YOU:` and there is NO user message after it; NEVER continue me past an unanswered `❓ NEEDS YOU` (after I answer, Claude resolves that ticket and",
+   "re-prints this /goal line if issues remain). (B) QUALITY CONTRACT HELD — gk-QUALITY window, PROVEN IN THIS TURN, NEVER CLAIMED: DONE only when 0 subdev hand-offs failed the",
+   "gate for a class not yet root-caused into a mechanical guard AND `audit_bounce_rule_updates.py --rounds` is trending DOWN per stream AND no gk-quality ticket is workable —",
+   "else CONTINUE with NO turn limit; the only other stop is (A) `❓ NEEDS YOU` on the owner's answer, which (#1007) applies only when no background agent/lane is live; with",
+   "lanes live use ASK-AND-CONTINUE and let the footer U carry the question. QUALITY ROLE — I own subdev delivery QUALITY end-to-end: (a) own the review lenses",
+   "(`gk-review-lenses*.md`) + the hand-off gate `subdev_handoff_gate.py` promotions — an advisory check graduates to FAIL per the 7-day policy; (b) root-cause EVERY bounce and",
+   "release-break into a guard / lane / rule so the class never recurs — `audit_bounce_rule_updates.py --rounds` trends DOWN per stream; a re-introduced solved problem is a",
+   "rule defect, never a fresh bounce; (c) enforce fresh-prod-copy + E2E evidence at hand-off as gate evidence — a green suite alone is not delivery; (d) give the streams a",
+   "read-only PROD fact source (live PROD version / row reads) so a hand-off is verified against prod, never guessed; (e) infra tickets (label infra) are NOT worked here, only",
+   "filed; (f) per cycle print `python3 ~/devel/airuleset/airuleset.py core-quals --role quality --count`, the bounce-rounds trend per stream, and the gate promotion state.",
+   "Also stop for a genuinely-irreversible approval or a CI failure unfixable after two real attempts. While NEITHER holds, work the backlog — related tickets: work them",
+   "together in one branch, one PR and one CI cycle when their focus allows; Never gate, classify, skip, or warn based on prod-usage / events / off-air / hardware — I alone",
+   "guard whether prod is live. ASK the moment input is needed (it ALWAYS pings) — prefer ASK-AND-CONTINUE (`❓ ASKED` + `needs-answer` comment, end `⏳ WORKING`) ASK ONCE, no",
+   "repeat; `❓ NEEDS YOU` only if nothing else is workable. A `needs-answer`/`needs-decision`/`needs-acceptance`/`ops-wait` ticket is parked — never counted, never blocks 🏁",
+   "(paste `core-quals --waiting`/`--ops-wait`). NEVER bury a question or blame my silence. No night/day difference (#791): work the backlog and ask questions 24/7 — no",
+   "night-hour cutoff, no time-of-day deferral. Bounce lane: open tickets labeled prio:bounce jump the queue, oldest-first (never preempting running work); a named nudge gets a",
+   "one-line ACK + prio:bounce label, taken next turn, never worked inline. Count a ticket done ONLY after verifying from primary sources — `gh pr view` (merged,",
+   "closingIssuesReferences), `gh run list` (main green), `gh issue view` (closed), the deployed version on the live target — never the worker's claim alone; verify the LAST",
+   "ticket as strictly as the first. After EVERY integration END the turn with the full `## ✅ Work Complete` report (`completion-report.md`) terminating in `✅ DONE:` —",
+   "CONTINUE, NEVER satisfies (B). Machine compacts are REMOVED (#1084) — native autocompact only; never a compact command, never a compact HOLD."
+  ]
+ },
+ {
+  "name": "176-pall2 lead-space 176",
+  "cols": 176,
+  "text": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa bb",
+  "rows": [
+   "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "bb"
+  ]
+ },
+ {
+  "name": "176-pall2 lead-space ctrl",
+  "cols": 176,
+  "text": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa bb",
+  "rows": [
+   "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa bb"
+  ]
+ },
+ {
+  "name": "176-pfix full/infra",
+  "cols": 176,
+  "text": "/goal STOP CONDITIONS — the loop is DONE the moment EITHER holds, both checkable from the transcript: (A) BLOCKED ON MY ANSWER — the latest assistant message ends with a line starting `❓ NEEDS YOU:` and there is NO user message after it; NEVER continue me past an unanswered `❓ NEEDS YOU` (after I answer, Claude resolves that ticket and re-prints this /goal line if issues remain). (A) applies only when no background agent/lane is live; with lanes live use ASK-AND-CONTINUE and let the footer U carry the question. (B) BACKLOG EMPTY — PROVEN IN THIS TURN, NEVER CLAIMED. Every open issue THIS box is OBLIGED to action — the CORE slice (not labeled autopilot-skip, not owned by a sub-dev stream) PLUS every ticket only I can action whatever stream owns it (needs-gatekeeper, a hand-off awaiting my review/merge/close) — is resolved, and (B) holds ONLY when my final message carries the pasted OUTPUT of both proof commands: `python3 ~/devel/airuleset/airuleset.py core-quals --role infra --count` printing exactly `0` under it (it counts EXACTLY that obligation set), AND `gh run list -b \"$(gh repo view --json defaultBranchRef --jq .defaultBranchRef.name)\" -L 1 --json conclusion --jq '.[0].conclusion'` printing exactly `success` under it, AND then the line `🏁 BACKLOG EMPTY: 0 open, main green` directly above the terminal `✅ DONE:` marker. HOW TO TELL A REAL COMPLETION FROM A CLAIMED ONE: real = output shown; claimed = asserted. `✅ DONE:` NEVER satisfies (B) — it is the per-ticket CONTINUE terminator, even in a turn full of `✅` rows and a merged PR. IF I CANNOT TELL — missing, unreadable, or stale output, any doubt — (B) does NOT hold: CONTINUE. There is no third answer. TO PRODUCE THE PROOF: run both, paste each output, write the `🏁` line — no proof, no stop. A stream ticket in that set is NOT mine to implement — I ACTION it (review, merge, close, unblock) and never write its code (a bare sub-dev bounce is NOT in this set — `/process-subdev`'s loop holds it). Also stop for a genuinely-irreversible approval or a CI failure unfixable after two real attempts. While NEITHER holds, work the backlog — related tickets: work them together in one branch, one PR and one CI cycle when their focus allows; INFRA ROLE — only tickets labelled `infra`; no stream hand-offs / release ops / PROD data; never touch the review window's checkout; coordinate with the review window via tickets only; box-maintenance steps stop with `❓ NEEDS YOU` between steps. Never gate, classify, skip, or warn based on prod-usage / events / off-air / hardware — I alone guard whether prod is live. ASK the moment input is needed (it ALWAYS pings) — prefer ASK-AND-CONTINUE (`❓ ASKED` + `needs-answer` comment, end `⏳ WORKING`) ASK ONCE, no repeat; `❓ NEEDS YOU` only if nothing else is workable. A `needs-answer`/`needs-decision`/`needs-acceptance`/`ops-wait` ticket is parked — never counted, never blocks 🏁 (paste `core-quals --waiting`/`--ops-wait`). NEVER bury a question or blame my silence. No night/day difference (#791): work the backlog and ask questions 24/7 — no night-hour cutoff, no time-of-day deferral. Bounce lane: open tickets labeled prio:bounce jump the queue, oldest-first (never preempting running work); a named nudge gets a one-line ACK + prio:bounce label, taken next turn, never worked inline. Count a ticket done ONLY after verifying from primary sources — `gh pr view` (merged, closingIssuesReferences), `gh run list` (main green), `gh issue view` (closed), the deployed version on the live target — never the worker's claim alone; verify the LAST ticket as strictly as the first. After EVERY integration END the turn with the full `## ✅ Work Complete` report (`completion-report.md`) terminating in `✅ DONE:` — CONTINUE, NEVER satisfies (B). Machine compacts are REMOVED (#1084) — native autocompact only; never a compact command, never a compact HOLD.",
+  "rows": [
+   "/goal STOP CONDITIONS — the loop is DONE the moment EITHER holds, both checkable from the transcript: (A) BLOCKED ON MY ANSWER — the latest assistant message ends with a",
+   "line starting `❓ NEEDS YOU:` and there is NO user message after it; NEVER continue me past an unanswered `❓ NEEDS YOU` (after I answer, Claude resolves that ticket and",
+   "re-prints this /goal line if issues remain). (A) applies only when no background agent/lane is live; with lanes live use ASK-AND-CONTINUE and let the footer U carry the",
+   "question. (B) BACKLOG EMPTY — PROVEN IN THIS TURN, NEVER CLAIMED. Every open issue THIS box is OBLIGED to action — the CORE slice (not labeled autopilot-skip, not owned by",
+   "a sub-dev stream) PLUS every ticket only I can action whatever stream owns it (needs-gatekeeper, a hand-off awaiting my review/merge/close) — is resolved, and (B) holds",
+   "ONLY when my final message carries the pasted OUTPUT of both proof commands: `python3 ~/devel/airuleset/airuleset.py core-quals --role infra --count` printing exactly `0`",
+   "under it (it counts EXACTLY that obligation set), AND `gh run list -b \"$(gh repo view --json defaultBranchRef --jq .defaultBranchRef.name)\" -L 1 --json conclusion --jq",
+   "'.[0].conclusion'` printing exactly `success` under it, AND then the line `🏁 BACKLOG EMPTY: 0 open, main green` directly above the terminal `✅ DONE:` marker. HOW TO TELL",
+   "A REAL COMPLETION FROM A CLAIMED ONE: real = output shown; claimed = asserted. `✅ DONE:` NEVER satisfies (B) — it is the per-ticket CONTINUE terminator, even in a turn",
+   "full of `✅` rows and a merged PR. IF I CANNOT TELL — missing, unreadable, or stale output, any doubt — (B) does NOT hold: CONTINUE. There is no third answer. TO PRODUCE",
+   "THE PROOF: run both, paste each output, write the `🏁` line — no proof, no stop. A stream ticket in that set is NOT mine to implement — I ACTION it (review, merge, close,",
+   "unblock) and never write its code (a bare sub-dev bounce is NOT in this set — `/process-subdev`'s loop holds it). Also stop for a genuinely-irreversible approval or a CI",
+   "failure unfixable after two real attempts. While NEITHER holds, work the backlog — related tickets: work them together in one branch, one PR and one CI cycle when their",
+   "focus allows; INFRA ROLE — only tickets labelled `infra`; no stream hand-offs / release ops / PROD data; never touch the review window's checkout; coordinate with the",
+   "review window via tickets only; box-maintenance steps stop with `❓ NEEDS YOU` between steps. Never gate, classify, skip, or warn based on prod-usage / events / off-air /",
+   "hardware — I alone guard whether prod is live. ASK the moment input is needed (it ALWAYS pings) — prefer ASK-AND-CONTINUE (`❓ ASKED` + `needs-answer` comment, end `⏳",
+   "WORKING`) ASK ONCE, no repeat; `❓ NEEDS YOU` only if nothing else is workable. A `needs-answer`/`needs-decision`/`needs-acceptance`/`ops-wait` ticket is parked — never",
+   "counted, never blocks 🏁 (paste `core-quals --waiting`/`--ops-wait`). NEVER bury a question or blame my silence. No night/day difference (#791): work the backlog and ask",
+   "questions 24/7 — no night-hour cutoff, no time-of-day deferral. Bounce lane: open tickets labeled prio:bounce jump the queue, oldest-first (never preempting running work);",
+   "a named nudge gets a one-line ACK + prio:bounce label, taken next turn, never worked inline. Count a ticket done ONLY after verifying from primary sources — `gh pr view`",
+   "(merged, closingIssuesReferences), `gh run list` (main green), `gh issue view` (closed), the deployed version on the live target — never the worker's claim alone; verify",
+   "the LAST ticket as strictly as the first. After EVERY integration END the turn with the full `## ✅ Work Complete` report (`completion-report.md`) terminating in `✅ DONE:`",
+   "— CONTINUE, NEVER satisfies (B). Machine compacts are REMOVED (#1084) — native autocompact only; never a compact command, never a compact HOLD."
+  ]
+ },
+ {
+  "name": "176-prev176 full/review",
+  "cols": 176,
+  "text": "/goal STOP CONDITIONS — the loop is DONE the moment EITHER holds, both checkable from the transcript: (A) BLOCKED ON MY ANSWER — the latest assistant message ends with a line starting `❓ NEEDS YOU:` and there is NO user message after it; NEVER continue me past an unanswered `❓ NEEDS YOU` (after I answer, Claude resolves that ticket and re-prints this /goal line if issues remain). (B) BACKLOG EMPTY — gk REVIEW okno, PROVEN IN THIS TURN, NEVER CLAIMED: HOTOVO iba keď 0 hand-offov starších než 1 h bez akcie A 0 otvorených stream PR bez skorého review ≤ 1 h A montalu/slovnormal/miva == main A `core-quals --role review --count` == 0 — inak CONTINUE bez akéhokoľvek turn limitu; hlavný ďalší stop je (A) ❓ NEEDS YOU na ownerovu odpoveď (per #1007 iba keď nebeží žiadna lane). REVIEW ROLE — (a) infra tickety (label infra) sa TU NEpracujú, iba zakladajú; vlastné I tickety (`core-quals --role review --list`) pracuj každý cyklus po (b)/(c), dep-wait odblokuj či založ; waiter nie je práca (#1309); (b) SUBDEVS NIKDY NEČAKAJÚ NA GK: každý OTVORENÝ stream PR→develop (montalu/*, david*/kvaskodev, miva*, simap*) dostane skoré advisory review do 1 h od posledného pushu (koment „gk skoré review (advisory, pred hand-offom)\", bez verdikt headingu) a znova po každom podstatnom pushi; (c) každý hand-off (ready-for-review / needs-gatekeeper / prio:bounce / GATEKEEPER-ACTION; stream:montalu prvé) dostane gk verdikt alebo akčný komentár do 1 h; (d) čakanie na CI nikdy neblokuje ďalšiu prácu (review / fix-forward / resync / PROD akcia); (e) každá akceptovaná vetva má merged PR do develop; červený/DIRTY gk PR dostane fix lane v tom istom cykle; (f) release train nikdy nestojí (develop pred main ≥ 2 h a nič in-flight → existuje cut PR; shadow/main/deploy postup; každý STOP hlásený na odoo-erp#6883); (g) za cyklus vypíš `python3 ~/devel/airuleset/airuleset.py core-quals --role review --count`, počet otvorených stream PR bez skorého review ≤ 1 h, stav release (cut PR, shadow, main PR, posledné deploy runy s DB verziou, montalu/slovnormal/miva vs main). Also stop for a genuinely-irreversible approval or a CI failure unfixable after two real attempts. While NEITHER holds, work the backlog — related tickets: work them together in one branch, one PR and one CI cycle when their focus allows; Never gate, classify, skip, or warn based on prod-usage / events / off-air / hardware — I alone guard whether prod is live. ASK the moment input is needed (it ALWAYS pings) — prefer ASK-AND-CONTINUE (`❓ ASKED` + `needs-answer` comment, end `⏳ WORKING`) ASK ONCE, no repeat; `❓ NEEDS YOU` only if nothing else is workable. A `needs-answer`/`needs-decision`/`needs-acceptance`/`ops-wait` ticket is parked — never counted, never blocks 🏁 (paste `core-quals --waiting`/`--ops-wait`). NEVER bury a question or blame my silence. No night/day difference (#791): work the backlog and ask questions 24/7 — no night-hour cutoff, no time-of-day deferral. Bounce lane: open tickets labeled prio:bounce jump the queue, oldest-first (never preempting running work); a named nudge gets a one-line ACK + prio:bounce label, taken next turn, never worked inline. Count a ticket done ONLY after verifying from primary sources — `gh pr view` (merged, closingIssuesReferences), `gh run list` (main green), `gh issue view` (closed), the deployed version on the live target — never the worker's claim alone; verify the LAST ticket as strictly as the first. After EVERY integration END the turn with the full `## ✅ Work Complete` report (`completion-report.md`) terminating in `✅ DONE:` — CONTINUE, NEVER satisfies (B). Machine compacts are REMOVED (#1084) — native autocompact only; never a compact command, never a compact HOLD.",
+  "rows": [
+   "/goal STOP CONDITIONS — the loop is DONE the moment EITHER holds, both checkable from the transcript: (A) BLOCKED ON MY ANSWER — the latest assistant message ends with a",
+   "line starting `❓ NEEDS YOU:` and there is NO user message after it; NEVER continue me past an unanswered `❓ NEEDS YOU` (after I answer, Claude resolves that ticket and",
+   "re-prints this /goal line if issues remain). (B) BACKLOG EMPTY — gk REVIEW okno, PROVEN IN THIS TURN, NEVER CLAIMED: HOTOVO iba keď 0 hand-offov starších než 1 h bez akcie",
+   "A 0 otvorených stream PR bez skorého review ≤ 1 h A montalu/slovnormal/miva == main A `core-quals --role review --count` == 0 — inak CONTINUE bez akéhokoľvek turn limitu;",
+   "hlavný ďalší stop je (A) ❓ NEEDS YOU na ownerovu odpoveď (per #1007 iba keď nebeží žiadna lane). REVIEW ROLE — (a) infra tickety (label infra) sa TU NEpracujú, iba",
+   "zakladajú; vlastné I tickety (`core-quals --role review --list`) pracuj každý cyklus po (b)/(c), dep-wait odblokuj či založ; waiter nie je práca (#1309); (b) SUBDEVS NIKDY",
+   "NEČAKAJÚ NA GK: každý OTVORENÝ stream PR→develop (montalu/*, david*/kvaskodev, miva*, simap*) dostane skoré advisory review do 1 h od posledného pushu (koment „gk skoré",
+   "review (advisory, pred hand-offom)\", bez verdikt headingu) a znova po každom podstatnom pushi; (c) každý hand-off (ready-for-review / needs-gatekeeper / prio:bounce /",
+   "GATEKEEPER-ACTION; stream:montalu prvé) dostane gk verdikt alebo akčný komentár do 1 h; (d) čakanie na CI nikdy neblokuje ďalšiu prácu (review / fix-forward / resync / PROD",
+   "akcia); (e) každá akceptovaná vetva má merged PR do develop; červený/DIRTY gk PR dostane fix lane v tom istom cykle; (f) release train nikdy nestojí (develop pred main ≥ 2",
+   "h a nič in-flight → existuje cut PR; shadow/main/deploy postup; každý STOP hlásený na odoo-erp#6883); (g) za cyklus vypíš `python3 ~/devel/airuleset/airuleset.py",
+   "core-quals --role review --count`, počet otvorených stream PR bez skorého review ≤ 1 h, stav release (cut PR, shadow, main PR, posledné deploy runy s DB verziou,",
+   "montalu/slovnormal/miva vs main). Also stop for a genuinely-irreversible approval or a CI failure unfixable after two real attempts. While NEITHER holds, work the backlog —",
+   "related tickets: work them together in one branch, one PR and one CI cycle when their focus allows; Never gate, classify, skip, or warn based on prod-usage / events /",
+   "off-air / hardware — I alone guard whether prod is live. ASK the moment input is needed (it ALWAYS pings) — prefer ASK-AND-CONTINUE (`❓ ASKED` + `needs-answer` comment,",
+   "end `⏳ WORKING`) ASK ONCE, no repeat; `❓ NEEDS YOU` only if nothing else is workable. A `needs-answer`/`needs-decision`/`needs-acceptance`/`ops-wait` ticket is parked —",
+   "never counted, never blocks 🏁 (paste `core-quals --waiting`/`--ops-wait`). NEVER bury a question or blame my silence. No night/day difference (#791): work the backlog and",
+   "ask questions 24/7 — no night-hour cutoff, no time-of-day deferral. Bounce lane: open tickets labeled prio:bounce jump the queue, oldest-first (never preempting running",
+   "work); a named nudge gets a one-line ACK + prio:bounce label, taken next turn, never worked inline. Count a ticket done ONLY after verifying from primary sources — `gh pr",
+   "view` (merged, closingIssuesReferences), `gh run list` (main green), `gh issue view` (closed), the deployed version on the live target — never the worker's claim alone;",
+   "verify the LAST ticket as strictly as the first. After EVERY integration END the turn with the full `## ✅ Work Complete` report (`completion-report.md`) terminating in `✅",
+   "DONE:` — CONTINUE, NEVER satisfies (B). Machine compacts are REMOVED (#1084) — native autocompact only; never a compact command, never a compact HOLD."
+  ]
+ },
+ {
+  "name": "100-prev review",
+  "cols": 100,
+  "text": "/goal STOP CONDITIONS — the loop is DONE the moment EITHER holds, both checkable from the transcript: (A) BLOCKED ON MY ANSWER — the latest assistant message ends with a line starting `❓ NEEDS YOU:` and there is NO user message after it; NEVER continue me past an unanswered `❓ NEEDS YOU` (after I answer, Claude resolves that ticket and re-prints this /goal line if issues remain). (B) BACKLOG EMPTY — gk REVIEW okno, PROVEN IN THIS TURN, NEVER CLAIMED: HOTOVO iba keď 0 hand-offov starších než 1 h bez akcie A 0 otvorených stream PR bez skorého review ≤ 1 h A montalu/slovnormal/miva == main A `core-quals --role review --count` == 0 — inak CONTINUE bez akéhokoľvek turn limitu; hlavný ďalší stop je (A) ❓ NEEDS YOU na ownerovu odpoveď (per #1007 iba keď nebeží žiadna lane). REVIEW ROLE — (a) infra tickety (label infra) sa TU NEpracujú, iba zakladajú; vlastné I tickety (`core-quals --role review --list`) pracuj každý cyklus po (b)/(c), dep-wait odblokuj či založ; waiter nie je práca (#1309); (b) SUBDEVS NIKDY NEČAKAJÚ NA GK: každý OTVORENÝ stream PR→develop (montalu/*, david*/kvaskodev, miva*, simap*) dostane skoré advisory review do 1 h od posledného pushu (koment „gk skoré review (advisory, pred hand-offom)\", bez verdikt headingu) a znova po každom podstatnom pushi; (c) každý hand-off (ready-for-review / needs-gatekeeper / prio:bounce / GATEKEEPER-ACTION; stream:montalu prvé) dostane gk verdikt alebo akčný komentár do 1 h; (d) čakanie na CI nikdy neblokuje ďalšiu prácu (review / fix-forward / resync / PROD akcia); (e) každá akceptovaná vetva má merged PR do develop; červený/DIRTY gk PR dostane fix lane v tom istom cykle; (f) release train nikdy nestojí (develop pred main ≥ 2 h a nič in-flight → existuje cut PR; shadow/main/deploy postup; každý STOP hlásený na odoo-erp#6883); (g) za cyklus vypíš `python3 ~/devel/airuleset/airuleset.py core-quals --role review --count`, počet otvorených stream PR bez skorého review ≤ 1 h, stav release (cut PR, shadow, main PR, posledné deploy runy s DB verziou, montalu/slovnormal/miva vs main). Also stop for a genuinely-irreversible approval or a CI failure unfixable after two real attempts. While NEITHER holds, work the backlog — related tickets: work them together in one branch, one PR and one CI cycle when their focus allows; Never gate, classify, skip, or warn based on prod-usage / events / off-air / hardware — I alone guard whether prod is live. ASK the moment input is needed (it ALWAYS pings) — prefer ASK-AND-CONTINUE (`❓ ASKED` + `needs-answer` comment, end `⏳ WORKING`) ASK ONCE, no repeat; `❓ NEEDS YOU` only if nothing else is workable. A `needs-answer`/`needs-decision`/`needs-acceptance`/`ops-wait` ticket is parked — never counted, never blocks 🏁 (paste `core-quals --waiting`/`--ops-wait`). NEVER bury a question or blame my silence. No night/day difference (#791): work the backlog and ask questions 24/7 — no night-hour cutoff, no time-of-day deferral. Bounce lane: open tickets labeled prio:bounce jump the queue, oldest-first (never preempting running work); a named nudge gets a one-line ACK + prio:bounce label, taken next turn, never worked inline. Count a ticket done ONLY after verifying from primary sources — `gh pr view` (merged, closingIssuesReferences), `gh run list` (main green), `gh issue view` (closed), the deployed version on the live target — never the worker's claim alone; verify the LAST ticket as strictly as the first. After EVERY integration END the turn with the full `## ✅ Work Complete` report (`completion-report.md`) terminating in `✅ DONE:` — CONTINUE, NEVER satisfies (B). Machine compacts are REMOVED (#1084) — native autocompact only; never a compact command, never a compact HOLD.",
+  "rows": [
+   "/goal STOP CONDITIONS — the loop is DONE the moment EITHER holds, both checkable from the",
+   "transcript: (A) BLOCKED ON MY ANSWER — the latest assistant message ends with a line starting",
+   "`❓ NEEDS YOU:` and there is NO user message after it; NEVER continue me past an unanswered `❓",
+   "NEEDS YOU` (after I answer, Claude resolves that ticket and re-prints this /goal line if issues",
+   "remain). (B) BACKLOG EMPTY — gk REVIEW okno, PROVEN IN THIS TURN, NEVER CLAIMED: HOTOVO iba keď",
+   "0 hand-offov starších než 1 h bez akcie A 0 otvorených stream PR bez skorého review ≤ 1 h A",
+   "montalu/slovnormal/miva == main A `core-quals --role review --count` == 0 — inak CONTINUE bez",
+   "akéhokoľvek turn limitu; hlavný ďalší stop je (A) ❓ NEEDS YOU na ownerovu odpoveď (per #1007",
+   "iba keď nebeží žiadna lane). REVIEW ROLE — (a) infra tickety (label infra) sa TU NEpracujú, iba",
+   "zakladajú; vlastné I tickety (`core-quals --role review --list`) pracuj každý cyklus po (b)/(c),",
+   "dep-wait odblokuj či založ; waiter nie je práca (#1309); (b) SUBDEVS NIKDY NEČAKAJÚ NA GK:",
+   "každý OTVORENÝ stream PR→develop (montalu/*, david*/kvaskodev, miva*, simap*) dostane skoré",
+   "advisory review do 1 h od posledného pushu (koment „gk skoré review (advisory, pred",
+   "hand-offom)\", bez verdikt headingu) a znova po každom podstatnom pushi; (c) každý hand-off",
+   "(ready-for-review / needs-gatekeeper / prio:bounce / GATEKEEPER-ACTION; stream:montalu prvé)",
+   "dostane gk verdikt alebo akčný komentár do 1 h; (d) čakanie na CI nikdy neblokuje ďalšiu prácu",
+   "(review / fix-forward / resync / PROD akcia); (e) každá akceptovaná vetva má merged PR do",
+   "develop; červený/DIRTY gk PR dostane fix lane v tom istom cykle; (f) release train nikdy nestojí",
+   "(develop pred main ≥ 2 h a nič in-flight → existuje cut PR; shadow/main/deploy postup; každý",
+   "STOP hlásený na odoo-erp#6883); (g) za cyklus vypíš `python3 ~/devel/airuleset/airuleset.py",
+   "core-quals --role review --count`, počet otvorených stream PR bez skorého review ≤ 1 h, stav",
+   "release (cut PR, shadow, main PR, posledné deploy runy s DB verziou, montalu/slovnormal/miva vs",
+   "main). Also stop for a genuinely-irreversible approval or a CI failure unfixable after two real",
+   "attempts. While NEITHER holds, work the backlog — related tickets: work them together in one",
+   "branch, one PR and one CI cycle when their focus allows; Never gate, classify, skip, or warn",
+   "based on prod-usage / events / off-air / hardware — I alone guard whether prod is live. ASK the",
+   "moment input is needed (it ALWAYS pings) — prefer ASK-AND-CONTINUE (`❓ ASKED` + `needs-answer`",
+   "comment, end `⏳ WORKING`) ASK ONCE, no repeat; `❓ NEEDS YOU` only if nothing else is workable.",
+   "A `needs-answer`/`needs-decision`/`needs-acceptance`/`ops-wait` ticket is parked — never",
+   "counted, never blocks 🏁 (paste `core-quals --waiting`/`--ops-wait`). NEVER bury a question or",
+   "blame my silence. No night/day difference (#791): work the backlog and ask questions 24/7 — no",
+   "night-hour cutoff, no time-of-day deferral. Bounce lane: open tickets labeled prio:bounce jump",
+   "the queue, oldest-first (never preempting running work); a named nudge gets a one-line ACK +",
+   "prio:bounce label, taken next turn, never worked inline. Count a ticket done ONLY after",
+   "verifying from primary sources — `gh pr view` (merged, closingIssuesReferences), `gh run list`",
+   "(main green), `gh issue view` (closed), the deployed version on the live target — never the",
+   "worker's claim alone; verify the LAST ticket as strictly as the first. After EVERY integration",
+   "END the turn with the full `## ✅ Work Complete` report (`completion-report.md`) terminating in",
+   "`✅ DONE:` — CONTINUE, NEVER satisfies (B). Machine compacts are REMOVED (#1084) — native",
+   "autocompact only; never a compact command, never a compact HOLD."
+  ]
+ },
+ {
+  "name": "176 char '→'",
+  "cols": 176,
+  "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa → zz",
+  "rows": [
+   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa →",
+   "zz"
+  ]
+ },
+ {
+  "name": "176 char '←'",
+  "cols": 176,
+  "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ← zz",
+  "rows": [
+   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ←",
+   "zz"
+  ]
+ },
+ {
+  "name": "176 char '↑'",
+  "cols": 176,
+  "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ↑ zz",
+  "rows": [
+   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ↑",
+   "zz"
+  ]
+ },
+ {
+  "name": "176 char '⇒'",
+  "cols": 176,
+  "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ⇒ zz",
+  "rows": [
+   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ⇒",
+   "zz"
+  ]
+ },
+ {
+  "name": "176 char '≤'",
+  "cols": 176,
+  "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ≤ zz",
+  "rows": [
+   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ≤",
+   "zz"
+  ]
+ },
+ {
+  "name": "176 char '≥'",
+  "cols": 176,
+  "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ≥ zz",
+  "rows": [
+   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ≥",
+   "zz"
+  ]
+ },
+ {
+  "name": "176 char '∞'",
+  "cols": 176,
+  "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ∞ zz",
+  "rows": [
+   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ∞",
+   "zz"
+  ]
+ },
+ {
+  "name": "176 char '−'",
+  "cols": 176,
+  "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa − zz",
+  "rows": [
+   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa −",
+   "zz"
+  ]
+ },
+ {
+  "name": "176 char '—'",
+  "cols": 176,
+  "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa — zz",
+  "rows": [
+   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa —",
+   "zz"
+  ]
+ },
+ {
+  "name": "176 char '…'",
+  "cols": 176,
+  "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa … zz",
+  "rows": [
+   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa …",
+   "zz"
+  ]
+ },
+ {
+  "name": "176 char '·'",
+  "cols": 176,
+  "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa · zz",
+  "rows": [
+   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ·",
+   "zz"
+  ]
+ },
+ {
+  "name": "176 char '×'",
+  "cols": 176,
+  "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa × zz",
+  "rows": [
+   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ×",
+   "zz"
+  ]
+ },
+ {
+  "name": "176 char 'é'",
+  "cols": 176,
+  "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa é zz",
+  "rows": [
+   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa é",
+   "zz"
+  ]
+ },
+ {
+  "name": "176 char '◎'",
+  "cols": 176,
+  "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ◎ zz",
+  "rows": [
+   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ◎",
+   "zz"
+  ]
+ },
+ {
+  "name": "176 char '▲'",
+  "cols": 176,
+  "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ▲ zz",
+  "rows": [
+   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ▲",
+   "zz"
+  ]
+ },
+ {
+  "name": "176 char '✓'",
+  "cols": 176,
+  "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ✓ zz",
+  "rows": [
+   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ✓",
+   "zz"
+  ]
+ },
+ {
+  "name": "176 char '★'",
+  "cols": 176,
+  "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ★ zz",
+  "rows": [
+   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ★",
+   "zz"
+  ]
+ },
+ {
+  "name": "176 char '⚠'",
+  "cols": 176,
+  "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ⚠ zz",
+  "rows": [
+   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ⚠",
+   "zz"
+  ]
+ },
+ {
+  "name": "176 char '⚠️'",
+  "cols": 176,
+  "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ⚠️ zz",
+  "rows": [
+   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "⚠️ zz"
+  ]
+ },
+ {
+  "name": "176 char '✅'",
+  "cols": 176,
+  "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ✅ zz",
+  "rows": [
+   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "✅ zz"
+  ]
+ },
+ {
+  "name": "176 char '❓'",
+  "cols": 176,
+  "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ❓ zz",
+  "rows": [
+   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "❓ zz"
+  ]
+ },
+ {
+  "name": "176 char '⏳'",
+  "cols": 176,
+  "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ⏳ zz",
+  "rows": [
+   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "⏳ zz"
+  ]
+ },
+ {
+  "name": "176 char '🏁'",
+  "cols": 176,
+  "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa 🏁 zz",
+  "rows": [
+   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "🏁 zz"
+  ]
+ },
+ {
+  "name": "176 char '⌘'",
+  "cols": 176,
+  "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ⌘ zz",
+  "rows": [
+   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ⌘",
+   "zz"
+  ]
+ },
+ {
+  "name": "176 char '↔'",
+  "cols": 176,
+  "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ↔ zz",
+  "rows": [
+   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ↔",
+   "zz"
+  ]
+ },
+ {
+  "name": "176 exact-full",
+  "cols": 176,
+  "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "rows": [
+   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  ]
+ },
+ {
+  "name": "176 exact-full-2words",
+  "cols": 176,
+  "text": "bbbbbbbbbb aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "rows": [
+   "bbbbbbbbbb aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  ]
+ },
+ {
+  "name": "176 hardbreak",
+  "cols": 176,
+  "text": "hello bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "rows": [
+   "hello bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+   "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  ]
+ },
+ {
+  "name": "176 hardbreak-long-first",
+  "cols": 176,
+  "text": "hello bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "rows": [
+   "hello",
+   "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+   "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  ]
+ },
+ {
+  "name": "176 dblspace",
+  "cols": 176,
+  "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa   bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "rows": [
+   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  ]
+ },
+ {
+  "name": "176 trailing-space",
+  "cols": 176,
+  "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ",
+  "rows": [
+   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  ]
+ },
+ {
+  "name": "100 row18",
+  "cols": 100,
+  "text": "pred main ≥ 2 h a nič in-flight → existuje cut PR; shadow/main/deploy postup; každý STOP hlásený zz",
+  "rows": [
+   "pred main ≥ 2 h a nič in-flight → existuje cut PR; shadow/main/deploy postup; každý STOP hlásený",
+   "zz"
+  ]
+ },
+ {
+  "name": "100 row18 ≥→>",
+  "cols": 100,
+  "text": "pred main > 2 h a nič in-flight → existuje cut PR; shadow/main/deploy postup; každý STOP hlásený zz",
+  "rows": [
+   "pred main > 2 h a nič in-flight → existuje cut PR; shadow/main/deploy postup; každý STOP hlásený",
+   "zz"
+  ]
+ },
+ {
+  "name": "100 row18 →→>",
+  "cols": 100,
+  "text": "pred main ≥ 2 h a nič in-flight > existuje cut PR; shadow/main/deploy postup; každý STOP hlásený zz",
+  "rows": [
+   "pred main ≥ 2 h a nič in-flight > existuje cut PR; shadow/main/deploy postup; každý STOP hlásený",
+   "zz"
+  ]
+ },
+ {
+  "name": "100 row18 both",
+  "cols": 100,
+  "text": "pred main > 2 h a nič in-flight > existuje cut PR; shadow/main/deploy postup; každý STOP hlásený zz",
+  "rows": [
+   "pred main > 2 h a nič in-flight > existuje cut PR; shadow/main/deploy postup; každý STOP hlásený",
+   "zz"
+  ]
+ },
+ {
+  "name": "100 a94 →",
+  "cols": 100,
+  "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa → zz",
+  "rows": [
+   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa →",
+   "zz"
+  ]
+ },
+ {
+  "name": "100 a94 ≥",
+  "cols": 100,
+  "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ≥ zz",
+  "rows": [
+   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ≥",
+   "zz"
+  ]
+ },
+ {
+  "name": "100 a88 hlásený",
+  "cols": 100,
+  "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa hlásený zz",
+  "rows": [
+   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa hlásený",
+   "zz"
+  ]
+ },
+ {
+  "name": "100 a90 každý",
+  "cols": 100,
+  "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa každý zz",
+  "rows": [
+   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa každý",
+   "zz"
+  ]
+ },
+ {
+  "name": "100 a92 nič",
+  "cols": 100,
+  "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa nič zz",
+  "rows": [
+   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa nič",
+   "zz"
+  ]
+ },
+ {
+  "name": "100 mid →",
+  "cols": 100,
+  "text": "x → aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa zz",
+  "rows": [
+   "x → aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "zz"
+  ]
+ },
+ {
+  "name": "100 mid ≥",
+  "cols": 100,
+  "text": "x ≥ aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa zz",
+  "rows": [
+   "x ≥ aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "zz"
+  ]
+ },
+ {
+  "name": "100-p10 r10 first",
+  "cols": 100,
+  "text": "dep-wait odblokuj či založ; waiter nie je práca (#1309); (b) SUBDEVS NIKDY NEČAKAJÚ NA GK: každý OTVORENÝ zz",
+  "rows": [
+   "dep-wait odblokuj či založ; waiter nie je práca (#1309); (b) SUBDEVS NIKDY NEČAKAJÚ NA GK: každý",
+   "OTVORENÝ zz"
+  ]
+ },
+ {
+  "name": "100-p10 r10 second",
+  "cols": 100,
+  "text": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx dep-wait odblokuj či založ; waiter nie je práca (#1309); (b) SUBDEVS NIKDY NEČAKAJÚ NA GK: každý OTVORENÝ zz",
+  "rows": [
+   "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+   "dep-wait odblokuj či založ; waiter nie je práca (#1309); (b) SUBDEVS NIKDY NEČAKAJÚ NA GK:",
+   "každý OTVORENÝ zz"
+  ]
+ },
+ {
+  "name": "100-p10 r10 ascii",
+  "cols": 100,
+  "text": "dep-wait odblokuj ci zaloz; waiter nie je praca (#1309); (b) SUBDEVS NIKDY NECAKAJU NA GK: každý OTVORENÝ zz",
+  "rows": [
+   "dep-wait odblokuj ci zaloz; waiter nie je praca (#1309); (b) SUBDEVS NIKDY NECAKAJU NA GK: každý",
+   "OTVORENÝ zz"
+  ]
+ },
+ {
+  "name": "100-p10 r10 no#",
+  "cols": 100,
+  "text": "dep-wait odblokuj či založ; waiter nie je práca (X1309); (b) SUBDEVS NIKDY NEČAKAJÚ NA GK: každý OTVORENÝ zz",
+  "rows": [
+   "dep-wait odblokuj či založ; waiter nie je práca (X1309); (b) SUBDEVS NIKDY NEČAKAJÚ NA GK: každý",
+   "OTVORENÝ zz"
+  ]
+ },
+ {
+  "name": "100-p10 r10 kazdy",
+  "cols": 100,
+  "text": "dep-wait odblokuj či založ; waiter nie je práca (#1309); (b) SUBDEVS NIKDY NEČAKAJÚ NA GK: kazdy OTVORENY zz",
+  "rows": [
+   "dep-wait odblokuj či založ; waiter nie je práca (#1309); (b) SUBDEVS NIKDY NEČAKAJÚ NA GK: kazdy",
+   "OTVORENY zz"
+  ]
+ },
+ {
+  "name": "100-p10 a94 Č",
+  "cols": 100,
+  "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa Č zz",
+  "rows": [
+   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa Č",
+   "zz"
+  ]
+ },
+ {
+  "name": "100-p10 a94 Ú",
+  "cols": 100,
+  "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa Ú zz",
+  "rows": [
+   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa Ú",
+   "zz"
+  ]
+ },
+ {
+  "name": "100-p10 a87 NEČAKAJÚ",
+  "cols": 100,
+  "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa NEČAKAJÚ zz",
+  "rows": [
+   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa NEČAKAJÚ",
+   "zz"
+  ]
+ }
+]

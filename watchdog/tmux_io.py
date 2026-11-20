@@ -1242,15 +1242,14 @@ def _await_submit_confirmed(tpath, baseline, text, sleep_fn):
 
 
 def _await_typed_landed(pane_id, text, run, sleep_fn, want=True):
-    """Poll (bounded) until the input box shows evidence of `text`
-    (`want=True`) or has stopped showing it (`want=False`) — the pre-Enter
-    TYPE verify. Mirrors `goal._await_typed`, reproduced here to keep tmux_io's
-    `import watchdog`-only module boundary (#433). Returns the final verdict; a
-    type that never renders is refused (`not want`)."""
+    """Poll (bounded) until the input box shows evidence of `text` (`want=True`;
+    #1381: a collapsed own tail too) or has stopped showing it (`want=False`).
+    Mirrors `goal._await_typed` (kept here for the #433 module boundary); returns
+    the final verdict, a type that never renders is refused (`not want`)."""
+    from watchdog import collapsed_box as _cb
     sleep_fn = sleep_fn or time.sleep
     for i in range(SEND_TYPE_SETTLE_POLLS):
-        landed = watchdog._typed_landed(text, watchdog._input_line_text(
-            watchdog.capture_pane(pane_id, run, lines=40)))
+        landed = _cb.holds(watchdog.capture_pane(pane_id, run, lines=40), text)
         if landed is want:
             return landed
         if i < SEND_TYPE_SETTLE_POLLS - 1:
@@ -1711,7 +1710,7 @@ def submit_own_draft_verified(pane_id, draft, run=None, tpath=None,
 
 
 def submit_own_goal_verified(pane_id, text, run=None, sleep_fn=None, logs=None,
-                             nudge="goal-sweep"):
+                             nudge="goal-sweep", out=None):
     """#566 -- SUBMIT an EXISTING, COMPLETE, own `/goal <...>` payload already
     sitting swallowed-unsubmitted in the input box, PANE-verified, WITHOUT
     re-typing or backspacing it. The `/goal`-specific sibling of
@@ -1723,12 +1722,9 @@ def submit_own_goal_verified(pane_id, text, run=None, sleep_fn=None, logs=None,
     head+tail match against `text` rather than an unambiguous-nudge prefix.
 
     COMPLETENESS is mandatory before ANY keystroke (HARD CONSTRAINT: a truncated
-    slash command is NEVER submitted -- the #36 disaster): the box HEAD row must
-    be a leading substring of `text` AND the box TAIL row must be a trailing
-    substring of `text` AND `text` must start with `/goal `. Both ends matching
-    the literal expected payload prove the box holds the WHOLE rendered
-    `/goal <...>`; a partial/truncated type (tail does not match `text`'s tail)
-    is refused. Recognition reads the HEAD row (`_input_box_head_text`) + the
+    slash command is NEVER submitted -- the #36 disaster): the box HEAD row a
+    leading and the TAIL row a trailing substring of `text`, `text` starting
+    `/goal ` (a truncated type fails the tail; #1381: a collapsed box, below). Recognition reads the HEAD row (`_input_box_head_text`) + the
     TAIL row (`_input_line_text`), never guessing. A collapsed-paste placeholder
     (`[Pasted text #N]`) never `startswith("/goal ")`, so it is refused too.
 
@@ -1766,13 +1762,14 @@ def submit_own_goal_verified(pane_id, text, run=None, sleep_fn=None, logs=None,
 
     def _complete_own_goal(cap):
         # The box holds the COMPLETE literal `/goal <text>`: head row is its
-        # leading substring AND tail row is its trailing substring. A truncated
-        # type matches the head but NOT the tail -> refused.
-        head = watchdog._input_box_head_text(cap)
-        tail = watchdog._input_line_text(cap)
-        return (bool(head) and head.startswith("/goal ")
-                and text.startswith(head)
-                and bool(tail) and text.endswith(tail))
+        # leading substring AND tail row its trailing substring (a truncated type
+        # fails the tail), or (#1381) a COLLAPSED box's rows end `text` row-exact
+        # with the `↑ N` count `text` wraps to (the caller holds the typed record).
+        from watchdog import collapsed_box as _cb, send_outcome as _so
+        head, tail = watchdog._input_box_head_text(cap), watchdog._input_line_text(cap)
+        return (bool(head) and head.startswith("/goal ") and text.startswith(head)
+                and bool(tail) and text.endswith(tail)) or _cb.own_tail(
+                    cap, text, cols=_so.pane_width(pane_id, run) or 0)
 
     cap = watchdog.capture_pane(pane_id, run, lines=40)
     if not _complete_own_goal(cap):
@@ -1793,6 +1790,8 @@ def submit_own_goal_verified(pane_id, text, run=None, sleep_fn=None, logs=None,
             return False
     if not watchdog.keys(pane_id, "Enter", kind="goal", nudge=nudge, run=run, logs=logs):
         return False
+    if isinstance(out, dict):
+        out["entered"] = True                    # #1381: the caller counts a keyed miss
     # PANE proof: the box no longer holds our `/goal` (`want=False`) => submitted.
     if not _await_typed_landed(pane_id, text, run, sleep_fn, want=False):
         _log("submit-own-goal delivered")

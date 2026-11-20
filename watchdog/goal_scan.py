@@ -621,25 +621,26 @@ def pane_goal_armed(captured):
     rendered below it.
 
     #383-review Finding 3 (theoretical, unconfirmed live) — the trailing
-    walk trusts an agent-strip/selected-strip/selector-hint row ON ITS OWN
-    even without a statusline row also in the walk. This is safe ONLY
-    because `footer` is one CONTIGUOUS suffix of the whole capture (never a
-    subset with a gap) and every real CC render this repo has ever captured
-    puts the statusline row STRICTLY ABOVE (i.e. earlier in) the agent
-    strip — so an agent-strip row reaching the trailing walk structurally
-    implies the statusline row above it is ALSO still inside `footer`
-    (nothing between idx+1 and the strip row is ever skipped). If a future
-    CC layout ever renders the strip BEFORE the statusline, this reasoning
-    — and the population of sessions it protects, autopilot supervisors
-    with visible worker rows — would need re-checking."""
+    walk trusts an agent-strip/selected-strip/selector-hint row ON ITS OWN,
+    even without a statusline row in the walk. Safe ONLY because `footer` is
+    one CONTIGUOUS suffix of the capture and every CC render this repo ever
+    captured puts the statusline STRICTLY ABOVE the strip, so a strip row in
+    the walk implies the statusline is in `footer` too. A future CC layout
+    with the strip BEFORE the statusline needs re-checking.
+    #1381: a COLLAPSED box (`↑ N more`, no `❯` row) is found by its borders."""
     lines = (captured or "").splitlines()
     idx = None
     for i, ln in enumerate(lines):
         s = ln.strip()
         if s.startswith("❯") and not watchdog._is_bottom_chrome(s):
             idx = i
-    if idx is None:
-        return None                        # no input box in view
+    head = idx
+    if idx is None:   # #1381: a COLLAPSED box draws no `❯` row; read past its borders
+        from watchdog import collapsed_box
+        head, idx = collapsed_box.span([ln.strip() for ln in lines]) or (None, None)
+        if idx is None:
+            return None                    # no input box in view
+        head += 1
     footer = lines[idx + 1:]
     if not any(ln.strip() for ln in footer):
         return None                        # nothing rendered below it
@@ -682,7 +683,7 @@ def pane_goal_armed(captured):
     # 3-line bound keeps the search inside the box header, never reaching
     # the conversation. Placed here (only when the footer path would
     # otherwise say False) so every #383 `None` branch above is preserved.
-    header = lines[max(0, idx - 3):idx]
+    header = lines[max(0, head - 3):head]
     if any(watchdog._GOAL_HEADER_INDICATOR_RX.match(ln.strip()) for ln in header):
         return True
     return False
