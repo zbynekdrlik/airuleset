@@ -71,7 +71,7 @@ class TestRrsyncWrapper(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             log = os.path.join(td, "log")
             rr = os.path.join(td, "rrsync")
-            write_exe(rr, 'echo "rrsync $*" >> %s' % log)
+            write_exe(rr, 'echo "rrsync $* :: $SSH_ORIGINAL_COMMAND" >> %s' % log)
             w = os.path.join(td, "w.sh")
             with open(w, "w") as f:
                 f.write(fbm.render_fleetbackup_rrsync_wrapper(rrsync=rr, root="/home"))
@@ -85,12 +85,21 @@ class TestRrsyncWrapper(unittest.TestCase):
         self.assertEqual(log, "", command)
         self.assertIn("refused", r.stderr)
 
-    def test_a_pull_of_either_tree_reaches_rrsync_read_only(self):
-        for path in ("david3/uploads/", "david3/uploads", "david3/uploads/sub/x.pdf",
-                     "david3/.claude/work-products/", "u1/uploads/ u2/.claude/work-products/a"):
+    def test_a_pull_of_either_tree_reaches_rrsync_rooted_at_that_home(self):
+        for path, rel in (("david3/uploads/", "uploads/"), ("david3/uploads", "uploads"),
+                          ("david3/uploads/sub/x.pdf", "uploads/sub/x.pdf"),
+                          ("david3/.claude/work-products/", ".claude/work-products/"),
+                          ("david3/uploads/ david3/.claude/work-products/a",
+                           "uploads/ .claude/work-products/a")):
             r, log = self._run("%s --numeric-ids . %s" % (PULL, path))
             self.assertEqual(r.returncode, 0, (path, r.stderr))
-            self.assertEqual(log, "rrsync -ro /home\n", path)
+            self.assertEqual(log, "rrsync -ro /home/david3 :: %s --numeric-ids . %s\n" % (PULL, rel),
+                             path)
+
+    def test_one_pull_names_one_account(self):
+        """Round 4 🟡: rrsync only checks that a path resolves inside its root;
+        rooted at /home, carol/uploads -> /home/bob/uploads served bob's tree."""
+        self.assert_refused("%s . u1/uploads/ u2/.claude/work-products/a" % PULL)
 
     def test_the_refused_options_are_exactly_these(self):
         self.assertEqual(set(fbm.FLEETBACKUP_REFUSED_OPTIONS),
@@ -190,6 +199,20 @@ class TestRrsyncWrapperLive(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)
         self.assertNotIn("SECRET\n", found.values())
 
+    def test_one_account_never_serves_another_accounts_tree(self):
+        bob = os.path.join(self.root, "bob", "uploads")
+        os.makedirs(bob)
+        with open(os.path.join(bob, "b.txt"), "w") as f:
+            f.write("BOB\n")
+        os.makedirs(os.path.join(self.root, "carol"))
+        os.symlink(bob, os.path.join(self.root, "carol", "uploads"))
+        r, found = self.pull("x:carol/uploads/")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertNotIn("BOB\n", found.values())
+        r, found = self.pull("x:bob/uploads/")              # bob's own pull still works
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(found, {"b.txt": "BOB\n"})
+
     def test_nothing_outside_the_trees(self):
         for src in ("x:alice/devel/", "x:alice/", "x:/", "x:alice/uploads/etclink/"):
             r, found = self.pull(src)
@@ -234,10 +257,41 @@ class TestScriptInvariants(unittest.TestCase):
         call = re.compile(r"\bsetfacl\s+-")
         self.assertGreater(len(self.fn), 25)
         for name, body in self.fn.items():
-            if name not in account_side | {"fb_root_deny"}:
+            if name not in account_side | {"fb_root_deny", "fb_deny_foreign"}:
                 self.assertIsNone(call.search(body), name)
         self.assertEqual(self.fn["fb_root_deny"].strip().splitlines()[-1].strip(),
                          'setfacl -P -n -m "u:$FB:---" -- "$1"')
+        self.assertEqual(self.fn["fb_deny_foreign"].strip().splitlines()[-1].strip(),
+                         '| xargs -0 -r setfacl -P -n -m "u:$FB:---" --')
+
+    def test_root_walks_and_denies_run_timed(self):
+        """Round 4: the size of a tenant's trees (and of its home) is the
+        tenant's choice, so root's walks and batched denies are timed too."""
+        self.assertIn('timeout -k 10 "$(fb_cut "$FB_CHECK_TIMEOUT" 30)" /bin/bash "$FB_SELF" records',
+                      self.fn["fb_walk"])
+        self.assertIn('/bin/bash "$FB_SELF" deny-foreign "$h" "$u"', self.fn["fb_account"])
+        self.assertNotIn("fb_records", self.fn["fb_account"])
+        self.assertNotIn("fb_root_deny", self.fn["fb_account"])
+
+    def test_the_home_listing_never_stats_an_entry_or_needs_a_temp_file(self):
+        """Round 4 🔴: root cannot stat a tenant's FUSE mount, and an
+        unlistable /home withdrew the login; inode exhaustion broke mktemp."""
+        foreign = self.fn["fb_foreign_homes"]
+        self.assertNotIn("find ", foreign)
+        self.assertNotIn("mktemp", foreign)
+        self.assertIn('for p in "$FB_ROOT"/*; do', foreign)
+        self.assertIn("shopt -s nullglob dotglob", foreign)
+
+    def test_only_a_box_level_fault_withdraws(self):
+        calls = [n for n, body in self.fn.items() if "fb_withdraw" in body and n != "fb_withdraw"]
+        self.assertEqual(calls, ["fb_refresh"])
+        refresh = self.fn["fb_refresh"]
+        self.assertEqual(refresh.count("fb_withdraw"), 2)
+        self.assertLess(refresh.rindex("fb_withdraw"), refresh.index("fb_account"))
+
+    def test_the_read_back_streams_its_input(self):
+        self.assertIn("sys.stdin.buffer.read(1 << 16)", fbm._CHECK_PY)
+        self.assertNotIn(".read().split", fbm._CHECK_PY)
 
     def test_every_other_uid_runs_timed_with_no_root_environment(self):
         runs = re.findall(r"[^\n]*runuser -u[^\n]*", self.s)
@@ -250,7 +304,7 @@ class TestScriptInvariants(unittest.TestCase):
         self.assertIn('runuser -u "$FB"', self.fn["fb_as_fb"])
         self.assertIn('t=$(fb_cut "$1" 30)', self.fn["fb_as_fb"])
         calls = re.findall(r"fb_as_fb [^\n]*", self.s)
-        self.assertEqual(len(calls), 5, calls)
+        self.assertEqual(len(calls), 4, calls)
         for c in calls:
             self.assertRegex(c, r'^fb_as_fb "\$FB_(CHECK_TIMEOUT|QUICK_CHECK)" check\b', c)
 
@@ -262,7 +316,7 @@ class TestScriptInvariants(unittest.TestCase):
 
     def test_every_find_tolerates_a_vanishing_file(self):
         finds = re.findall(r"\bfind \"[^\"]+\"[^\n]*", self.s)
-        self.assertGreaterEqual(len(finds), 8)
+        self.assertGreaterEqual(len(finds), 7)      # /home itself is listed by a glob (round 4)
         for f in finds:
             self.assertIn("-ignore_readdir_race", f)
 
@@ -302,7 +356,7 @@ class TestScriptInvariants(unittest.TestCase):
     def test_the_login_is_restored_only_after_every_check(self):
         refresh = self.fn["fb_refresh"]
         restore = refresh.index("fb_restore")
-        for before in ("fb_identity", "fb_account", "fb_foreign_homes", "withdrawn"):
+        for before in ("fb_identity", "fb_withdraw", "fb_account", "fb_foreign_homes"):
             self.assertLess(refresh.index(before), restore, before)
 
 
@@ -493,10 +547,10 @@ class TestWiring(unittest.TestCase):
             r = subprocess.run(["bash", "-c", "set -euo pipefail\n" + body],
                                capture_output=True, text=True)
             self.assertEqual(r.returncode, 1, r.stderr)
-            os.unlink(acl)
+            os.unlink(acl)       # the same push installs both: a missing script fails
             r = subprocess.run(["bash", "-c", "set -euo pipefail\n" + body],
                                capture_output=True, text=True)
-            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual(r.returncode, 1, r.stderr)
             self.assertIn("missing", r.stderr)
 
     def test_a_busy_hourly_refresh_is_loud_but_not_a_failure(self):

@@ -49,7 +49,8 @@ exec "$@"
 '''
 
 _CHAGE = r'''#!/bin/bash
-echo "chage $*" >> "$FBT_LOG"
+if [ -e "$FBT_MARK" ]; then mk=yes; else mk=no; fi
+echo "chage $* marker=$mk" >> "$FBT_LOG"
 [ -z "${FBT_FAIL_CHAGE:-}" ] || exit 1
 [ "$1" = -E ] || exit 2
 v="$2"; [ "$v" = -1 ] && v=""
@@ -59,17 +60,6 @@ while IFS=: read -r n p a b c d e x r; do
     echo "$n:$p:$a:$b:$c:$d:$e:$x:$r"
 done < "$FBT_SHADOW" > "$tmp"
 mv "$tmp" "$FBT_SHADOW"
-'''
-
-# root-side stat: FBT_STAT_OWNER="<path>=<name>" reports that path's owner
-# name as <name>; an empty <name> is a failed stat
-_STAT = r'''#!/bin/bash
-if [ -n "${FBT_STAT_OWNER:-}" ] && [ "$*" = "-c %U -- ${FBT_STAT_OWNER%%=*}" ]; then
-    n=${FBT_STAT_OWNER#*=}
-    [ -n "$n" ] || exit 1
-    echo "$n"; exit 0
-fi
-exec /usr/bin/stat "$@"
 '''
 
 # root-side find: fails a -print* walk whose arguments contain FBT_FAIL_FIND
@@ -169,7 +159,6 @@ class Box:
         write_exe(os.path.join(self.bindir, "getent"), _GETENT)
         write_exe(os.path.join(self.bindir, "setfacl"), _SETFACL)
         write_exe(os.path.join(self.bindir, "chage"), _CHAGE)
-        write_exe(os.path.join(self.bindir, "stat"), _STAT)
         write_exe(os.path.join(self.bindir, "find"), _FIND)
         write_exe(os.path.join(self.bindir, "id"), _ID)
         write_exe(os.path.join(self.bindir, "pkill"), 'echo "pkill $*" >> "$FBT_LOG"; exit 1')
@@ -206,7 +195,7 @@ class Box:
         env = dict(os.environ)
         env.update(PATH=self.bindir + ":" + env.get("PATH", ""), FBT_LOG=self.log,
                    FBT_QUEUE=self.queue, FBT_FB=self.fb, FBT_PASSWD=self.passwd,
-                   FBT_SHADOW=self.shadow, FBT_CHECKS=self.checks)
+                   FBT_SHADOW=self.shadow, FBT_CHECKS=self.checks, FBT_MARK=self.mark)
         env.update(self.extra_env)
         return env
 

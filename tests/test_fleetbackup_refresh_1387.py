@@ -194,14 +194,6 @@ class TestRefresh(unittest.TestCase):
         self.assertEqual(entry(h, "user:nobody:"), "user:nobody:---")
         self.assert_not_withdrawn(box)
 
-    def test_an_unlistable_home_root_withdraws(self):
-        box, _h = self.box()
-        box.extra_env["FBT_FAIL_FIND"] = box.root + " -ignore_readdir_race -mindepth 1 -maxdepth 1 !"
-        box.answers(PRE0, CLEAN)
-        r = box.run()
-        self.assertIn("could not list", r.stderr)
-        self.assert_withdrawn(box, r)
-
     def test_an_incomplete_record_stream_counts_as_open(self):
         box, h = self.box()
         box.extra_env["FBT_FAIL_FIND"] = "/uploads"
@@ -249,7 +241,7 @@ class TestRefresh(unittest.TestCase):
         box.answers(PRE0, "leak=1 miss=0 readable=4 private=0", LEAK1, NONE)
         r = box.run()
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
-        self.assertIn("its home stays open by its own doing", r.stderr)
+        self.assertIn("its own doing; failed for", r.stderr)
         self.assert_not_withdrawn(box)
 
     def test_a_tenant_that_blocks_root_on_its_own_home_fails_alone(self):
@@ -261,43 +253,31 @@ class TestRefresh(unittest.TestCase):
         box.answers(PRE0, "leak=1 miss=0 readable=4 private=0", LEAK1, NONE)
         r = box.run()
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
-        self.assertIn("its home stays open by its own doing", r.stderr)
+        self.assertIn("root could not close", r.stderr)
+        self.assertIn("its own doing; failed for", r.stderr)
         self.assertIn("--x", entry(h, "user:%s:" % box.fb))     # our grant was there
         self.assert_not_withdrawn(box)
 
-    def test_a_home_owned_by_root_that_stays_open_withdraws(self):
-        box = Box(self.td, fb="daemon", accounts=("nobody",))
-        h = box.home("nobody")
-        make_layout(h)
-        box.extra_env["FBT_STAT_OWNER"] = h + "=root"
-        box.extra_env["FBT_FAIL_SETFACL_LAST"] = h
-        box.answers(PRE0, "leak=1 miss=0 readable=4 private=0", LEAK1, NONE)
-        r = box.run()
-        self.assert_withdrawn(box, r)
-        self.assertIn("UNRESOLVED", r.stderr)
-
-    def test_a_child_root_could_not_close_makes_an_open_home_unresolved(self):
-        """The home is the account's, but a child it does NOT own stayed open
-        (root's deny failed): not the account's own doing."""
-        box = Box(self.td, fb="daemon", accounts=("nobody",))
-        h = box.home("nobody")
-        make_layout(h)
-        box.extra_env["FBT_STAT_OWNER"] = h + "=nobody"
-        box.extra_env["FBT_FAIL_SETFACL"] = "/devel"
-        box.answers(PRE0, LEAK1, LEAK1, NONE)
-        r = box.run()
-        self.assert_withdrawn(box, r)
-        self.assertIn("UNRESOLVED", r.stderr)
-
-    def test_an_unverifiable_close_withdraws_the_login(self):
-        box, _h = self.box()
-        box.answers(PRE0, "leak=1 miss=0 readable=4 private=0", "", NONE)
-        self.assert_withdrawn(box, box.run())
-
-    def test_an_unparseable_close_answer_withdraws_the_login(self):
-        box, _h = self.box()
-        box.answers(PRE0, "leak=1 miss=0 readable=4 private=0", "garbage", NONE)
-        self.assert_withdrawn(box, box.run())
+    def test_a_home_level_fault_never_withdraws_the_login(self):
+        """Round 4 🔴: every per-path attribution of a withdrawal was
+        tenant-triggerable (a FUSE mount root cannot stat, a child of another
+        account with full xattrs, an ACL flip). Every inode that carries a
+        grant of ours is the account's own, so a home that root cannot close
+        fails that account — whatever else failed with it."""
+        for close_answer in (LEAK1, "", "garbage"):
+            with self.subTest(close_answer=close_answer), tempfile.TemporaryDirectory() as td:
+                box = Box(td, fb="daemon", accounts=("nobody",))
+                h = box.home("nobody")
+                make_layout(h)
+                box.extra_env["FBT_FAIL_SETFACL"] = "/devel"      # a child root cannot close
+                box.extra_env["FBT_FAIL_SETFACL_LAST"] = h         # and the home itself
+                box.answers(PRE0, LEAK1, close_answer, NONE)
+                r = box.run()
+                self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+                self.assertIn("HELD", r.stderr)
+                self.assertIn("failed for nobody only", r.stderr)
+                self.assertNotIn("UNRESOLVED", r.stderr)
+                self.assert_not_withdrawn(box)
 
     def test_a_read_back_that_did_not_run_counts_as_open(self):
         box, h = self.box()
@@ -434,8 +414,10 @@ class TestRefresh(unittest.TestCase):
         self.assertNotIn("set by someone else", r.stderr)
         self.assert_live_key(box)
         # an admin's lock (the documented `usermod --expiredate 1`, or a date),
-        # with no marker of ours, or with a stale one the admin's change outlived
-        for expiry, marker in (("1", False), ("20500", False), ("1", True), ("2", False)):
+        # with no marker of ours, or with a stale one the admin's change outlived;
+        # an expired one fails the refresh LOUD (the login stays blocked)
+        for expiry, marker, expired in (("1", False, True), ("20500", False, True), ("1", True, True),
+                                        ("2", False, True), ("99999", False, False)):
             with self.subTest(expiry=expiry, marker=marker), tempfile.TemporaryDirectory() as td:
                 box2 = Box(td, expiry=expiry)
                 make_layout(box2.home())
@@ -447,6 +429,34 @@ class TestRefresh(unittest.TestCase):
                 self.assertEqual(box2.expiry(), expiry)
                 self.assertIn("set by someone else", r.stderr)
                 self.assertFalse(os.path.exists(box2.mark), "a stale marker is forgotten")
+                self.assertEqual(r.returncode, 1 if expired else 0, r.stderr)
+                self.assertEqual("EXPIRED" in r.stderr, expired, r.stderr)
+
+    def test_the_withdrawal_marker_is_written_before_the_expiry(self):
+        """Round 4 🟡: chage first + marker second left our own `2` unmarked
+        (a crash, a failed write), and every later refresh reported success
+        while the login stayed blocked."""
+        box, _h = self.box(pw_status="P")
+        r = box.run()
+        self.assert_withdrawn(box, r)
+        self.assertIn("chage -E 2 nobody marker=yes", box.calls())
+
+    def test_a_withdrawal_without_a_marker_says_so_and_stays_loud(self):
+        box, _h = self.box(pw_status="P")
+        os.chmod(box.fbhome, 0o775)                 # the marker's dir is not safe: no marker
+        r = box.run()
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("no withdrawal marker could be written", r.stderr)
+        self.assertEqual(box.expiry(), "2")
+        self.assertFalse(os.path.exists(box.mark))
+        os.chmod(box.fbhome, 0o755)
+        with tempfile.TemporaryDirectory() as td:
+            box2 = Box(td, expiry="2")              # the next refresh, everything else clean
+            make_layout(box2.home())
+            box2.answers(PRE0, CLEAN, NONE)
+            r = box2.run()
+            self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+            self.assertIn("EXPIRED", r.stderr)
 
     def test_a_withdrawal_over_an_admin_expiry_never_marks_it_ours(self):
         box, _h = self.box(pw_status="P", expiry="1")
@@ -536,7 +546,7 @@ class TestRefresh(unittest.TestCase):
         box.answers(PRE0, CLEAN, LEAK1)
         r = box.run()
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
-        self.assertIn("open only through its owner's own", r.stderr)
+        self.assertIn("still reachable", r.stderr)
         self.assert_not_withdrawn(box)
 
     def test_a_non_stream_entry_that_cannot_be_closed_fails_even_unreachable(self):
@@ -550,37 +560,17 @@ class TestRefresh(unittest.TestCase):
         self.assertIn("could not close", r.stderr)
         self.assert_not_withdrawn(box)
 
-    def test_a_root_owned_entry_with_our_grant_that_cannot_be_closed_withdraws(self):
+    def test_a_non_stream_entry_that_stays_reachable_never_withdraws(self):
         box, _h = self.box()
         other = box.home("otherdir", stream=False)
         subprocess.run(["setfacl", "-m", "u:nobody:r-x", other], check=True)
-        box.extra_env["FBT_STAT_OWNER"] = other + "=root"
         box.extra_env["FBT_FAIL_SETFACL_LAST"] = other
-        box.answers(PRE0, CLEAN, LEAK1, LEAK1)
-        r = box.run()
-        self.assert_withdrawn(box, r)
-        self.assertEqual(box.checked(3), {("C", other)})
-
-    def test_an_entry_of_unknown_owner_counts_as_root_owned(self):
-        box, _h = self.box()
-        other = box.home("otherdir", stream=False)
-        box.extra_env["FBT_STAT_OWNER"] = other + "="
-        box.answers(PRE0, CLEAN, LEAK1, LEAK1)
-        self.assert_withdrawn(box, box.run())
-
-    def test_only_the_root_owned_entries_decide_a_withdrawal(self):
-        """Round 3: the unsafe flag was global — a root-owned entry that was
-        closed fine, next to a tenant-owned one its owner reopened, withdrew."""
-        box, _h = self.box()
-        closed = box.home("rootdir", stream=False)
-        self.foreign_owned(box.home("tenantdir", stream=False))
-        box.extra_env["FBT_STAT_OWNER"] = closed + "=root"
-        box.answers(PRE0, CLEAN, LEAK1, NONE)
+        box.answers(PRE0, CLEAN, LEAK1)
         r = box.run()
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
-        self.assertEqual(box.checked(3), {("C", closed)})
+        self.assertIn("still reachable", r.stderr)
         self.assert_not_withdrawn(box)
-
+        self.assertEqual(len(os.listdir(box.checks)), 3)    # one read-back of /home, no second
 
     def test_a_child_the_account_does_not_own_is_closed_by_root(self):
         # the stream account is `nobody` (the files are the test user's, so
@@ -591,15 +581,30 @@ class TestRefresh(unittest.TestCase):
         box.answers(PRE0, CLEAN, NONE)
         r = box.run()
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        denied = " ".join(c for c in box.calls() if c.startswith("root-setfacl "))
         for rel in ("devel", ".bashrc", ".claude/settings.json"):
             self.assertEqual(entry(os.path.join(h, rel), "user:daemon:"), "user:daemon:---", rel)
-            self.assertIn("root-setfacl -P -n -m u:daemon:--- -- %s" % os.path.join(h, rel),
-                          box.calls(), rel)
+            self.assertIn(" %s" % os.path.join(h, rel), denied, rel)
         self.assertEqual(entry(h, "user:daemon:"), "user:daemon:--x")
-        # root only ever denies: no other root-side setfacl ran
+        # root only ever denies, batched: no other root-side setfacl ran
         root_calls = [c for c in box.calls() if c.startswith("root-setfacl ")]
         self.assertTrue(all(c.startswith("root-setfacl -P -n -m u:daemon:--- -- ") for c in root_calls),
                         root_calls)
+
+    def test_root_closes_many_foreign_children_in_a_few_calls(self):
+        """Round 4 🟡: one root setfacl per child let a second account (or
+        hardlinks) stall the refresh past its budget."""
+        box = Box(self.td, fb="daemon", accounts=("nobody",))
+        h = box.home("nobody")
+        make_layout(h)
+        for i in range(3000):
+            open(os.path.join(h, "f%04d" % i), "w").close()
+        box.answers(PRE0, CLEAN, NONE)
+        r = box.run()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        calls = [c for c in box.calls() if c.startswith("root-setfacl ")]
+        self.assertLess(len(calls), 10, len(calls))
+        self.assertEqual(entry(os.path.join(h, "f2999"), "user:daemon:"), "user:daemon:---")
 
     def test_a_child_root_cannot_close_holds_the_home(self):
         box = Box(self.td, fb="daemon", accounts=("nobody",))
