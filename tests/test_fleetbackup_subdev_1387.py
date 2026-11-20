@@ -561,9 +561,13 @@ class TestWiring(unittest.TestCase):
             bindir = os.path.join(td, "bin")
             os.makedirs(bindir)
             write_exe(os.path.join(bindir, "getent"),
-                      '[ "$1 $2" = "passwd fleetbackup" ] && [ -n "${FBT_HAS_FB:-}" ] '
-                      '&& echo "fleetbackup:x:998:998::/var/lib/fleetbackup:/bin/sh" || exit 2')
-            for has_fb, rc in (("1", 1), ("", 0)):
+                      '[ "$1 $2" = "passwd fleetbackup" ] || exit 2\n'
+                      'case "${FBT_HAS_FB:-}" in\n'
+                      '    ours) echo "fleetbackup:x:998:998::/var/lib/fleetbackup:/bin/sh" ;;\n'
+                      '    foreign) echo "fleetbackup:x:1003:1003::/home/fleetbackup:/bin/bash" ;;\n'
+                      '    *) exit 2 ;;\n'
+                      'esac')
+            for has_fb, rc in (("ours", 1), ("foreign", 0), ("", 0)):
                 env = dict(os.environ, PATH=bindir + ":" + os.environ["PATH"], FBT_HAS_FB=has_fb)
                 r = subprocess.run(["bash", "-c", "set -euo pipefail\n" + body],
                                    capture_output=True, text=True, env=env)
