@@ -1710,7 +1710,7 @@ def submit_own_draft_verified(pane_id, draft, run=None, tpath=None,
 
 
 def submit_own_goal_verified(pane_id, text, run=None, sleep_fn=None, logs=None,
-                             nudge="goal-sweep"):
+                             nudge="goal-sweep", out=None):
     """#566 -- SUBMIT an EXISTING, COMPLETE, own `/goal <...>` payload already
     sitting swallowed-unsubmitted in the input box, PANE-verified, WITHOUT
     re-typing or backspacing it. The `/goal`-specific sibling of
@@ -1722,12 +1722,9 @@ def submit_own_goal_verified(pane_id, text, run=None, sleep_fn=None, logs=None,
     head+tail match against `text` rather than an unambiguous-nudge prefix.
 
     COMPLETENESS is mandatory before ANY keystroke (HARD CONSTRAINT: a truncated
-    slash command is NEVER submitted -- the #36 disaster): the box HEAD row must
-    be a leading substring of `text` AND the box TAIL row must be a trailing
-    substring of `text` AND `text` must start with `/goal `. Both ends matching
-    the literal expected payload prove the box holds the WHOLE rendered
-    `/goal <...>`; a partial/truncated type (tail does not match `text`'s tail)
-    is refused. Recognition reads the HEAD row (`_input_box_head_text`) + the
+    slash command is NEVER submitted -- the #36 disaster): the box HEAD row a
+    leading and the TAIL row a trailing substring of `text`, `text` starting
+    `/goal ` (a truncated type fails the tail; #1381: a collapsed box, below). Recognition reads the HEAD row (`_input_box_head_text`) + the
     TAIL row (`_input_line_text`), never guessing. A collapsed-paste placeholder
     (`[Pasted text #N]`) never `startswith("/goal ")`, so it is refused too.
 
@@ -1793,6 +1790,8 @@ def submit_own_goal_verified(pane_id, text, run=None, sleep_fn=None, logs=None,
             return False
     if not watchdog.keys(pane_id, "Enter", kind="goal", nudge=nudge, run=run, logs=logs):
         return False
+    if isinstance(out, dict):
+        out["entered"] = True                    # #1381: the caller counts a keyed miss
     # PANE proof: the box no longer holds our `/goal` (`want=False`) => submitted.
     if not _await_typed_landed(pane_id, text, run, sleep_fn, want=False):
         _log("submit-own-goal delivered")

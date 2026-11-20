@@ -662,8 +662,7 @@ GOAL_DELIVERY_LIVE_ATTEMPT_CAP = 6
 # escalation) or any zero-keystroke defer (`undeterminable`/`busy`/
 # `busy-transcript`/`in-mode`/... -- counting those would starve a
 # legitimate delivery, #611). A structured return word, never a log-string match.
-_GOAL_KEYSTROKE_SKIPS = frozenset(("skip:verify-failed", "skip:stash-abort",
-                                   "skip:collapsed-unsubmitted"))  # #1381: no other path
+_GOAL_KEYSTROKE_SKIPS = frozenset(("skip:verify-failed", "skip:stash-abort"))
 
 # REMOVED (#403-review CRITICAL C1): `_GOAL_NON_BOUNDARY_MARKERS` used to
 # refuse to arm while the session's last transcript marker was a question
@@ -890,7 +889,8 @@ def _janitor_provenance(state, pid, now):
 
 
 def _submit_stranded_own_goal(sid, cwd, text, pid, captured, tpath, run, state,
-                              now, sleep_fn, logs, nudge="goal-sweep", owner_arm=False):
+                              now, sleep_fn, logs, nudge="goal-sweep", owner_arm=False,
+                              out=None):
     """#566 case (a) -- when the input box ALREADY holds our OWN swallowed
     COMPLETE `/goal <text>` (a prior attempt typed it but the Enter was
     swallowed/raced), COMPLETE the submit in place, never via `deliver_with_stash`
@@ -898,41 +898,37 @@ def _submit_stranded_own_goal(sid, cwd, text, pid, captured, tpath, run, state,
     confirmed submit, else False (the caller's stash path; never a collapsed box).
 
     Three gates, ALL required before the one Enter keystroke: (1) janitor
-    PROVENANCE (a watchdog job touched this pane -- the mark `deliver_goal` just
-    set, or a durable park); (2) the recent-human gate (never keystroke a
-    human-active pane); (3) EXACT-payload completeness -- the box head is a
-    leading substring of `text` AND the box tail is a trailing substring, proving
-    the box holds the WHOLE literal `/goal <text>` (a truncated type fails the
-    tail check and is refused). A foreign draft matches neither end and is left
-    untouched. `submit_own_goal_verified` re-verifies completeness against a
+    PROVENANCE (the mark `deliver_goal` just set, or a durable park); (2) the
+    recent-human gate (never keystroke a human-active pane); (3) EXACT-payload
+    completeness -- head row a leading and tail row a trailing substring of `text`
+    (a truncated type fails the tail; a foreign draft matches neither end). `submit_own_goal_verified` re-verifies completeness against a
     FRESH capture right before the keystroke. #1381: (3) for a COLLAPSED box (no
     `❯` row, head hidden) = this pane's first-person record of typing exactly
-    `text` (`_cbox.note_typed`, head-checkpointed) AND NO attached-client input
-    since that record (the hidden head is then still what we typed) AND its rows
-    row-exact the end of `text` with the `↑ N` count `text` wraps to. For the
-    owner's own `/autopilot` arm (`owner_arm`) gate (2) keeps only that client
-    input signal (5 min for an uncollapsed box): the 30-min transcript/presence
-    window is the request's whole life, which his own prompt always filled (#752)."""
+    `text` (`_cbox.note_typed`, head-checkpointed) AND its rows row-exact the end
+    of `text` with the `↑ N` count `text` wraps to; (2) with a record = NO human
+    attach or key in the session since it (`_cbox.input_since`: no human can have
+    edited the hidden head; the rows hidden between the checkpoint and the view
+    stay unproven, the #746 residual). Without a record the owner's own arm
+    (`owner_arm`) keeps only the 5-min client-input signal: the 30-min
+    transcript/presence window is the request's whole life, which his own
+    `/autopilot` prompt always filled (#752). `out["entered"]`: an Enter was sent."""
     if not _janitor_provenance(state, pid, now):
         return False
     head = watchdog._input_box_head_text(captured)    # cheap pre-check first
     tail = watchdog._input_line_text(captured)
-    since = None
-    if not (head and head.startswith("/goal ") and text.startswith(head)
-            and tail and text.endswith(tail)):
-        since = _cbox.typed_at(state, pid, text, now)   # #1381 collapsed: our record
-        if since is None or not _cbox.own_tail(
-                captured, text, cols=_send_outcome.pane_width(pid, run) or 0):
-            return False
-    if watchdog._tmux_client_recent_input(   # a collapsed box: ANY input since we typed
-            pid, run, now, veto_s=None if since is None else now - since + 1)[0] or (
+    since = _cbox.typed_at(state, pid, text, now)        # #1381: our own type's record
+    if not ((head and head.startswith("/goal ") and text.startswith(head)
+             and tail and text.endswith(tail)) or (since is not None and _cbox.own_tail(
+                 captured, text, cols=_send_outcome.pane_width(pid, run) or 0))):
+        return False
+    if (_cbox.input_since(pid, run, since) if since is not None
+            else watchdog._tmux_client_recent_input(pid, run, now)[0]) or (
             not owner_arm and _recovery_recent_human(sid, cwd, tpath, now, pid=pid, run=run)):
         _log_goal_sync("SKIP recover-swallowed recent-human sid=%s cwd=%s"
                        % (sid, cwd))
         return False
-    return watchdog.submit_own_goal_verified(pid, text, run=run,
-                                             sleep_fn=sleep_fn, logs=logs,
-                                             nudge=nudge)   # #1038 declared -> goal-arm
+    return watchdog.submit_own_goal_verified(pid, text, run=run, sleep_fn=sleep_fn,
+                                             logs=logs, nudge=nudge, out=out)  # #1038
 
 
 # #617 -- a stranded truncated /goal type always FAR exceeds this (montalu1's
@@ -1623,8 +1619,9 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
         # completeness against `text` (head+tail, or #1381 a collapsed box with a
         # first-person record + row proof) + the recent-human gate (for the owner's
         # own arm only its 5-min client-input signal, #752) -- see the helper.
+        _sub = {}
         if _submit_stranded_own_goal(sid, cwd, text, pid, captured, tpath,
-                                     run, state, now, sleep_fn, logs, nudge=_nudge,
+                                     run, state, now, sleep_fn, logs, nudge=_nudge, out=_sub,
                                      owner_arm=origin == _GOAL_SELF_CALLBACK_ORIGIN):
             watchdog._janitor_clear_watch(state, pid)
             _cbox.forget_typed(state, pid)
@@ -1640,7 +1637,9 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
             _log_goal_sync("SEND recover-swallowed sid=%s cwd=%s" % (sid, cwd))
             return "sent"
         if _cbox.rows(captured) is not None:     # #1381: never stash a collapsed box
-            _log_goal_sync("SKIP collapsed-unsubmitted sid=%s cwd=%s (counted)" % (sid, cwd))
+            if _sub.get("entered"):              # an Enter went in: the counted class
+                return _verify_fail_word(tpath, _tage, now)
+            _log_goal_sync("SKIP collapsed-unsubmitted sid=%s cwd=%s" % (sid, cwd))
             return "skip:collapsed-unsubmitted"
         # #488: thread `state` so deliver_with_stash can DURABLY record a park
         # it definitively creates (STASH_PARKED) -> the shared janitor reclaims

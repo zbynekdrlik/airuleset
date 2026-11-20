@@ -88,8 +88,10 @@ def own_tail(captured, text, cols=None):
     inside a row fails (`send_outcome._rows_end_with`, #1157); no row is blank.
     The rows hold at least `GOAL_ARM_LEFTOVER_MIN_SUBSTR` chars and fewer than
     `text` (a collapsed box hides at least one row). With the pane width `cols`
-    the `↑ N` count must also be what `text` wraps to (`goal_box_rows`): a box
-    holding more or less than `text` above the visible rows fails."""
+    the `↑ N` count must also be what `text` wraps to (`goal_box_rows`). That
+    catches a hidden part of a different HEIGHT only: a same-height change above
+    the view (a short prefix, a dropped byte) is invisible to any render, which
+    is why an Enter on a box this sweep did not type also needs `input_since`."""
     return _ends_with(rows(captured), text, cols)
 
 
@@ -133,6 +135,18 @@ def holds(captured, text):
     the shared tail contract (`_typed_landed`) or our own collapsed tail."""
     return bool(watchdog._typed_landed(text, watchdog._input_line_text(captured))
                 or own_tail(captured, text))
+
+
+def input_since(pid, run, since):
+    """True when a human attached to or typed into `pid`'s session at or after
+    `since` (`#{session_activity}`: tmux bumps it on a client attach and on client
+    keys, never on our own `send-keys`, and keeps it after a detach), or when it
+    cannot be read: fail closed, no Enter."""
+    out = run(["tmux", "display-message", "-p", "-t", pid, "#{session_activity}"])
+    try:
+        return int((out or "").strip()) >= int(since)
+    except (TypeError, ValueError):
+        return True
 
 
 def _sha(text):
