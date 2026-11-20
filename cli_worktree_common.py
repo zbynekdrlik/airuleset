@@ -83,12 +83,12 @@ def _worktree_env_age_s(env_key, default_s):
 
 
 def _worktree_git(args, cwd, timeout: int = 15):
-    """`git -C <cwd> <args>` -- stdout text on rc==0, else None (never
-    guess; every caller treats None as "skip this repo/candidate", never
-    as a false positive or negative)."""
+    """`git -C <cwd> <args>` -- stdout text on rc==0, else None (never guess;
+    None is always "skip this repo/candidate"). #1380: untracked files are
+    always shown, so `status.showUntrackedFiles=no` never reads as clean."""
     import subprocess
     try:
-        r = subprocess.run(["git", "-C", str(cwd)] + list(args),
+        r = subprocess.run(["git", "-c", "status.showUntrackedFiles=normal", "-C", str(cwd)] + list(args),
                            capture_output=True, text=True, timeout=timeout)
     except Exception:
         return None

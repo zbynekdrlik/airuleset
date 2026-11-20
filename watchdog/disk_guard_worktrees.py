@@ -38,7 +38,7 @@ def _safe_dir_size(path, dir_stats_fn=None):
 
 
 # --- stale agent worktrees (drain rung — every box class) ------------------ #
-_PROTECTED_BRANCHES = frozenset({"main", "dev", "master", "develop"})   # never removed
+_PROTECTED_BRANCHES = frozenset({"main", "dev", "master", "develop", "staging"})  # kept
 _NOT_ON_ORIGIN = "HEAD not contained in any origin ref — kept"
 
 
@@ -157,8 +157,8 @@ def _classify(path, git_run_fn=None, dir_stats_fn=None):
         return _skip("git branch --contains unreadable — kept", error=True)
     if via is None:
         return _skip(_NOT_ON_ORIGIN)
-    if lane.precious_ignored(path, git_run_fn):            # #1380: last, a reclaim only
-        return _skip(lane.PRECIOUS_KEPT)
+    if (kept := lane.final_reason(path, git_run_fn)) is not None:   # #1380: a reclaim only
+        return _skip(kept[0], error=kept[1])
     return {"bytes": _safe_dir_size(path, dir_stats_fn), "kind": "worktree-remove",
             "reason": None, "branch": branch, "contained_in": via}
 

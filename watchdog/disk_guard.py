@@ -524,10 +524,42 @@ def discover_toolchain_dirs(home=None, box_class_fn=None, pgrep_fn=None,
         elif live.strip():
             out.append({"cls": "toolchain", "path": p, "size": size, "kind": "skip",
                         "reason": "live java/gradle/emulator process present — kept"})
+        elif keys := _signing_material(p):
+            out.append({"cls": "toolchain", "path": p, "size": size, "kind": "report",
+                        "reason": "signing material %s — reported, never removed (#1380)"
+                        % ", ".join(keys[:3])})
         else:
             out.append({"cls": "toolchain", "path": p, "size": size, "kind": "delete",
                         "reason": None})
     return out
+
+
+_SIGNING_GLOBS = ("*.jks", "*.keystore", "*.p12", "*.pfx")
+_SIGNING_PROPS = ("storepassword", "keypassword", "signing.")
+
+
+def _signing_material(path, max_depth=3):
+    """#1380: release keys or signing passwords inside a toolchain dir are not
+    regenerable (an auto-made ``debug.keystore`` is). Bounded walk."""
+    import fnmatch
+    found, base = [], path.rstrip(os.sep).count(os.sep)
+    for dp, dns, fns in os.walk(path, onerror=lambda e: None):
+        if dp.count(os.sep) - base >= max_depth:
+            dns[:] = []
+        for f in fns:
+            fp = os.path.join(dp, f)
+            if f != "debug.keystore" and any(fnmatch.fnmatch(f, g) for g in _SIGNING_GLOBS):
+                found.append(fp)
+            elif f == "gradle.properties":
+                try:
+                    with open(fp, encoding="utf-8", errors="replace") as fh:
+                        text = fh.read(65536).lower()
+                except OSError:
+                    found.append(fp)          # unreadable: never proven harmless
+                    continue
+                if any(k in text for k in _SIGNING_PROPS):
+                    found.append(fp)
+    return found
 
 
 # --------------------------------------------------------------------------- #
@@ -2281,12 +2313,15 @@ def _default_planners(home, now, scratch_rows=None, wt_cache=False, level=None):
     ]
 
 
-def _prevention_planners(home, now, scratch_rows=None):
+def _prevention_planners(home, now, scratch_rows=None, wt_cache=False):
     """#920 — cheapest/safest rungs for the PREVENTION pass (70-79%, or any
     level on shared-stream boxes #939). Age-out operations on disposable content
     + worktree cleanup (#939: proactive worktree reclaim on shared-stream boxes,
     not only under >=80% pressure).
-    #965: added android-build (no age gate on shared-stream) and scratch-worktree."""
+    #965: added android-build (no age gate on shared-stream) and scratch-worktree.
+    #1380: the stale-agent-worktree rung (agent lanes + the out-of-tree lane
+    source, which the #834 rung leaves to it) runs first; ``wt_cache`` is
+    ``not dry_run``, as in the drain ladder."""
     return [
         ("tmp-test", lambda: _plan_tmp_test(home, now)),
         ("scratch", lambda: _plan_scratch(home, now, scratch_rows=scratch_rows)),
@@ -2294,6 +2329,7 @@ def _prevention_planners(home, now, scratch_rows=None):
         ("npm-uv-cache", lambda: _plan_npm_uv_cache(home, now)),
         ("android-build", lambda: _plan_android_build(home, now)),
         ("scratch-worktree", lambda: _plan_scratch_worktrees(home, now)),
+        ("stale-agent-worktree", lambda: _plan_stale_agent_worktrees(home, now, wt_cache)),
         ("worktree", lambda: _plan_worktrees(home, now)),
     ]
 
@@ -2331,16 +2367,28 @@ def _remove_worktree_dir(a):
     """`git worktree remove` the directory (the branch REF is kept). #1380: NO
     `--force` — every planner hands over only CLEAN trees, so git itself
     refuses one that turned dirty (an untracked or modified file) between plan
-    and act; ignored files (build output) do not block it. A git refusal is a
-    SKIP (raise → logged FAIL), NEVER a raw `rm -rf` (review 🔴). TOCTOU
-    re-check: live-use (a `claude --resume` that cd'd in between plan and act,
-    #939 Fable review F5)."""
+    and act; `-c status.showUntrackedFiles=normal` keeps a repo's `no` setting
+    from hiding untracked files from that check. Ignored files are deleted by
+    git, so the #1380 ignored-entry gate (``final_reason``) runs again here,
+    and a row that carries its planned ``head`` (a lane, possibly detached) is
+    refused once HEAD moved: a new commit on a detached HEAD has no other ref.
+    A git refusal is a SKIP (raise → logged FAIL), NEVER a raw `rm -rf` (review
+    🔴). TOCTOU re-check: live-use (a `claude --resume` that cd'd in between
+    plan and act, #939 Fable review F5)."""
+    from cli_worktree_common import _worktree_git
+    from watchdog.disk_guard_lane_wt import final_reason
     repo, path = a.get("repo"), a.get("path")
     if not repo:
         raise OSError("worktree-remove with no repo for %s" % path)
     if _target_in_live_use_pw(path):
         raise OSError("worktree %s now in live use at remove time — SKIP" % path)
-    r = subprocess.run(["git", "-C", repo, "worktree", "remove", "--", path],
+    if a.get("head") and (_worktree_git(["rev-parse", "HEAD"], path) or "").strip() != a["head"]:
+        raise OSError("worktree %s HEAD moved since the plan — SKIP" % path)
+    kept = final_reason(path)
+    if kept is not None:
+        raise OSError("worktree %s at remove time: %s — SKIP" % (path, kept[0]))
+    r = subprocess.run(["git", "-c", "status.showUntrackedFiles=normal", "-C", repo,
+                        "worktree", "remove", "--", path],
                        capture_output=True, text=True, timeout=120)
     if r.returncode != 0:
         raise OSError("git worktree remove refused %s: %s" % (path, (r.stderr or "").strip()))
@@ -2411,7 +2459,7 @@ def _perform_action(a, sudo_ok=False, run_fn=None, scratch_live_fn=None, now=Non
         if not repo or not os.path.isdir(os.path.join(repo, ".git")):
             raise OSError("scratch-worktree repo not found for: %s" % wt)
         subprocess.run(
-            ["git", "-C", repo, "worktree", "remove", wt],
+            ["git", "-c", "status.showUntrackedFiles=normal", "-C", repo, "worktree", "remove", wt],
             check=True, capture_output=True, text=True, timeout=60)
         return nbytes
     if kind == "journal-vacuum":
@@ -2466,16 +2514,26 @@ def _make_do_action(dry_run, sudo_ok=False, run_fn=None, scratch_live_fn=None, n
     return _do
 
 
-def _protected_owner_path(path, home):
+_PATH_KINDS = frozenset({"delete", "worktree-remove", "scratch-worktree-remove", "gzip",
+                         "orphan-gitdir"})
+
+
+def _protected_owner_path(path, home, kind=None):
     """The protected owner dir (#1380) that ``path`` lies in, or is an ancestor
     of, else None: ``<home>/uploads`` and ``<home>/.claude/work-products``,
     for ``home`` and for every ``/home/<user>/`` (the runner rungs act in
-    another account's home). Only an absolute ``path`` is judged; a command
-    string (``journalctl --user ...``) or a docker image id is never a path.
-    Symlinks are resolved on both sides, so a link INTO ``~/uploads`` is
-    refused too. Fail-safe: an unresolvable path is protected."""
+    another account's home). A ``Path`` is judged like its string. For a
+    ``kind`` that acts on a path (:data:`_PATH_KINDS`) a non-absolute path is
+    refused outright (it would resolve against the watchdog's cwd, ``$HOME``);
+    a command kind's "path" (``journalctl --user ...``, a docker image id) is
+    never a path. Symlinks are resolved on both sides, so a link INTO
+    ``~/uploads`` is refused too. Fail-safe: an unresolvable path is protected."""
+    try:
+        path = os.fspath(path)
+    except TypeError:
+        return "an unreadable path" if kind in _PATH_KINDS else None
     if not isinstance(path, str) or not os.path.isabs(path):
-        return None
+        return ("a non-absolute path (%r)" % path) if kind in _PATH_KINDS else None
     try:
         target = os.path.realpath(path)
         roots = [os.path.realpath(os.path.join(str(home), sub))
@@ -2602,10 +2660,13 @@ def execute_drain(status, home, planners, recheck_fn, do_action_fn,
             # #1216: the budget is checked before every RUNNABLE action after
             # the first one this rung tried (a failed one counts), and a gzip
             # starts only when it can finish in the time left.
-            left = sum(1 for x in actions if x.get("cls", _label) in RECLAIMABLE_CLASSES
+            guard = [_protected_owner_path(x.get("path"), home, x.get("kind", "delete"))
+                     for x in actions]       # #1380: judged once, refused rows never "runnable"
+            left = sum(1 for x, gd in zip(actions, guard)
+                       if x.get("cls", _label) in RECLAIMABLE_CLASSES and not gd
                        and x.get("kind", "delete") not in ("skip", "report"))
             tried = False
-            for a in actions:
+            for a, guarded in zip(actions, guard):
                 acls = a.get("cls", _label)
                 path = a.get("path", "-")
                 planned = a.get("bytes", 0) or 0
@@ -2624,7 +2685,6 @@ def execute_drain(status, home, planners, recheck_fn, do_action_fn,
                     rung_lines.append(_log_line(now, "REPORT", path, planned,
                                                 reason or "report-only"))
                     continue
-                guarded = _protected_owner_path(path, home)
                 if guarded:
                     rung_lines.append(_log_line(
                         now, "REFUSE-PROTECTED", path, planned,
@@ -3199,7 +3259,8 @@ def _run_prevention_pass(status, home, now, dry_run, scratch_rows,
     if lock is _LOCK_UNAVAILABLE:
         logs.append("disk-guard: prevention lock uncreatable — draining lockless")
     try:
-        prev_planners = _prevention_planners(home, now, scratch_rows=scratch_rows)
+        prev_planners = _prevention_planners(home, now, scratch_rows=scratch_rows,
+                                             wt_cache=not dry_run)
 
         def prev_recheck():
             return disk_status(statvfs_fn=statvfs_fn, dev_fn=dev_fn,
