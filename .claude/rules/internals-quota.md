@@ -11,6 +11,7 @@ paths:
   - "cli_logrotate_owner.py"
   - "cli_fail2ban.py"
   - "cli_sshd_maxstartups.py"
+  - "cli_cargo_jobs.py"
 ---
 
 ### airuleset internals — per-user quota on shared-stream boxes (#950 / #1140)
