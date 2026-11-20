@@ -1690,12 +1690,27 @@ GOAL_INDICATOR = "◎ /goal"          # CC's own armed-goal footer indicator
 # is NOT matched (its glyph would re-darken; add it if seen live); (2) a
 # banner render whose wording differs from `Update installed · Restart to
 # update|apply` likewise re-darkens.
+# #1381 (live CC 2.1.327, 20.11.2026): the indicator is now one ` · `-separated
+# SEGMENT of a chrome line, e.g. `You've used 91% of your weekly limit · resets
+# Nov 23, 11am (Europe/Prague) · ◎ /goal active (7s) · ✔ Update installed ·
+# /restart to apply`. Every OTHER segment must be a known chrome shape, so a
+# prose line that merely puts ` · ` around a quoted indicator stays dark (#393).
+_GOAL_CHROME_SEG = (
+    r"(?:" + re.escape(STASH_MARKER)
+    + r"|(?:[✔✓]\s*)?Update installed"
+    + r"|/?[Rr]estart to (?:update|apply)"
+    + r"|You've used \d{1,3}% of your [\w -]{0,20}limit"
+    + r"|resets [^·]{1,60}?"
+    + r"|stop hook reported a problem"
+    + r")")
 _GOAL_HEADER_INDICATOR_RX = re.compile(
     r"^(?:" + re.escape(STASH_MARKER + " · ")
     + r"|(?:[✔✓]\s*)?Update installed\s*·\s*Restart to (?:update|apply)"
+    + r"|(?:" + _GOAL_CHROME_SEG + r"\s*·\s*)+"
     + r")?"
     + re.escape(GOAL_INDICATOR)
-    + r"( active(\s\(\d{1,3}[smhd]\))?)?$")
+    + r"( active(\s\(\d{1,3}[smhd]\))?)?"
+    + r"(?:\s*·\s*" + _GOAL_CHROME_SEG + r")*$")
 _GOAL_LCS_OPEN = "<local-command-stdout>"
 _GOAL_LCS_CLOSE = "</local-command-stdout>"
 
