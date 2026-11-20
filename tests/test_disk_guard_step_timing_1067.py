@@ -138,7 +138,7 @@ def test_shared_stream_quota_drift_and_prevention_are_named(tmp_path, monkeypatc
     proactive prevention pass (#939) both run, and a slow one names itself."""
     clock, calls = FakeClock(), []
     monkeypatch.setattr(dg, "_prevention_planners",
-                        lambda _h, _n, scratch_rows=None: [_rung(clock, 6.0, calls, "tmp-test")])
+                        lambda _h, _n, scratch_rows=None, **_k: [_rung(clock, 6.0, calls, "tmp-test")])
     uid = os.getuid()
     now = 60.0 * (uid % 10)           # this uid's staggered first-drift minute slot
 
@@ -250,7 +250,7 @@ def test_completed_poll_still_stamps_and_gates_the_next(tmp_path):
 
 def test_prevention_pass_respects_the_budget(tmp_path, monkeypatch):
     clock, calls = FakeClock(), []
-    monkeypatch.setattr(dg, "_prevention_planners", lambda _h, _n, scratch_rows=None: [
+    monkeypatch.setattr(dg, "_prevention_planners", lambda _h, _n, scratch_rows=None, **_k: [
         _rung(clock, 46.0, calls, "tmp-test"), _rung(clock, 0.0, calls, "scratch"),
         _rung(clock, 0.0, calls, "worktree")])
     logs = dg.run_disk_guard(
@@ -392,7 +392,7 @@ def test_rung_actions_count_toward_the_rung_step(tmp_path):
 
 def test_slow_quota_read_is_named(tmp_path, monkeypatch):
     clock = FakeClock()
-    monkeypatch.setattr(dg, "_prevention_planners", lambda _h, _n, scratch_rows=None: [])
+    monkeypatch.setattr(dg, "_prevention_planners", lambda _h, _n, scratch_rows=None, **_k: [])
 
     def _slow_usage():
         clock.advance(7.0)
@@ -527,7 +527,7 @@ def test_cut_short_prevention_does_not_skip_rungs_of_the_next_drain(tmp_path, mo
     """Ladders share rung labels: a resume point written by the prevention
     ladder must not make the next full drain start in its middle."""
     clock, calls = FakeClock(), []
-    monkeypatch.setattr(dg, "_prevention_planners", lambda _h, _n, scratch_rows=None: [
+    monkeypatch.setattr(dg, "_prevention_planners", lambda _h, _n, scratch_rows=None, **_k: [
         _rung(clock, 50.0, calls, "tmp-test"), _rung(clock, 0.0, calls, "scratch")])
     dg.run_disk_guard(
         now=10_000.0, home=str(tmp_path), dry_run=False, statvfs_fn=_statvfs(72),
@@ -537,8 +537,8 @@ def test_cut_short_prevention_does_not_skip_rungs_of_the_next_drain(tmp_path, mo
     assert calls == ["tmp-test"]
     clock2, calls2 = FakeClock(), []
     _poll(tmp_path, clock2, [_rung(clock2, 0.0, calls2, x)
-                             for x in ("session-scratch", "scratch", "uploads")], now=10_060.0)
-    assert calls2 == ["session-scratch", "scratch", "uploads"]
+                             for x in ("session-scratch", "scratch", "user-cache")], now=10_060.0)
+    assert calls2 == ["session-scratch", "scratch", "user-cache"]
 
 
 def test_fs_ladder_leaves_another_ladders_resume_point(tmp_path):

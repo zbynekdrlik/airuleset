@@ -425,7 +425,7 @@ def test_dry_run_poll_never_uses_the_cache(tmp_path, monkeypatch, dry_run):
     monkeypatch.setattr(dg, "_default_planners",
                         lambda _h, _n, scratch_rows=None, **kw: kws.append(kw) or [])
     monkeypatch.setattr(dg, "_prevention_planners",
-                        lambda _h, _n, scratch_rows=None: [])
+                        lambda _h, _n, scratch_rows=None, **_k: [])
     monkeypatch.setattr(dg, "_collect_top_consumers", lambda *a, **k: [])
     dg.run_disk_guard(
         now=10_000.0, home=str(tmp_path), dry_run=dry_run, statvfs_fn=_sv(82),

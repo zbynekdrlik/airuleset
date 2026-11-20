@@ -54,7 +54,7 @@ def _ladder(clock, calls, took=None):
             clock.advance(took.get(label, 0.0))
             return []
         return (label, _p)
-    return lambda _h, _n, scratch_rows=None: [_rung(x) for x in ("tmp-test", "scratch", "worktree")]
+    return lambda _h, _n, scratch_rows=None, **_k: [_rung(x) for x in ("tmp-test", "scratch", "worktree")]
 
 
 # box shape -> (box class, used %) that takes the prevention branch

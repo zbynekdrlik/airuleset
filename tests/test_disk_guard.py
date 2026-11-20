@@ -2028,7 +2028,7 @@ class TestEscalationTop5Paths849:
             {"cls": "scratch", "path": "/big1", "bytes": 500, "kind": "delete", "reason": None},
             {"cls": "scratch", "path": "/big2", "bytes": 200, "kind": "delete", "reason": None},
             {"cls": "worktree", "path": "/wt3", "bytes": 100, "kind": "delete", "reason": None},
-            {"cls": "uploads", "path": "/up4", "bytes": 50, "kind": "skip", "reason": "too recent"},
+            {"cls": "user-cache", "path": "/up4", "bytes": 50, "kind": "skip", "reason": "too recent"},
         ]
         top = dg._top_consumers_by_path(actions, limit=5)
         assert len(top) == 3
