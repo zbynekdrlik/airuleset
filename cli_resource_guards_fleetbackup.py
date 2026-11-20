@@ -110,11 +110,13 @@ def render_fleetbackup_rrsync_wrapper(rrsync=RRSYNC_PATH, root=RRSYNC_ROOT):
     FF, CR, 0x1c-0x1f, NBSP …) and honours backslashes, sh splits on space,
     tab and newline only, so any other byte lets the two read different words
     (round 3: ``\\r--files-from=-`` served /etc). The set holds no glob,
-    quote or expansion character, so the unquoted split below is plain. Then: ``rsync --server
-    --sender``, options minus ``FLEETBACKUP_REFUSED_OPTIONS``, ``.``, and one
-    or more paths that each lie inside ``<account>/uploads`` or ``<account>/
-    .claude/work-products`` (no ``..``). rrsync gets the words we checked,
-    re-joined. The client's text is never evaluated."""
+    quote or expansion character, so the unquoted split below is plain and
+    rrsync reads the same words. ``LC_ALL=C``: sshd's default ``AcceptEnv
+    LANG LC_*`` lets the client pick the locale the pattern runs in. Then:
+    ``rsync --server --sender``, options minus ``FLEETBACKUP_REFUSED_OPTIONS``,
+    ``.``, and one or more paths that each lie inside ``<account>/uploads`` or
+    ``<account>/.claude/work-products`` (no ``..``). The client's text is
+    never evaluated."""
     refused = "|".join("%s|%s=*" % (o, o) for o in FLEETBACKUP_REFUSED_OPTIONS)
     return (
         "#!/bin/sh\n"
@@ -157,8 +159,6 @@ def render_fleetbackup_rrsync_wrapper(rrsync=RRSYNC_PATH, root=RRSYNC_ROOT):
         "    paths=$((paths + 1))\n"
         "done\n"
         '[ "$dot" -eq 1 ] && [ "$paths" -ge 1 ] || fb_refuse "no path"\n'
-        'SSH_ORIGINAL_COMMAND="$*"\n'
-        "export SSH_ORIGINAL_COMMAND\n"
         "exec %s -ro %s\n"
         % (refused, shlex.quote(rrsync), shlex.quote(root))
     )
