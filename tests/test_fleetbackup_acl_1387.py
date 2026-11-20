@@ -99,9 +99,10 @@ class TestApply(_Tmp):
                 self.assertIn("user:nobody:---", lines, (d, rel))
                 self.assertIn("other::---", lines, (d, rel))
 
-    def test_a_file_that_arrived_closed_stays_closed_and_is_reported(self):
-        """Round 2 🔴: a file born under the closed home default (or a re-created
-        tree) has mask ---; it is never silently counted as private."""
+    def test_a_file_that_arrived_closed_is_reported_and_its_own_mode_decides(self):
+        """Rounds 2-3: a file born under the closed home default (or in a
+        re-created tree) arrives with u:fb:--- and mask ---. It is reported, it
+        gets r-- like any tree file, and its owner's `chmod g+r` includes it."""
         self.apply()
         old = os.umask(0o022)
         try:
@@ -112,12 +113,15 @@ class TestApply(_Tmp):
         os.rename(self.p("report.txt"), self.p("uploads/report.txt"))
         os.rename(self.p("devel/code.py"), self.p("uploads/code.py"))   # no fleetbackup entry
         r = self.apply()
-        self.assertEqual(r.returncode, 1, r.stderr)
+        self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("arrived closed", r.stderr)
-        self.assertIn("1 file(s) in a backup tree stay closed", r.stderr)
-        self.assertEqual(entry(self.p("uploads/report.txt"), "user:nobody:"), "user:nobody:---")
+        self.assertIn("1 file(s) in a backup tree arrived closed", r.stderr)
+        self.assertEqual(entry(self.p("uploads/report.txt"), "user:nobody:"),
+                         "user:nobody:r--\t#effective:---")
         self.assertIn("user:nobody:r--", acl(self.p("uploads/code.py")))
         self.assertIn("mask::r--", acl(self.p("uploads/code.py")))
+        os.chmod(self.p("uploads/report.txt"), 0o640)   # the documented remedy
+        self.assertEqual(entry(self.p("uploads/report.txt"), "user:nobody:"), "user:nobody:r--")
 
     def test_missing_trees_are_created_and_granted(self):
         with tempfile.TemporaryDirectory() as td:
@@ -159,11 +163,13 @@ class TestApply(_Tmp):
                 os.close(os.open(self.p("uploads/" + name), os.O_CREAT | os.O_WRONLY, mode))
         finally:
             os.umask(old)
-        r = self.apply()
-        self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("user:nobody:r-x\t#effective:r--", acl(self.p("uploads/open.txt")))
         self.assertIn("other::---", acl(self.p("uploads/open.txt")))
         self.assertIn("user:nobody:r-x\t#effective:---", acl(self.p("uploads/priv.txt")))
+        r = self.apply()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("user:nobody:r--", acl(self.p("uploads/open.txt")))
+        self.assertIn("user:nobody:r--\t#effective:---", acl(self.p("uploads/priv.txt")))
 
     def test_a_group_the_owner_closed_is_never_reopened(self):
         sub = self.p("uploads/sub")
@@ -226,6 +232,12 @@ class TestApply(_Tmp):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(entry(self.h, "user:nobody:"), "user:nobody:--x")
         self.assertEqual(entry(self.p("devel"), "user:nobody:"), "user:nobody:---")
+
+    def test_a_vanished_tree_file_costs_one_re_scan(self):
+        self.box.extra_env["FBT_FAIL_ONCE"] = "/uploads/x.txt"
+        r = self.apply()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("user:nobody:r--", acl(self.p("uploads/x.txt")))
 
     def test_hold_closes_the_home_and_claude_and_opens_nothing(self):
         r = self.apply("hold")

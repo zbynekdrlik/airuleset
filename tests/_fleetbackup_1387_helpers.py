@@ -37,16 +37,45 @@ case " $* " in
             [ -n "$line" ] || exit 91
             echo "$line"; exit 0
         fi ;;
-    *" apply "*" hold "*)
-        if [ -n "${FBT_HOLD_STRIPS:-}" ]; then
-            # a hostile account: strips every ACL entry off its home, refuses the hold
-            /usr/bin/setfacl -b -- "${@: -2:1}"; exit 1
-        fi
-        [ -z "${FBT_FAIL_HOLD:-}" ] || exit 1 ;;
     *" apply "*" grant "*)
-        [ -z "${FBT_STALL_APPLY:-}" ] || sleep 30 ;;
+        [ -z "${FBT_STALL_APPLY:-}" ] || sleep 30
+        if [ -n "${FBT_SPAM_APPLY:-}" ]; then head -c 400000 /dev/zero | tr '\0' x; echo; fi
+        if [ -n "${FBT_ESC_APPLY:-}" ]; then printf '\033[2Jforged\n'; fi ;;
 esac
 exec "$@"
+'''
+
+_CHAGE = r'''#!/bin/bash
+echo "chage $*" >> "$FBT_LOG"
+[ -z "${FBT_FAIL_CHAGE:-}" ] || exit 1
+[ "$1" = -E ] || exit 2
+v="$2"; [ "$v" = -1 ] && v=""
+tmp="$FBT_SHADOW.t"
+while IFS=: read -r n p a b c d e x r; do
+    if [ "$n" = "$3" ]; then x="$v"; fi
+    echo "$n:$p:$a:$b:$c:$d:$e:$x:$r"
+done < "$FBT_SHADOW" > "$tmp"
+mv "$tmp" "$FBT_SHADOW"
+'''
+
+# root-side stat: FBT_STAT_OWNER="<path>=<name>" reports that path's owner
+# name as <name>; an empty <name> is a failed stat
+_STAT = r'''#!/bin/bash
+if [ -n "${FBT_STAT_OWNER:-}" ] && [ "$*" = "-c %U -- ${FBT_STAT_OWNER%%=*}" ]; then
+    n=${FBT_STAT_OWNER#*=}
+    [ -n "$n" ] || exit 1
+    echo "$n"; exit 0
+fi
+exec /usr/bin/stat "$@"
+'''
+
+# root-side find: fails a -printf walk whose arguments contain FBT_FAIL_FIND
+_FIND = r'''#!/bin/bash
+rc=0; /usr/bin/find "$@" || rc=$?
+if [ -n "${FBT_FAIL_FIND:-}" ]; then
+    case "$*" in *"$FBT_FAIL_FIND"*-printf*) exit 1 ;; esac
+fi
+exit "$rc"
 '''
 
 _GETENT = r'''#!/bin/bash
@@ -71,19 +100,6 @@ if [ -n "${FBT_FAIL_ONCE:-}" ] && [ ! -e "$FBT_LOG.failed-once" ]; then
     case "$*" in *"$FBT_FAIL_ONCE"*) : > "$FBT_LOG.failed-once"; echo "setfacl: vanished" >&2; exit 1 ;; esac
 fi
 exec /usr/bin/setfacl "$@"
-'''
-
-_USERMOD = r'''#!/bin/bash
-echo "usermod $*" >> "$FBT_LOG"
-[ -z "${FBT_FAIL_USERMOD:-}" ] || exit 1
-if [ "$1" = --expiredate ]; then
-    tmp="$FBT_SHADOW.t"
-    while IFS=: read -r n p a b c d e x r; do
-        if [ "$n" = "$3" ]; then x="$2"; fi
-        echo "$n:$p:$a:$b:$c:$d:$e:$x:$r"
-    done < "$FBT_SHADOW" > "$tmp"
-    mv "$tmp" "$FBT_SHADOW"
-fi
 '''
 
 _ID = r'''#!/bin/bash
@@ -122,7 +138,7 @@ class Box:
 
     def __init__(self, td, fb="nobody", accounts=(ME,), pw_status="L",
                  sudo_out="User x is not allowed to run sudo on box.", fb_sig_home=None,
-                 expiry="", paused=(), account_timeout_s=60):
+                 expiry="", paused=(), account_timeout_s=60, budget_s=None, output_cap_kib=None):
         self.td, self.fb = td, fb
         self.root = os.path.join(td, "home")
         self.fbhome = os.path.join(td, "fbhome")
@@ -149,18 +165,26 @@ class Box:
         write_exe(os.path.join(self.bindir, "runuser"), _RUNUSER)
         write_exe(os.path.join(self.bindir, "getent"), _GETENT)
         write_exe(os.path.join(self.bindir, "setfacl"), _SETFACL)
-        write_exe(os.path.join(self.bindir, "usermod"), _USERMOD)
+        write_exe(os.path.join(self.bindir, "chage"), _CHAGE)
+        write_exe(os.path.join(self.bindir, "stat"), _STAT)
+        write_exe(os.path.join(self.bindir, "find"), _FIND)
         write_exe(os.path.join(self.bindir, "id"), _ID)
         write_exe(os.path.join(self.bindir, "pkill"), 'echo "pkill $*" >> "$FBT_LOG"; exit 1')
         write_exe(os.path.join(self.bindir, "passwd"),
                   'echo "$2 %s 01/01/2026 0 99999 7 -1"' % pw_status)
         write_exe(os.path.join(self.bindir, "sudo"), "echo %r" % sudo_out)
         self.script = os.path.join(td, "fleetbackup-acl.sh")
+        script = fbm.render_fleetbackup_acl_script(
+            user=fb, home=self.fbhome, shell="/bin/sh", home_root=self.root,
+            key_uid=os.getuid(), key_line=KEYLINE, lock=self.lock, lock_wait_s=1,
+            paused=paused, account_timeout_s=account_timeout_s,
+            **({} if budget_s is None else {"budget_s": budget_s}))
+        if output_cap_kib is not None:
+            line = "FB_OUTPUT_CAP_KIB=%d\n" % fbm.FLEETBACKUP_OUTPUT_CAP_KIB
+            assert script.count(line) == 1
+            script = script.replace(line, "FB_OUTPUT_CAP_KIB=%d\n" % output_cap_kib)
         with open(self.script, "w") as f:
-            f.write(fbm.render_fleetbackup_acl_script(
-                user=fb, home=self.fbhome, shell="/bin/sh", home_root=self.root,
-                key_uid=os.getuid(), key_line=KEYLINE, lock=self.lock, lock_wait_s=1,
-                paused=paused, account_timeout_s=account_timeout_s))
+            f.write(script)
         self.mark = os.path.join(self.fbhome, ".airuleset-withdrawn")
 
     def home(self, name=ME, stream=True):

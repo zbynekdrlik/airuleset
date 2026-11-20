@@ -2,7 +2,7 @@
 command wrapper, the push leg, and its wiring into the root apply + the hourly
 quota-ceiling unit.
 
-The push leg is executed against stub useradd/getent/passwd/usermod/install
+The push leg is executed against stub useradd/getent/passwd/usermod/install/systemctl
 (never root, never a real account); the installed ACL script is a stub here
 (it has its own suite, test_fleetbackup_acl_1387.py).
 """
@@ -103,7 +103,24 @@ class TestRrsyncWrapper(unittest.TestCase):
     def test_only_paths_inside_a_tree(self):
         for path in ("u/devel/", "u/.claude/", "u/.claude/projects/x", "u/", "u", "/",
                      "/etc/passwd", "u/uploads/../devel", "u/uploads/..", "../etc",
-                     "U-Pper/uploads/", "u/uploadsX/", "u/.claude/work-productsX"):
+                     "U-Pper/uploads/", "u/uploadsX/", "u/.claude/work-productsX",
+                     "uploads", "uploads/x", "a.b/uploads/", "./uploads/", ".x/uploads/"):
+            self.assert_refused("%s . %s" % (PULL, path))
+
+    def test_a_byte_only_rrsync_splits_on_is_refused(self):
+        """Round 3 🔴: rrsync splits on every Python \\s and honours a
+        backslash, sh splits on space, tab and newline only. A VT between two
+        words was one allowed option to the wrapper and `--files-from=-` to
+        rrsync, which then served /etc through a planted symlink."""
+        for sep in ("\x0b", "\x0c", "\r", "\x1c", "\x1d", "\x1e", "\x1f", "\t", "\n",
+                    "\x85", "\xa0", "\u2003"):
+            self.assert_refused("%s%s--files-from=- . u/uploads/" % (PULL, sep))
+            self.assert_refused("%s . u/uploads/%s/etc/passwd" % (PULL, sep))
+
+    def test_no_quote_glob_or_escape_character_passes(self):
+        for path in ("u/uploads/a\\ b", "u/uploads/*", "u/uploads/?", "u/uploads/[a]",
+                     '"u/uploads/x"', "'u/uploads/x'", "u/uploads/~x", "u/uploads/$HOME",
+                     "u/uploads/x;id", "u/uploads/x|id", "u/uploads/{a,b}"):
             self.assert_refused("%s . %s" % (PULL, path))
 
     def test_only_a_read_only_pull(self):
@@ -213,8 +230,7 @@ class TestScriptInvariants(unittest.TestCase):
         """Every GRANT runs as the account; the only root setfacl is the
         deny-only fb_root_deny (-n: the mask is never recalculated, `---`:
         nothing can open, whatever path it lands on)."""
-        account_side = {"fb_traverse", "fb_tree", "fb_grant_files", "fb_close", "fb_close_kids",
-                        "fb_apply"}
+        account_side = {"fb_traverse", "fb_tree", "fb_close", "fb_close_kids", "fb_apply"}
         call = re.compile(r"\bsetfacl\s+-")
         self.assertGreater(len(self.fn), 25)
         for name, body in self.fn.items():
@@ -227,10 +243,16 @@ class TestScriptInvariants(unittest.TestCase):
         runs = re.findall(r"[^\n]*runuser -u[^\n]*", self.s)
         self.assertEqual(len(runs), 2, runs)
         for line in runs:
-            self.assertRegex(line, r"timeout -k 10 \"\$FB_(ACCOUNT|CHECK)_TIMEOUT\" runuser -u ")
+            self.assertRegex(line, r"timeout -k 10 \"\$t\" runuser -u ")
             self.assertIn("-- env -i PATH=", line)
         self.assertIn('runuser -u "$u"', self.fn["fb_run_account"])
+        self.assertIn('t=$(fb_cut "$FB_ACCOUNT_TIMEOUT" 1)', self.fn["fb_run_account"])
         self.assertIn('runuser -u "$FB"', self.fn["fb_as_fb"])
+        self.assertIn('t=$(fb_cut "$1" 30)', self.fn["fb_as_fb"])
+        calls = re.findall(r"fb_as_fb [^\n]*", self.s)
+        self.assertEqual(len(calls), 5, calls)
+        for c in calls:
+            self.assertRegex(c, r'^fb_as_fb "\$FB_(CHECK_TIMEOUT|QUICK_CHECK)" check\b', c)
 
     def test_every_setfacl_is_physical(self):
         calls = re.findall(r"\bsetfacl( -[A-Za-z]+)+", self.s)
@@ -254,8 +276,8 @@ class TestScriptInvariants(unittest.TestCase):
         self.assertIn("d:u:$1:r-x,d:g::---,d:o::---", self.fn["fb_tree"])
 
     def test_files_never_get_their_mask_recalculated(self):
-        self.assertIn('setfacl -P --restore="$rf"', self.fn["fb_grant_files"])
-        self.assertIn('if (!hasmask) print "mask::" gp', self.s)
+        self.assertIn('-type f -exec setfacl -P -n -m "u:$1:r--" -- {} +', self.fn["fb_tree"])
+        self.assertNotIn("--restore", self.s)    # round 3: it rewrote the whole ACL
         self.assertIn('setfacl -P -n -m "u:$fb:---"', self.fn["fb_close"])
         self.assertIn('setfacl -P -n -m "u:$1:---"', self.fn["fb_close_kids"])
 
@@ -267,7 +289,9 @@ class TestScriptInvariants(unittest.TestCase):
     def test_account_side_output_cannot_forge_a_line_or_hold_a_pipe(self):
         run = self.fn["fb_run_account"]
         self.assertIn('>"$out" 2>&1', run)
-        self.assertIn('fb_prefix "$u" <"$out"', run)
+        self.assertIn('ulimit -f "$FB_OUTPUT_CAP_KIB"', run)
+        self.assertIn('head -c 32768 -- "$out" | head -n 200 | fb_prefix "$u"', run)
+        self.assertIn("s/[^[:print:]]/?/g", self.fn["fb_prefix"])
         self.assertNotIn("fb_as ", self.fn["fb_account"])
 
     def test_the_refresh_lock_is_root_only(self):
@@ -282,7 +306,8 @@ class TestScriptInvariants(unittest.TestCase):
             self.assertLess(refresh.index(before), restore, before)
 
 
-def _push_box(td, passwd_line=None, pw="L", rrsync=True, wrapper=True, acl_rc=0):
+def _push_box(td, passwd_line=None, pw="L", rrsync=True, wrapper=True, systemctl_rc=0,
+              aquota=True):
     """Stubs for the push leg; returns (script_path, env, paths)."""
     bindir = os.path.join(td, "bin")
     os.makedirs(bindir)
@@ -301,8 +326,13 @@ def _push_box(td, passwd_line=None, pw="L", rrsync=True, wrapper=True, acl_rc=0)
     write_exe(os.path.join(bindir, "usermod"), 'echo "usermod $*" >> %s' % log)
     write_exe(os.path.join(bindir, "install"),
               'echo "install $*" >> %s; mkdir -p "${@: -1}"' % log)
+    write_exe(os.path.join(bindir, "systemctl"),
+              'echo "systemctl $*" >> %s; exit %d' % (log, systemctl_rc))
     acl = os.path.join(td, "acl.sh")
-    write_exe(acl, 'echo "acl-run $*" >> %s; exit %d' % (log, acl_rc))
+    write_exe(acl, 'echo "acl-run $*" >> %s' % log)
+    aq = os.path.join(td, "aquota.user")
+    if aquota:
+        open(aq, "w").close()
     rr = os.path.join(td, "rrsync")
     if rrsync:
         write_exe(rr, "exit 0")
@@ -310,7 +340,7 @@ def _push_box(td, passwd_line=None, pw="L", rrsync=True, wrapper=True, acl_rc=0)
     if wrapper:
         write_exe(wr, "exit 0")
     block = fbm.render_fleetbackup_push_block(acl_script=acl, wrapper=wr, user="fbt",
-                                              home=home, rrsync=rr)
+                                              home=home, rrsync=rr, aquota=aq)
     script = os.path.join(td, "push.sh")
     with open(script, "w") as f:
         f.write("set -euo pipefail\n" + block + "\n"
@@ -330,7 +360,7 @@ def _log(p):
 
 
 class TestPushLeg(unittest.TestCase):
-    def test_fresh_box_creates_the_system_account_then_refreshes(self):
+    def test_fresh_box_creates_the_system_account_then_queues_the_refresh(self):
         with tempfile.TemporaryDirectory() as td:
             script, env, p = _push_box(td, passwd_line="")
             r = _run(script, env)
@@ -340,7 +370,9 @@ class TestPushLeg(unittest.TestCase):
                           "--comment %s fbt" % (p["home"], fbm.FLEETBACKUP_GECOS), log)
             self.assertIn("install -d -o root -g root -m 0755 %s" % p["home"], log)
             self.assertIn("install -d -o root -g root -m 0755 %s/.ssh" % p["home"], log)
-            self.assertEqual(log[-1], "acl-run ")
+            self.assertEqual(log[-1], "systemctl start --no-block %s" % fbm.FLEETBACKUP_REFRESH_UNIT)
+            self.assertFalse(any(ln.startswith("acl-run") for ln in log), "the push never waits")
+            self.assertIn("queued in %s" % fbm.FLEETBACKUP_REFRESH_UNIT, r.stdout)
 
     def test_existing_account_is_not_recreated(self):
         with tempfile.TemporaryDirectory() as td:
@@ -355,7 +387,7 @@ class TestPushLeg(unittest.TestCase):
             r = _run(script, env)
             self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
             self.assertIn("not airuleset's", r.stderr)
-            self.assertFalse(any(ln.startswith(("useradd", "usermod", "install", "acl-run"))
+            self.assertFalse(any(ln.startswith(("useradd", "usermod", "install", "systemctl"))
                                  for ln in _log(p)))
 
     def test_an_unlocked_password_is_locked(self):
@@ -380,24 +412,34 @@ class TestPushLeg(unittest.TestCase):
             os.symlink(td, p["home"])
             r = _run(script, env)
             self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
-            self.assertFalse(any(ln.startswith("acl-run") for ln in _log(p)))
+            self.assertFalse(any(ln.startswith("systemctl") for ln in _log(p)))
 
-    def test_a_busy_refresh_lock_is_loud_but_not_a_failure(self):
-        """The hourly unit is running the same refresh right now."""
+    def test_no_quota_means_no_refresh_and_fails_loud(self):
+        """The hourly unit carries the refresh and needs /aquota.user."""
         with tempfile.TemporaryDirectory() as td:
-            script, env, p = _push_box(td, acl_rc=fbm.FLEETBACKUP_LOCK_BUSY_RC)
+            script, env, p = _push_box(td, aquota=False)
             r = _run(script, env)
-            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-            self.assertIn("refresh lock busy", r.stderr)
-            self.assertNotIn("FLEETBACKUP FAILED", r.stderr)
+            self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+            self.assertIn("quota is not provisioned", r.stderr)
+            self.assertFalse(any(ln.startswith("systemctl") for ln in _log(p)))
             self.assertTrue(os.path.exists(p["after"]), "a later guard step was skipped")
 
-    def test_a_failed_refresh_never_skips_a_later_step(self):
+    def test_a_missing_installed_script_changes_nothing(self):
         with tempfile.TemporaryDirectory() as td:
-            script, env, p = _push_box(td, acl_rc=2)
+            script, env, p = _push_box(td, passwd_line="")
+            os.unlink(os.path.join(td, "acl.sh"))
             r = _run(script, env)
-            self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
-            self.assertIn("FLEETBACKUP FAILED rc=2", r.stderr)
+            self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+            self.assertIn("nothing changed", r.stderr)
+            self.assertEqual(_log(p), [])
+
+    def test_a_refresh_that_cannot_be_queued_never_skips_a_later_step(self):
+        with tempfile.TemporaryDirectory() as td:
+            script, env, p = _push_box(td, systemctl_rc=5)
+            r = _run(script, env)
+            self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+            self.assertIn("could not queue", r.stderr)
+            self.assertIn("FLEETBACKUP FAILED rc=1", r.stderr)
             self.assertTrue(os.path.exists(p["after"]), "a later guard step was skipped")
 
 
@@ -415,7 +457,9 @@ class TestWiring(unittest.TestCase):
         s = crg.build_apply_script()
         leg = fbm.render_fleetbackup_push_block()
         self.assertEqual(s.count(leg), 1)
-        self.assertIn("/bin/bash %s\n" % fbm.FLEETBACKUP_ACL_SCRIPT_PATH, leg)
+        self.assertIn("systemctl start --no-block airuleset-quota-ceiling.service ", leg)
+        self.assertEqual(fbm.FLEETBACKUP_REFRESH_UNIT, os.path.basename(crgq.QUOTA_CEILING_SERVICE_PATH))
+        self.assertNotIn("/bin/bash %s" % fbm.FLEETBACKUP_ACL_SCRIPT_PATH, leg)
         self.assertNotIn(crg.QUOTA_LOCK_PATH, leg)
         self.assertLess(s.index("per-user ext4 disk quota"), s.index(leg))
         self.assertLess(s.index(leg), s.index("shared Playwright browsers"))
@@ -477,7 +521,14 @@ class TestQuotaLockIsRootOnly(unittest.TestCase):
     """#1387 review: any local user could flock a world-readable quota lock
     and stall every quota writer (and, before the release, the refresh)."""
 
-    def _run_preamble(self, td, existing_mode=None):
+    def _no_chmod_env(self, td):
+        """A PATH whose chmod does nothing: what is left is the umask."""
+        bindir = os.path.join(td, "bin")
+        os.makedirs(bindir)
+        write_exe(os.path.join(bindir, "chmod"), "exit 0")
+        return dict(os.environ, PATH=bindir + ":" + os.environ.get("PATH", ""))
+
+    def _run_preamble(self, td, existing_mode=None, env=None):
         lock = os.path.join(td, "quota.lock")
         aq = os.path.join(td, "aquota.user")
         open(aq, "w").close()
@@ -487,9 +538,22 @@ class TestQuotaLockIsRootOnly(unittest.TestCase):
         s = crgq._render_quota_script_preamble("t", "h", "w") + "exit 0\n"
         s = s.replace(crgq.QUOTA_LOCK_PATH, lock).replace("/aquota.user", aq)
         r = subprocess.run(["bash", "-c", "umask 022\n" + s], capture_output=True, text=True,
-                           timeout=30)
+                           timeout=30, env=env)
         self.assertEqual(r.returncode, 0, r.stderr)
         return lock
+
+    def test_the_lock_is_born_root_only_not_only_chmod_ed_later(self):
+        with tempfile.TemporaryDirectory() as td:
+            lock = self._run_preamble(td, env=self._no_chmod_env(td))
+            self.assertEqual(os.stat(lock).st_mode & 0o777, 0o600)
+        with tempfile.TemporaryDirectory() as td:
+            lock = os.path.join(td, "quota.lock")
+            s = ("set -euo pipefail\numask 022\nquota_fail=0\n"
+                 + crgq._render_quota_apply_lock_block().replace(crgq.QUOTA_LOCK_PATH, lock) + "\n")
+            r = subprocess.run(["bash", "-c", s], capture_output=True, text=True, timeout=30,
+                               env=self._no_chmod_env(td))
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual(os.stat(lock).st_mode & 0o777, 0o600)
 
     def test_the_script_preamble_creates_and_keeps_it_0600(self):
         for existing in (None, 0o644):
