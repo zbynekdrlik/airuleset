@@ -299,7 +299,7 @@ class TestScriptInvariants(unittest.TestCase):
         for w in walks:
             self.assertIn('! -user "$me" -prune -o ', w)
         self.assertIn('[ "$(stat -c %U -- "$2" 2>/dev/null || true)" != "$me" ]', tree)
-        self.assertIn('-user "$3" -print0', self.fn["fb_close_kids"])
+        self.assertEqual(self.fn["fb_close_kids"].count('-user "$3" -print0'), 2)   # home and .claude
         self.assertIn('me=$(stat -c %U -- "$h" 2>/dev/null)', self.fn["fb_apply"])
 
     def test_a_cut_timeout_is_never_zero(self):
