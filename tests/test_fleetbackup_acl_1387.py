@@ -465,6 +465,8 @@ class TestRefresh(_Tmp):
 
     def test_an_unlocked_password_withdraws_and_touches_no_home(self):
         box, h = self.box(pw_status="P")
+        with open(box.keys, "w") as f:      # a live key from an earlier clean refresh
+            f.write(KEYLINE + "\n")
         r = box.run()
         self.assert_withdrawn(box, r)
         self.assertFalse(any(c.startswith(("nobody ", ME + " ")) for c in box.calls()))
@@ -592,7 +594,13 @@ class TestRefresh(_Tmp):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         for rel in ("devel", ".bashrc", ".claude/settings.json"):
             self.assertEqual(entry(os.path.join(h, rel), "user:daemon:"), "user:daemon:---", rel)
+            self.assertIn("root-setfacl -P -n -m u:daemon:--- -- %s" % os.path.join(h, rel),
+                          box.calls(), rel)
         self.assertEqual(entry(h, "user:daemon:"), "user:daemon:--x")
+        # root only ever denies: no other root-side setfacl ran
+        root_calls = [c for c in box.calls() if c.startswith("root-setfacl ")]
+        self.assertTrue(all(c.startswith("root-setfacl -P -n -m u:daemon:--- -- ") for c in root_calls),
+                        root_calls)
 
     def test_a_child_root_cannot_close_holds_the_home(self):
         box = Box(self.td, fb="daemon", accounts=("nobody",))

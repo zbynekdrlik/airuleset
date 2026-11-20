@@ -48,8 +48,10 @@ done < "$db"
 exit 2
 '''
 
-# root-side setfacl (on the test PATH): fails on a path containing FBT_FAIL_SETFACL
+# root-side setfacl (on the test PATH; the account side runs with a clean PATH
+# and never reaches it): logged, fails on a path containing FBT_FAIL_SETFACL
 _SETFACL = r'''#!/bin/bash
+echo "root-setfacl $*" >> "$FBT_LOG"
 if [ -n "${FBT_FAIL_SETFACL:-}" ]; then
     case "$*" in *"$FBT_FAIL_SETFACL"*) echo "setfacl: forced failure" >&2; exit 1 ;; esac
 fi
