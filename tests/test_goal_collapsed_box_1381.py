@@ -255,7 +255,8 @@ class CollapsingBoxFake(DeliverGoalFakeTmux):
     FOOT = ["  wk 91%(3d)  opus5.5  I 24▲  ctx 735K  caveman",
             "  ⏵⏵ bypass permissions on · 1 shell · ↓ to manage"]
 
-    def __init__(self, spinner=False, client_activity=None, lag=False, **kw):
+    def __init__(self, spinner=False, client_activity=None, lag=False,
+                 session_activity=1, **kw):
         bare = "\n".join(self.HEAD + ["─" * self.COLS, "❯", "─" * self.COLS]
                          + self.FOOT) + "\n"
         super().__init__([(PID, "claude", CWD, "111")], bare, model_type=True,
@@ -263,6 +264,7 @@ class CollapsingBoxFake(DeliverGoalFakeTmux):
         self.spinner = spinner
         self.client_activity = client_activity     # epoch of an attached client's input
         self.lag = lag                             # the last row never redraws
+        self.session_activity = session_activity   # last human attach / key (epoch)
 
     def _render_wrapped(self):
         rows = _cc_rows(self.box, self.COLS)
@@ -283,6 +285,8 @@ class CollapsingBoxFake(DeliverGoalFakeTmux):
             return ""
         if "display-message" in argv and argv[-1] == "#{pane_width}":
             return "%d\n" % self.COLS
+        if "display-message" in argv and argv[-1] == "#{session_activity}":
+            return "%d\n" % self.session_activity
         if "list-clients" in argv:
             return "" if self.client_activity is None else "%d\n" % self.client_activity
         return super().__call__(argv, timeout)
@@ -341,37 +345,77 @@ class DeliverGoalArmsThroughACollapsedBox(unittest.TestCase):
         proj, tpath = _project(self, human_prompt="/autopilot")
         now = time.time()
         fake = CollapsingBoxFake(transcript_path=str(tpath), initial_box=TEXT,
-                                 client_activity=now - 600)   # last key before we typed
+                                 session_activity=now - 600)   # his last key: before our type
         word = _deliver(self, fake, proj, state=_typed_state(now), now=now)
         self.assertEqual(word, "sent", fake.keys())
         self.assertEqual(fake.keys(), ["Enter"])     # no C-s, no retype, no clear
 
-    def _refused(self, box, state, client_activity=None):
+    def _refused(self, box, state, session_activity=1):
         proj, tpath = _project(self, human_prompt="/autopilot")
         fake = CollapsingBoxFake(transcript_path=str(tpath), initial_box=box,
-                                 client_activity=client_activity)
+                                 session_activity=session_activity)
         word = _deliver(self, fake, proj, state=state, now=self.now)
         self.assertEqual(word, "skip:collapsed-unsubmitted", fake.keys())
         self.assertEqual(fake.sent, [])               # no Enter, and never a C-s stash
-        self.assertIn(word, goal._GOAL_KEYSTROKE_SKIPS)   # counted: no livelock
+        self.assertNotIn(word, goal._GOAL_KEYSTROKE_SKIPS)   # zero keys: never counted (#611)
 
     def test_without_our_typed_record_a_collapsed_goal_gets_no_key(self):
         self.now = time.time()
         self._refused(TEXT, {})
 
+    def test_a_record_for_another_text_proves_nothing(self):
+        self.now = time.time()
+        self._refused(TEXT, _typed_state(self.now, text="/goal reply ok, then stop"))
+
     def test_a_head_swallowed_collapsed_box_gets_no_key(self):
         self.now = time.time()                   # #720: a junk prompt, never submitted
         self._refused(TEXT[1:], {})
 
-    def test_any_client_input_since_we_typed_vetoes_the_hidden_head(self):
-        self.now = time.time()                   # the owner may have edited the head
+    def test_any_human_attach_or_key_since_we_typed_vetoes_the_hidden_head(self):
+        # the owner may have edited the hidden head and detached again (no client
+        # listed any more); tmux keeps `session_activity`
+        self.now = time.time()
         self._refused("NIE, toto nespúšťaj, chcem iné zadanie: " + TEXT,
-                      _typed_state(self.now), client_activity=self.now - 60)
-        self._refused(TEXT, _typed_state(self.now), client_activity=self.now - 60)
+                      _typed_state(self.now), session_activity=self.now - 60)
+        self._refused(TEXT, _typed_state(self.now), session_activity=self.now - 60)
+
+    def test_the_veto_is_anchored_at_our_record(self):
+        self.now = time.time()                   # input 6 min ago, after a 10-min-old record
+        self._refused(TEXT, _typed_state(self.now, ago=600),
+                      session_activity=self.now - 360)
 
     def test_a_doubled_goal_fails_the_hidden_row_count(self):
         self.now = time.time()
         self._refused(TEXT + " " + TEXT, _typed_state(self.now))
+
+    def test_the_submit_recheck_refuses_a_doubled_box(self):
+        fake = CollapsingBoxFake(initial_box=TEXT + " " + TEXT)
+        self.assertFalse(wd.submit_own_goal_verified(PID, TEXT, run=fake,
+                                                     sleep_fn=lambda *_: None))
+        self.assertEqual(fake.sent, [])
+
+    def test_a_keyed_but_unconfirmed_submit_is_counted(self):
+        proj, tpath = _project(self, human_prompt="/autopilot")
+        now = time.time()
+        fake = CollapsingBoxFake(transcript_path=str(tpath), initial_box=TEXT,
+                                 enters_swallowed=2)
+        word = _deliver(self, fake, proj, state=_typed_state(now), now=now)
+        self.assertEqual(fake.keys(), ["Enter", "Escape", "Enter"])
+        self.assertIn(word, goal._GOAL_KEYSTROKE_SKIPS)
+
+    def test_a_record_is_written_only_when_a_key_reached_the_box(self):
+        proj, tpath = _project(self, human_prompt="/autopilot")
+        for typed in (False, True):
+            def fake_send(*a, out=None, **k):
+                if typed:
+                    out["typed"] = True
+                return False
+            state = {}
+            with unittest.mock.patch.object(goal, "_send_goal_verified", fake_send):
+                _deliver(self, CollapsingBoxFake(transcript_path=str(tpath)), proj,
+                         state=state)
+            with self.subTest(typed=typed):
+                self.assertEqual(PID in state.get("goal_collapsed_typed", {}), typed)
 
     def test_an_unconfirmed_type_records_it_and_the_next_sweep_submits(self):
         proj, tpath = _project(self, human_prompt="/autopilot")
@@ -415,6 +459,21 @@ class DeliverGoalArmsThroughACollapsedBox(unittest.TestCase):
                                  spinner=True)
         self.assertEqual(_deliver(self, fake, proj), "skip:busy")
         self.assertEqual(fake.sent, [])
+
+    def test_with_a_record_his_earlier_autopilot_keys_do_not_veto(self):
+        # an uncollapsed own goal we typed: the veto is anchored at our record,
+        # so his /autopilot keystrokes before it never stash our own /goal
+        proj, tpath = _project(self, human_prompt="/autopilot")
+        now = time.time()
+        short = "/goal work the backlog until every issue is closed"
+        fake = CollapsingBoxFake(transcript_path=str(tpath), initial_box=short,
+                                 client_activity=now - 180, session_activity=now - 180)
+        word = goal.deliver_goal(SID, CWD, short, "full", run=fake, projects_dir=proj,
+                                 now=now, state=_typed_state(now, text=short, ago=120),
+                                 request_ts=now - 60, sleep_fn=lambda *_: None,
+                                 origin="self-callback")
+        self.assertEqual(word, "sent", fake.keys())
+        self.assertNotIn("C-s", fake.keys())
 
     def test_the_owner_arm_submits_its_own_uncollapsed_goal_despite_the_prompt(self):
         # #566's submit-in-place vetoed on the 30-min recent-human window, which
