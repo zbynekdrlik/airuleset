@@ -892,12 +892,15 @@ def render_fleetbackup_push_block(acl_script=FLEETBACKUP_ACL_SCRIPT_PATH,
     )
 
 
-def render_fleetbackup_hourly_call(acl_script=FLEETBACKUP_ACL_SCRIPT_PATH):
+def render_fleetbackup_hourly_call(acl_script=FLEETBACKUP_ACL_SCRIPT_PATH, user=FLEETBACKUP_USER,
+                                   home=FLEETBACKUP_HOME, shell=FLEETBACKUP_SHELL):
     """The hourly quota-ceiling script's call, AFTER its limits block: it
     releases the quota lock (fd 9) first, because the refresh takes its own and
     may walk large trees. A busy refresh lock means another refresh (a manual
-    run) holds it: LOUD, not a failure. A missing script fails (the same push
-    installs both). Leaves the status in ``fb_rc``."""
+    run) holds it: LOUD, not a failure. A missing script fails where OUR
+    fleetbackup account exists (the same push installs both; a foreign one
+    with that name, like the controller's #1351 account, does not count), and
+    is only a warning elsewhere. Leaves the status in ``fb_rc``."""
     q = shlex.quote(acl_script)
     return (
         '# #1387: the fleetbackup ACL refresh (hourly, and queued by every push),\n'
@@ -909,11 +912,12 @@ def render_fleetbackup_hourly_call(acl_script=FLEETBACKUP_ACL_SCRIPT_PATH):
         '    /bin/bash %s || fb_rc=$?\n'
         'else\n'
         '    echo "  ⚠ quota-ceiling: %s missing — fleetbackup ACL refresh not run" >&2\n'
-        '    fb_rc=1\n'
+        '    if [ "$(getent passwd %s | cut -d: -f6,7)" = %s ]; then fb_rc=1; fi\n'
         'fi\n'
         'if [ "$fb_rc" -eq %d ]; then\n'
         '    echo "  ⚠ quota-ceiling: fleetbackup refresh lock busy (another refresh is running)" >&2\n'
         '    fb_rc=0\n'
         'fi\n'
-        % (q, q, acl_script, FLEETBACKUP_LOCK_BUSY_RC)
+        % (q, q, acl_script, shlex.quote(user), shlex.quote(_passwd_signature(home, shell)),
+           FLEETBACKUP_LOCK_BUSY_RC)
     )
