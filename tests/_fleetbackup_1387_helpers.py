@@ -1,0 +1,158 @@
+"""Shared harness for the #1387 fleetbackup ACL tests.
+
+The installed script runs REAL setfacl/getfacl/find on temp files owned by the
+test user, with a real system account (`nobody`, `daemon`) standing in for
+fleetbackup, because a named ACL entry needs a resolvable user. Root-only tools
+are stubs: `runuser` drops `-u <user> --` and runs the command as the test
+user — except a fleetbackup-side `check`, whose answers come from a scenario
+queue (a non-root test cannot ask the kernel as another uid; `check` itself is
+tested separately with owner-permission proxies).
+"""
+import getpass
+import os
+import pwd
+import subprocess
+
+import cli_resource_guards_fleetbackup as fbm
+
+ME = getpass.getuser()
+KEYLINE = 'from="10.0.0.1",restrict,command="/usr/bin/rrsync -ro /home" ssh-ed25519 AAAAtest k@test'
+
+_RUNUSER = r'''#!/bin/bash
+[ "$1" = -u ] || exit 90
+u="$2"; shift 2
+[ "${1:-}" = -- ] && shift
+echo "$u $*" >> "$FBT_LOG"
+case " $* " in
+    *" check "*)
+        if [ "$u" = "$FBT_FB" ] && [ -f "$FBT_QUEUE" ]; then
+            cat >/dev/null
+            line=$(head -n 1 "$FBT_QUEUE")
+            tail -n +2 "$FBT_QUEUE" > "$FBT_QUEUE.t"; mv "$FBT_QUEUE.t" "$FBT_QUEUE"
+            [ -n "$line" ] || exit 91
+            echo "$line"; exit 0
+        fi ;;
+esac
+exec "$@"
+'''
+
+_GETENT = r'''#!/bin/bash
+[ "$1" = passwd ] || exit 2
+while IFS= read -r line; do
+    [ "${line%%:*}" = "$2" ] && { echo "$line"; exit 0; }
+done < "$FBT_PASSWD"
+exit 2
+'''
+
+
+def write_exe(path, body):
+    with open(path, "w") as f:
+        f.write(body)
+    os.chmod(path, 0o755)
+
+
+def passwd_line(name, home, shell="/bin/bash"):
+    try:
+        p = pwd.getpwnam(name)
+        uid, gid = p.pw_uid, p.pw_gid
+    except KeyError:
+        uid = gid = 4242
+    return "%s:x:%d:%d::%s:%s" % (name, uid, gid, home, shell)
+
+
+class Box:
+    """A temp 'box': <td>/home/<accounts>, <td>/fbhome/.ssh, stub bin dir and
+    the rendered script with the test's fleetbackup stand-in."""
+
+    def __init__(self, td, fb="nobody", accounts=(ME,), pw_status="L",
+                 sudo_out="User x is not allowed to run sudo on box.", fb_sig_home=None):
+        self.td, self.fb = td, fb
+        self.root = os.path.join(td, "home")
+        self.fbhome = os.path.join(td, "fbhome")
+        self.ssh = os.path.join(self.fbhome, ".ssh")
+        self.keys = os.path.join(self.ssh, "authorized_keys")
+        self.bindir = os.path.join(td, "bin")
+        self.log = os.path.join(td, "runuser.log")
+        self.queue = os.path.join(td, "queue")
+        for d in (self.root, self.ssh, self.bindir):
+            os.makedirs(d, exist_ok=True)
+        os.chmod(self.fbhome, 0o755)
+        os.chmod(self.ssh, 0o755)
+        lines = [passwd_line(fb, fb_sig_home or self.fbhome, "/bin/sh")]
+        lines += [passwd_line(a, os.path.join(self.root, a)) for a in accounts]
+        self.passwd = os.path.join(td, "passwd")
+        with open(self.passwd, "w") as f:
+            f.write("\n".join(lines) + "\n")
+        write_exe(os.path.join(self.bindir, "runuser"), _RUNUSER)
+        write_exe(os.path.join(self.bindir, "getent"), _GETENT)
+        write_exe(os.path.join(self.bindir, "passwd"),
+                  'echo "$2 %s 01/01/2026 0 99999 7 -1"' % pw_status)
+        write_exe(os.path.join(self.bindir, "sudo"), "echo %r" % sudo_out)
+        self.script = os.path.join(td, "fleetbackup-acl.sh")
+        with open(self.script, "w") as f:
+            f.write(fbm.render_fleetbackup_acl_script(
+                user=fb, home=self.fbhome, shell="/bin/sh", home_root=self.root,
+                key_uid=os.getuid(), key_line=KEYLINE))
+
+    def home(self, name=ME, stream=True):
+        h = os.path.join(self.root, name)
+        os.makedirs(os.path.join(h, ".claude"), exist_ok=True)
+        if stream:
+            with open(os.path.join(h, ".claude", "airuleset-box-class"), "w") as f:
+                f.write("shared-stream\n")
+        return h
+
+    def answers(self, *lines):
+        with open(self.queue, "w") as f:
+            f.write("".join(ln + "\n" for ln in lines))
+
+    def env(self):
+        env = dict(os.environ)
+        env.update(PATH=self.bindir + ":" + env.get("PATH", ""), FBT_LOG=self.log,
+                   FBT_QUEUE=self.queue, FBT_FB=self.fb, FBT_PASSWD=self.passwd)
+        return env
+
+    def run(self, *args, stdin=None):
+        return subprocess.run(["bash", self.script, *args], env=self.env(), input=stdin,
+                              capture_output=True, text=True, timeout=120)
+
+    def calls(self):
+        if not os.path.exists(self.log):
+            return []
+        return open(self.log).read().splitlines()
+
+
+def acl(path):
+    """getfacl -c lines of `path` (absolute names, no header)."""
+    out = subprocess.run(["getfacl", "-p", "-c", "--", path], capture_output=True,
+                         text=True, check=True).stdout
+    return [ln for ln in out.splitlines() if ln]
+
+
+def entry(path, prefix):
+    """The ACL line of `path` starting with `prefix` (e.g. 'user:nobody:'), or None."""
+    for ln in acl(path):
+        if ln.startswith(prefix):
+            return ln
+    return None
+
+
+def make_layout(h):
+    """A realistic stream home: siblings that must close, the two trees, a
+    symlink child, 0600 files that must stay closed."""
+    for d, mode in (("devel", 0o755), (".private", 0o700), (".claude/projects", 0o775),
+                    ("uploads", 0o775), ("uploads/sub", 0o700),
+                    (".claude/work-products", 0o775), (".claude/work-products/a", 0o700)):
+        os.makedirs(os.path.join(h, d), exist_ok=True)
+        os.chmod(os.path.join(h, d), mode)
+    for f, mode in (("devel/code.py", 0o644), (".bashrc", 0o644),
+                    (".claude/settings.json", 0o664), ("uploads/x.txt", 0o644),
+                    ("uploads/p.txt", 0o600), ("uploads/sub/s.txt", 0o640),
+                    (".claude/work-products/a/w.md", 0o644)):
+        p = os.path.join(h, f)
+        with open(p, "w") as fh:
+            fh.write("data\n")
+        os.chmod(p, mode)
+    os.symlink("devel", os.path.join(h, "link"))
+    os.chmod(os.path.join(h, ".claude"), 0o700)
+    os.chmod(h, 0o750)
