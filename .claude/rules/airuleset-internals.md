@@ -42,7 +42,7 @@ Pôvodný 973 KB monolit bol rozbitý (#482) — dotyk súboru už neinjektuje ~
 - `skills/** agents/** profiles/** modules/** rules/**` → `.claude/rules/internals-skills-modules.md`
 - `.github/** scripts/ci_*.py tests/test_ci_*.py` → `.claude/rules/internals-ci.md`
 - `gates/** cli_concurrency.py goal_registry.py cli_lane_liveness.py` → `.claude/rules/internals-gates.md`
-- `cli_resource_guards*.py tests/test_quota*.py gates/owntranscript.py cli_question_block.py cli_disk_guard_root.py cli_logrotate_owner.py cli_fail2ban.py cli_sshd_maxstartups.py` → `.claude/rules/internals-quota.md`
+- `cli_resource_guards*.py tests/test_quota*.py gates/owntranscript.py cli_question_block.py cli_disk_guard_root.py cli_logrotate_owner.py cli_fail2ban.py cli_sshd_maxstartups.py tests/test_fleetbackup*.py` → `.claude/rules/internals-quota.md`
 - `cli_account*.py cli_accounts.py cli_project_gh_token.py cli_project_ci_sync.py cli_project_toolchain.py hooks/*project*account* tests/test_project_account*.py tests/test_project_gh_token*.py tests/test_project_ci_sync*.py tests/test_*1201.py peer_channel.py cli_peer_channel.py peer-links.json` → `.claude/rules/internals-accounts.md`
 - **hlbší archív / staré lekcie (on-demand, grep):** `.claude/rules-reference/internals-archive.md`
 
