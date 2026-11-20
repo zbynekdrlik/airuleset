@@ -116,10 +116,14 @@ def _spinner_above_box(cap):
     rows = watchdog._input_box_rows_raw(cap)
     lines = [ln.strip() for ln in (cap or "").splitlines() if ln.strip()]
     heads = [i for i, ln in enumerate(lines) if rows and ln == rows[0]]
-    if not heads:
-        return False
+    return bool(heads) and spinner_above(lines, heads[-1])
+
+
+def spinner_above(lines, idx):
+    """The #1104 walk shared with the collapsed box (#1381): up from the
+    stripped `lines[idx]` to the first content row; True when it is a spinner."""
     from watchdog import pane_text as _pt
-    for ln in list(reversed(lines[:heads[-1]]))[:25]:   # bounded, like #1104
+    for ln in list(reversed(lines[:idx]))[:25]:   # bounded, like #1104
         if (watchdog._is_separator_line(ln) or watchdog._is_border_rule(ln)
                 or watchdog._GOAL_HEADER_INDICATOR_RX.match(ln)
                 or ln.startswith(("❯", "⎿"))):   # queued rows / Tip / todo rows

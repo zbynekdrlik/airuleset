@@ -182,6 +182,7 @@ from watchdog import send_outcome as _send_outcome            # #1157 (delivery 
 from watchdog import goal_arm_failure as _arm_failure         # #1181 (visible failed arm)
 from watchdog import watch_triggers as _wt                    # #1163 (steer=watch windows)
 from watchdog import owner_stop as _owner_stop                # #1257 (owner-stop latch)
+from watchdog import collapsed_box as _cbox                  # #1381 (collapsed input box)
 from watchdog.send_outcome import (  # noqa: E402 -- #1157: moved, ONE shared undo
     janitor_undo_if_own_stranded as _janitor_undo_if_own_stranded)
 
@@ -718,10 +719,9 @@ def _await_typed(pid, text, run, sleep_fn, want=True):
     (`want=True`) or has stopped showing it (`want=False`), returning the
     final verdict. A render-settle poll, not a blind timeout: it returns
     the instant the box agrees, and a type that never appears is still
-    refused."""
+    refused. #1381: a collapsed box showing our own tail still holds `text`."""
     for i in range(GOAL_TYPE_SETTLE_POLLS):
-        landed = watchdog._typed_landed(text, watchdog._input_line_text(
-            watchdog.capture_pane(pid, run, lines=40)))
+        landed = _cbox.holds(watchdog.capture_pane(pid, run, lines=40), text)
         if landed is want:
             return landed
         if i < GOAL_TYPE_SETTLE_POLLS - 1:
@@ -893,7 +893,7 @@ def _janitor_provenance(state, pid, now):
 
 
 def _submit_stranded_own_goal(sid, cwd, text, pid, captured, tpath, run, state,
-                              now, sleep_fn, logs, nudge="goal-sweep"):
+                              now, sleep_fn, logs, nudge="goal-sweep", owner_arm=False):
     """#566 case (a) -- when the input box ALREADY holds our OWN swallowed
     COMPLETE `/goal <text>` (a prior attempt typed it but the Enter was
     swallowed/raced), COMPLETE the submit in place rather than routing it into
@@ -909,17 +909,19 @@ def _submit_stranded_own_goal(sid, cwd, text, pid, captured, tpath, run, state,
     the box holds the WHOLE literal `/goal <text>` (a truncated type fails the
     tail check and is refused). A foreign draft matches neither end and is left
     untouched. `submit_own_goal_verified` re-verifies completeness against a
-    FRESH capture right before the keystroke."""
+    FRESH capture right before the keystroke. #1381: a COLLAPSED box (no `❯`
+    row) is complete when its rows are row-exact the end of `text`
+    (`_cbox.own_tail`), and the owner's own `/autopilot` arm (`owner_arm`)
+    skips gate (2): its prompt IS the recent human (30-min window = the whole
+    request life, so this path never fired for it); #752 owner ruling."""
     if not _janitor_provenance(state, pid, now):
         return False
-    # cheap content pre-check on the capture we already hold, before the
-    # transcript read the recent-human gate does -- a foreign draft bails here.
-    head = watchdog._input_box_head_text(captured)
+    head = watchdog._input_box_head_text(captured)    # cheap pre-check first
     tail = watchdog._input_line_text(captured)
-    if not (head and head.startswith("/goal ") and text.startswith(head)
-            and tail and text.endswith(tail)):
+    if not ((head and head.startswith("/goal ") and text.startswith(head)
+             and tail and text.endswith(tail)) or _cbox.own_tail(captured, text)):
         return False
-    if _recovery_recent_human(sid, cwd, tpath, now, pid=pid, run=run):
+    if not owner_arm and _recovery_recent_human(sid, cwd, tpath, now, pid=pid, run=run):
         _log_goal_sync("SKIP recover-swallowed recent-human sid=%s cwd=%s"
                        % (sid, cwd))
         return False
@@ -1092,11 +1094,12 @@ def _goal_box_kind(captured, text):
                   draft, left completely untouched.
     Ownership is UNION-of-proofs so BOTH render shapes are recognised (the literal
     `/goal ...` a short text renders AND the placeholder a large one collapses to);
-    the frozen-text match is the proof against a human paste."""
+    the frozen-text match is the proof against a human paste. #1381: a COLLAPSED
+    box (`↑ N more`, no `❯` row) is ours/other by its rows, never "empty"."""
     occupied = watchdog.STASH_MARKER in (captured or "")
     head = watchdog._input_box_head_text(captured)
     if not head and not occupied:
-        return "empty"
+        return _cbox.box_kind(captured, text) or "empty"
     if occupied or watchdog._looks_like_own_stuck_content(head):
         return "ours"
     # #737/#1303 -- the ONE shared proof (arm-confirm cleanup + janitor use it
@@ -1281,7 +1284,7 @@ def _log_arm_confirm_fail(sid, cwd, text, pid, run, sleep_fn=None,
         _log_goal_sync("ARM-CONFIRM-FAIL sid=%s cwd=%s diag-capture-failed=%r"
                        % (sid, cwd, e))
         cap = ""
-    boundary, _bd = watchdog._classify_boundary(cap)
+    boundary, _bd = _cbox.boundary(cap, text)    # #1381: own collapsed box = input
     busy = _ops_wait_recheck._pane_busy_waiting(cap)
     armed = watchdog.pane_goal_armed(cap)
     box = _goal_box_kind(cap, text)
@@ -1295,38 +1298,28 @@ def _log_arm_confirm_fail(sid, cwd, text, pid, run, sleep_fn=None,
                    "armed=%s box=%s tage=%s"
                    % (sid, cwd, boundary, busy, armed, box, tage))
     watchdog._draft_rescue_persist(pid, cap)
-    # #737 A -- DELIVERY-TIME self-cleanup: a verify-failed / arm-confirm-fail
-    # arm can strand our OWN /goal in the box (a swallowed submit whose len-based
-    # undo did not converge, the montalu6/montalu3/gk leftover). Clean it NOW so
-    # it never becomes an unrecognizable "foreign draft" that jams the single
-    # stash slot forever. FIRST-PERSON provenance makes this safe without the
-    # janitor's `_janitor_watch_seen` gate: the delivery proved the box BARE
-    # seconds ago and typed our own text into it. Own-leftover proof = the box is
-    # a >= 80-char contiguous SUBSTRING of `text` (a SCROLLED /goal) OR the
-    # own-shape head (`_looks_like_own_stuck_content`: `/goal ` prefix / collapsed
-    # placeholder). A CLEAN idle input boundary only (never Escape/clear a live
-    # turn's render). Every outcome is falsifiable in goal-sync.log (design D).
+    if _cbox.rows(cap) is not None:   # #1381: no clear key can read a collapsed box;
+        _log_goal_sync("ARM-CONFIRM-FAIL sid=%s cwd=%s cleanup=%s (collapsed box)" % (
+            sid, cwd, "kept for the next sweep's submit" if _cbox.own_tail(cap, text)
+            else "declined"))           # a complete own /goal is submitted next sweep
+        return
+    # #737 A -- DELIVERY-TIME self-cleanup: a verify-failed arm can strand our OWN
+    # /goal (a swallowed submit whose undo did not converge); clean it NOW so it
+    # never jams the single stash slot as an unrecognisable "foreign draft".
+    # First-person provenance (the delivery proved the box BARE seconds ago, then
+    # typed our text): own = a >= 80-char contiguous SUBSTRING of `text` (a
+    # SCROLLED /goal) or the own-shape head (`/goal ` prefix / paste placeholder).
+    # A CLEAN idle input boundary only; every outcome is logged (design D).
     head = watchdog._input_box_head_text(cap)
-    # #1113 -- the BARE-BOX delivery path sets `_janitor_mark_watch(state, pid,
-    # now)` immediately before the type and never clears it on failure, so on the
-    # regression path (a swallowed submit that strands a TRUNCATED / grid-wrapped
-    # own /goal -- the >10x david1-3 report) provenance holds here and the payload
-    # is proven ours by the tail + whitespace-stripped body substring (the
-    # un-foolable teeth), not only the #737 clean substring / the `/goal ` head
-    # prefix. The two STASH/stranded-submit confirm-fail callers CLEAR the watch
-    # on their verified submit before reaching here, so the provenance branch is
-    # inert on those paths -- deliberately SAFE: a verified stash/stranded submit
-    # left the box empty, so there is nothing to clear (a truncated leftover only
-    # arises when the bare-box type itself failed to converge, which keeps its
-    # mark). `state=None`/no mark -> the provenance branch stays inert and the
-    # #737 clean-substring / head-shape fallback governs (a foreign draft, never
-    # a >=80-char substring of our payload, is untouched either way).
+    # #1113 -- the bare-box path marks the janitor watch before typing and never
+    # clears it on failure, so provenance holds here and a TRUNCATED / grid-wrapped
+    # own /goal (the >10x david1-3 report) is proven by tail + whitespace-stripped
+    # body substring. The stash/stranded callers clear the watch on a verified
+    # submit (box empty, nothing to clear), so that branch is inert there; no mark
+    # -> the #737 substring / head-shape proof governs (a foreign draft never passes).
     _now = now if now is not None else time.time()
-    # #1113 recurrence -- `match_templates=True` recognises the box as OUR leftover
-    # when it is a verbatim run of ANY rendered /goal template variant, not only
-    # this request's `text`: the 23.9 `cleanup=declined` was a fork-no-merge tail
-    # whose payload-specific tail proof missed because the handed-in payload was a
-    # different variant. Verbatim template text needs no provenance.
+    # #1113 recurrence -- `match_templates=True`: a verbatim run of ANY rendered
+    # /goal variant is ours (the 23.9 fork-no-merge tail carried another variant).
     own = (watchdog._box_is_own_leftover(
                cap, text, watchdog.GOAL_ARM_LEFTOVER_MIN_SUBSTR,
                provenance=watchdog._janitor_watch_seen(state, pid, _now),
@@ -1600,7 +1593,7 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
             out["detail"] = "transcript advanced %ds ago" % _tage_ago
         return "skip:busy-transcript"
 
-    kind, draft = watchdog._classify_boundary(captured)
+    kind, draft = _cbox.boundary(captured, text)   # #1381: own collapsed /goal = a draft
     if kind == "no-input-line":
         _log_goal_sync("SKIP no-input-line sid=%s cwd=%s" % (sid, cwd))
         return "skip:no-input-line"
@@ -1631,8 +1624,8 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
         # against `text` + the recent-human gate -- so a foreign draft or a
         # truncated own type is NEVER submitted, and a human-active pane vetoes.
         if _submit_stranded_own_goal(sid, cwd, text, pid, captured, tpath,
-                                     run, state, now, sleep_fn, logs,
-                                     nudge=_nudge):
+                                     run, state, now, sleep_fn, logs, nudge=_nudge,
+                                     owner_arm=origin == _GOAL_SELF_CALLBACK_ORIGIN):
             watchdog._janitor_clear_watch(state, pid)
             if not _await_goal_armed(pid, run, sleep_fn, tpath, _mark_off):  # #720/#1265
                 _log_goal_sync("SKIP not-armed(stranded) sid=%s cwd=%s" % (sid, cwd))
@@ -1645,6 +1638,9 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
                 return _verify_fail_word(tpath, _tage, now)
             _log_goal_sync("SEND recover-swallowed sid=%s cwd=%s" % (sid, cwd))
             return "sent"
+        if _cbox.rows(captured) is not None:     # #1381: never stash a collapsed box
+            _log_goal_sync("SKIP collapsed-unsubmitted sid=%s cwd=%s" % (sid, cwd))
+            return "skip:collapsed-unsubmitted"
         # #488: thread `state` so deliver_with_stash can DURABLY record a park
         # it definitively creates (STASH_PARKED) -> the shared janitor reclaims
         # it after ANY delay, not just the 6h generic-mark window (the gk

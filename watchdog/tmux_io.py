@@ -1246,11 +1246,11 @@ def _await_typed_landed(pane_id, text, run, sleep_fn, want=True):
     (`want=True`) or has stopped showing it (`want=False`) — the pre-Enter
     TYPE verify. Mirrors `goal._await_typed`, reproduced here to keep tmux_io's
     `import watchdog`-only module boundary (#433). Returns the final verdict; a
-    type that never renders is refused (`not want`)."""
+    type that never renders is refused (`not want`). #1381: collapsed box too."""
+    from watchdog import collapsed_box as _cb
     sleep_fn = sleep_fn or time.sleep
     for i in range(SEND_TYPE_SETTLE_POLLS):
-        landed = watchdog._typed_landed(text, watchdog._input_line_text(
-            watchdog.capture_pane(pane_id, run, lines=40)))
+        landed = _cb.holds(watchdog.capture_pane(pane_id, run, lines=40), text)
         if landed is want:
             return landed
         if i < SEND_TYPE_SETTLE_POLLS - 1:
@@ -1766,13 +1766,12 @@ def submit_own_goal_verified(pane_id, text, run=None, sleep_fn=None, logs=None,
 
     def _complete_own_goal(cap):
         # The box holds the COMPLETE literal `/goal <text>`: head row is its
-        # leading substring AND tail row is its trailing substring. A truncated
-        # type matches the head but NOT the tail -> refused.
-        head = watchdog._input_box_head_text(cap)
-        tail = watchdog._input_line_text(cap)
-        return (bool(head) and head.startswith("/goal ")
-                and text.startswith(head)
-                and bool(tail) and text.endswith(tail))
+        # leading substring AND tail row its trailing substring (a truncated type
+        # fails the tail), or (#1381) a COLLAPSED box's rows end `text` row-exact.
+        from watchdog import collapsed_box as _cb
+        head, tail = watchdog._input_box_head_text(cap), watchdog._input_line_text(cap)
+        return (bool(head) and head.startswith("/goal ") and text.startswith(head)
+                and bool(tail) and text.endswith(tail)) or _cb.own_tail(cap, text)
 
     cap = watchdog.capture_pane(pane_id, run, lines=40)
     if not _complete_own_goal(cap):
