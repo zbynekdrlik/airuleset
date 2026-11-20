@@ -6,7 +6,8 @@ fleetbackup, because a named ACL entry needs a resolvable user. Root-only tools
 are stubs: `runuser` drops `-u <user> --` and runs the command as the test
 user — except a fleetbackup-side `check`, whose answers come from a scenario
 queue (a non-root test cannot ask the kernel as another uid; `check` itself is
-tested separately with owner-permission proxies).
+tested separately with owner-permission proxies). Every record stream a check
+receives is SAVED (checks/<n>.bin), so a test can assert what was asked.
 """
 import getpass
 import os
@@ -16,7 +17,7 @@ import subprocess
 import cli_resource_guards_fleetbackup as fbm
 
 ME = getpass.getuser()
-KEYLINE = 'from="10.0.0.1",restrict,command="/usr/bin/rrsync -ro /home" ssh-ed25519 AAAAtest k@test'
+KEYLINE = 'from="10.0.0.1",restrict,command="/bin/sh /w" ssh-ed25519 AAAAtest k@test'
 
 _RUNUSER = r'''#!/bin/bash
 [ "$1" = -u ] || exit 90
@@ -26,22 +27,60 @@ echo "$u $*" >> "$FBT_LOG"
 case " $* " in
     *" check "*)
         if [ "$u" = "$FBT_FB" ] && [ -f "$FBT_QUEUE" ]; then
-            cat >/dev/null
+            n=$(ls "$FBT_CHECKS" | wc -l)
+            cat > "$FBT_CHECKS/$n.bin"
             line=$(head -n 1 "$FBT_QUEUE")
             tail -n +2 "$FBT_QUEUE" > "$FBT_QUEUE.t"; mv "$FBT_QUEUE.t" "$FBT_QUEUE"
             [ -n "$line" ] || exit 91
             echo "$line"; exit 0
         fi ;;
+    *" apply "*" hold "*)
+        [ -z "${FBT_FAIL_HOLD:-}" ] || exit 1 ;;
 esac
 exec "$@"
 '''
 
 _GETENT = r'''#!/bin/bash
-[ "$1" = passwd ] || exit 2
+case "$1" in passwd) db="$FBT_PASSWD" ;; shadow) db="$FBT_SHADOW" ;; *) exit 2 ;; esac
 while IFS= read -r line; do
     [ "${line%%:*}" = "$2" ] && { echo "$line"; exit 0; }
-done < "$FBT_PASSWD"
+done < "$db"
 exit 2
+'''
+
+# root-side setfacl (on the test PATH): fails on a path containing FBT_FAIL_SETFACL
+_SETFACL = r'''#!/bin/bash
+if [ -n "${FBT_FAIL_SETFACL:-}" ]; then
+    case "$*" in *"$FBT_FAIL_SETFACL"*) echo "setfacl: forced failure" >&2; exit 1 ;; esac
+fi
+exec /usr/bin/setfacl "$@"
+'''
+
+_USERMOD = r'''#!/bin/bash
+echo "usermod $*" >> "$FBT_LOG"
+[ -z "${FBT_FAIL_USERMOD:-}" ] || exit 1
+if [ "$1" = --expiredate ]; then
+    tmp="$FBT_SHADOW.t"
+    while IFS=: read -r n p a b c d e x r; do
+        if [ "$n" = "$3" ]; then x="$2"; fi
+        echo "$n:$p:$a:$b:$c:$d:$e:$x:$r"
+    done < "$FBT_SHADOW" > "$tmp"
+    mv "$tmp" "$FBT_SHADOW"
+fi
+'''
+
+_ID = r'''#!/bin/bash
+for a in "$@"; do
+    if [ "$a" = "$FBT_FB" ]; then
+        case "$1" in
+            -G) echo "${FBT_ID_G:-1}" ;;
+            -gn) echo "${FBT_ID_GN:-$FBT_FB}" ;;
+            -Gn) echo "${FBT_ID_GN:-$FBT_FB}" ;;
+        esac
+        exit 0
+    fi
+done
+exec /usr/bin/id "$@"
 '''
 
 
@@ -65,16 +104,20 @@ class Box:
     the rendered script with the test's fleetbackup stand-in."""
 
     def __init__(self, td, fb="nobody", accounts=(ME,), pw_status="L",
-                 sudo_out="User x is not allowed to run sudo on box.", fb_sig_home=None):
+                 sudo_out="User x is not allowed to run sudo on box.", fb_sig_home=None,
+                 expiry="", paused=()):
         self.td, self.fb = td, fb
         self.root = os.path.join(td, "home")
         self.fbhome = os.path.join(td, "fbhome")
         self.ssh = os.path.join(self.fbhome, ".ssh")
         self.keys = os.path.join(self.ssh, "authorized_keys")
         self.bindir = os.path.join(td, "bin")
-        self.log = os.path.join(td, "runuser.log")
+        self.log = os.path.join(td, "calls.log")
         self.queue = os.path.join(td, "queue")
-        for d in (self.root, self.ssh, self.bindir):
+        self.checks = os.path.join(td, "checks")
+        self.lock = os.path.join(td, "fb.lock")
+        self.extra_env = {}
+        for d in (self.root, self.ssh, self.bindir, self.checks):
             os.makedirs(d, exist_ok=True)
         os.chmod(self.fbhome, 0o755)
         os.chmod(self.ssh, 0o755)
@@ -83,8 +126,15 @@ class Box:
         self.passwd = os.path.join(td, "passwd")
         with open(self.passwd, "w") as f:
             f.write("\n".join(lines) + "\n")
+        self.shadow = os.path.join(td, "shadow")
+        with open(self.shadow, "w") as f:
+            f.write("%s:!:20000:0:99999:7::%s:\n" % (fb, expiry))
         write_exe(os.path.join(self.bindir, "runuser"), _RUNUSER)
         write_exe(os.path.join(self.bindir, "getent"), _GETENT)
+        write_exe(os.path.join(self.bindir, "setfacl"), _SETFACL)
+        write_exe(os.path.join(self.bindir, "usermod"), _USERMOD)
+        write_exe(os.path.join(self.bindir, "id"), _ID)
+        write_exe(os.path.join(self.bindir, "pkill"), 'echo "pkill $*" >> "$FBT_LOG"; exit 1')
         write_exe(os.path.join(self.bindir, "passwd"),
                   'echo "$2 %s 01/01/2026 0 99999 7 -1"' % pw_status)
         write_exe(os.path.join(self.bindir, "sudo"), "echo %r" % sudo_out)
@@ -92,7 +142,8 @@ class Box:
         with open(self.script, "w") as f:
             f.write(fbm.render_fleetbackup_acl_script(
                 user=fb, home=self.fbhome, shell="/bin/sh", home_root=self.root,
-                key_uid=os.getuid(), key_line=KEYLINE))
+                key_uid=os.getuid(), key_line=KEYLINE, lock=self.lock, lock_wait_s=1,
+                paused=paused))
 
     def home(self, name=ME, stream=True):
         h = os.path.join(self.root, name)
@@ -109,7 +160,9 @@ class Box:
     def env(self):
         env = dict(os.environ)
         env.update(PATH=self.bindir + ":" + env.get("PATH", ""), FBT_LOG=self.log,
-                   FBT_QUEUE=self.queue, FBT_FB=self.fb, FBT_PASSWD=self.passwd)
+                   FBT_QUEUE=self.queue, FBT_FB=self.fb, FBT_PASSWD=self.passwd,
+                   FBT_SHADOW=self.shadow, FBT_CHECKS=self.checks)
+        env.update(self.extra_env)
         return env
 
     def run(self, *args, stdin=None):
@@ -121,10 +174,19 @@ class Box:
             return []
         return open(self.log).read().splitlines()
 
+    def expiry(self):
+        return open(self.shadow).read().split(":")[7]
+
+    def checked(self, n):
+        """The records the n-th answered check received: a set of (kind, path)."""
+        data = open(os.path.join(self.checks, "%d.bin" % n), "rb").read().decode()
+        f = data.split("\0")[:-1]
+        return {(f[i], f[i + 2]) for i in range(0, len(f), 3)}
+
 
 def acl(path):
     """getfacl -c lines of `path` (absolute names, no header)."""
-    out = subprocess.run(["getfacl", "-p", "-c", "--", path], capture_output=True,
+    out = subprocess.run(["/usr/bin/getfacl", "-p", "-c", "--", path], capture_output=True,
                          text=True, check=True).stdout
     return [ln for ln in out.splitlines() if ln]
 
