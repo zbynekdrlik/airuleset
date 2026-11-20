@@ -20,6 +20,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
@@ -40,15 +41,18 @@ OWNER_PROMPTS = (
     "ale ja nemam jednu hodinu!!!",
     "slovensky!!!",
 )
-# devbridge's English answers; the issue quotes their first words
+# devbridge's English answers. Only their first words are quoted on the issue
 # ("Starting now. The terminal will ask for a card …", "You're right, and I'm
-# sorry", "The fix for #158 … is stuck").
+# sorry", "The fix for #158 … is stuck"); the rest of each line is a faithful
+# continuation, NOT transcript text (the devbridge transcript lives in another
+# account and was not read).
 EN_ANSWER = ("Starting now. The terminal will ask for a card first; once it shows "
              "the amount, tap the card and tell me what the screen says, then I "
              "will check the logs on the cash PC.")
 EN_SORRY = ("You're right, and I'm sorry. The fix for #158 is stuck because the "
             "build on the cash PC failed and I did not notice it until now.")
-# devbridge's Slovak line after the owner wrote "slovensky!!!" (verbatim).
+# devbridge's Slovak line after the owner wrote "slovensky!!!", verbatim as the
+# dispatch quoted it (the issue body quotes only its first sentence).
 SK_APOLOGY = ("Prepáč, odteraz píšem po slovensky. Pokladničné PC v SNV beží bez "
               "eKasy, verzia 0.8.82, terminál je pripojený.")
 # English material a Slovak report legitimately carries: code, a command, a
@@ -343,20 +347,34 @@ class TestEvaluate(unittest.TestCase):
              .raw("not json at all").assistant(EN_ANSWER))
         self.assertEqual(self._eval(t, EN_ANSWER), "block")
 
-    def test_prompt_beyond_the_scan_window_allows_fast(self):
+    def test_prompt_beyond_the_scan_window_allows(self):
+        # the window is read from the module at CALL time, so a small one can
+        # be patched in instead of writing a 32 MiB fixture
         t = _Transcript(self).prompt(OWNER_PROMPTS[0])
-        blob = "y" * 200000
-        for _ in range(int(ol.MAX_SCAN_BYTES / 200000) + 3):
-            t.tool(blob)
-        t.assistant(EN_ANSWER)
-        path = t.write()
-        self.assertGreater(os.path.getsize(path), ol.MAX_SCAN_BYTES)
-        t0 = time.monotonic()
-        self.assertEqual(ol.evaluate(_payload(EN_ANSWER, path))[0], "allow")
-        self.assertLess(time.monotonic() - t0, 2.0)
+        for _ in range(4):
+            t.tool("y" * 100000)
+        path = t.assistant(EN_ANSWER).write()
+        with mock.patch.object(ol, "MAX_SCAN_BYTES", 300000):
+            self.assertEqual(ol.evaluate(_payload(EN_ANSWER, path))[0], "allow")
+        self.assertEqual(ol.evaluate(_payload(EN_ANSWER, path))[0], "block")
 
-    def test_scan_window_is_bounded(self):
-        self.assertLessEqual(ol.MAX_SCAN_BYTES, 4_000_000)
+    def test_scan_window_covers_a_long_turn(self):
+        # review round 1: Claude Code 2.1.3xx writes api-request records at
+        # about 2 MiB a minute (watchdog/owner_stop.py TAIL_BYTES), so the old
+        # 4 MB window lost the prompt of any turn longer than two minutes
+        self.assertGreaterEqual(ol.MAX_SCAN_BYTES, 32 * 1024 * 1024)
+        self.assertLessEqual(ol.MAX_SCAN_BYTES, 64 * 1024 * 1024)
+
+    def test_prompt_behind_6_mb_of_api_records_is_found_fast(self):
+        t = _Transcript(self).prompt(OWNER_PROMPTS[0])
+        for _ in range(30):
+            t.raw(json.dumps({"type": "api-request-blob", "messages": [
+                {"role": "user", "content": "x" * 200000}]}))
+        path = t.assistant(EN_ANSWER).write()
+        self.assertGreater(os.path.getsize(path), 6_000_000)
+        t0 = time.monotonic()
+        self.assertEqual(ol.evaluate(_payload(EN_ANSWER, path))[0], "block")
+        self.assertLess(time.monotonic() - t0, 2.0)
 
 
 class TestHook(unittest.TestCase):
@@ -410,8 +428,336 @@ class TestDoctrine(unittest.TestCase):
     def test_every_owner_message_is_slovak(self):
         text = MODULE.read_text(encoding="utf-8")
         for phrase in ("Every message to the owner is SLOVAK", "not only questions",
-                       "stop-check-owner-language.sh", "peer messages"):
+                       "stop-check-owner-language.sh", "peer messages",
+                       # review round 1: the operative restriction + every
+                       # keyword the hooks key on (#799: lock the rule, not nouns)
+                       "English only in code, commands, paths, exact error strings",
+                       "`NEEDS YOU`", "`ASKED`", "`WORKING`", "`DONE`",
+                       "`Work Complete`"):
             self.assertIn(phrase, text)
+
+
+# --------------------------------------------------------------------------- #
+# Review round 1 (two fresh-context adversarial reviews): every finding with a
+# behaviour gets a fixture here. The probe texts are the reviewers' own.
+# --------------------------------------------------------------------------- #
+# a SHORT Slovak lead (sk 4): with the English stripped the message is too short
+# to judge (allow); with any stripper broken it blocks (the teeth)
+SK_SHORT = "Pozrel som to, výsledok je takýto:\n"
+EN_HEAVY = EN_MATERIAL + " and " + EN_MATERIAL
+FP_NAMES = (
+    "The Pokladničné PC in Spišská Nová Ves is running without eKasa, and the "
+    "terminal in Kežmarok is connected. I checked the logs on the cash PC in Stará "
+    "Ľubovňa, and the build there is fine.",
+    "The cash PC in Spišská Nová Ves is back online, Kežmarok and Stará Ľubovňa "
+    "still show the old version, I will push the build to them next.",
+    "I created the invoice for Pekáreň Hriňová and sent it to Jozef Šťastný; the "
+    "order for Mäsiarstvo Ďurík is still open because it has no address.",
+)
+TITLES_TABLE = (
+    "| Ticket | Názov | Stav |\n|---|---|---|\n"
+    "| #1379 | Every message to the owner is Slovak and not only the questions that we ask | otvorený |\n"
+    "| #1378 | The filing brake counts the history with the same predicate as the live filing | zatvorený |\n"
+    "| #1377 | The footer should show the number of the tickets that are waiting on the owner | otvorený |\n"
+    "| #1376 | Make the watchdog skip a pane when the user is typing in it and it is busy | otvorený |\n")
+TITLES_DASH = (
+    "- #1379 — Every message to the owner is Slovak, not only the questions\n"
+    "- #1378 — Filing brake counts history with the same predicate as the live filing\n"
+    "- #1377 — The footer should show the number of tickets that wait on the owner\n")
+TITLES_PR = (
+    "- PR #7: Refactor the driver so that it handles the reconnect when the device is gone\n"
+    "- PR #8: Add a test for the case where the card reader is not connected at all\n"
+    "- PR #9: Fix the crash when the config file is missing on the first start of the app\n")
+TITLES_NESTED = (
+    "Zatvoril som #1379 (Every message to the owner (not only the questions) is Slovak "
+    "and the Stop gate holds it for all of the boxes), #1380 (Make the footer (the U "
+    "bucket) show what is waiting on the owner and not on the client).\n")
+QUOTED_ERRORS = (
+    'Build padol s chybou "could not find the config file and it will not retry until '
+    'the next push to the branch" a potom ešte "the service is not running because it '
+    'was not able to bind to the port".\n')
+LOG_LINES = (
+    "2026-11-20 05:21:03 ERROR the connection to the database was lost and it could not be restored\n"
+    "2026-11-20 05:21:04 WARN retrying in 5 seconds because the server is not available\n"
+    "05:21:09 the connection to the database was lost and it could not be restored\n"
+    "INFO giving up after the third attempt, the job will run again in an hour\n")
+
+
+class TestRound1Prose(unittest.TestCase):
+    def test_slovak_names_do_not_hide_an_english_reply(self):
+        for msg in FP_NAMES:
+            with self.subTest(msg=msg[:30]):
+                self.assertTrue(ol.message_is_mainly_english(msg))
+
+    def test_a_sentence_initial_slovak_word_still_counts(self):
+        self.assertIn("pokladničné", ol.prose_words(SK_APOLOGY))
+        self.assertNotIn("kežmarok", ol.prose_words("The PC in Kežmarok is up."))
+        self.assertIn("i'm", ol.prose_words("Sure, I'm on it."))
+
+    def test_digit_glued_tokens_and_over_are_no_slovak_signal(self):
+        self.assertEqual(ol.prose_words("v2 k8s s3 10k o2"), [])
+        for msg in ("The v2 rollout on k8s is done. I bumped the s3 bucket policy, set "
+                    "the 10k limit, the v3 API is next. It's all in the k8s namespace "
+                    "for v2.",
+                    "I went over the logs on v2 and k8s, took over the s3 sync and moved "
+                    "it over to v3; the 10k batch is over."):
+            with self.subTest(msg=msg[:30]):
+                self.assertTrue(ol.message_is_mainly_english(msg))
+
+    def test_ticket_title_forms_are_not_prose(self):
+        for block in (TITLES_TABLE, TITLES_DASH, TITLES_PR, TITLES_NESTED):
+            with self.subTest(block=block[:24]):
+                self.assertFalse(ol.message_is_mainly_english(SK_SHORT + block))
+
+    def test_double_quoted_strings_and_log_lines_are_not_prose(self):
+        for msg in (QUOTED_ERRORS + "Opravím to.\n",
+                    "Pozrel som logy služby:\n" + LOG_LINES + "Príčina je výpadok DB.\n"):
+            with self.subTest(msg=msg[:24]):
+                self.assertFalse(ol.message_is_mainly_english(msg))
+
+    def test_each_stripper_is_load_bearing(self):
+        ident = " ".join(w + "_" + w for w in EN_HEAVY.split())
+        for name, wrapped in (("backtick fence", "```\n" + EN_HEAVY + "\n```\n"),
+                              ("tilde fence", "~~~\n" + EN_HEAVY + "\n~~~\n"),
+                              ("inline code", "`" + EN_HEAVY + "`\n"),
+                              ("quote", "> " + EN_HEAVY + "\n"),
+                              ("identifiers", ident + "\n")):
+            with self.subTest(stripper=name):
+                self.assertFalse(ol.message_is_mainly_english(SK_SHORT + wrapped))
+        self.assertTrue(ol.message_is_mainly_english(SK_SHORT + EN_HEAVY))
+
+    def test_a_backtick_line_inside_a_tilde_fence_stays_fenced(self):
+        msg = SK_SHORT + "~~~\n```\n" + EN_HEAVY + "\n~~~\n"
+        self.assertFalse(ol.message_is_mainly_english(msg))
+
+    def test_curly_apostrophe_contractions_are_english(self):
+        self.assertEqual(ol.scores(ol.prose_words("it’s I’m don’t")), (0, 3))
+
+    def test_min_en_boundary(self):
+        base = ("Deployment finished, services restarted, dashboards verified, metrics "
+                "checked, logs rotated, configs updated, caches warmed")
+        self.assertFalse(ol.message_is_mainly_english(base + " the and the"))
+        self.assertTrue(ol.message_is_mainly_english(base + " the and the for"))
+
+    def test_en_ratio_boundary(self):
+        sk = ["som", "je", "na", "pri"]
+        self.assertFalse(ol.message_is_mainly_english(" ".join(sk + ["the"] * 11)))
+        self.assertTrue(ol.message_is_mainly_english(" ".join(sk + ["the"] * 12)))
+
+    def test_diacritics_alone_make_a_prompt_slovak(self):
+        self.assertEqual(ol.prompt_language("Pokladničné terminály hlásia výpadok, opravíš?"),
+                         "sk")
+
+    def test_slovak_line_around_a_pasted_english_log(self):
+        paste = ("Error: the connection to the database was lost and it could not be "
+                 "restored because the server is not available and the job will run "
+                 "again in an hour when the network is back")
+        self.assertEqual(ol.prompt_language(paste + "\n\nco s tym?"), "sk")
+        self.assertEqual(ol.prompt_language("pozri toto:\n" + paste), "sk")
+        self.assertEqual(ol.prompt_language(paste), "en")
+
+    def test_block_reason_names_the_kept_keywords(self):
+        t = _Transcript(self).prompt(OWNER_PROMPTS[0]).assistant(EN_ANSWER)
+        reason = ol.evaluate(_payload(EN_ANSWER, t.write()))[1]
+        for kw in ("NEEDS YOU", "ASKED", "WORKING", "DONE", "Work Complete", '"'):
+            self.assertIn(kw, reason)
+
+
+class TestRound1Transcript(unittest.TestCase):
+    def _eval(self, t, msg=EN_ANSWER):
+        return ol.evaluate(_payload(msg, t.write()))[0]
+
+    def _queued(self, t, text, origin=None):
+        att = {"type": "queued_command", "prompt": text, "commandMode": "prompt"}
+        if origin is not None:
+            att["origin"] = origin
+        return t._add({"type": "attachment", "attachment": att})
+
+    def test_a_queued_owner_message_is_the_newest_turn(self):
+        t = _Transcript(self).prompt("Please check the card reader and the logs")
+        t.assistant("…").user("<task-notification>\n<status>completed</status>\n"
+                              "</task-notification>")
+        self._queued(t.tool(), "slovensky!!! preco pises po anglicky?")
+        self.assertEqual(self._eval(t.tool().assistant(EN_ANSWER)), "block")
+
+    def test_a_queued_machine_continuation_is_skipped(self):
+        t = _Transcript(self).prompt(OWNER_PROMPTS[0])
+        self._queued(t, "Goal set: STOP CONDITIONS — the loop is done when all of the "
+                        "issues are closed and the CI is green", {"kind": "auto-continuation"})
+        self.assertEqual(self._eval(t.assistant(EN_ANSWER)), "block")
+
+    def test_an_english_machine_nudge_inherits_the_owner_language(self):
+        t = _Transcript(self).prompt(OWNER_PROMPTS[0]).assistant("…").prompt(
+            "stuck-check: goal arm failed 3x. Owner: paste the /goal line above and "
+            "check the session, it is not running")
+        self.assertEqual(self._eval(t.assistant(EN_ANSWER)), "block")
+
+    def test_an_interrupt_marker_inherits_the_owner_language(self):
+        t = (_Transcript(self).prompt(OWNER_PROMPTS[0]).tool()
+             .prompt("[Request interrupted by user for tool use]").prompt("1"))
+        self.assertEqual(self._eval(t.assistant(EN_ANSWER)), "block")
+
+    def test_a_discord_relay_is_the_owner_speaking(self):
+        t = _Transcript(self).prompt("Please check the card reader and the logs")
+        t.assistant("…").prompt("Odpoveď z Discordu: áno, sprav to hneď")
+        self.assertEqual(self._eval(t.assistant(EN_ANSWER)), "block")
+
+    def test_pasted_stop_hook_output_is_an_owner_prompt(self):
+        t = _Transcript(self).prompt("Please check the card reader and the logs")
+        t.assistant("…").prompt("Stop hook feedback: zablokovalo mi to, čo s tým "
+                                "spravíme? prečo to tak je?")
+        self.assertEqual(self._eval(t.assistant(EN_ANSWER)), "block")
+
+    def test_a_reminder_block_does_not_hide_the_prompt(self):
+        t = _Transcript(self).prompt("Please check the card reader and the logs")
+        t.assistant("…").user([
+            {"type": "text", "text": "<system-reminder>\nThe user is working in this "
+                                     "repository and the file was changed.\n</system-reminder>"},
+            {"type": "text", "text": OWNER_PROMPTS[0]}])
+        self.assertEqual(self._eval(t.assistant(EN_ANSWER)), "block")
+
+    def test_a_string_message_is_skipped_not_fatal(self):
+        t = _Transcript(self).prompt(OWNER_PROMPTS[0]).raw(
+            json.dumps({"type": "user", "message": "hi"}))
+        self.assertEqual(self._eval(t.assistant(EN_ANSWER)), "block")
+
+    def test_tool_and_meta_entries_do_not_exhaust_the_lookback(self):
+        t = _Transcript(self).prompt(OWNER_PROMPTS[0])
+        for _ in range(ol.PROMPT_LOOKBACK + 3):
+            t.tool().meta("Base directory for this skill: /x\nUse it when the user "
+                          "wants to check the logs.")
+        self.assertEqual(self._eval(t.assistant(EN_ANSWER)), "block")
+
+    def test_a_prompt_line_across_the_chunk_edge(self):
+        t = _Transcript(self).prompt(OWNER_PROMPTS[0])
+        prompt_len = len(json.dumps(t.lines[0])) + 1
+        t.assistant("z" * (ol.CHUNK - 220))
+        path = t.write()
+        size = os.path.getsize(path)
+        self.assertTrue(0 < size - ol.CHUNK < prompt_len, (size, prompt_len))
+        self.assertEqual(ol.evaluate(_payload(EN_ANSWER, path))[0], "block")
+
+
+class TestRound1Run(unittest.TestCase):
+    def setUp(self):
+        self.home = tempfile.mkdtemp(prefix="i1379-home-")
+        self.addCleanup(shutil.rmtree, self.home, True)
+        patcher = mock.patch.dict(os.environ, {"HOME": self.home})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.sid = "i1379-run-%d-%s" % (os.getpid(), self.id().rsplit(".", 1)[-1])
+        self.marker = "/tmp/airuleset-owner-language-block-" + self.sid
+        self.addCleanup(lambda: os.path.exists(self.marker) and os.remove(self.marker))
+
+    def _log(self):
+        p = Path(self.home) / "devel" / "airuleset" / "audits" / ol.GATE_LOG
+        return p.read_text(encoding="utf-8") if p.exists() else ""
+
+    def _run(self, payload):
+        return ol.run(json.dumps(payload) if isinstance(payload, dict) else payload)
+
+    def test_fail_open_paths_are_journalled(self):
+        self.assertEqual(self._run("{not json"), 0)
+        self.assertEqual(self._run(_payload(EN_ANSWER, "/no/such/dir/s.jsonl")), 0)
+        log = self._log()
+        self.assertIn("BADPAYLOAD", log)
+        self.assertIn("UNREADABLE", log)
+
+    def test_a_non_string_cwd_never_raises(self):
+        t = _Transcript(self).prompt(OWNER_PROMPTS[0])
+        payload = _payload(EN_ANSWER, t.assistant(EN_ANSWER).write())
+        payload["cwd"] = 7
+        self.assertEqual(self._run(payload), 2)
+
+    def test_the_block_survives_a_failing_journal(self):
+        t = _Transcript(self).prompt(OWNER_PROMPTS[0])
+        payload = _payload(EN_ANSWER, t.assistant(EN_ANSWER).write())
+        with mock.patch.object(ol.audit, "append_line", side_effect=OSError("ro")), \
+                mock.patch("sys.stderr") as err:
+            self.assertEqual(self._run(payload), 2)
+        self.assertIn("slovensky", "".join(c.args[0] for c in err.write.call_args_list))
+
+    def test_a_block_leaves_the_notify_marker(self):
+        t = _Transcript(self).prompt(OWNER_PROMPTS[0])
+        payload = _payload(EN_ANSWER, t.assistant(EN_ANSWER).write())
+        payload["session_id"] = self.sid
+        self.assertEqual(self._run(payload), 2)
+        self.assertTrue(os.path.isfile(self.marker))
+        self.assertLess(time.time() - os.path.getmtime(self.marker), 30)
+
+
+class TestRound1Notify(unittest.TestCase):
+    """The English ❓ draft a block rejects must not reach the phone (review B
+    🔴): notify-discord-pending suppresses it exactly like a question-quality
+    rewrite, so the Slovak rewrite is a fresh ask, never a blocked repeat."""
+
+    PENDING = REPO / "hooks" / "notify-discord-pending.sh"
+    QUESTION = ("**Otázka — projekt airuleset (správa pravidiel):** The gate needs a "
+                "decision on the window size before I continue with the tests.\n\n"
+                "- Keep 32 MiB (recommended) — covers a long turn\n"
+                "- Use 8 MiB — cheaper\n\n"
+                "❓ NEEDS YOU: which window size should the gate use?")
+
+    def setUp(self):
+        self.home = Path(tempfile.mkdtemp(prefix="i1379-notify-"))
+        self.addCleanup(shutil.rmtree, self.home, True)
+        d = self.home / ".claude" / "channels" / "discord"
+        d.mkdir(parents=True)
+        # a fake bot credential for the fake curl (built, never a literal value)
+        (d / ".env").write_text("%s=%s\nDISCORD_NOTIFICATION_CHANNEL_ID=123\n" % (
+            "DISCORD_BOT_TOKEN", "fake"))
+        self.bin = Path(tempfile.mkdtemp(prefix="i1379-curl-"))
+        self.addCleanup(shutil.rmtree, self.bin, True)
+        (self.bin / "curl").write_text(
+            "#!/usr/bin/env bash\nprintf '%s\\n%s' '{\"id\":\"137901\"}' '200'\n")
+        (self.bin / "curl").chmod(0o755)
+        self.sid = "i1379-notify-%d" % os.getpid()
+        for p in ("/tmp/airuleset-owner-language-block-" + self.sid,
+                  "/tmp/claude-discord-lastq-" + self.sid,
+                  "/tmp/claude-discord-pending-" + self.sid,
+                  "/tmp/claude-discord-cardchk-" + self.sid):
+            self.addCleanup(lambda p=p: os.path.exists(p) and os.remove(p))
+
+    def test_a_rejected_english_question_is_not_pinged(self):
+        env = {**os.environ, "HOME": str(self.home),
+               "PATH": str(self.bin) + os.pathsep + os.environ["PATH"],
+               "ND_BLOCK_SETTLE": "0", "TMUX_PANE": "", "AIRULESET_NOTIFY_OWNER": "",
+               "AIRULESET_SHARED_CHANNEL_OWNER": ""}
+        env.pop("DISCORD_NOTIFY_DRYRUN", None)
+        t = _Transcript(self).prompt(OWNER_PROMPTS[0]).assistant(self.QUESTION)
+        payload = _payload(self.QUESTION, t.write(), cwd=str(self.home))
+        payload["session_id"] = self.sid
+        stdin = json.dumps(payload)
+        r = subprocess.run(["bash", str(HOOK)], input=stdin, text=True,
+                           capture_output=True, env=env, timeout=30)
+        self.assertEqual(r.returncode, 2, r.stderr)
+        r = subprocess.run(["bash", str(self.PENDING)], input=stdin, text=True,
+                           capture_output=True, env=env, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        qmap = self.home / ".claude" / "discord-questions.json"
+        self.assertFalse(qmap.exists() and "137901" in qmap.read_text())
+        dlog = (self.home / ".claude" / "notify-delivery.log").read_text()
+        self.assertIn("owner-language-rewrite", dlog)
+
+
+class TestRound1Structure(unittest.TestCase):
+    def test_the_gate_never_imports_watchdog(self):
+        code = ("import sys; sys.path.insert(0, %r); import gates.ownerlang; "
+                "print('watchdog' in sys.modules)" % str(REPO))
+        r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                           timeout=60)
+        self.assertEqual(r.stdout.strip(), "False", r.stderr)
+
+    def test_machine_prompt_constants_have_one_home(self):
+        import machine_prompts as mp
+        import watchdog
+        from watchdog import owner_stop, questions
+        self.assertIs(watchdog._MACHINE_PROMPT_PREFIXES, mp.MACHINE_PROMPT_PREFIXES)
+        self.assertIs(watchdog._MACHINE_PROMPT_EXACT, mp.MACHINE_PROMPT_EXACT)
+        self.assertIs(questions._DISCORD_ANSWER_PREFIXES, mp.DISCORD_ANSWER_PREFIXES)
+        self.assertEqual(owner_stop._INTERRUPT, mp.INTERRUPT_PREFIX)
+        for p in mp.DISCORD_ANSWER_PREFIXES:
+            self.assertIn(p, mp.MACHINE_PROMPT_PREFIXES)
 
 
 if __name__ == "__main__":
