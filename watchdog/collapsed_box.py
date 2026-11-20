@@ -14,31 +14,37 @@ HOLD (no Enter) and the stranded text was never submitted (dasio/dcontroller,
 20.11.2026).
 
 So this leaf reads the collapsed shape and answers "are the visible rows the
-END of this exact text?"; only the goal-arm path asks. Every shared primitive is
+END of this exact text?"; only the goal-arm path asks. The rows hidden above
+`↑ N more` are never visible, so a box this path did not just type into needs
+more proof before an Enter: a first-person record (`note_typed`), no tmux
+client input since it (the caller), and the row count `N + visible ==
+box_rows(text, pane width)`. Every shared primitive is
 read as `watchdog.<name>` at call time (the leaf idiom), so existing seams hold.
 """
+import hashlib
 import re
 
 import watchdog
 
 _TOP_RX = re.compile(r"^─{2,}\s*↑\s*(\d+)\s+more\b")
 _MAX_ROWS = 200          # a box is at most about half a pane: bound the walk
+_TYPED_KEY = "goal_collapsed_typed"
+_TYPED_TTL_S = 30 * 60   # = goal.GOAL_REQUEST_MAX_AGE_S: never outlives a request
 
 
 def span(lines):
-    """`(top, bottom)` indexes into the STRIPPED `lines` of a collapsed box at
-    the pane's chrome boundary, else None. The bottom border is the last strict
-    separator with only chrome below it (no `❯` row, no `esc to interrupt`: the
-    rule that keeps `_input_box_rows_raw` off a QUOTED box); walking up from it,
-    the first `─ ↑ N more ─` row is the top. A strict separator or a `❯` row met
-    first is an ordinary box (or none): None."""
+    """`(top, bottom)` indexes into the STRIPPED `lines` (blank lines kept) of a
+    collapsed box at the pane's chrome boundary, else None. The bottom border is
+    the last strict separator and EVERY row below it is chrome (`_is_bottom_chrome`:
+    statusline, mode row, agent strip): a box quoted in the conversation above
+    the real box never qualifies. Walking up from it, the first `─ ↑ N more ─`
+    row is the top; a strict separator or a `❯` row met first is an ordinary box
+    (or none): None."""
     seps = [i for i, ln in enumerate(lines) if watchdog._is_separator_line(ln)]
     if not seps:
         return None
     bot = seps[-1]
-    if any(not watchdog._is_bottom_chrome(ln)
-           and (ln.startswith("❯") or "esc to interrupt" in ln)
-           for ln in lines[bot + 1:]):
+    if not all(watchdog._is_bottom_chrome(ln) for ln in lines[bot + 1:]):
         return None
     for top in range(bot - 1, max(-1, bot - 1 - _MAX_ROWS), -1):
         if _TOP_RX.match(lines[top]):
@@ -49,9 +55,11 @@ def span(lines):
 
 
 def rows(captured):
-    """`(hidden, visible_rows)` of a collapsed input box, else None."""
+    """`(hidden, visible_rows)` of a collapsed input box, else None. A blank row
+    inside the borders is kept: it is content (#1332), never a wrap."""
     lines = [ln.strip() for ln in (captured or "").splitlines()]
-    lines = [ln for ln in lines if ln]
+    while lines and not lines[-1]:
+        lines.pop()
     got = span(lines)
     if got is None or got[1] - got[0] < 2:
         return None
@@ -59,29 +67,37 @@ def rows(captured):
     return int(_TOP_RX.match(lines[top]).group(1)), lines[top + 1:bot]
 
 
-def _ends_with(got, text):
+def _ends_with(got, text, cols=None):
     from watchdog import send_outcome
     if not got or not text:
         return False
     hidden, body = got
     vis = sum(len(r) for r in body)
-    return (hidden >= 1 and watchdog.GOAL_ARM_LEFTOVER_MIN_SUBSTR <= vis < len(text)
-            and send_outcome._rows_end_with(body, text))
+    if not (hidden >= 1 and all(body) and watchdog.GOAL_ARM_LEFTOVER_MIN_SUBSTR <= vis
+            < len(text) and send_outcome._rows_end_with(body, text)):
+        return False
+    if cols is None or cols < 10:      # None: no row check; else an unreadable width
+        return cols is None
+    import goal_box_rows
+    return hidden + len(body) == len(goal_box_rows.box_rows(text, cols))
 
 
-def own_tail(captured, text):
+def own_tail(captured, text, cols=None):
     """True when the box is collapsed and its visible rows are, row-exact, the
     END of `text`: only a wrap break may sit between two rows and a dropped byte
-    inside a row fails (`send_outcome._rows_end_with`, #1157). The rows must hold
-    at least `GOAL_ARM_LEFTOVER_MIN_SUBSTR` chars and fewer than `text` (a
-    collapsed box hides at least one row)."""
-    return _ends_with(rows(captured), text)
+    inside a row fails (`send_outcome._rows_end_with`, #1157); no row is blank.
+    The rows hold at least `GOAL_ARM_LEFTOVER_MIN_SUBSTR` chars and fewer than
+    `text` (a collapsed box hides at least one row). With the pane width `cols`
+    the `↑ N` count must also be what `text` wraps to (`goal_box_rows`): a box
+    holding more or less than `text` above the visible rows fails."""
+    return _ends_with(rows(captured), text, cols)
 
 
 def box_kind(captured, text):
     """`"ours"` / `"other"` for a collapsed box, None when it is not collapsed:
     our own request text or any shipped /goal variant (the janitor's verbatim
-    template proof, #1113) is ours, anything else is a foreign draft."""
+    template proof, #1113) is ours, anything else is a foreign draft. A
+    DIAGNOSTIC verdict only -- no keystroke is ever decided on it."""
     got = rows(captured)
     if got is None:
         return None
@@ -103,8 +119,9 @@ def _spinner_above(captured):
 def boundary(captured, text):
     """`deliver_goal`'s boundary read: `watchdog._classify_boundary` unchanged,
     except an idle collapsed box holding our own `text` reads as an input whose
-    draft is its last row (the stranded-submit branch then takes it), and as busy
-    under a running-turn spinner. Any other collapsed box stays busy: no key."""
+    draft is its last row (the stranded-submit branch then takes it, with its
+    own stricter proof), and as busy under a running-turn spinner. Any other
+    collapsed box stays busy: no key."""
     got = rows(captured)
     if _ends_with(got, text):
         return ("busy", None) if _spinner_above(captured) else ("input", got[1][-1])
@@ -116,3 +133,37 @@ def holds(captured, text):
     the shared tail contract (`_typed_landed`) or our own collapsed tail."""
     return bool(watchdog._typed_landed(text, watchdog._input_line_text(captured))
                 or own_tail(captured, text))
+
+
+def _sha(text):
+    return hashlib.sha1(text.encode("utf-8")).hexdigest()[:16]
+
+
+def note_typed(state, pid, text, now):
+    """First-person record: this sweep typed `text` into `pid`'s VERIFIED-bare
+    box (the head checkpoint proved its first chars) and could not confirm the
+    whole. Only this licenses a later Enter on a collapsed box whose head is
+    hidden. No-op without a `state` dict."""
+    if isinstance(state, dict):
+        recs = state.setdefault(_TYPED_KEY, {})
+        for gone in [k for k in recs if typed_at(state, k, None, now) is None]:
+            recs.pop(gone, None)                      # expired: prune on every write
+        recs[pid] = {"sha": _sha(text), "ts": now}
+
+
+def typed_at(state, pid, text, now):
+    """When `note_typed` recorded exactly `text` (any text when `text` is None)
+    for `pid` within the request life (`_TYPED_TTL_S`), else None."""
+    rec = state.get(_TYPED_KEY, {}).get(pid) if isinstance(state, dict) else None
+    try:
+        ok = ((text is None or rec["sha"] == _sha(text))
+              and 0 <= float(now) - float(rec["ts"]) <= _TYPED_TTL_S)
+    except (KeyError, TypeError, ValueError):
+        return None
+    return float(rec["ts"]) if ok else None
+
+
+def forget_typed(state, pid):
+    """Drop `pid`'s record (a submit landed, or the box is bare again)."""
+    if isinstance(state, dict):
+        state.get(_TYPED_KEY, {}).pop(pid, None)

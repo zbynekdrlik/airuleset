@@ -1242,11 +1242,10 @@ def _await_submit_confirmed(tpath, baseline, text, sleep_fn):
 
 
 def _await_typed_landed(pane_id, text, run, sleep_fn, want=True):
-    """Poll (bounded) until the input box shows evidence of `text`
-    (`want=True`) or has stopped showing it (`want=False`) — the pre-Enter
-    TYPE verify. Mirrors `goal._await_typed`, reproduced here to keep tmux_io's
-    `import watchdog`-only module boundary (#433). Returns the final verdict; a
-    type that never renders is refused (`not want`). #1381: collapsed box too."""
+    """Poll (bounded) until the input box shows evidence of `text` (`want=True`;
+    #1381: a collapsed own tail too) or has stopped showing it (`want=False`).
+    Mirrors `goal._await_typed` (kept here for the #433 module boundary); returns
+    the final verdict, a type that never renders is refused (`not want`)."""
     from watchdog import collapsed_box as _cb
     sleep_fn = sleep_fn or time.sleep
     for i in range(SEND_TYPE_SETTLE_POLLS):
@@ -1767,11 +1766,13 @@ def submit_own_goal_verified(pane_id, text, run=None, sleep_fn=None, logs=None,
     def _complete_own_goal(cap):
         # The box holds the COMPLETE literal `/goal <text>`: head row is its
         # leading substring AND tail row its trailing substring (a truncated type
-        # fails the tail), or (#1381) a COLLAPSED box's rows end `text` row-exact.
-        from watchdog import collapsed_box as _cb
+        # fails the tail), or (#1381) a COLLAPSED box's rows end `text` row-exact
+        # with the `↑ N` count `text` wraps to (the caller holds the typed record).
+        from watchdog import collapsed_box as _cb, send_outcome as _so
         head, tail = watchdog._input_box_head_text(cap), watchdog._input_line_text(cap)
         return (bool(head) and head.startswith("/goal ") and text.startswith(head)
-                and bool(tail) and text.endswith(tail)) or _cb.own_tail(cap, text)
+                and bool(tail) and text.endswith(tail)) or _cb.own_tail(
+                    cap, text, cols=_so.pane_width(pane_id, run) or 0)
 
     cap = watchdog.capture_pane(pane_id, run, lines=40)
     if not _complete_own_goal(cap):

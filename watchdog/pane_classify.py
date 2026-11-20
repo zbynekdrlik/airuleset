@@ -80,16 +80,15 @@ def _is_bottom_chrome(s):
     renders `❯ ● main` / `❯ ◯ <agent>` instead, per issue #36), CC's pinned-preview /
     attachment row (`⧉  <project>`, #458 — a thrice-observed real element rendered at
     the bottom of this zone), the strip's selector hint (`↑/↓ to select · Enter to
-    view`), the mode hint (`⏵⏵ …`), the `ctx …` footer statusline, or a horizontal
-    border rule. Their count is VARIABLE — the agent strip grows one row per running
-    subagent — so these MUST be stripped from the bottom before locating the `❯`
-    prompt. `s` is already stripped.
+    view`) and overflow row (`↓ 1 more`, #1381: live dasio with 6 agents; unread, the
+    footer read `armed=None`), the mode hint (`⏵⏵ …`), the `ctx …` statusline, or a
+    border rule. Their count is VARIABLE (the strip grows one row per subagent), so
+    they MUST be stripped from the bottom before locating the `❯`. `s` is stripped.
 
     NB — box-FINDING (`_input_box_rows_raw`) deliberately does NOT lean on enumerating
     novel chrome (a truly-new glyph is handled structurally, between the box's own
     separators — the `▶ brand-new-widget` test); this enumeration only keeps KNOWN
-    shapes current, and stays the sole chrome answer for `pane_goal_armed`'s
-    footer-in-view proof, which has no structural alternative.
+    shapes current, and is the sole chrome answer for `pane_goal_armed`'s footer.
 
     The `⧉` match is a bare PREFIX (like the sibling `●◯` branch). A content row whose
     stripped first char is `⧉` would be misread as chrome — a theoretical #383 off-
@@ -105,8 +104,9 @@ def _is_bottom_chrome(s):
         return True                                     # `⧉  <project>` row (#458/#243)
     if s.startswith("❯ ●") or s.startswith("❯ ◯"):       # a SELECTED strip row
         return True
-    if s.startswith("↑/↓") or ("to select" in s and "Enter to view" in s):
-        return True                                     # the strip's selector hint
+    if (s.startswith("↑/↓") or ("to select" in s and "Enter to view" in s)
+            or re.fullmatch(r"↓ \d+ more", s)):      # selector hint / #1381 overflow row
+        return True
     if s.startswith("⏵⏵"):                              # bypass / mode hint
         return True
     if s.startswith("ctx "):                            # legacy pre-#223 statusline

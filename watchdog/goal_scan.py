@@ -621,13 +621,13 @@ def pane_goal_armed(captured):
     rendered below it.
 
     #383-review Finding 3 (theoretical, unconfirmed live) — the trailing
-    walk trusts an agent-strip/selected-strip/selector-hint row ON ITS OWN.
-    Safe ONLY because `footer` is one CONTIGUOUS suffix of the capture and
-    every real CC render puts the statusline STRICTLY ABOVE the agent strip,
-    so a strip row in the walk implies the statusline is in `footer` too. A
-    future CC layout with the strip BEFORE the statusline needs re-checking.
-    #1381: a COLLAPSED box (`↑ N more`, no `❯` row) is located by its two
-    borders (`collapsed_box.span`); footer and header are read the same way."""
+    walk trusts an agent-strip/selected-strip/selector-hint row ON ITS OWN,
+    even without a statusline row in the walk. Safe ONLY because `footer` is
+    one CONTIGUOUS suffix of the capture and every CC render this repo ever
+    captured puts the statusline STRICTLY ABOVE the strip, so a strip row in
+    the walk implies the statusline is in `footer` too. A future CC layout
+    with the strip BEFORE the statusline needs re-checking.
+    #1381: a COLLAPSED box (`↑ N more`, no `❯` row) is found by its borders."""
     lines = (captured or "").splitlines()
     idx = None
     for i, ln in enumerate(lines):
