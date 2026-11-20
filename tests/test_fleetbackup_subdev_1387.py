@@ -555,11 +555,20 @@ class TestWiring(unittest.TestCase):
             r = subprocess.run(["bash", "-c", "set -euo pipefail\n" + body],
                                capture_output=True, text=True)
             self.assertEqual(r.returncode, 1, r.stderr)
-            os.unlink(acl)       # the same push installs both: a missing script fails
-            r = subprocess.run(["bash", "-c", "set -euo pipefail\n" + body],
-                               capture_output=True, text=True)
-            self.assertEqual(r.returncode, 1, r.stderr)
-            self.assertIn("missing", r.stderr)
+            os.unlink(acl)
+            # the same push installs both: missing while fleetbackup exists fails the unit;
+            # on a box with no fleetbackup account (a quota-only box, a test) it is a warning
+            bindir = os.path.join(td, "bin")
+            os.makedirs(bindir)
+            write_exe(os.path.join(bindir, "getent"),
+                      '[ "$1 $2" = "passwd fleetbackup" ] && [ -n "${FBT_HAS_FB:-}" ] '
+                      '&& echo "fleetbackup:x:998:998::/var/lib/fleetbackup:/bin/sh" || exit 2')
+            for has_fb, rc in (("1", 1), ("", 0)):
+                env = dict(os.environ, PATH=bindir + ":" + os.environ["PATH"], FBT_HAS_FB=has_fb)
+                r = subprocess.run(["bash", "-c", "set -euo pipefail\n" + body],
+                                   capture_output=True, text=True, env=env)
+                self.assertEqual(r.returncode, rc, (has_fb, r.stderr))
+                self.assertIn("missing", r.stderr)
 
     def test_a_busy_hourly_refresh_is_loud_but_not_a_failure(self):
         with tempfile.TemporaryDirectory() as td:
