@@ -2,11 +2,11 @@
 
 **Context gate — related rules you MUST also apply:**
 - `ask-before-assuming.md` — WHEN to ask (this rule is HOW to phrase it)
-- `message-status-marker.md` — the `❓ NEEDS YOU` line is already Slovak; this extends the SAME to the whole `AskUserQuestion` dialog
+- `message-status-marker.md` — the `❓ NEEDS YOU` line is already Slovak; this extends it to the whole `AskUserQuestion` dialog
 - `issue-reference-context.md` — a `#N` always carries its topic; here you ALSO explain it in plain words
-- `skills/user-questions-slovak` — the full hook-enforced template, both re-ask branches, and every worked example; auto-loads the moment you call `AskUserQuestion`, and load it explicitly for a prose `❓` question too, since that path never triggers the auto-load
+- `skills/user-questions-slovak` — template + worked examples; auto-loads on `AskUserQuestion`, load it yourself for a prose `❓` question
 
-**Every question to the user MUST be in SLOVAK, plain, human language.** Question + every option label + every option description. The ONLY English kept is the status keyword `NEEDS YOU` / `DONE` (the hooks key on it).
+**Every message to the owner is SLOVAK** — all prose and status lines, not only questions (#1379, `stop-check-owner-language.sh`). English only in code, commands, paths, exact error strings, the `NEEDS YOU`/`DONE` keywords, and text persisted for other readers (tickets, commits, peer messages). Questions: plain, human, every option too.
 
 **Self-contained — write EVERY question for someone with ZERO context.** Opens with a 2-4 sentence plain-Slovak briefing: which project + what it is, what was happening, explain EVERY cross-reference, THEN the decision + options with `(odporúčam)`.
 
