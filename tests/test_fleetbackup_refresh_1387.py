@@ -539,6 +539,17 @@ class TestRefresh(unittest.TestCase):
         self.assertIn("open only through its owner's own", r.stderr)
         self.assert_not_withdrawn(box)
 
+    def test_a_non_stream_entry_that_cannot_be_closed_fails_even_unreachable(self):
+        box, _h = self.box()
+        other = box.home("otherdir", stream=False)
+        self.foreign_owned(other)
+        box.extra_env["FBT_FAIL_SETFACL_LAST"] = other
+        box.answers(PRE0, CLEAN, NONE)
+        r = box.run()
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("could not close", r.stderr)
+        self.assert_not_withdrawn(box)
+
     def test_a_root_owned_entry_with_our_grant_that_cannot_be_closed_withdraws(self):
         box, _h = self.box()
         other = box.home("otherdir", stream=False)
