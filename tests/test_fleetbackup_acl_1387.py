@@ -245,7 +245,8 @@ class TestApply(_Tmp):
         anyway: EPERM failed the account every hour) — root denies it."""
         self.box.extra_env["FBT_ID_UN"] = "nobody"      # every inode here is "another user's"
         r = self.apply()
-        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.returncode, 1, r.stderr)     # a tree root not its own: LOUD, not granted
+        self.assertIn("is not owned by nobody", r.stderr)
         for rel in ("uploads", "uploads/x.txt", ".claude/work-products", ".claude/work-products/a/w.md"):
             self.assertIsNone(entry(self.p(rel), "user:nobody:"), rel)
 

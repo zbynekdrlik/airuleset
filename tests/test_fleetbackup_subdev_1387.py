@@ -363,7 +363,7 @@ class TestScriptInvariants(unittest.TestCase):
         self.assertIn("d:u:$1:r-x,d:g::---,d:o::---", self.fn["fb_tree"])
 
     def test_files_never_get_their_mask_recalculated(self):
-        self.assertIn('-type f -exec setfacl -P -n -m "u:$1:r--" -- {} +', self.fn["fb_tree"])
+        self.assertIn('-type f \\\n        -exec setfacl -P -n -m "u:$1:r--" -- {} +', self.fn["fb_tree"])
         self.assertNotIn("--restore", self.s)    # round 3: it rewrote the whole ACL
         self.assertIn('setfacl -P -n -m "u:$fb:---"', self.fn["fb_close"])
         self.assertIn('setfacl -P -n -m "u:$1:---"', self.fn["fb_close_kids"])
