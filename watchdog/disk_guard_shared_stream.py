@@ -82,7 +82,7 @@ def discover_android_build_intermediates(home=None, dir_stats_fn=None):
 SCRATCH_WORKTREE_MIN_AGE_S = 2 * 3600
 # Protected branches never removed
 SCRATCH_WORKTREE_PROTECTED_BRANCHES = frozenset({
-    "main", "dev", "master", "develop"})
+    "main", "dev", "master", "develop", "staging"})
 
 
 def discover_scratch_worktrees(tmp_dir="/tmp", uid=None, now=None,

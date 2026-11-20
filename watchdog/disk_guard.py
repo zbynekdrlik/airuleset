@@ -2235,14 +2235,39 @@ def _plan_idle_incremental(home, now, level=None):
 
 
 def _plan_scratch_worktrees(home, now):
-    """#965 — scratch worktrees under /tmp scratchpads."""
+    """#965 — scratch worktrees under /tmp scratchpads. #1380: every
+    reclaimable row passes :func:`_gate_scratch_worktrees`."""
     try:
         rows = discover_scratch_worktrees(now=now)
     except Exception as e:
         return [{"cls": "scratch-worktree", "path": "-", "bytes": 0, "kind": "skip",
                  "reason": "scratch-worktree discovery error: %r" % e}]
-    return [_norm_action("scratch-worktree", r, r.get("kind", "delete"))
-            for r in rows]
+    return _gate_scratch_worktrees([_norm_action("scratch-worktree", r, r.get("kind", "delete"))
+                                    for r in rows], now)
+
+
+def _scratch_worktree_kept(path, now):
+    """#1380: why a scratch worktree must stay, or None. A scratchpad child
+    read/written within the #1195 child floor (or held open) is a live
+    session's (the 2 h dir-mtime gate never saw its files); else the one
+    worktree ``final_reason`` (ignored secrets, hidden edits, nested repos)."""
+    from watchdog.disk_guard_lane_wt import final_reason
+    try:
+        if _default_scratch_live(path, now):
+            return "scratch worktree in use (used within the child floor or held open)"
+    except Exception as e:  # airuleset:script-ok fail-safe: unknown use = keep
+        return "scratch liveness unreadable (%r)" % e
+    kept = final_reason(path)
+    return kept[0] if kept else None
+
+
+def _gate_scratch_worktrees(rows, now):
+    out = []
+    for a in rows:
+        why = (_scratch_worktree_kept(a["path"], now)
+               if a.get("kind") == "scratch-worktree-remove" else None)
+        out.append(dict(a, kind="skip", reason=why + " — kept") if why else a)
+    return out
 
 
 def _plan_stale_agent_worktrees(home, now, wt_cache=False, level=None):
@@ -2387,6 +2412,9 @@ def _remove_worktree_dir(a):
         raise OSError("worktree %s now in live use at remove time — SKIP" % path)
     if a.get("head") and (_worktree_git(["rev-parse", "HEAD"], path) or "").strip() != a["head"]:
         raise OSError("worktree %s HEAD moved since the plan — SKIP" % path)
+    from watchdog.disk_guard_lane_wt import orphan_reflog_commit
+    if a.get("branch") in ("HEAD", "(detached)") and orphan_reflog_commit(path):
+        raise OSError("worktree %s: its reflog holds a commit no ref keeps — SKIP" % path)
     kept = final_reason(path)
     if kept is not None:
         raise OSError("worktree %s at remove time: %s — SKIP" % (path, kept[0]))
@@ -2449,7 +2477,11 @@ def _perform_action(a, sudo_ok=False, run_fn=None, scratch_live_fn=None, now=Non
     if kind == "scratch-worktree-remove":
         # #965: scratch worktree under /tmp — parse repo from .git file, remove
         # R4 fix: no --force, no rm fallback (git refusal = SKIP, #834 invariant)
+        # #1380: the plan's gate again at act time (in use since, ignored files)
         wt = path
+        why = _scratch_worktree_kept(wt, now or time.time())
+        if why:
+            raise OSError("scratch worktree %s: %s — SKIP" % (wt, why))
         git_file = os.path.join(wt, ".git")
         repo = None
         try:

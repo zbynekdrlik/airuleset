@@ -15,16 +15,12 @@ Code decides its own dispatch and integration; only the prune stays.
 # — so a lane handed off / merged moments ago (or a fresh intra-sweep race) is
 # never removed while a worker may still be settling.
 #
-# COMMIT-age, deliberately NOT the #513 ACTIVITY-recency helper
-# (`_worktree_recency_age_s`) here (#1103 review): recency reads the worktree
-# INDEX mtime among its signals, and this sweep's OWN clean-check
-# (`git status --porcelain`, run every sweep) REFRESHES that index mtime to now
-# — empirically verified (3h -> 0h after one `git status`). So a finished
-# worktree re-checked each sweep would perpetually read "just active" and NEVER
-# age out. Commit history is untouched by `git status`, and the prune's
-# candidate set is only FINISHED/MERGED lanes (which by definition stop getting
-# commits — a live lane is excluded by the classifier BEFORE the age check), so
-# time-since-last-commit == time-since-hand-off, exactly the signal we want.
+# COMMIT-age, deliberately NOT the #513 ACTIVITY-recency helper (#1103 review):
+# recency reads the worktree INDEX mtime, and this sweep's OWN clean-check (`git
+# status`, every sweep) refreshes it to now (verified: 3h -> 0h), so a finished
+# worktree would never age out. Commit history is untouched by `git status`, and
+# the candidates are only FINISHED/MERGED lanes (no new commits; a live lane is
+# excluded BEFORE the age check): time-since-last-commit == time-since-hand-off.
 WORKTREE_PRUNE_MIN_AGE_S = 2 * 3600
 
 # The sweep self-gates per repo at this cadence (git-heavy `worktree list` + `status`
@@ -142,13 +138,16 @@ def prune_finished_worktrees(repo_root, run=None, *, now=None, dry_run=False,
         if live_use_fn(path):
             logs.append("worktree-prune kept (in live use): %s" % path)
             continue
-        if kept := ("dirty/unmeasurable tree" if clean_fn(path) is not True else (dlw.final_reason(path, _git_run) or (None,))[0]):  # #1380
-            logs.append("worktree-prune kept (%s): %s" % (kept, path))
+        if clean_fn(path) is not True:
+            logs.append("worktree-prune kept (dirty/unmeasurable tree): %s" % path)
             continue
         age = age_fn(ref)
         if age is None or age < age_min_s:
             logs.append("worktree-prune kept (<%dh since last commit): %s"
                         % (age_min_s // 3600, path))
+            continue
+        if kept := (dlw.final_reason(path, _git_run) or (None,))[0]:   # #1380, after the cheap gates
+            logs.append("worktree-prune kept (%s): %s" % (kept, path))
             continue
         if dry_run:
             logs.append("worktree-prune would remove (%s, branch kept): %s"

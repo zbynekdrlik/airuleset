@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import fnmatch
 import os
+import re
 import time
 from pathlib import Path
 
@@ -65,14 +66,19 @@ REGENERABLE_IGNORED_DIRS = frozenset({
     "htmlcov", ".gradle", ".next", ".nuxt", ".parcel-cache", ".turbo", ".eggs",
     ".hypothesis", ".playwright-mcp", "blob-report"})
 REGENERABLE_IGNORED_DIR_GLOBS = ("*.egg-info", "test-results*", "playwright-report*")
-REGENERABLE_IGNORED_FILE_GLOBS = ("*.pyc", "*.pyo", ".coverage", ".coverage.*", "*.o",
-                                  "*.mo", "coverage.xml", "package-lock.json")
-NESTED_SCAN_MAX_ENTRIES = 2_000_000          # a walk past this is "unmeasurable"
+REGENERABLE_IGNORED_FILE_GLOBS = ("*.pyc", "*.pyo", ".coverage", "*.o", "*.mo",
+                                  "coverage.xml")
+# One budget per final_reason call for the nested-checkout walk over every
+# ignored dir: past it the tree is kept (a cacheable verdict, never re-walked).
+NESTED_SCAN_MAX_ENTRIES = 200_000
+NESTED_SCAN_MAX_S = 10.0
 
 
 def _self_ignoring(d: str) -> bool:
     """A cache dir that ignores itself: a CACHEDIR.TAG, or a .gitignore whose
-    only rule is ``*`` (what pytest and ruff write)."""
+    only rule is ``*`` (what pytest and ruff write). The caller also requires
+    that no tracked file sits in it (a tracked ``dist/`` with an owner-made
+    ``*`` .gitignore is no cache)."""
     if os.path.isfile(os.path.join(d, "CACHEDIR.TAG")):
         return True
     try:
@@ -83,32 +89,65 @@ def _self_ignoring(d: str) -> bool:
     return rules == ["*"]
 
 
-def _regenerable(wt_path: str, entry: str) -> bool:
-    """One ignored ``git status`` entry (a dir keeps its trailing ``/``)."""
+def _allowlisted_dir(name: str) -> bool:
+    return (name in REGENERABLE_IGNORED_DIRS
+            or any(fnmatch.fnmatch(name, g) for g in REGENERABLE_IGNORED_DIR_GLOBS))
+
+
+def _regenerable(wt_path: str, entry: str, named=frozenset(), tracked_dirs=frozenset()) -> bool:
+    """One ignored ``git status`` entry (a dir keeps its trailing ``/``).
+    ``named``: the dir entries whose matching ignore RULE names them (a
+    catch-all ``/*`` or ``*`` proves nothing about ``dist/``);
+    ``tracked_dirs``: every dir holding a tracked file."""
     parts = [p for p in entry.split("/") if p]
     if not parts:
         return True
     name, is_dir = parts[-1], entry.endswith("/")
-    if is_dir and (name in REGENERABLE_IGNORED_DIRS
-                   or any(fnmatch.fnmatch(name, g) for g in REGENERABLE_IGNORED_DIR_GLOBS)):
+    if is_dir and _allowlisted_dir(name) and entry in named:
         return True
     if not is_dir and any(fnmatch.fnmatch(name, g) for g in REGENERABLE_IGNORED_FILE_GLOBS):
         return True
+    if not is_dir and name == "package-lock.json":       # npm's, only beside its package.json
+        return os.path.isfile(os.path.join(wt_path, *parts[:-1], "package.json"))
     return any(parts[i - 1] in REGENERABLE_IGNORED_DIRS
+               and "/".join(parts[:i]) not in tracked_dirs
                and _self_ignoring(os.path.join(wt_path, *parts[:i]))
                for i in range(1, len(parts)))
 
 
-def _holds_git(d: str):
+def _named_by_rule(wt_path, dir_entries, run):
+    """The allowlisted ignored dirs whose matching rule (``git check-ignore
+    -v``) names them, by the rule's last pattern part, never a bare ``*``."""
+    cand = [e for e in dir_entries if _allowlisted_dir(e.rstrip("/").split("/")[-1])]
+    if not cand:
+        return frozenset()
+    # `-z` needs --stdin, so the plain `<source>:<line>:<pattern>\t<path>` form;
+    # an odd (quoted) path simply never matches: kept, the safe side
+    out = run(["check-ignore", "-v", "--"] + [e.rstrip("/") for e in cand], wt_path)
+    named = set()
+    for ln in (out or "").splitlines():
+        head, _, path = ln.partition("\t")
+        m = re.match(r"^(.*):(\d+):(.*)$", head)
+        if not m:
+            continue
+        pat = m.group(3)
+        last = pat.strip("/").split("/")[-1] if not pat.startswith("!") else ""
+        name = path.rstrip("/").split("/")[-1]
+        if last not in ("", "*", "**") and fnmatch.fnmatch(name, last):
+            named.add(path.rstrip("/") + "/")
+    return frozenset(named)
+
+
+def _holds_git(d: str, budget):
     """True when a ``.git`` sits anywhere under ``d`` (a nested checkout the
     checkout walk never enters: it skips target/, build/, .cache/ ...); None
-    when the walk is too large to finish (unmeasurable)."""
-    seen = 0
+    once ``budget`` (``[entries left, deadline]``, shared by every ignored dir
+    of one tree) runs out (unmeasurable)."""
     for _dp, dns, fns in os.walk(d, onerror=lambda e: None):
         if ".git" in dns or ".git" in fns:
             return True
-        seen += len(dns) + len(fns)
-        if seen > NESTED_SCAN_MAX_ENTRIES:
+        budget[0] -= len(dns) + len(fns)
+        if budget[0] < 0 or time.monotonic() > budget[1]:
             return None
     return False
 
@@ -119,7 +158,17 @@ def _index_reason(wt_path, run):
     populated submodules (git refuses them), from ``git ls-files -s -v``."""
     out = run(["ls-files", "-s", "-v", "-z"], wt_path)
     if out is None:
-        return "git index unreadable — kept", True
+        return ("git index unreadable — kept", True), frozenset()
+    tracked_dirs = set()
+    for rec in out.split("\x00"):
+        rel = rec.partition("\t")[2]
+        while "/" in rel:
+            rel = rel.rsplit("/", 1)[0]
+            tracked_dirs.add(rel)
+    return _index_flags(wt_path, out), frozenset(tracked_dirs)
+
+
+def _index_flags(wt_path, out):
     for rec in out.split("\x00"):
         meta, _, rel = rec.partition("\t")
         f = meta.split()
@@ -144,7 +193,7 @@ def final_reason(wt_path: str, git_run_fn=None):
     three sources and its executor, the Job 20 lane prune, the #345 sweep."""
     from cli_worktree_common import _worktree_git
     run = git_run_fn or _worktree_git
-    kept = _index_reason(wt_path, run)
+    kept, tracked_dirs = _index_reason(wt_path, run)
     if kept is not None:
         return kept
     # `--ignored=matching`: an ignored DIR is one entry, and a dir that is not
@@ -159,17 +208,36 @@ def final_reason(wt_path: str, git_run_fn=None):
     dirty = [r[3:] for r in recs if not r.startswith("!! ")]
     if dirty:
         return ("dirty worktree (untracked %s) — kept" % ", ".join(dirty[:3])), False
-    bad = [r[3:] for r in recs if not _regenerable(wt_path, r[3:])]
+    named = _named_by_rule(wt_path, [r[3:] for r in recs if r.endswith("/")], run)
+    bad = [r[3:] for r in recs if not _regenerable(wt_path, r[3:], named, tracked_dirs)]
     if bad:
         return ("non-regenerable ignored file(s) %s — kept" % ", ".join(bad[:3])), False
+    budget = [NESTED_SCAN_MAX_ENTRIES, time.monotonic() + NESTED_SCAN_MAX_S]
     for r in recs:
         if r.endswith("/"):
-            nested = _holds_git(os.path.join(wt_path, r[3:]))
+            nested = _holds_git(os.path.join(wt_path, r[3:]), budget)
             if nested is None:
                 return "ignored %s too large to scan for a nested checkout — kept" % r[3:], False
             if nested:
                 return "holds another checkout inside ignored %s — kept" % r[3:], False
     return None
+
+
+def orphan_reflog_commit(wt_path, git_run_fn=None):
+    """A commit in this worktree's own HEAD reflog that no branch or remote
+    ref holds (a detached lane committed, then checked out elsewhere: the
+    reflog dies with the worktree and gc prunes it), else None. Unreadable =
+    ``"?"`` (kept)."""
+    from cli_worktree_common import _worktree_git
+    run = git_run_fn or _worktree_git
+    log = run(["log", "-g", "--format=%H", "HEAD"], wt_path)
+    if log is None:
+        return "?"
+    shas = list(dict.fromkeys(log.split()))[:500]
+    if not shas:
+        return None
+    out = run(["rev-list", "-n1"] + shas + ["--not", "--branches", "--remotes"], wt_path)
+    return "?" if out is None else (out.strip() or None)
 
 
 def rotate(items, now):
@@ -317,6 +385,9 @@ def _repo_lane_rows(root, gate, cache, git_run_fn, dir_stats_fn, live, now,
                     return dgw._skip(_DEFERRED, error=True)     # error: never cached
                 from cli_worktree_common import _worktree_git
                 head = (git_run_fn or _worktree_git)(["rev-parse", "HEAD"], p)
+                if e.get("branch") is None and (lost := orphan_reflog_commit(p, git_run_fn)):
+                    return dgw._skip("detached HEAD reflog holds %s, which no ref keeps — kept"
+                                     % lost[:12], error=lost == "?")
                 v = dgw._classify(p, git_run_fn, dir_stats_fn)
                 if v.get("kind") == "worktree-remove":
                     if not (head or "").strip():

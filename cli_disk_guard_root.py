@@ -432,7 +432,7 @@ def render_drain_script():
         "    [ -d \"$home\" ] || continue\n"
         "    u=$(basename \"$home\")\n"
         "    _is_paused \"$u\" && { _log \"SKIP-D $home (paused #851)\"; continue; }\n"
-        "    find \"$home\" -name '*.tgz' -type f -not -type l -mmin +%d -path \"$home/*-pull/*\" -not -path \"$home/uploads/*\" -not -path \"$home/.claude/work-products/*\" "
+        "    find \"$home\" -name '*.tgz' -type f -not -type l -mmin +%d -regex \"$home/[^/]*-pull/.*\" -not -path \"$home/uploads/*\" -not -path \"$home/.claude/work-products/*\" "
         "-print0 2>/dev/null | "
         "while IFS= read -r -d '' f; do\n"
         "        stem=\"${f%%.tgz}\"\n"

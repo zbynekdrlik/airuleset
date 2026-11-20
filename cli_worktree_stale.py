@@ -556,6 +556,11 @@ def sweep_stale_worktrees(home=None, dry_run: bool = False, now=None, log_path=N
                 entry["reason"] = "in live use (process rooted in tree) -- kept (live-worker guard)"
                 results.append(entry)
                 continue
+        from watchdog.disk_guard_lane_wt import final_reason   # #1380: dry run = live run, before any unlock
+        if kind != "orphan_branch" and (kept := final_reason(c["path"], git_run)) is not None:
+            entry["reason"] = "%s -- left in place" % kept[0]
+            results.append(entry)
+            continue
         if dry_run:
             entry["reason"] = "would remove (dry-run)"
             results.append(entry)
@@ -584,11 +589,6 @@ def sweep_stale_worktrees(home=None, dry_run: bool = False, now=None, log_path=N
             results.append(entry)
             continue
 
-        from watchdog.disk_guard_lane_wt import final_reason   # #1380, before any unlock
-        if (kept := final_reason(c["path"], git_run)) is not None:
-            entry["reason"] = "%s -- left in place" % kept[0]
-            results.append(entry)
-            continue
         if kind == "locked_dead":
             # #348 -- a lock created by a now-provably-dead session must be
             # released before `worktree remove` can touch it at all; git
