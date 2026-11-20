@@ -502,15 +502,21 @@ send_q() {
     # below, unchanged. `-L`/`-O` guard a foreign-uid-planted /tmp marker
     # (shared, sticky /tmp) from suppressing a ping — a planted file fails the
     # owner test, so the safe direction is taken (the question pings).
-    qqf="/tmp/airuleset-question-quality-block-${SID}"
-    if [ -f "$qqf" ] && [ ! -L "$qqf" ] && [ -O "$qqf" ]; then
-        m=$(stat -c %Y "$qqf" 2>/dev/null || echo 0)
-        case "$m" in ''|*[!0-9]*) m=0 ;; esac
-        if [ "$m" -le "$now" ] && [ $((now - m)) -lt 12 ]; then
-            _pending_log "suppressed" "question-quality-rewrite" "$QH"
-            return 0
+    # #1379: the owner-language gate rejects an ENGLISH draft of the same
+    # question the same way (the Slovak rewrite re-delivers); pinging the
+    # draft would also make the rewrite a blocked repeat of an asked question.
+    local qgate
+    for qgate in question-quality owner-language; do
+        qqf="/tmp/airuleset-${qgate}-block-${SID}"
+        if [ -f "$qqf" ] && [ ! -L "$qqf" ] && [ -O "$qqf" ]; then
+            m=$(stat -c %Y "$qqf" 2>/dev/null || echo 0)
+            case "$m" in ''|*[!0-9]*) m=0 ;; esac
+            if [ "$m" -le "$now" ] && [ $((now - m)) -lt 12 ]; then
+                _pending_log "suppressed" "${qgate}-rewrite" "$QH"
+                return 0
+            fi
         fi
-    fi
+    done
 
     send="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/notify-discord-send.sh"
     # REWORD of a still-unanswered question (LASTQ exists = a ❓ was already

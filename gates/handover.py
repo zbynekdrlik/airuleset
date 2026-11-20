@@ -126,6 +126,9 @@ def _entry_text(content):
     return content if isinstance(content, str) else ""
 
 
+entry_text = _entry_text      # the public name sibling gates read (gates.ownerlang)
+
+
 def _result_text(blk):
     c = blk.get("content")
     if isinstance(c, list):

@@ -50,3 +50,9 @@ These paragraphs restated what `message-status-marker.md` owns (owner-scoped del
 
 The full hook-enforced template, both re-ask branches, worked examples, and away-user delivery mechanics are in the `skills/user-questions-slovak` skill — loaded automatically on `AskUserQuestion`. History + rationale: `.claude/rules-reference/user-questions-slovak-history.md` (#859).
 ~~~
+
+#### #1379 (owner 20.11.2026) — every message to the owner is Slovak, not only questions
+
+Owner, verbatim: "preco sa devbridge napriek uz mesiace pozadovanemu pravidlu komunikovat so mnou slvoensky neustale prepina do anglictiny?!" The devbridge transcript (19.11. 21:55 → 20.11. 05:26) answered every Slovak prompt in English ("Starting now. The terminal will ask for a card …", "You're right, and I'm sorry"); only "slovensky!!!" switched it, and that correction lives in the conversation, lost at the next compaction. Root cause: this module scoped Slovak to QUESTIONS, while everything else a session reads is English by our own rules (tickets, commits, peer messages, project docs), so long sessions drift.
+
+Fix: the module's sentence "Every message to the owner is SLOVAK" (all prose and status lines; English only in code, commands, paths, exact error strings, the `NEEDS YOU`/`DONE` keywords and text persisted for other readers) + the Stop gate `hooks/stop-check-owner-language.sh` → `gates/ownerlang.py`: a Slovak owner prompt + a mainly-English final message (code, quotes, URLs, paths stripped) blocks once per prompt, fail-open everywhere else.

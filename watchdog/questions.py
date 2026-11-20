@@ -284,8 +284,7 @@ def _last_human_prompt_ts(tpath, tail_bytes=2_000_000, extra_human_prefixes=()):
 # `_compact_recent_human_activity`'s own `extra_human_prefixes` choice. This is
 # the OPPOSITE of `_goal_autoarm_recent_human_activity`'s stricter "typed
 # DIRECTLY at the terminal" question (which deliberately excludes them).
-_DISCORD_ANSWER_PREFIXES = (
-    "Odpoveď z Discordu:", "Odpoveď užívateľa na tvoju otázku")
+from machine_prompts import DISCORD_ANSWER_PREFIXES as _DISCORD_ANSWER_PREFIXES  # noqa: E402,E501 (#1379)
 
 
 def _is_genuine_human_prompt(entry, extra_human_prefixes=_DISCORD_ANSWER_PREFIXES):

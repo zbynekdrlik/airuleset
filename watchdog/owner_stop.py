@@ -70,7 +70,7 @@ STOP_WORD_RX = re.compile(   # the Stop HOOK / a stop CONDITION is vocabulary
     re.IGNORECASE)
 _STOP_COMMANDS = ("exit", "quit")
 _CMD_RX = re.compile(r"<command-name>/?([^<\s]+)</command-name>")
-_INTERRUPT = "[Request interrupted by user"
+from machine_prompts import INTERRUPT_PREFIX as _INTERRUPT  # noqa: E402 (#1379)
 
 _PANES = {}        # pane_id -> context of THIS sweep (`refresh`)
 _SWEEP = {}        # {"state", "projects_dir", "cwds": {pane_id: cwd}} of the sweep
