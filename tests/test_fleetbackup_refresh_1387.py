@@ -168,7 +168,8 @@ class TestRefresh(unittest.TestCase):
         r = box.run()
         self.assertEqual(r.returncode, 1, r.stdout[-500:] + r.stderr[-2000:])
         self.assertIn("wrote too much output", r.stderr)
-        self.assertLess(len(r.stderr), 200 * 1024)
+        self.assertIn("TR_RC=153", box.calls())        # SIGXFSZ: the file stopped at the cap
+        self.assertLess(len(r.stderr), 40 * 1024)        # and at most 32 KiB of it is shown
         self.assert_live_key(box)
 
     def test_over_the_budget_homes_are_closed_by_root_not_granted(self):
@@ -181,6 +182,25 @@ class TestRefresh(unittest.TestCase):
         self.assertEqual(entry(h, "user:nobody:"), "user:nobody:---")
         self.assertEqual(box.checked(0), {("C", h)})
         self.assert_live_key(box)
+
+    def test_a_check_past_the_budget_still_gets_its_floor(self):
+        """Only root can stop fleetbackup's processes: a check past the budget
+        keeps a 30 s floor, so a slow check never reads as `unverifiable`."""
+        box, h = self.box(budget_s=0)
+        box.extra_env["FBT_CHECK_DELAY"] = "3"
+        box.answers(NONE, NONE)
+        r = box.run()
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertEqual(entry(h, "user:nobody:"), "user:nobody:---")
+        self.assert_not_withdrawn(box)
+
+    def test_an_unlistable_home_root_withdraws(self):
+        box, _h = self.box()
+        box.extra_env["FBT_FAIL_FIND"] = box.root + " -ignore_readdir_race -mindepth 1 -maxdepth 1 !"
+        box.answers(PRE0, CLEAN)
+        r = box.run()
+        self.assertIn("could not list", r.stderr)
+        self.assert_withdrawn(box, r)
 
     def test_an_incomplete_record_stream_counts_as_open(self):
         box, h = self.box()

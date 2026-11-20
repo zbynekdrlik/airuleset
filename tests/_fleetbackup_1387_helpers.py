@@ -32,6 +32,7 @@ case " $* " in
         if [ "$u" = "$FBT_FB" ] && [ -f "$FBT_QUEUE" ]; then
             n=$(ls "$FBT_CHECKS" | wc -l)
             cat > "$FBT_CHECKS/$n.bin"
+            [ -z "${FBT_CHECK_DELAY:-}" ] || sleep "$FBT_CHECK_DELAY"
             line=$(head -n 1 "$FBT_QUEUE")
             tail -n +2 "$FBT_QUEUE" > "$FBT_QUEUE.t"; mv "$FBT_QUEUE.t" "$FBT_QUEUE"
             [ -n "$line" ] || exit 91
@@ -39,7 +40,9 @@ case " $* " in
         fi ;;
     *" apply "*" grant "*)
         [ -z "${FBT_STALL_APPLY:-}" ] || sleep 30
-        if [ -n "${FBT_SPAM_APPLY:-}" ]; then head -c 400000 /dev/zero | tr '\0' x; echo; fi
+        if [ -n "${FBT_SPAM_APPLY:-}" ]; then   # stderr off: bash would report the kill INTO the cap
+            { head -c 400000 /dev/zero | tr '\0' x; echo "TR_RC=${PIPESTATUS[1]}" >> "$FBT_LOG"; } 2>/dev/null
+        fi
         if [ -n "${FBT_ESC_APPLY:-}" ]; then printf '\033[2Jforged\n'; fi ;;
 esac
 exec "$@"
@@ -69,11 +72,11 @@ fi
 exec /usr/bin/stat "$@"
 '''
 
-# root-side find: fails a -printf walk whose arguments contain FBT_FAIL_FIND
+# root-side find: fails a -print* walk whose arguments contain FBT_FAIL_FIND
 _FIND = r'''#!/bin/bash
 rc=0; /usr/bin/find "$@" || rc=$?
 if [ -n "${FBT_FAIL_FIND:-}" ]; then
-    case "$*" in *"$FBT_FAIL_FIND"*-printf*) exit 1 ;; esac
+    case "$*" in *"$FBT_FAIL_FIND"*-print*) exit 1 ;; esac
 fi
 exit "$rc"
 '''
