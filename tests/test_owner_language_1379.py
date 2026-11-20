@@ -287,6 +287,18 @@ class TestEvaluate(unittest.TestCase):
                 t.assistant("…").user(later)
                 self.assertEqual(self._eval(t.assistant(EN_ANSWER), EN_ANSWER), "allow")
 
+    def test_harness_echo_is_not_the_owner_language(self):
+        # a slash-command echo / local command output is Claude Code's English,
+        # not the owner's words: it inherits like a bare "1"
+        for echo in ("<local-command-stdout>Set effort level to xhigh (saved as your "
+                     "default for new sessions)</local-command-stdout>",
+                     "<command-name>/goal</command-name>\n<command-args>the loop is "
+                     "done when all of the issues are closed and the CI is green"
+                     "</command-args>"):
+            with self.subTest(echo=echo[:24]):
+                t = _Transcript(self).prompt(OWNER_PROMPTS[0]).assistant("…").user(echo)
+                self.assertEqual(self._eval(t.assistant(EN_ANSWER), EN_ANSWER), "block")
+
     def test_signal_free_prompt_alone_is_not_checked(self):
         t = _Transcript(self).prompt("1")
         self.assertEqual(self._eval(t.assistant(EN_ANSWER), EN_ANSWER), "allow")
