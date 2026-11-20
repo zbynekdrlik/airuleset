@@ -548,12 +548,18 @@ class TestRound1Prose(unittest.TestCase):
         self.assertEqual(ol.prompt_language("Pokladničné terminály hlásia výpadok, opravíš?"),
                          "sk")
 
-    def test_slovak_line_around_a_pasted_english_log(self):
+    def test_a_pasted_english_log_around_a_slovak_line(self):
+        # Re-pinned in review round 2: a "short Slovak first/last line" rule
+        # read English prompts ending in a shell line, a checklist item or a
+        # Slovak quote as Slovak (false blocks). An UNFENCED paste now reads as
+        # English (the safe direction, never judged); a fenced or quoted paste
+        # leaves only the owner's own words.
         paste = ("Error: the connection to the database was lost and it could not be "
                  "restored because the server is not available and the job will run "
                  "again in an hour when the network is back")
-        self.assertEqual(ol.prompt_language(paste + "\n\nco s tym?"), "sk")
-        self.assertEqual(ol.prompt_language("pozri toto:\n" + paste), "sk")
+        self.assertEqual(ol.prompt_language(paste + "\n\nco s tym?"), "en")
+        self.assertEqual(ol.prompt_language("```\n" + paste + "\n```\nco s tym?"), "sk")
+        self.assertEqual(ol.prompt_language("pozri toto:\n> " + paste), "sk")
         self.assertEqual(ol.prompt_language(paste), "en")
 
     def test_block_reason_names_the_kept_keywords(self):
@@ -686,10 +692,9 @@ class TestRound1Run(unittest.TestCase):
         self.assertLess(time.time() - os.path.getmtime(self.marker), 30)
 
 
-class TestRound1Notify(unittest.TestCase):
-    """The English ❓ draft a block rejects must not reach the phone (review B
-    🔴): notify-discord-pending suppresses it exactly like a question-quality
-    rewrite, so the Slovak rewrite is a fresh ask, never a blocked repeat."""
+class _NotifyBase(unittest.TestCase):
+    """A hermetic HOME with a fake Discord bot + a fake curl for
+    notify-discord-pending.sh (the #467 harness shape)."""
 
     PENDING = REPO / "hooks" / "notify-discord-pending.sh"
     QUESTION = ("**Otázka — projekt airuleset (správa pravidiel):** The gate needs a "
@@ -717,6 +722,13 @@ class TestRound1Notify(unittest.TestCase):
                   "/tmp/claude-discord-pending-" + self.sid,
                   "/tmp/claude-discord-cardchk-" + self.sid):
             self.addCleanup(lambda p=p: os.path.exists(p) and os.remove(p))
+
+
+
+class TestRound1Notify(_NotifyBase):
+    """The English ❓ draft a block rejects must not reach the phone (review B
+    🔴): notify-discord-pending suppresses it exactly like a question-quality
+    rewrite, so the Slovak rewrite is a fresh ask, never a blocked repeat."""
 
     def test_a_rejected_english_question_is_not_pinged(self):
         env = {**os.environ, "HOME": str(self.home),
@@ -758,6 +770,215 @@ class TestRound1Structure(unittest.TestCase):
         self.assertEqual(owner_stop._INTERRUPT, mp.INTERRUPT_PREFIX)
         for p in mp.DISCORD_ANSWER_PREFIXES:
             self.assertIn(p, mp.MACHINE_PROMPT_PREFIXES)
+
+
+# --------------------------------------------------------------------------- #
+# Review round 2 (a fresh-context verification of the round-1 fix).
+# --------------------------------------------------------------------------- #
+SK_MOSTLY = (
+    "Stav ticketov po dnešnom kole:\n"
+    "- #1379: brána je opravená, nasadená a overená na dev1 aj dev2\n"
+    "- #1380: čaká na review, CI je zelené\n"
+    "- #1381: zatvorené ako duplicitné, odkaz je v komentári\n"
+    "Next: I will run the mutation tests and then push the fix.\n",
+    "Zatvoril som tieto tickety:\n"
+    "- #1379 — opravená brána, nasadené na všetky boxy\n"
+    "- #1380 — doplnený test, CI je zelené\n"
+    "The rest of the work is in the next PR and it will be done today.\n",
+    "PR #7: mergnutý a nasadený, overil som to v prehliadači a verzia sedí.\n"
+    "PR #8: čaká na CI, potom ho mergnem.\n"
+    "It is all on the dev branch for now and the release is after that.\n",
+    "Priebeh:\n"
+    "2026-11-20 07:10 nasadil som opravu na dev1 a overil ju\n"
+    "2026-11-20 07:20 spustil som testy, všetko prešlo\n"
+    "2026-11-20 07:30 nasadil som to na všetky boxy\n"
+    "Zhrnutie: the gate is live on all of the boxes and it is working as it should now.\n",
+    "INFO je teraz zapnuté pre všetky služby a logy sa ukladajú na disk.\n"
+    "ERROR hlášky sa posielajú na Discord.\n"
+    "The rest of the config is the same as before and it is in the repo.\n",
+)
+EN_PROMPTS_WITH_SLOVAK_TAIL = (
+    "Please summarise the client's message below in English for the CRM note.\n\n"
+    "Dobrý deň, faktúra je zlá.",
+    "Please check why the health check fails and fix it.\ncurl -s https://example.com/health",
+    "Run the migration on the staging box and check the logs afterwards.\nsu - deploy",
+    "Why does this command print nothing for the service logs?\n"
+    "journalctl -u api | grep -v DEBUG",
+    "Fix the failing test and push the branch when the suite is green.\n- [ ] overiť na dev1",
+)
+
+
+class TestRound2Prose(unittest.TestCase):
+    def test_slovak_status_in_structured_places_still_counts(self):
+        # language-aware cuts: a ticket title, a table cell, a quote or a log
+        # line is dropped only when it carries no Slovak signal
+        for msg in SK_MOSTLY:
+            with self.subTest(msg=msg[:28]):
+                self.assertFalse(ol.message_is_mainly_english(msg))
+        words = ol.prose_words("Zatvoril som #12 (oprava terminálu v SNV) a nasadil to.")
+        self.assertIn("oprava", words)
+        self.assertIn("terminálu", words)
+
+    def test_english_behind_a_level_word_or_a_long_quote_counts(self):
+        for msg in ("WARNING: the build is not green and the deploy did not run, so I "
+                    "will look at it again after the tests are done and tell you what "
+                    "is wrong.",
+                    'He wrote "the build is not green and the deploy did not run, so I '
+                    "will look at it again after the tests are done and tell you what "
+                    "is wrong, and then I will push the fix to the branch and wait for "
+                    'the checks to pass before anything else is done" and left.'):
+            with self.subTest(msg=msg[:24]):
+                self.assertTrue(ol.message_is_mainly_english(msg))
+
+    def test_sentence_start_after_a_bullet_bold_colon_or_ellipsis(self):
+        for text in ("- Kežmarok beží", "**Úloha:** Oprava beží", "Stav: Kežmarok beží",
+                     "Hotovo… Kežmarok beží", "1. Kežmarok beží"):
+            with self.subTest(text=text):
+                words = ol.prose_words(text)
+                self.assertTrue({"kežmarok", "oprava"} & set(words), words)
+        self.assertNotIn("kežmarok", ol.prose_words("PC v Kežmarok beží"))
+
+    def test_min_prose_words_boundary(self):
+        eleven = "the build and the deploy is done for the cash register"
+        self.assertEqual(len(ol.prose_words(eleven)), 11)
+        self.assertFalse(ol.message_is_mainly_english(eleven))
+        self.assertTrue(ol.message_is_mainly_english(eleven + " again"))
+
+    def test_ref_cut_edges(self):
+        self.assertIn("three", ol.prose_words("#12-3 three"))
+        words = ol.prose_words("Ticket #12 (the reader is not fixed and it will take")
+        self.assertNotIn("reader", words)
+
+    def test_quote_stripping_is_linear(self):
+        t0 = time.monotonic()
+        ol.message_is_mainly_english("„" * 100000)
+        ol.message_is_mainly_english('"x ' * 50000)
+        self.assertLess(time.monotonic() - t0, 1.0)
+
+
+class TestRound2Prompt(unittest.TestCase):
+    def test_english_prompt_with_a_short_slovak_tail_stays_english(self):
+        for p in EN_PROMPTS_WITH_SLOVAK_TAIL:
+            with self.subTest(prompt=p[:28]):
+                self.assertEqual(ol.prompt_language(p), "en")
+
+
+class TestRound2Transcript(unittest.TestCase):
+    def _eval(self, t, msg=EN_ANSWER):
+        return ol.evaluate(_payload(msg, t.write()))[0]
+
+    def _queued(self, t, text, kind=None):
+        att = {"type": "queued_command", "prompt": text, "commandMode": "prompt"}
+        if kind is not None:
+            att["origin"] = {"kind": kind}
+        return t._add({"type": "attachment", "attachment": att})
+
+    def test_a_queued_human_message_is_a_prompt(self):
+        t = _Transcript(self).prompt("Please check the card reader and the logs")
+        self._queued(t.tool(), "slovensky!!! preco pises po anglicky?", "human")
+        self.assertEqual(self._eval(t.tool().assistant(EN_ANSWER)), "block")
+
+    def test_queued_wakes_and_machine_text_do_not_end_the_owner_turn(self):
+        # an absorbed message does not START a turn: the owner's prompt decides
+        for kind, text in (("channel", '<channel source="plugin:peer:peer" from="x">'
+                                       'the deploy is done</channel>'),
+                           ("task-notification", "<task-notification>done</task-notification>"),
+                           (None, "stuck-check: the goal arm failed, check the session"),
+                           (None, "<system-reminder>\nThe user changed a file.\n"
+                                  "</system-reminder>")):
+            with self.subTest(kind=kind, text=text[:20]):
+                t = _Transcript(self).prompt(OWNER_PROMPTS[0])
+                self._queued(t.tool(), text, kind)
+                self.assertEqual(self._eval(t.tool().assistant(EN_ANSWER)), "block")
+
+    def test_a_long_tool_result_line_is_read_in_linear_time(self):
+        t = _Transcript(self).prompt(OWNER_PROMPTS[0])
+        path = t.tool("y" * (24 * 1024 * 1024)).assistant(EN_ANSWER).write()
+        t0 = time.monotonic()
+        self.assertEqual(ol.evaluate(_payload(EN_ANSWER, path))[0], "block")
+        self.assertLess(time.monotonic() - t0, 1.5)
+
+
+class TestRound2Marker(unittest.TestCase):
+    """Review round 2 🔴: the block marker must never eat the ping of the
+    accepted Slovak rewrite."""
+
+    def setUp(self):
+        self.home = tempfile.mkdtemp(prefix="i1379-r2-")
+        self.addCleanup(shutil.rmtree, self.home, True)
+        patcher = mock.patch.dict(os.environ, {"HOME": self.home})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.sid = "i1379-r2-%d-%s" % (os.getpid(), self.id().rsplit(".", 1)[-1])
+        self.marker = "/tmp/airuleset-owner-language-block-" + self.sid
+        self.addCleanup(lambda: os.path.lexists(self.marker) and os.remove(self.marker))
+
+    def _payload(self, msg, active=False):
+        t = _Transcript(self).prompt(OWNER_PROMPTS[0]).assistant(msg)
+        p = _payload(msg, t.write(), active=active)
+        p["session_id"] = self.sid
+        return json.dumps(p)
+
+    def test_an_allowed_stop_clears_the_marker(self):
+        self.assertEqual(ol.run(self._payload(EN_ANSWER)), 2)
+        self.assertTrue(os.path.exists(self.marker))
+        self.assertEqual(ol.run(self._payload(SK_APOLOGY, active=True)), 0)
+        self.assertFalse(os.path.lexists(self.marker))
+        Path(self.marker).write_text("1")
+        self.assertEqual(ol.run(self._payload(SK_APOLOGY)), 0)
+        self.assertFalse(os.path.lexists(self.marker))
+
+    def test_a_planted_symlink_is_never_written_through(self):
+        target = Path(self.home) / "victim"
+        target.write_text("keep")
+        os.symlink(target, self.marker)
+        self.assertEqual(ol.run(self._payload(EN_ANSWER)), 2)
+        self.assertEqual(target.read_text(), "keep")
+
+    def test_the_budget_path_is_journalled(self):
+        with mock.patch.object(ol, "SCAN_BUDGET_S", -1.0):
+            self.assertEqual(ol.run(self._payload(EN_ANSWER)), 0)
+        log = Path(self.home) / "devel" / "airuleset" / "audits" / ol.GATE_LOG
+        self.assertIn("owner-language:budget", log.read_text(encoding="utf-8"))
+
+
+class TestRound2Notify(_NotifyBase):
+    REWRITE = ("**Otázka — projekt airuleset (správa pravidiel):** Brána potrebuje "
+               "rozhodnutie o veľkosti okna, kým budem pokračovať s testami.\n\n"
+               "- Nechať 32 MiB (odporúčam) — pokryje dlhý ťah\n"
+               "- Použiť 8 MiB — lacnejšie\n\n"
+               "❓ NEEDS YOU: akú veľkosť okna má brána použiť?")
+
+    def test_the_slovak_rewrite_after_a_block_is_pinged(self):
+        env = {**os.environ, "HOME": str(self.home),
+               "PATH": str(self.bin) + os.pathsep + os.environ["PATH"],
+               "ND_BLOCK_SETTLE": "0", "TMUX_PANE": "", "AIRULESET_NOTIFY_OWNER": "",
+               "AIRULESET_SHARED_CHANNEL_OWNER": ""}
+        env.pop("DISCORD_NOTIFY_DRYRUN", None)
+        t = _Transcript(self).prompt(OWNER_PROMPTS[0]).assistant(self.QUESTION)
+        draft = _payload(self.QUESTION, t.write(), cwd=str(self.home))
+        draft["session_id"] = self.sid
+        r = subprocess.run(["bash", str(HOOK)], input=json.dumps(draft), text=True,
+                           capture_output=True, env=env, timeout=30)
+        self.assertEqual(r.returncode, 2, r.stderr)
+        rewrite = dict(draft, last_assistant_message=self.REWRITE, stop_hook_active=True)
+        stdin = json.dumps(rewrite)
+        r = subprocess.run(["bash", str(HOOK)], input=stdin, text=True,
+                           capture_output=True, env=env, timeout=30)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        r = subprocess.run(["bash", str(self.PENDING)], input=stdin, text=True,
+                           capture_output=True, env=env, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        qmap = self.home / ".claude" / "discord-questions.json"
+        self.assertTrue(qmap.exists() and "137901" in qmap.read_text(),
+                        (self.home / ".claude" / "notify-delivery.log").read_text())
+
+
+class TestRound2Leaf(unittest.TestCase):
+    def test_compact_reads_the_discord_prefixes_from_the_leaf(self):
+        import machine_prompts as mp
+        from watchdog import compact
+        self.assertIs(compact._COMPACT_DISCORD_ANSWER_PREFIXES, mp.DISCORD_ANSWER_PREFIXES)
 
 
 if __name__ == "__main__":
