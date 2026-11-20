@@ -376,9 +376,10 @@ def _render_workstation_readback_block() -> str:
     which turns the push step LOUD)."""
     return (
         'lo_high=$((exp_high * 3 / 4)); hi_high=$((exp_high * 3 / 2))\n'
-        'fail=0\n'
+        'fail=0; checked=0\n'
         'for slice in ' + _USER_SLICES + '; do\n'
         '    [ "$slice" = "user-0.slice" ] && continue\n'
+        '    checked=$((checked + 1))\n'
         '    mhigh=$(systemctl show -p MemoryHigh --value "$slice" 2>/dev/null || echo "")\n'
         '    mmax=$(systemctl show -p MemoryMax --value "$slice" 2>/dev/null || echo "")\n'
         '    if [ "$mmax" != infinity ]; then\n'
@@ -394,6 +395,11 @@ def _render_workstation_readback_block() -> str:
         '           fi ;;\n'
         '    esac\n'
         'done\n'
+        '# the apply runs inside the sudo account\'s own session, so its slice is\n'
+        '# always listed: none listed = the read failed, never a vacuous pass\n'
+        'if [ "$checked" -eq 0 ]; then\n'
+        '    echo "  RESOURCE-GUARDS VERIFY FAIL: no user slice listed" >&2; fail=1\n'
+        'fi\n'
         'if [ "$fail" -ne 0 ]; then\n'
         '    echo "  RESOURCE-GUARDS FAILED read-back verify (workstation)" >&2\n'
         '    exit 4\n'
