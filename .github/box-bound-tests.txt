@@ -52,3 +52,6 @@ tests/test_trailing_semicolon_1319.py::TestRealTmux::test_chunk_ending_in_semico
 #
 # #1318: builds a real crate with Cargo (the python:3.12 container has no cargo)
 tests/test_target_cap_cargo_1318.py
+#
+# #1384: reads the managed ~/.cargo/config.toml through the real cargo (no cargo in the container)
+tests/test_cargo_jobs_1384.py::RealCargo
