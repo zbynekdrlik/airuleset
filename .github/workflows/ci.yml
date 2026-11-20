@@ -66,7 +66,8 @@ jobs:
       - name: Install jq (hooks under test parse their payload with jq)
         run: |
           apt-get update -qq
-          apt-get install -y -qq jq acl
+          # rsync: its /usr/bin/rrsync is driven for real by the #1387 wrapper tests
+          apt-get install -y -qq jq acl rsync
           jq --version
           # #1266 peer-channel root-script tests run setfacl/getfacl.
           setfacl --version

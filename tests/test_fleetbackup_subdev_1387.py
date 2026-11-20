@@ -63,6 +63,9 @@ class TestKeyAndAccount(unittest.TestCase):
         self.assertEqual(tuple(fbm._paused_accounts()), tuple(cli_disk_guard_root._paused_accounts()))
 
 
+PULL = "rsync --server --sender -vlogDtpre.iLsfxCIvu"
+
+
 class TestRrsyncWrapper(unittest.TestCase):
     def _run(self, command):
         with tempfile.TemporaryDirectory() as td:
@@ -76,22 +79,106 @@ class TestRrsyncWrapper(unittest.TestCase):
             r = subprocess.run(["/bin/sh", w], env=env, capture_output=True, text=True)
             return r, (open(log).read() if os.path.exists(log) else "")
 
-    def test_a_plain_pull_reaches_rrsync_read_only(self):
-        r, log = self._run("rsync --server --sender -vlogDtpre.iLsfxCIvu . david3/uploads/")
-        self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(log, "rrsync -ro /home\n")
+    def assert_refused(self, command):
+        r, log = self._run(command)
+        self.assertEqual(r.returncode, 1, command)
+        self.assertEqual(log, "", command)
+        self.assertIn("refused", r.stderr)
 
-    def test_symlink_following_options_never_reach_rrsync(self):
-        for opt in fbm.FLEETBACKUP_REFUSED_OPTIONS:
-            r, log = self._run("rsync --server --sender -vlogDtpre.iLsfxCIvu %s . u/uploads/" % opt)
-            self.assertEqual(r.returncode, 1, opt)
-            self.assertEqual(log, "", opt)
-            self.assertIn("refused", r.stderr)
+    def test_a_pull_of_either_tree_reaches_rrsync_read_only(self):
+        for path in ("david3/uploads/", "david3/uploads", "david3/uploads/sub/x.pdf",
+                     "david3/.claude/work-products/", "u1/uploads/ u2/.claude/work-products/a"):
+            r, log = self._run("%s --numeric-ids . %s" % (PULL, path))
+            self.assertEqual(r.returncode, 0, (path, r.stderr))
+            self.assertEqual(log, "rrsync -ro /home\n", path)
+
+    def test_the_refused_options_are_exactly_these(self):
+        self.assertEqual(set(fbm.FLEETBACKUP_REFUSED_OPTIONS),
+                         {"--files-from", "--copy-unsafe-links", "--copy-links",
+                          "--copy-dirlinks", "--keep-dirlinks"})
+        for opt in ("--files-from=-", "--files-from", "--copy-unsafe-links", "--copy-links",
+                    "--copy-dirlinks", "--keep-dirlinks"):
+            self.assert_refused("%s %s . u/uploads/" % (PULL, opt))
+
+    def test_only_paths_inside_a_tree(self):
+        for path in ("u/devel/", "u/.claude/", "u/.claude/projects/x", "u/", "u", "/",
+                     "/etc/passwd", "u/uploads/../devel", "u/uploads/..", "../etc",
+                     "U-Pper/uploads/", "u/uploadsX/", "u/.claude/work-productsX"):
+            self.assert_refused("%s . %s" % (PULL, path))
+
+    def test_only_a_read_only_pull(self):
+        for command in ("rsync --server -vlogDtpre.iLsfxCIvu . u/uploads/",   # a push
+                        "scp -f u/uploads/x", "", "rsync --server --sender -v u/uploads/",
+                        "rsync --server --sender -v .", "id"):
+            self.assert_refused(command)
 
     def test_the_client_text_is_never_evaluated(self):
-        r, log = self._run('rsync --server --sender $(touch /nonexistent/x) `id` ; id . u/')
+        with tempfile.TemporaryDirectory() as td:
+            canary = os.path.join(td, "canary")
+            self.assert_refused('%s $(touch %s) `touch %s` . u/uploads/' % (PULL, canary, canary))
+            self.assert_refused('%s . u/uploads/$(touch %s)*' % (PULL, canary))
+            self.assertFalse(os.path.exists(canary))
+
+
+class TestRrsyncWrapperLive(unittest.TestCase):
+    """The real rsync client, a fake ssh that sets SSH_ORIGINAL_COMMAND the way
+    sshd does, the rendered wrapper and the real /usr/bin/rrsync."""
+
+    def setUp(self):
+        self._td = tempfile.TemporaryDirectory()
+        td = self.td = self._td.name
+        self.addCleanup(self._td.cleanup)
+        self.root = os.path.join(td, "home")
+        os.makedirs(os.path.join(self.root, "alice", "uploads"))
+        os.makedirs(os.path.join(self.root, "alice", "devel"))
+        with open(os.path.join(self.root, "alice", "uploads", "a.txt"), "w") as f:
+            f.write("backup me\n")
+        with open(os.path.join(self.root, "alice", "devel", "code.py"), "w") as f:
+            f.write("not me\n")
+        secret_dir = os.path.join(td, "outside")
+        os.makedirs(secret_dir)
+        with open(os.path.join(secret_dir, "secret"), "w") as f:
+            f.write("SECRET\n")
+        os.symlink(secret_dir, os.path.join(self.root, "alice", "uploads", "etclink"))
+        w = os.path.join(td, "wrapper")
+        with open(w, "w") as f:
+            f.write(fbm.render_fleetbackup_rrsync_wrapper(rrsync=fbm.RRSYNC_PATH, root=self.root))
+        self.ssh = os.path.join(td, "fakessh")
+        write_exe(self.ssh, 'shift\nSSH_ORIGINAL_COMMAND="$*" exec /bin/sh %s\n' % w)
+
+    def pull(self, *args):
+        dest = tempfile.mkdtemp(dir=self.td)
+        r = subprocess.run(["rsync", "-a", "-e", self.ssh, *args, dest + "/"],
+                           capture_output=True, text=True, timeout=60)
+        found = {}
+        for d, _dirs, files in os.walk(dest):
+            for name in files:
+                with open(os.path.join(d, name)) as f:
+                    found[os.path.relpath(os.path.join(d, name), dest)] = f.read()
+        return r, found
+
+    def test_a_tree_pull_works_and_keeps_symlinks_as_links(self):
+        r, found = self.pull("x:alice/uploads/")
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(log, "rrsync -ro /home\n")
+        self.assertEqual(found, {"a.txt": "backup me\n"})
+
+    def test_a_planted_symlink_never_serves_its_target(self):
+        r, found = self.pull("--copy-unsafe-links", "x:alice/uploads/")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertNotIn("SECRET\n", found.values())
+        lst = os.path.join(self.td, "list")
+        with open(lst, "w") as f:
+            f.write("etclink/secret\n")
+        r, found = self.pull("--files-from=%s" % lst, "x:alice/uploads/")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertNotIn("SECRET\n", found.values())
+
+    def test_nothing_outside_the_trees(self):
+        for src in ("x:alice/devel/", "x:alice/", "x:/", "x:alice/uploads/etclink/"):
+            r, found = self.pull(src)
+            self.assertNotEqual(r.returncode, 0, src)
+            self.assertNotIn("not me\n", found.values(), src)
+            self.assertNotIn("SECRET\n", found.values(), src)
 
 
 def _functions(script):
@@ -124,9 +211,10 @@ class TestScriptInvariants(unittest.TestCase):
 
     def test_root_side_never_grants(self):
         """Every GRANT runs as the account; the only root setfacl is the
-        deny-only fb_root_deny (-P: a swapped symlink is skipped, -n: the mask
-        is never recalculated, `---`: nothing can open)."""
-        account_side = {"fb_traverse", "fb_tree", "fb_close", "fb_close_kids", "fb_apply"}
+        deny-only fb_root_deny (-n: the mask is never recalculated, `---`:
+        nothing can open, whatever path it lands on)."""
+        account_side = {"fb_traverse", "fb_tree", "fb_grant_files", "fb_close", "fb_close_kids",
+                        "fb_apply"}
         call = re.compile(r"\bsetfacl\s+-")
         self.assertGreater(len(self.fn), 25)
         for name, body in self.fn.items():
@@ -134,7 +222,15 @@ class TestScriptInvariants(unittest.TestCase):
                 self.assertIsNone(call.search(body), name)
         self.assertEqual(self.fn["fb_root_deny"].strip().splitlines()[-1].strip(),
                          'setfacl -P -n -m "u:$FB:---" -- "$1"')
-        self.assertIn('runuser -u "$u" -- env -i', self.fn["fb_as"])
+
+    def test_every_other_uid_runs_timed_with_no_root_environment(self):
+        runs = re.findall(r"[^\n]*runuser -u[^\n]*", self.s)
+        self.assertEqual(len(runs), 2, runs)
+        for line in runs:
+            self.assertRegex(line, r"timeout -k 10 \"\$FB_(ACCOUNT|CHECK)_TIMEOUT\" runuser -u ")
+            self.assertIn("-- env -i PATH=", line)
+        self.assertIn('runuser -u "$u"', self.fn["fb_run_account"])
+        self.assertIn('runuser -u "$FB"', self.fn["fb_as_fb"])
 
     def test_every_setfacl_is_physical(self):
         calls = re.findall(r"\bsetfacl( -[A-Za-z]+)+", self.s)
@@ -154,11 +250,12 @@ class TestScriptInvariants(unittest.TestCase):
                 self.assertIn("-xdev", f, name)
 
     def test_default_acls(self):
-        self.assertIn('setfacl -P -d -m "u:$fb:---,g::---,o::---" -- "$h"', self.fn["fb_apply"])
+        self.assertIn('setfacl -P -n -d -m "u:$fb:---,g::---,o::---" -- "$h"', self.fn["fb_apply"])
         self.assertIn("d:u:$1:r-x,d:g::---,d:o::---", self.fn["fb_tree"])
 
     def test_files_never_get_their_mask_recalculated(self):
-        self.assertIn('-type f -exec setfacl -P -n -m "u:$1:r--"', self.fn["fb_tree"])
+        self.assertIn('setfacl -P --restore="$rf"', self.fn["fb_grant_files"])
+        self.assertIn('if (!hasmask) print "mask::" gp', self.s)
         self.assertIn('setfacl -P -n -m "u:$fb:---"', self.fn["fb_close"])
         self.assertIn('setfacl -P -n -m "u:$1:---"', self.fn["fb_close_kids"])
 
@@ -167,10 +264,16 @@ class TestScriptInvariants(unittest.TestCase):
             self.assertIn("! -type l", self.fn[name], name)
         self.assertNotIn("find -L", self.s)
 
-    def test_account_side_output_cannot_forge_a_line(self):
-        for line in self.fn["fb_account"].splitlines():
-            if "fb_as \"$u\" apply" in line:
-                self.assertIn("| fb_prefix \"$u\"", line)
+    def test_account_side_output_cannot_forge_a_line_or_hold_a_pipe(self):
+        run = self.fn["fb_run_account"]
+        self.assertIn('>"$out" 2>&1', run)
+        self.assertIn('fb_prefix "$u" <"$out"', run)
+        self.assertNotIn("fb_as ", self.fn["fb_account"])
+
+    def test_the_refresh_lock_is_root_only(self):
+        lock = self.fn["fb_lock"]
+        self.assertLess(lock.index("umask 077"), lock.index('exec 8>>"$FB_LOCK"'))
+        self.assertIn('"$FB_KEY_UID 600"', lock)
 
     def test_the_login_is_restored_only_after_every_check(self):
         refresh = self.fn["fb_refresh"]
@@ -279,12 +382,14 @@ class TestPushLeg(unittest.TestCase):
             self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
             self.assertFalse(any(ln.startswith("acl-run") for ln in _log(p)))
 
-    def test_a_busy_refresh_lock_is_loud_and_deferred(self):
+    def test_a_busy_refresh_lock_is_loud_but_not_a_failure(self):
+        """The hourly unit is running the same refresh right now."""
         with tempfile.TemporaryDirectory() as td:
             script, env, p = _push_box(td, acl_rc=fbm.FLEETBACKUP_LOCK_BUSY_RC)
             r = _run(script, env)
-            self.assertEqual(r.returncode, fbm.FLEETBACKUP_LOCK_BUSY_RC, r.stdout + r.stderr)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
             self.assertIn("refresh lock busy", r.stderr)
+            self.assertNotIn("FLEETBACKUP FAILED", r.stderr)
             self.assertTrue(os.path.exists(p["after"]), "a later guard step was skipped")
 
     def test_a_failed_refresh_never_skips_a_later_step(self):
@@ -350,11 +455,63 @@ class TestWiring(unittest.TestCase):
             self.assertEqual(r.returncode, 0, r.stderr)
             self.assertIn("missing", r.stderr)
 
+    def test_a_busy_hourly_refresh_is_loud_but_not_a_failure(self):
+        with tempfile.TemporaryDirectory() as td:
+            acl = os.path.join(td, "acl.sh")
+            write_exe(acl, "exit %d" % fbm.FLEETBACKUP_LOCK_BUSY_RC)
+            body = fbm.render_fleetbackup_hourly_call(acl) + \
+                'if [ "$fb_rc" -ne 0 ]; then exit 1; fi\nexit 0\n'
+            r = subprocess.run(["bash", "-c", "set -euo pipefail\n" + body],
+                               capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn("refresh lock busy", r.stderr)
+
     def test_the_ceiling_unit_has_time_for_the_refresh(self):
         svc = crg.render_quota_ceiling_service()
         line = [ln for ln in svc.splitlines() if ln.startswith("TimeoutStartSec=")][0]
         self.assertGreaterEqual(int(line.split("=", 1)[1]),
                                 crgq.QUOTA_LOCK_WAIT_S + fbm.FLEETBACKUP_REFRESH_BUDGET_S)
+
+
+class TestQuotaLockIsRootOnly(unittest.TestCase):
+    """#1387 review: any local user could flock a world-readable quota lock
+    and stall every quota writer (and, before the release, the refresh)."""
+
+    def _run_preamble(self, td, existing_mode=None):
+        lock = os.path.join(td, "quota.lock")
+        aq = os.path.join(td, "aquota.user")
+        open(aq, "w").close()
+        if existing_mode is not None:
+            open(lock, "w").close()
+            os.chmod(lock, existing_mode)
+        s = crgq._render_quota_script_preamble("t", "h", "w") + "exit 0\n"
+        s = s.replace(crgq.QUOTA_LOCK_PATH, lock).replace("/aquota.user", aq)
+        r = subprocess.run(["bash", "-c", "umask 022\n" + s], capture_output=True, text=True,
+                           timeout=30)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return lock
+
+    def test_the_script_preamble_creates_and_keeps_it_0600(self):
+        for existing in (None, 0o644):
+            with tempfile.TemporaryDirectory() as td:
+                lock = self._run_preamble(td, existing)
+                self.assertEqual(os.stat(lock).st_mode & 0o777, 0o600, existing)
+
+    def test_the_push_apply_lock_block_too(self):
+        with tempfile.TemporaryDirectory() as td:
+            lock = os.path.join(td, "quota.lock")
+            open(lock, "w").close()
+            os.chmod(lock, 0o644)
+            s = ("set -euo pipefail\numask 022\nquota_fail=0\n"
+                 + crgq._render_quota_apply_lock_block().replace(crgq.QUOTA_LOCK_PATH, lock)
+                 + '\n[ "$quota_fail" -eq 0 ]\n[ "$(umask)" = 0022 ]\n')
+            r = subprocess.run(["bash", "-c", s], capture_output=True, text=True, timeout=30)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual(os.stat(lock).st_mode & 0o777, 0o600)
+
+    def test_the_quota_units_run_under_umask_0077(self):
+        for svc in (crg.render_quota_refresh_service(), crg.render_quota_ceiling_service()):
+            self.assertIn("UMask=0077\n", svc)
 
 
 class TestMarkerRead(unittest.TestCase):

@@ -24,6 +24,9 @@ _RUNUSER = r'''#!/bin/bash
 u="$2"; shift 2
 [ "${1:-}" = -- ] && shift
 echo "$u $*" >> "$FBT_LOG"
+for fd in 8 9; do
+    if [ -e "/proc/$$/fd/$fd" ]; then echo "FD$fd-OPEN $u $*" >> "$FBT_LOG"; fi
+done
 case " $* " in
     *" check "*)
         if [ "$u" = "$FBT_FB" ] && [ -f "$FBT_QUEUE" ]; then
@@ -35,7 +38,13 @@ case " $* " in
             echo "$line"; exit 0
         fi ;;
     *" apply "*" hold "*)
+        if [ -n "${FBT_HOLD_STRIPS:-}" ]; then
+            # a hostile account: strips every ACL entry off its home, refuses the hold
+            /usr/bin/setfacl -b -- "${@: -2:1}"; exit 1
+        fi
         [ -z "${FBT_FAIL_HOLD:-}" ] || exit 1 ;;
+    *" apply "*" grant "*)
+        [ -z "${FBT_STALL_APPLY:-}" ] || sleep 30 ;;
 esac
 exec "$@"
 '''
@@ -54,6 +63,12 @@ _SETFACL = r'''#!/bin/bash
 echo "root-setfacl $*" >> "$FBT_LOG"
 if [ -n "${FBT_FAIL_SETFACL:-}" ]; then
     case "$*" in *"$FBT_FAIL_SETFACL"*) echo "setfacl: forced failure" >&2; exit 1 ;; esac
+fi
+if [ -n "${FBT_FAIL_SETFACL_LAST:-}" ] && [ "${@: -1}" = "$FBT_FAIL_SETFACL_LAST" ]; then
+    echo "setfacl: No space left on device" >&2; exit 1
+fi
+if [ -n "${FBT_FAIL_ONCE:-}" ] && [ ! -e "$FBT_LOG.failed-once" ]; then
+    case "$*" in *"$FBT_FAIL_ONCE"*) : > "$FBT_LOG.failed-once"; echo "setfacl: vanished" >&2; exit 1 ;; esac
 fi
 exec /usr/bin/setfacl "$@"
 '''
@@ -107,7 +122,7 @@ class Box:
 
     def __init__(self, td, fb="nobody", accounts=(ME,), pw_status="L",
                  sudo_out="User x is not allowed to run sudo on box.", fb_sig_home=None,
-                 expiry="", paused=()):
+                 expiry="", paused=(), account_timeout_s=60):
         self.td, self.fb = td, fb
         self.root = os.path.join(td, "home")
         self.fbhome = os.path.join(td, "fbhome")
@@ -145,7 +160,8 @@ class Box:
             f.write(fbm.render_fleetbackup_acl_script(
                 user=fb, home=self.fbhome, shell="/bin/sh", home_root=self.root,
                 key_uid=os.getuid(), key_line=KEYLINE, lock=self.lock, lock_wait_s=1,
-                paused=paused))
+                paused=paused, account_timeout_s=account_timeout_s))
+        self.mark = os.path.join(self.fbhome, ".airuleset-withdrawn")
 
     def home(self, name=ME, stream=True):
         h = os.path.join(self.root, name)
