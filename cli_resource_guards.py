@@ -121,10 +121,16 @@ from cli_resource_guards_quota import (  # noqa: E402, F401
     render_quota_ceiling_service, render_quota_ceiling_timer,
     _render_quota_kmod_block, _render_quota_limits_block,
     _render_quota_apply_block, _render_quota_apply_lock_block,
-    _render_quota_timer_enable_block,
+    _render_quota_timer_enable_block, _render_is_stream_test,
 )
 
 from cli_resource_guards_conflicts import render_stale_fairness_removal  # noqa: E402 (#1321)
+# #1387: read-only fleetbackup access to ~/uploads + ~/.claude/work-products
+from cli_resource_guards_fleetbackup import (  # noqa: E402
+    FLEETBACKUP_ACL_SCRIPT_PATH, FLEETBACKUP_DEFERRED_EXIT, FLEETBACKUP_RRSYNC_WRAPPER_PATH,
+    render_fleetbackup_acl_script, render_fleetbackup_push_block,
+    render_fleetbackup_rrsync_wrapper,
+)
 
 # Shared Playwright browser install path (#950-B)
 PLAYWRIGHT_SHARED_PATH = "/opt/ms-playwright"
@@ -254,6 +260,10 @@ def guard_files():
         (QUOTA_CEILING_SCRIPT_PATH, render_quota_ceiling_script()),
         (QUOTA_CEILING_SERVICE_PATH, render_quota_ceiling_service()),
         (QUOTA_CEILING_TIMER_PATH, render_quota_ceiling_timer()),
+        # #1387: the ONE fleetbackup ACL refresh (push + the hourly ceiling unit)
+        # and the forced-command wrapper in front of rrsync
+        (FLEETBACKUP_ACL_SCRIPT_PATH, render_fleetbackup_acl_script()),
+        (FLEETBACKUP_RRSYNC_WRAPPER_PATH, render_fleetbackup_rrsync_wrapper()),
     ]
 
 
@@ -278,7 +288,7 @@ def _render_swap_policy_block() -> str:
         '# Guard: only acts when a shared-stream box-class marker exists.\n'
         'swap_is_shared_stream=false\n'
         'for bcf in /home/*/.claude/airuleset-box-class; do\n'
-        '    if [ -f "$bcf" ] && grep -q "shared-stream" "$bcf" 2>/dev/null; then\n'
+        '    if @@IS_STREAM_BCF@@; then\n'
         '        swap_is_shared_stream=true; break\n'
         '    fi\n'
         'done\n'
@@ -358,7 +368,7 @@ def _render_swap_policy_block() -> str:
            SWAP_SIZE_GB,
            SWAP_SIZE_GB, SWAP_SIZE_GB,
            SWAP_SIZE_GB)
-    )
+    ).replace("@@IS_STREAM_BCF@@", _render_is_stream_test('"$bcf"'))
 
 
 def _render_playwright_shared_block() -> str:
@@ -584,12 +594,10 @@ def build_apply_script() -> str:
            CPU_WEIGHT, CPU_QUOTA_PCT)
     )
     parts.append("")
-    # #950: per-user disk quota (rendered by _render_quota_apply_block).
-    parts.append(_render_quota_apply_block())
-    parts.append("")
-    # #950-B: shared Playwright browser install (rendered by
-    # _render_playwright_shared_block).
-    parts.append(_render_playwright_shared_block())
+    # #950 quota; #1387 fleetbackup (own subshell, own lock, its exit deferred
+    # to the very end); #950-B shared Playwright.
+    parts += [_render_quota_apply_block(), "", render_fleetbackup_push_block(), "",
+              _render_playwright_shared_block(), FLEETBACKUP_DEFERRED_EXIT]
     return "\n".join(parts) + "\n"
 
 

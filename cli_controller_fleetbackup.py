@@ -32,15 +32,18 @@ import sys
 
 from cli_owner_vps import _sudoers_install_script
 
+# The manager key from dev1:/home/fleet-backup/.ssh/id_ed25519.pub (PUBLIC
+# material) and dev1's tailscale address it must come from (hardening 17.11.,
+# #1290). ONE copy: the subdev rrsync login (#1387) builds its line from these.
+MANAGER_FROM = "100.104.8.125"
+MANAGER_KEY = ("ssh-ed25519 "
+               "AAAAC3NzaC1lZDI1NTE5AAAAIMzhgslnCx56OLBPtqRStknHDCCDlpWvLoNQkXVB5B3l")
+
 FLEETBACKUP = {
     "user": "fleetbackup",
     "gecos": "fleet-backup manager (airuleset#1351)",
-    # The manager key from dev1:/home/fleet-backup/.ssh/id_ed25519.pub (PUBLIC
-    # material), restricted to dev1's tailscale IP (hardening 17.11., #1290).
-    "authorized_key": (
-        'from="100.104.8.125" ssh-ed25519 '
-        "AAAAC3NzaC1lZDI1NTE5AAAAIMzhgslnCx56OLBPtqRStknHDCCDlpWvLoNQkXVB5B3l "
-        "fleet-backup-manager@dev1 (airuleset#1351)"),
+    "authorized_key": 'from="%s" %s fleet-backup-manager@dev1 (airuleset#1351)' % (
+        MANAGER_FROM, MANAGER_KEY),
     # No '.' in the name: sudo's #includedir skips dotted files.
     "sudoers_path": "/etc/sudoers.d/60-airuleset-fleetbackup",
     "sudoers": (

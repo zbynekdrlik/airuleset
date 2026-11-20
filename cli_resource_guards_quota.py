@@ -21,7 +21,13 @@ the files through its ``guard_files()`` + atomic ``_install``, and embeds
 * #1315: that cap was per user, so N accounts were promised N x half the free
   space (subdev at 95 %, no account at its quota). The 50 % is now split in
   EQUAL shares over the shared-stream homes: all ceilings together fit the disk.
+* #1387: after its limits block the hourly ceiling unit releases the quota lock
+  and runs the fleetbackup ACL refresh, which takes its own lock
+  (``cli_resource_guards_fleetbackup``). The quota lock file is root-only.
 """
+from cli_resource_guards_fleetbackup import (
+    FLEETBACKUP_REFRESH_BUDGET_S, render_fleetbackup_hourly_call,
+)
 
 # #950: per-user disk quota on shared-stream boxes.  ext4 usrquota via legacy
 # journaled quota (NOT `tune2fs -O quota` which is REFUSED on a mounted root
@@ -111,20 +117,27 @@ def _render_quota_script_preamble(tag: str, holders: str, what: str) -> str:
     the hourly ceilings): ``set -euo pipefail``; ``/aquota.user`` missing →
     exit 3; then ``QUOTA_LOCK_PATH`` on fd 9 — ONE quota writer at a time
     (the refresh, the ceilings and the push apply all take it); busy or
-    unopenable → exit 4 touching nothing."""
+    unopenable → exit 4 touching nothing. #1387 review: the lock file is
+    root-only (created under umask 077, chmod 0600 before the flock) — any
+    local user could flock a world-readable one and stall every writer."""
     return (
         "set -euo pipefail\n"
         "if [ ! -f /aquota.user ]; then\n"
         "    echo \"  ⚠ %s: /aquota.user missing — quota not provisioned\" >&2\n"
         "    exit 3\n"
         "fi\n"
-        "# one quota writer at a time — shared with the other quota writers\n"
-        "if ! { exec 9>>%s; } 2>/dev/null || ! flock -w %d 9; then\n"
+        "# one quota writer at a time — shared with the other quota writers;\n"
+        "# root-only, so no other user can open (and flock) it\n"
+        "_um=$(umask); umask 077\n"
+        "if ! { exec 9>>%s; } 2>/dev/null || ! chmod 0600 %s 2>/dev/null \\\n"
+        "        || ! flock -w %d 9; then\n"
+        "    umask \"$_um\"\n"
         "    echo \"  ⚠ %s: quota lock %s busy/unopenable\" \\\n"
         "        \"(%s running?) — %s SKIPPED, quota untouched\" >&2\n"
         "    exit 4\n"
         "fi\n"
-        % (tag, QUOTA_LOCK_PATH, QUOTA_LOCK_WAIT_S, tag, QUOTA_LOCK_PATH,
+        "umask \"$_um\"\n"
+        % (tag, QUOTA_LOCK_PATH, QUOTA_LOCK_PATH, QUOTA_LOCK_WAIT_S, tag, QUOTA_LOCK_PATH,
            holders, what)
     )
 
@@ -201,6 +214,7 @@ def render_quota_refresh_service() -> str:
         "\n"
         "[Service]\n"
         "Type=oneshot\n"
+        "UMask=0077\n"
         "TimeoutStartSec=%d\n"
         "ExecStart=/bin/bash %s\n"
         "ExecStopPost=-/usr/bin/flock -w 60 %s /sbin/quotaon -u /\n"
@@ -237,8 +251,11 @@ def render_quota_ceiling_script() -> str:
     Same shape as ``render_quota_refresh_script()``: ``set -euo pipefail``,
     ``/aquota.user`` missing → exit 3, then ``QUOTA_LOCK_PATH`` (shared with
     the daily refresh and the push apply; busy → exit 4 touching nothing).
-    Exits 1 (LOUD in ``systemctl status``) when the limits block reported a
-    failure (``qfail``). Pure renderer."""
+    #1387: then it releases the quota lock and runs the fleetbackup ACL
+    refresh (decided: one idempotent refresh, hourly and queued by every push;
+    it takes its own lock). Exits 1 (LOUD in
+    ``systemctl status``) when the limits block reported a failure (``qfail``)
+    or the refresh failed. Pure renderer."""
     return (
         "#!/bin/bash\n"
         "# Managed by airuleset (#1140 D) — hourly usage-aware quota ceilings.\n"
@@ -246,7 +263,8 @@ def render_quota_ceiling_script() -> str:
         + _render_quota_script_preamble(
             "quota-ceiling", "a refresh or push apply", "ceilings")
         + _render_quota_limits_block() + "\n"
-        "if [ \"$qfail\" -ne 0 ]; then exit 1; fi\n"
+        + render_fleetbackup_hourly_call()
+        + "if [ \"$qfail\" -ne 0 ] || [ \"$fb_rc\" -ne 0 ]; then exit 1; fi\n"
         "exit 0\n"
     )
 
@@ -256,7 +274,8 @@ def render_quota_ceiling_service() -> str:
     (a ``Persistent=true`` catch-up at boot waits for its recount) AND the
     daily refresh: ``hourly`` and ``daily`` both elapse at 00:00, and the
     ordering makes systemd queue this job behind the refresh instead of racing
-    it for the lock. ``TimeoutStartSec`` exceeds the lock wait. No
+    it for the lock. ``TimeoutStartSec`` exceeds the lock wait, plus the #1387
+    fleetbackup refresh's budget (it walks the two trees of every account). No
     ``ExecStopPost=quotaon``: nothing here ever switches quota off."""
     return (
         "# Managed by airuleset (#1140 D) — hourly usage-aware quota ceilings.\n"
@@ -268,9 +287,10 @@ def render_quota_ceiling_service() -> str:
         "\n"
         "[Service]\n"
         "Type=oneshot\n"
+        "UMask=0077\n"
         "TimeoutStartSec=%d\n"
         "ExecStart=/bin/bash %s\n"
-        % (QUOTA_LOCK_WAIT_S + 300, QUOTA_CEILING_SCRIPT_PATH)
+        % (QUOTA_LOCK_WAIT_S + 300 + FLEETBACKUP_REFRESH_BUDGET_S, QUOTA_CEILING_SCRIPT_PATH)
     )
 
 
@@ -323,6 +343,15 @@ def _render_quota_kmod_block() -> str:
     )
 
 
+def _render_is_stream_test(path_expr: str) -> str:
+    """#1387 review: the bash test "this box-class marker says shared-stream".
+    Root reads a file the ACCOUNT owns: a FIFO there (or a symlink to one)
+    blocked a plain grep forever and hung every loop over the homes (an
+    attacker-held ceiling/push). Regular, non-symlink files only, bounded."""
+    return ('[ -f %s ] && [ ! -L %s ] && timeout 5 grep -q "shared-stream" -- %s 2>/dev/null'
+            % (path_expr, path_expr, path_expr))
+
+
 def _render_quota_limits_block() -> str:
     """#950 fix-forward D3+D4: usage-aware per-user quota application.
 
@@ -367,8 +396,7 @@ def _render_quota_limits_block() -> str:
         '    # ALL accounts together is at most %d%% of the free space\n'
         '    fs_share_n=0\n'
         '    for home in /home/*; do\n'
-        '        if grep -q "shared-stream" "$home/.claude/airuleset-box-class" 2>/dev/null;'
-        ' then fs_share_n=$(( fs_share_n + 1 )); fi\n'
+        '        if @@IS_STREAM_HOME@@; then fs_share_n=$(( fs_share_n + 1 )); fi\n'
         '    done\n'
         '    [ "$fs_share_n" -ge 1 ] || fs_share_n=1\n'
         '    fs_bound_kib=$(( fs_avail_kib * %d / 100 / fs_share_n ))\n'
@@ -383,7 +411,7 @@ def _render_quota_limits_block() -> str:
         '    [ -d "$home" ] || continue\n'
         '    u=$(basename "$home")\n'
         '    bcf="$home/.claude/airuleset-box-class"\n'
-        '    grep -q "shared-stream" "$bcf" 2>/dev/null || continue\n'
+        '    @@IS_STREAM_BCF@@ || continue\n'
         '    # Y6: repquota failure -> no usage for ANY user, never guess 0\n'
         '    if [ "$rq_rc" -ne 0 ]; then\n'
         '        echo "  ⚠ quota: repquota gave no usage for $u'
@@ -455,7 +483,7 @@ def _render_quota_limits_block() -> str:
         '    [ -d "$home" ] || continue\n'
         '    u=$(basename "$home")\n'
         '    bcf="$home/.claude/airuleset-box-class"\n'
-        '    grep -q "shared-stream" "$bcf" 2>/dev/null || continue\n'
+        '    @@IS_STREAM_BCF@@ || continue\n'
         '    # Re-read the applied hard limit for THIS user\n'
         '    applied_hard=$(echo "$rq_verify" | awk -v u="$u" \'$1==u{print $5}\')\n'
         '    applied_soft=$(echo "$rq_verify" | awk -v u="$u" \'$1==u{print $4}\')\n'
@@ -484,7 +512,9 @@ def _render_quota_limits_block() -> str:
            QUOTA_SOFT_KIB, QUOTA_HARD_KIB,
            QUOTA_FS_AVAIL_BOUND_PCT,
            QUOTA_GRACE_S)
-    ).replace("@@ROOM_FLOOR@@", room)
+    ).replace("@@ROOM_FLOOR@@", room).replace(
+        "@@IS_STREAM_HOME@@", _render_is_stream_test('"$home/.claude/airuleset-box-class"')
+    ).replace("@@IS_STREAM_BCF@@", _render_is_stream_test('"$bcf"'))
 
 
 def _render_quota_timer_enable_block(timer: str, label: str) -> str:
@@ -510,20 +540,25 @@ def _render_quota_apply_lock_block() -> str:
     lock as the daily refresh, so it never ``quotaon``s under a running
     recount (busy → the quota part of this push is SKIPPED, LOUD). An
     unopenable lock (non-root, never in production) proceeds unserialized,
-    LOUD. The fd is closed at the end of the apply block."""
+    LOUD. The fd is closed at the end of the apply block. #1387 review: the
+    lock file is root-only (umask 077 + chmod 0600 before the flock)."""
     return (
         '    if [ "$quota_fail" -eq 0 ]; then\n'
+        '        _um=$(umask); umask 077\n'
         '        if { exec 9>>%s; } 2>/dev/null; then\n'
+        '            umask "$_um"\n'
+        '            chmod 0600 %s 2>/dev/null || true\n'
         '            if ! flock -w %d 9; then\n'
         '                echo "  ⚠ quota: quota lock busy (a refresh recount running?)" \\\n'
         '                    "— quota apply SKIPPED this push" >&2\n'
         '                quota_fail=1\n'
         '            fi\n'
         '        else\n'
+        '            umask "$_um"\n'
         '            echo "  ⚠ quota: cannot open the quota lock — applying unserialized" >&2\n'
         '        fi\n'
         '    fi'
-        % (QUOTA_LOCK_PATH, QUOTA_APPLY_LOCK_WAIT_S)
+        % (QUOTA_LOCK_PATH, QUOTA_LOCK_PATH, QUOTA_APPLY_LOCK_WAIT_S)
     )
 
 
