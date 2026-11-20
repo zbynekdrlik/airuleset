@@ -197,7 +197,7 @@ NUDGE_TEXT = "continue"
 # re-dispatch-from-durable-state duty (subagent-continuation.md) with a
 # CONDITIONAL clause ("if any agent died…"), so it is HARMLESS for a solo
 # session with no agents (it just reads it and continues). Starts with the
-# `oauth-resume:` prefix registered in `_MACHINE_PROMPT_PREFIXES` below, so the
+# `oauth-resume:` prefix registered in `machine_prompts.MACHINE_PROMPT_PREFIXES`, so the
 # submitted `user` turn is never misread as a human answer (`_last_human_prompt_ts`
 # / `_is_genuine_human_prompt`) -- the same guarantee bare `continue` gets from
 # `_MACHINE_PROMPT_EXACT`. Typed by the #1075 handler (`_handle_authdead_episode`).
