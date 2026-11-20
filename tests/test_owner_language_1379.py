@@ -819,6 +819,12 @@ class TestRound2Prose(unittest.TestCase):
         self.assertIn("oprava", words)
         self.assertIn("terminálu", words)
 
+    def test_a_single_letter_does_not_make_an_english_title_slovak(self):
+        # final probe replay: "(the U bucket)" kept a whole English title,
+        # because the single letter "u" is a Slovak preposition
+        self.assertFalse(ol.message_is_mainly_english(TITLES_NESTED))
+        self.assertNotIn("footer", ol.prose_words(TITLES_NESTED))
+
     def test_english_behind_a_level_word_or_a_long_quote_counts(self):
         for msg in ("WARNING: the build is not green and the deploy did not run, so I "
                     "will look at it again after the tests are done and tell you what "
