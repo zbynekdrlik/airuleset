@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Hook: PostToolUse (Bash matcher) -- THIN ADAPTER (#1333, review round 3 A).
+# Hook: PostToolUse + PostToolUseFailure (Bash matcher) -- THIN ADAPTER (#1333,
+# review rounds 3 A + 4).
 #
 # The house-stack STATE check. All logic lives in gates/housestate.py: after a
 # Bash call whose text mentions a JS package manager or scaffolder, in a house
@@ -15,8 +16,10 @@ set -euo pipefail
 # Exit 2 = the reason on STDERR reaches the model (the command already ran: it
 # says revert or get the owner's exception). A git failure fails OPEN with a
 # logged reason (~/.claude/stack-gate.log); a python MALFUNCTION fails OPEN too.
-# Cheap path: a payload that names no package manager, scaffolder or package.json
-# exits here, before python.
+# Cheap path: a COMMAND (the tool_input.command field, never the tool output) that
+# names no package manager, scaffolder or package.json exits here, before python;
+# when jq cannot read the payload, the whole payload is matched (wider, never
+# narrower).
 # `-P` (#1061 item 5b): a stale in-cwd gates/ can never shadow the real package.
 # Dry-run: echo '{"tool_name":"Bash","cwd":"/path/to/repo","tool_input":{"command":"npm i react"}}' | bash <this hook>
 
@@ -24,7 +27,8 @@ HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
 REPO_ROOT="$(dirname "$HOOK_DIR")"
 PAYLOAD=$(cat 2>/dev/null || echo "")
 [ -z "$PAYLOAD" ] && PAYLOAD="${TOOL_INPUT:-}"
-case "$PAYLOAD" in
+CMD=$(printf '%s' "$PAYLOAD" | jq -r '.tool_input.command // empty' 2>/dev/null) || CMD="$PAYLOAD"
+case "$CMD" in
     *npm* | *yarn* | *bun* | *npx* | *pnpx* | *corepack* | *create-* | *package.json*) ;;
     *) exit 0 ;;
 esac

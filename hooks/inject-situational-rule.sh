@@ -246,11 +246,12 @@ for line in open(conf_path, encoding="utf-8"):
             continue
     except re.error:
         continue
-    if topic in REGISTRY_SCOPED_TOPICS and not house_scope():
-        continue
 
     marker = os.path.join(marker_dir, topic)
     if os.path.exists(marker):
+        continue
+    # #1333 round 4: the scope's git call only for a topic not yet injected
+    if topic in REGISTRY_SCOPED_TOPICS and not house_scope():
         continue
 
     body_path = os.path.join(repo_root, body_rel)

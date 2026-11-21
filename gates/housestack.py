@@ -7,45 +7,46 @@ file) that brings a JS UI framework FAMILY (``cli_onboard_stack.FRAMEWORK_FAMILY
 react incl. react-dom / next, vue incl. nuxt, svelte incl. sveltekit, angular,
 preact, solid, lit, alpine, htmx, astro, qwik, ember) NEW to the git repo into a
 house project, unless that family's owner-approved marker
-``<!-- airuleset:stack-exception <what> — <#N or GitHub URL> -->`` exists. The
-house stack's web UI is Leptos/WASM (``rules/house-stack.md``); the owner,
-21.11.2026, kept finding projects "postavane na random adhoc zvolenych
-technologiach".
+``<!-- airuleset:stack-exception <what> — <#N or GitHub URL> -->`` is in the
+repo-root ``CLAUDE.md``. The house stack's web UI is Leptos/WASM
+(``rules/house-stack.md``); the owner, 21.11.2026, kept finding projects
+"postavane na random adhoc zvolenych technologiach".
 
-It judges file CONTENT only. Review round 3 (ROZHODNUTÉ A) removed the Bash
-command-text parser (bypassed a dozen ways in two rounds, the #1220 lesson:
-never guard state by parsing commands); ``gates.housestate`` checks the repo's
-package.json STATE after a Bash call instead.
+It judges file CONTENT only. Review round 3 (ROZHODNUTÉ A) removed a Bash
+command-text parser (bypassed a dozen ways, the #1220 lesson: never guard state
+by parsing commands); ``gates.housestate`` checks the repo STATE after Bash.
 
-- New = absent from the file before the change AND from every other
-  package.json of the repo; hidden dirs and ``cli_stack_scope.SKIP_DIRS`` never
-  count, and nothing under a skipped dir is judged.
+- New = absent from the file before the change AND from every other judged
+  package.json of the repo: ``repo_package_files`` = ``git ls-files -co
+  --exclude-standard`` (the state check's set; hidden dirs, ``SKIP_DIRS`` and
+  paths deeper than ``SCAN_DEPTH`` left out). Nothing under a skipped dir is
+  judged.
 - House = the registry ``stack`` of the file's checkout, or, for a path outside
-  any repo, of the session cwd (round 3 B); an unregistered repo is house.
-- One marker per technology (round 3 E): a marker covers only the family its
-  ``<what>`` names, read from every ``CLAUDE.md`` / ``.claude/CLAUDE.md`` from
-  the file's dir up to the git root (and the cwd's, for an out-of-repo path).
-  A marker-allowed change is logged as ALLOW-MARKER.
+  any repo, of the session cwd, whose repo then supplies the existing set and
+  the root ``CLAUDE.md`` (round 3 B, round 4 item 3); an unregistered repo is
+  house; an unreadable registry is UNKNOWN: skipped with a log line.
+- One marker per technology, read from the repo-root ``CLAUDE.md`` only (round
+  4 item 6); a marker-allowed change is logged as ALLOW-MARKER.
 
 FAIL-OPEN with a logged reason (the sibling Write|Edit gates' contract), in
 ``~/.claude/stack-gate.log``: an unreadable payload, an unreadable or
 unparseable existing package.json, unparseable new content, an Edit whose
-``old_string`` is not in the file (CRLF), an unreadable CLAUDE.md, a repo too
-large to scan. Exit 2 = block, reason on STDERR only (the adapter runs this
-module with ``1>&2``). STDLIB ONLY.
+``old_string`` is not in the file (CRLF or stale text), an unreadable
+CLAUDE.md, a git failure. Exit 2 = block, reason on STDERR only (the adapter
+runs this module with ``1>&2``). STDLIB ONLY.
 """
 import json
 import os
+import subprocess
 import time
 
-from cli_stack_scope import HOUSE, REGISTRY_FILENAME, SKIP_DIRS, repo_root, stack_for
+from cli_stack_scope import (GIT_TIMEOUT_S, HOUSE, REGISTRY_FILENAME, SCAN_DEPTH,
+                             SKIP_DIRS, UNKNOWN, git_env, repo_root, stack_for)
 from gates import allow, emit_block_stderr, read_payload
 
 GATE_LOG = "stack-gate.log"
 REGISTRY = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                         REGISTRY_FILENAME)
-_SCAN_MAX_DIRS = 20000
-_SCAN_MAX_DEPTH = 8
 
 
 def log(line):
@@ -81,76 +82,83 @@ def skipped(rel_or_path):
     return bool(set(parts) & set(SKIP_DIRS))
 
 
-def claude_mds(start, root):
-    """CLAUDE.md and .claude/CLAUDE.md paths from `start` up to `root`
-    (inclusive; the filesystem root without one), nearest first."""
-    out = []
-    d = os.path.abspath(start)
-    stop = os.path.abspath(root) if root else None
-    while True:
-        out += [os.path.join(d, "CLAUDE.md"), os.path.join(d, ".claude", "CLAUDE.md")]
-        parent = os.path.dirname(d)
-        if d == stop or parent == d:
-            return out
-        d = parent
+def judged(rel):
+    """A repo-relative package.json the gates judge: not under a hidden or
+    skipped dir, not deeper than SCAN_DEPTH."""
+    parts = rel.split("/")
+    return (parts[-1] == "package.json" and len(parts) <= SCAN_DEPTH
+            and not set(parts[:-1]) & set(SKIP_DIRS)
+            and not any(p.startswith(".") for p in parts[:-1]))
 
 
-def uncovered(families, chains, what):
-    """The families no marker in the CLAUDE.md `chains` covers; a covered one
-    is logged as ALLOW-MARKER. An unreadable CLAUDE.md fails open."""
-    from cli_onboard_stack import exception_covers
-    texts = []
-    for cm in dict.fromkeys(chains):
-        text = read(cm)
-        if text is None:
-            fail_open(f"cannot read {cm} for {what}")
+def git(top, args, stdin=None):
+    """git stdout bytes, or None on failure (a GIT_TIMEOUT_S bound)."""
+    try:
+        r = subprocess.run(["git", "-C", top, *args], input=stdin, capture_output=True,
+                           timeout=GIT_TIMEOUT_S, env=git_env())
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return r.stdout if r.returncode == 0 else None
+
+
+def _names(out):
+    return [r for r in dict.fromkeys(out.decode("utf-8", "replace").split("\0"))
+            if r and judged(r)]
+
+
+def repo_package_files(top, args=("ls-files", "-z", "--cached", "--others",
+                                  "--exclude-standard")):
+    """{rel: text} of the judged package.json files git lists for `top`
+    (default: tracked + untracked, not ignored), read from the working tree."""
+    out = git(top, list(args))
+    if out is None:
+        fail_open(f"git {args[0]} failed in {top}")
+    files = {}
+    for rel in _names(out):
+        text = read(os.path.join(top, rel))
         if text:
-            texts.append((cm, text))
+            files[rel] = text
+    return files
+
+
+def uncovered(families, claude_md, what):
+    """The families no marker in the repo-root `claude_md` covers; a covered
+    one is logged as ALLOW-MARKER. An unreadable CLAUDE.md fails open."""
+    from cli_onboard_stack import exception_covers
+    text = read(claude_md)
+    if text is None:
+        fail_open(f"cannot read {claude_md} for {what}")
     left = []
     for fam in sorted(families):
-        hit = next((cm for cm, text in texts if exception_covers(text, fam)), None)
-        if hit:
-            log(f"ALLOW-MARKER {what} framework={fam} claude_md={hit}")
+        if text and exception_covers(text, fam):
+            log(f"ALLOW-MARKER {what} framework={fam} claude_md={claude_md}")
         else:
             left.append(fam)
     return left
 
 
-def repo_frameworks(root, exclude):
-    """The families every other package.json of the repo carries, or None when
-    the repo is too large to scan. Hidden and skipped dirs never count."""
-    from cli_onboard_stack import package_json_frameworks
-    found, seen = set(), 0
-    base_depth = root.rstrip(os.sep).count(os.sep)
-    ex = os.path.abspath(exclude) if exclude else None
-    for dirpath, dirnames, filenames in os.walk(root):
-        seen += 1
-        if seen > _SCAN_MAX_DIRS:
-            return None
-        if dirpath.count(os.sep) - base_depth >= _SCAN_MAX_DEPTH:
-            dirnames[:] = []
-        dirnames[:] = [d for d in dirnames
-                       if not d.startswith(".") and d not in SKIP_DIRS]
-        if "package.json" in filenames:
-            p = os.path.join(dirpath, "package.json")
-            if os.path.abspath(p) != ex:
-                found |= package_json_frameworks(read(p) or "") or set()
-    return found
+def house(start, cwd=None, registry=None):
+    """True when `start` (or, outside any repo, `cwd`) is a house checkout;
+    an unreadable registry is logged and never house."""
+    stack = stack_for(start, registry or REGISTRY, fallback=cwd)[1]
+    if stack == UNKNOWN:
+        log(f"SKIP registry unreadable ({registry or REGISTRY}) for {start}")
+    return stack == HOUSE
 
 
-def block_reason(families, what):
+def block_reason(families, what, where):
     return (
         f"🚫 BLOCKED: {what} adds the JS UI framework(s) {', '.join(families)}, new "
-        "to this repo, without its stack exception (#1333).\n"
+        f"to {where}, without its stack exception (#1333).\n"
         "The house stack is the default for every NEW app: web UI = Leptos CSR → "
         "WASM built by Trunk, served by the axum service — read "
         "~/.claude/rules/house-stack.md before choosing.\n"
         "Another stack only as an OWNER-approved exception, one per technology: ask "
         "the owner, then record `<!-- airuleset:stack-exception <what> — <#N or "
-        "GitHub URL> -->` (`<what>` names the technology) in the project CLAUDE.md, "
-        "never on your own judgement. A clearly better option than the house stack "
-        "is proposed as a stack upgrade (the rule's \"Stack evolution\"), never "
-        "used silently.")
+        "GitHub URL> -->` (`<what>` names the technology) in the repo-root "
+        "CLAUDE.md, never on your own judgement. A clearly better option than the "
+        "house stack is proposed as a stack upgrade (the rule's \"Stack "
+        "evolution\"), never used silently.")
 
 
 def _after_edit(before, tool_input, file_path):
@@ -172,7 +180,7 @@ def classify(tool_name, tool_input, cwd):
     if os.path.basename(file_path) != "package.json" or skipped(file_path):
         return ""
     start = os.path.dirname(file_path)
-    if stack_for(start, REGISTRY, fallback=cwd)[1] != HOUSE:
+    if not house(start, cwd):
         return ""
     before = read(file_path)
     if before is None:
@@ -197,14 +205,18 @@ def classify(tool_name, tool_input, cwd):
     if not families:
         return ""
     root = repo_root(start)
-    existing = repo_frameworks(root, file_path) if root else set()
-    if existing is None:
-        fail_open(f"repo at {root} too large to scan for {file_path}")
-    chains = claude_mds(start, root)
+    where = "this repo"
     if root is None and cwd:
-        chains += claude_mds(cwd, repo_root(cwd))
-    left = uncovered(families - existing, chains, f"`{file_path}`")
-    return block_reason(left, f"`{file_path}`") if left else ""
+        root, where = repo_root(cwd), "the session's repo"
+    existing = set()
+    if root:
+        real = os.path.realpath(file_path)
+        for rel, text in repo_package_files(root).items():
+            if os.path.realpath(os.path.join(root, rel)) != real:
+                existing |= package_json_frameworks(text) or set()
+    claude_md = os.path.join(root or cwd or start, "CLAUDE.md")
+    left = uncovered(families - existing, claude_md, f"`{file_path}`")
+    return block_reason(left, f"`{file_path}`", where) if left else ""
 
 
 def main():

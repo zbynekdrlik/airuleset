@@ -32,7 +32,15 @@ import re
 import subprocess
 
 HOUSE = "house"
+# An unreadable registry: the scope is unknown, so a consumer skips (and logs),
+# it never assumes house (round 4, item 4).
+UNKNOWN = "unknown"
 REGISTRY_FILENAME = "projects-registry.json"
+# Every git call here and in the gates stays below the 5 s / 10 s hook timeouts.
+GIT_TIMEOUT_S = 4
+# ONE depth for the gate's and the state check's package.json set and the
+# audit's find (path components below the project root).
+SCAN_DEPTH = 6
 
 STACK_IDS = {
     "house": "Rust app on the house stack (rules/house-stack.md)",
@@ -73,20 +81,26 @@ def _existing_dir(start):
     return d
 
 
+def git_env():
+    """The environment for a git subprocess: no inherited repo pointers."""
+    return {k: v for k, v in os.environ.items()
+            if k not in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE")}
+
+
 def git_layout(start):
-    """``(worktree top, main checkout, common git dir)`` of the checkout holding
-    `start`, asked of git itself; None outside a repo, without git, or when git
-    refuses (a foreign owner). A `start` that does not exist yet is walked up
-    from its first existing ancestor."""
+    """``(worktree top, main checkout, common git dir, superproject or None)``
+    of the checkout holding `start`, asked of git itself; None outside a repo,
+    without git, or when git refuses (a foreign owner). A `start` that does not
+    exist yet is walked up from its first existing ancestor."""
     d = _existing_dir(start)
     if d is None:
         return None
-    env = {k: v for k, v in os.environ.items()
-           if k not in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE")}
     try:
         r = subprocess.run(["git", "-C", d, "rev-parse", "--path-format=absolute",
-                            "--show-toplevel", "--git-common-dir"],
-                           capture_output=True, text=True, timeout=5, env=env)
+                            "--show-toplevel", "--git-common-dir",
+                            "--show-superproject-working-tree"],
+                           capture_output=True, text=True, timeout=GIT_TIMEOUT_S,
+                           env=git_env())
     except (OSError, subprocess.SubprocessError):
         return None
     lines = r.stdout.splitlines() if r.returncode == 0 else []
@@ -94,7 +108,7 @@ def git_layout(start):
         return None
     top, common = lines[0], lines[1]
     main = os.path.dirname(common) if os.path.basename(common) == ".git" else top
-    return top, main, common
+    return top, main, common, (lines[2] if len(lines) > 2 and lines[2] else None)
 
 
 def repo_root(start):
@@ -125,13 +139,13 @@ def origin_repo_name(common):
 
 
 def load_rows(registry_path):
-    """Registry rows (dicts), [] when the file is absent or broken."""
+    """Registry rows (dicts), None when the file is absent or broken."""
     try:
         with open(registry_path, encoding="utf-8") as f:
             data = json.load(f)
     except (OSError, ValueError):
-        return []
-    return [r for r in data if isinstance(r, dict)] if isinstance(data, list) else []
+        return None
+    return [r for r in data if isinstance(r, dict)] if isinstance(data, list) else None
 
 
 def _real(path):
@@ -162,10 +176,14 @@ def _row_by_path(rows, path, prefix=False):
 
 def stack_for(start, registry_path, fallback=None):
     """``(project name or None, stack id)`` for the checkout holding `start`;
-    outside any repo and registry path, for `fallback` (the session cwd).
-    Never raises; anything unresolvable reads ``(None, "house")``."""
+    outside any repo and registry path, for `fallback` (the session cwd); a
+    submodule for its superproject. ``(None, UNKNOWN)`` when the registry
+    cannot be read. Never raises; anything else unresolvable reads
+    ``(None, "house")``."""
     try:
         rows = load_rows(registry_path)
+        if rows is None:
+            return None, UNKNOWN
         layout = git_layout(start)
         if layout is None:
             row = _row_by_path(rows, start, prefix=True)
@@ -174,7 +192,9 @@ def stack_for(start, registry_path, fallback=None):
             if fallback is not None:
                 return stack_for(fallback, registry_path)
             return None, HOUSE
-        top, main, common = layout
+        top, main, common, superproject = layout
+        if superproject:
+            return stack_for(superproject, registry_path)
         name = origin_repo_name(common)
         for row in rows:
             repo = str(row.get("github_repo") or "").rsplit("/", 1)[-1]

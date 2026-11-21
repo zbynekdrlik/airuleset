@@ -229,6 +229,23 @@ def package_json_frameworks(text):
     return found
 
 
+def framework_packages(text):
+    """{family: {npm package names}} of a package.json ({} when unreadable):
+    what an `npm uninstall` would name."""
+    try:
+        doc = json.loads(str(text).lstrip("﻿"))
+    except (ValueError, TypeError):
+        return {}
+    out = {}
+    for key in _DEP_KEYS:
+        deps = doc.get(key) if isinstance(doc, dict) else None
+        for name, spec in (deps.items() if isinstance(deps, dict) else ()):
+            fam = FRAMEWORK_FAMILY.get(_alias_target(name, spec))
+            if fam:
+                out.setdefault(fam, set()).add(str(name))
+    return out
+
+
 def _alias_target(name, spec):
     """The real package of a dependency: an npm alias (`"ui": "npm:react@18"`)
     names it in the version spec."""
@@ -363,7 +380,7 @@ def audit_drift(path, host=None, run=None, claude_md=None, entry=None,
     if stack not in STACK_IDS:
         reg = registry_path or os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                             REGISTRY_FILENAME)
-        if entry.get("name") not in {r.get("name") for r in load_rows(reg)}:
+        if entry.get("name") not in {r.get("name") for r in load_rows(reg) or []}:
             detail = ("not in projects-registry.json: onboard it, and airuleset sets "
                       "its `stack`")
         else:
