@@ -31,7 +31,7 @@ INPUT=$(cat 2>/dev/null || echo "")
 CONF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/situational-triggers.conf"
 [ -f "$CONF" ] || exit 0
 
-python3 - "$CONF" "$INPUT" <<'PYEOF' || exit 0
+python3 -P - "$CONF" "$INPUT" <<'PYEOF' || exit 0
 import json
 import os
 import re
@@ -166,8 +166,37 @@ MAX_TOTAL = 14000
 # #1179: odoo-client-board-stages joins -- an `Acceptance-thread:` line lives in
 # the QUOTED/heredoc `gh issue comment` body, which the stripped haystack drops.
 # #1235: linux-box-swap — remote probes quote the command (ssh box 'free -h').
+# #1333: house-stack — the `Architektúra:` section lives in the quoted body.
 RAW_BASH_MATCH_TOPICS = {"cloudflare-api-tokens", "odoo-client-board-stages",
-                         "linux-box-swap"}
+                         "linux-box-swap", "house-stack"}
+
+# #1333 ROZHODNUTÉ 2: these topics reach only a checkout whose registry `stack`
+# is `house` -- or an unregistered repo, the moment a new app's stack is chosen.
+# The checkout is the written file's (Write/Edit), else the session cwd; a file
+# outside any repo (the scratchpad body of a `gh -F` comment) resolves through
+# the session cwd (round 3 B).
+REGISTRY_SCOPED_TOPICS = {"house-stack"}
+_scope_memo = {}
+
+
+def house_scope():
+    if "house" not in _scope_memo:
+        ok = True
+        try:
+            cwd = payload.get("cwd") or os.getcwd()
+            start, fallback = cwd, None
+            ti = payload.get("tool_input")
+            fp = ti.get("file_path") if isinstance(ti, dict) else None
+            if isinstance(fp, str) and os.path.isabs(fp):
+                start, fallback = os.path.dirname(fp), cwd
+            sys.path.insert(0, repo_root)
+            from cli_stack_scope import HOUSE, REGISTRY_FILENAME, stack_for
+            ok = stack_for(start, os.path.join(repo_root, REGISTRY_FILENAME),
+                           fallback=fallback)[1] == HOUSE
+        except Exception:  # airuleset:script-ok an unresolvable scope injects (cheap side)
+            ok = True
+        _scope_memo["house"] = ok
+    return _scope_memo["house"]
 
 
 def strip_frontmatter(text):
@@ -220,6 +249,9 @@ for line in open(conf_path, encoding="utf-8"):
 
     marker = os.path.join(marker_dir, topic)
     if os.path.exists(marker):
+        continue
+    # #1333 round 4: the scope's git call only for a topic not yet injected
+    if topic in REGISTRY_SCOPED_TOPICS and not house_scope():
         continue
 
     body_path = os.path.join(repo_root, body_rel)

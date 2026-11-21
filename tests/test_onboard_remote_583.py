@@ -284,7 +284,7 @@ class TestAuditRemote(unittest.TestCase):
     def _entry(self, path, host):
         return {"name": "foo583", "host": host, "path": path,
                 "branch_model": "2-branch", "default_branch": "main",
-                "work_branch": "dev"}
+                "work_branch": "dev", "stack": "house"}  # #1333
 
     def test_healthy_remote_audits_clean(self):
         run = RemoteRunner()

@@ -58,7 +58,7 @@ modules/quality/database-migrations.md
 rules/database-migrations.md
 rules/guide-agent-eval.md
 rules/linux-box-swap.md
-rules/rust-web-tray.md
+rules/house-stack.md
 modules/quality/version-on-dashboard.md
 modules/quality/comprehensive-logging.md
 modules/quality/autonomous-batch-issue-development.md

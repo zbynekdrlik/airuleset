@@ -2,7 +2,7 @@
 
 Two halves, both tested here:
 
-1. The convention is a path-scoped rule, ``rules/rust-web-tray.md``. It is
+1. The convention is a path-scoped rule, ``rules/house-stack.md`` (#1333). It is
    installed the same way as the other ``rules/*.md`` files: through a
    ``profiles/universal.profile`` line that ``symlink_global_rules`` links
    into ``~/.claude/rules/``.
@@ -33,7 +33,7 @@ import cli_onboard as ob  # noqa: E402
 from _onboard_gate_open import setUpModule, tearDownModule  # noqa: E402,F401
 from test_onboard_project import FakeRunner, init_repo  # noqa: E402
 
-RULE = REPO / "rules" / "rust-web-tray.md"
+RULE = REPO / "rules" / "house-stack.md"
 
 AXUM_PKG = """[package]
 name = "fohmixer"
@@ -105,11 +105,11 @@ def _foundation(root, existing=()):
 # --------------------------------------------------------------------------- #
 class TestRustWebTrayRule(unittest.TestCase):
     def test_rule_file_exists_with_rust_paths(self):
-        self.assertTrue(RULE.exists(), "rules/rust-web-tray.md not shipped")
+        self.assertTrue(RULE.exists(), "rules/house-stack.md not shipped")
         text = RULE.read_text()
         self.assertTrue(text.startswith("---\npaths:\n"), text[:80])
         head = text.split("---", 2)[1]
-        for glob in ('"**/Cargo.toml"', '"**/src/**/*.rs"', '"**/crates/**"'):
+        for glob in ('"**/Cargo.toml"', '"**/Trunk.toml"'):
             self.assertIn(glob, head)
 
     def test_rule_states_the_convention(self):
@@ -123,14 +123,14 @@ class TestRustWebTrayRule(unittest.TestCase):
     def test_rule_is_in_universal_profile(self):
         entries = airuleset.parse_profile(airuleset.UNIVERSAL_PROFILE)
         _modules, rules = airuleset.categorize_entries(entries)
-        self.assertIn("rules/rust-web-tray.md", rules)
+        self.assertIn("rules/house-stack.md", rules)
 
     def test_rule_gets_installed_as_a_symlink(self):
         with TemporaryDirectory() as d:
             claude_dir = Path(d)
-            airuleset.symlink_global_rules(["rules/rust-web-tray.md"],
+            airuleset.symlink_global_rules(["rules/house-stack.md"],
                                            claude_dir, airuleset.REPO_DIR)
-            link = claude_dir / "rules" / "rust-web-tray.md"
+            link = claude_dir / "rules" / "house-stack.md"
             self.assertTrue(link.is_symlink())
             self.assertEqual(link.resolve(), RULE.resolve())
 
@@ -220,7 +220,7 @@ class TestTrayFoundationGap(unittest.TestCase):
                                       ob.FOUNDATION_TRAY_TITLE)
             self.assertEqual(len(created), 1)
             body = created[0][created[0].index("--body") + 1]
-            self.assertIn("rules/rust-web-tray.md", body)
+            self.assertIn("rules/house-stack.md", body)
             self.assertIn("Scope-gate:", body)
 
     def test_existing_tray_ticket_is_not_refiled(self):

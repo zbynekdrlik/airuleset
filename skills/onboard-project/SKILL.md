@@ -25,11 +25,11 @@ What it ensures (each step: detect → act only if absent → report `satisfied`
 
 1. git repo (`git init` if missing)
 2. `.gitignore` hygiene — append-only, never overwrites; untracks already-tracked build artifacts
-3. `CLAUDE.md` skeleton + `## Playbook router` — ONLY if missing (existing file never overwritten)
+3. `CLAUDE.md` skeleton + `## Playbook router` — ONLY if missing (existing file never overwritten); a house candidate (Rust, or nothing yet) also gets `## Stack` (`rules/house-stack.md`, #1333)
 4. GitHub remote (`gh repo create zbynekdrlik/<name> --private --source . --push` if none)
 5. two/three-branch work branch per existing convention — NEVER changes the existing default branch
-6. foundation-gap tickets — no CI, web-without-version-label, or a Rust web app without a tray icon (`rules/rust-web-tray.md`, #1198) → files a tracked ticket (Scope-gate line; never auto-generates CI)
-7. registry entry in `projects-registry.json`
+6. foundation-gap tickets — no CI, web-without-version-label, or a Rust web app without a tray icon (`rules/house-stack.md`, #1198) → files a tracked ticket (Scope-gate line; never auto-generates CI)
+7. registry entry in `projects-registry.json`. Its `stack` field (`house` or a platform id from `cli_stack_scope.STACK_IDS`) is recorded by airuleset right after onboarding (a new app = `house`; a repo whose kind matches any existing platform id = that id); re-onboarding keeps it
 
 Then report the printed step table to the user (plain Slovak: čo bolo doplnené, čo už bolo v poriadku).
 
@@ -40,7 +40,7 @@ python3 ~/devel/airuleset/airuleset.py onboard-project --audit          # whole 
 python3 ~/devel/airuleset/airuleset.py onboard-project <path> --audit   # one project
 ```
 
-`--audit` (alias `--check`) reports drift from the checklist — missing remote, tracked build artifacts, missing Playbook router, branch-model mismatch, missing registry entry, a Rust web app without a tray (`missing-tray`; a server-only app opts out with `<!-- airuleset:tray=n/a <reason> -->` in its CLAUDE.md) — and changes NOTHING. A cross-host entry on a known `REMOTE_HOSTS` box is audited OVER SSH (a healthy remote project reads clean); a host that is neither this box nor a known remote target reads `unreachable`, never a false drift (#583). The fix for drift is an explicit re-run of `onboard-project` on that project, never an auto-fix.
+`--audit` (alias `--check`) reports drift from the checklist — missing remote, tracked build artifacts, missing Playbook router, branch-model mismatch, missing registry entry, a Rust web app without a tray (`missing-tray`; a server-only app opts out with `<!-- airuleset:tray=n/a <reason> -->` in its CLAUDE.md), a registry row with no known `stack` field (`stack-unpinned`; an unregistered path says so), and for a `house` row one `stack-deviation` per technology — a JS-framework family, a template / UI crate (askama, tera, maud, yew, dioxus, sycamore), hand-written JS outside a `Trunk.toml` dir or a leptos / wasm-bindgen crate, other technology in the `## Stack` table's Technology cells — silenced only by that technology's owner-approved `<!-- airuleset:stack-exception <what> — <#N or GitHub URL> -->`; `unverified-stack` when the tree could not be read; every marker (`stack-exception`) and the gate's ALLOW-MARKER lines (`stack-exception-use`) print as `·` notes, never drift — and changes NOTHING. A cross-host entry on a known `REMOTE_HOSTS` box is audited OVER SSH (a healthy remote project reads clean); a host that is neither this box nor a known remote target reads `unreachable`, never a false drift (#583). The fix for drift is an explicit re-run of `onboard-project` on that project, never an auto-fix.
 
 ## Rules
 

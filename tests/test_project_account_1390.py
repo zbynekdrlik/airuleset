@@ -143,7 +143,7 @@ class TestWallSongsAccount(unittest.TestCase):
         self.assertEqual(row, {
             "name": ACCT, "host": "dev1", "path": "/home/wall-songs/devel/wall-songs",
             "branch_model": "2-branch", "default_branch": "main", "work_branch": "dev",
-            "overrides": [], "onboarded": "2026-11-21", "account": ACCT})
+            "overrides": [], "onboarded": "2026-11-21", "account": ACCT, "stack": "house"})
         self.assertFalse(cli_accounts.is_legacy_account(ACCT))
         self.assertNotIn(ACCT, [r["name"] for r in cli_accounts.legacy_inventory(reg)])
 

@@ -344,6 +344,11 @@
           },
           {
             "type": "command",
+            "command": "bash ~/devel/airuleset/hooks/block-frontend-framework.sh",
+            "timeout": 5
+          },
+          {
+            "type": "command",
             "command": "bash ~/devel/airuleset/hooks/block-discuss-thread-name.sh",
             "timeout": 10
           },
@@ -379,6 +384,11 @@
           {
             "type": "command",
             "command": "bash ~/devel/airuleset/hooks/block-builtin-command-shadow.sh",
+            "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "bash ~/devel/airuleset/hooks/block-frontend-framework.sh",
             "timeout": 5
           },
           {
@@ -474,6 +484,11 @@
             "type": "command",
             "command": "bash ~/devel/airuleset/hooks/post-record-design-comment.sh",
             "timeout": 15
+          },
+          {
+            "type": "command",
+            "command": "bash ~/devel/airuleset/hooks/check-frontend-framework-state.sh",
+            "timeout": 10
           }
         ]
       },
@@ -503,6 +518,18 @@
           {
             "type": "command",
             "command": "bash ~/devel/airuleset/hooks/redact-vault-output.sh",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ~/devel/airuleset/hooks/check-frontend-framework-state.sh",
             "timeout": 10
           }
         ]

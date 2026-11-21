@@ -1,7 +1,7 @@
 """cli_onboard_tray.py — the "Rust web app without a tray icon" foundation gap
 (#1198, owner 2026-09-30).
 
-The fleet convention (``rules/rust-web-tray.md``): a Rust app that serves a
+The fleet convention (``rules/house-stack.md``): a Rust app that serves a
 web UI on a desktop machine ships a tray icon (status, Open <app>, Copy URL,
 Exit that ends the tray only), autostarted at the desktop user's logon. The
 fohmixer project went live without one because onboarding never checked. This
@@ -221,7 +221,7 @@ def rust_web_tray_gap(path, host=None, run=None):
 def foundation_tray_body(name, reason):
     return (
         "Webová Rust appka **%s** nemá tray ikonu (%s).\n\n"
-        "Konvencia `rules/rust-web-tray.md`: tray ukazuje stav (tooltip alebo "
+        "Konvencia `rules/house-stack.md`: tray ukazuje stav (tooltip alebo "
         "menu), má **Open <app>** (lokálna URL), **Copy URL** a Exit, ktorý "
         "ukončí len tray (služba beží ďalej). Tray sa spúšťa pri prihlásení "
         "desktop používateľa vedľa služby. Referencia: wall-bridge "

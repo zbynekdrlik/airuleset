@@ -81,6 +81,7 @@ from cli_onboard_exec import (  # noqa: E402
     _write_file as _write_file,
 )
 import cli_onboard_tray as _tray  # noqa: E402  (#1198 Rust web app tray gap)
+import cli_onboard_stack as _stack  # noqa: E402  (#1333 house-stack pin)
 FOUNDATION_TRAY_TITLE = _tray.FOUNDATION_TRAY_TITLE
 import cli_accounts  # noqa: E402  (#1184 per-project account gate)
 import cli_git_identity  # noqa: E402  (#1196 public repo → noreply identity)
@@ -378,6 +379,7 @@ def build_registry_entry(orig_path, target_path, host, name, overrides,
         "overrides": list(overrides or []),
         "onboarded": onboarded,
         "account": account or (existing or {}).get("account"),   # #1184
+        "stack": (existing or {}).get("stack"),   # #1333: set by airuleset only
     }
 
 
@@ -429,7 +431,7 @@ def _foundation_version_body(name):
 # --------------------------------------------------------------------------- #
 # CLAUDE.md skeleton.
 # --------------------------------------------------------------------------- #
-def _claude_md_skeleton(name):
+def _claude_md_skeleton(name, stack="unknown"):
     return (
         "# %s — Project Instructions\n\n"
         "## Overview\n\n"
@@ -438,11 +440,12 @@ def _claude_md_skeleton(name):
         "Two-branch: work na `dev`, PR `dev`→default. (Ak projekt používa "
         "inú konvenciu, uprav tento riadok — onboarding default branch "
         "nikdy nemení.)\n\n"
+        "%s"  # ## Stack (#1333)
         "## Playbook router\n\n"
         "- <area> → `.claude/rules/<area>.md` (auto-loads on its `paths:`)\n"
         "- build / deploy / release → load `.claude/skills/<area>` "
         "(invoke by name)\n"
-    ) % name
+    ) % (name, _stack.seed_section(stack))
 
 
 # --------------------------------------------------------------------------- #
@@ -527,14 +530,14 @@ def step_gitignore(path, stack, host=None, run=None, dry_run=False):
     return _step("gitignore", "applied", detail)
 
 
-def step_claude_md(path, name, host=None, run=None, dry_run=False):
+def step_claude_md(path, name, host=None, run=None, dry_run=False, stack="unknown"):
     cm = Path(path) / "CLAUDE.md"
     if _fs_exists(cm, host=host, run=run):
         return _step("claude_md", "satisfied", "CLAUDE.md present (never overwritten)")
     if dry_run:
         return _step("claude_md", "would-apply",
                      "would create CLAUDE.md skeleton + Playbook router")
-    if not _write_file(cm, _claude_md_skeleton(name), host=host, run=run):
+    if not _write_file(cm, _claude_md_skeleton(name, stack), host=host, run=run):
         return _step("claude_md", "skipped", "failed to write CLAUDE.md")
     _git(path, ["add", "CLAUDE.md"], host=host, run=run)
     cr = _commit_paths(
@@ -805,7 +808,8 @@ def onboard_project(path, host=None, name=None, overrides=None,
     steps = [
         step_git_init(target_path, host, run, dry_run),
         step_gitignore(target_path, stack, host, run, dry_run),
-        step_claude_md(target_path, name, host, run, dry_run),
+        step_claude_md(target_path, name, host, run, dry_run,
+                       (existing or {}).get("stack") or stack),
         step_remote(target_path, name, host, run, dry_run),
         step_branches(target_path, eff_overrides, host, run, dry_run),
         step_foundation_tickets(target_path, name, host, run, dry_run,
@@ -872,6 +876,7 @@ def audit_project(entry, host=None, run=None):
                       "detail": "CLAUDE.md has no Playbook router"})
     if tray := _tray.audit_drift(path, host=host, run=run, claude_md=cm_content or ""):
         drift.append(tray)
+    drift += _stack.audit_drift(path, host=host, run=run, claude_md=cm_content, entry=entry)
     return drift
 
 
@@ -925,7 +930,10 @@ def _print_result(result):
 def _print_audit(report):
     clean = True
     for name in sorted(report):
-        drift = report[name]
+        notes = [d for d in report[name] if d.get("kind") in _stack.NOTE_KINDS]
+        drift = [d for d in report[name] if d not in notes]   # #1333: notes never drift
+        for d in notes:
+            print("  · %-28s %-20s %s" % (name, d["kind"], d["detail"]))
         # `unreachable` is "could not check", NOT drift — surfaced distinctly and
         # never flips the clean tally (#583, requirement 4; kind evolved from the
         # #569 `remote-host` skip).
