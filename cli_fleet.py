@@ -523,6 +523,7 @@ REMOTE_HOSTS += [
         ("fleet-backup", "dev1", "100.104.8.125", False),  # #1339, live 16.11.
         ("companion-updater", "dev1", "100.104.8.125", False),  # #1363
         ("restreamer", "dev1", "100.104.8.125", False),  # #1373, live 19.11.
+        ("wall-songs", "dev1", "100.104.8.125", True),   # #1390, pending root bootstrap
     )
 ]
 
@@ -986,7 +987,7 @@ AUTHORITY_BY_USER = {
 FULL_AUTHORITY_USERS = frozenset(
     {"newlevel", "gatekeeper", "admin", "stepan", "airuleset", "claudy",
      "fohmixer", "varos", "wall-bridge", "songplayer",
-     "dstack", "dasio", "iemmixer", "dcontroller", "dsync", "intercom", "obs", "shading", "vstack", "nlch-finances", "tuke", "mikrotik-pz", "devbridge", "fleet-backup", "companion-updater", "restreamer"})
+     "dstack", "dasio", "iemmixer", "dcontroller", "dsync", "intercom", "obs", "shading", "vstack", "nlch-finances", "tuke", "mikrotik-pz", "devbridge", "fleet-backup", "companion-updater", "restreamer", "wall-songs"})
 
 
 # Webterm OBSERVER accounts (airuleset#867). An account that exists ONLY to run a
