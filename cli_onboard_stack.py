@@ -31,7 +31,8 @@ from cli_onboard_exec import _exec
 # frameworks (next, nuxt, @sveltejs/kit) imply React / Vue / Svelte.
 JS_UI_FRAMEWORKS = frozenset({
     "react", "react-dom", "next", "vue", "nuxt", "svelte", "@sveltejs/kit",
-    "angular", "@angular/core", "preact", "solid-js"})
+    "angular", "@angular/core", "preact", "solid-js", "lit", "alpinejs",
+    "htmx.org", "astro", "@builder.io/qwik", "ember-source"})
 _DEP_KEYS = ("dependencies", "devDependencies", "peerDependencies",
              "optionalDependencies")
 
@@ -60,6 +61,8 @@ _EMIT = ('for f; do printf "\\0%s\\0" "$f"; case "$f" in '
 _EXCEPTION_RE = re.compile(
     r"<!--[ \t]*airuleset:stack-exception[ \t]+([^<>\n]{1,400}?)[ \t]*-->")
 _EXCEPTION_SEP_RE = re.compile(r"\s*(?:—|–|\s-\s)\s*")
+# The owner ref is an issue (`#N`, `owner/repo#N`) or a GitHub URL (#1333 r1).
+_OWNER_REF_RE = re.compile(r"#\d+\b|https?://github\.com/\S+")
 _STACK_HEADING_RE = re.compile(r"^##[ \t]+Stack\b", re.M)
 
 STACK_SECTION = (
@@ -85,11 +88,13 @@ class StackCheckUnverified(Exception):
 
 
 def has_stack_exception(claude_md):
-    """True when the text carries a stack-exception marker that names both
-    `<what>` and `<owner ref>` around a dash."""
+    """True when the text carries a stack-exception marker that names
+    `<what>` and, after a dash, an `<owner ref>` holding a `#N` or a GitHub
+    URL."""
     for m in _EXCEPTION_RE.finditer(claude_md or ""):
         parts = _EXCEPTION_SEP_RE.split(m.group(1).strip(), maxsplit=1)
-        if len(parts) == 2 and parts[0].strip() and parts[1].strip():
+        if (len(parts) == 2 and parts[0].strip()
+                and _OWNER_REF_RE.search(parts[1])):
             return True
     return False
 
@@ -102,7 +107,7 @@ def package_json_frameworks(text):
     """The JS UI frameworks a package.json depends on (any dependency table),
     or None when the text is no JSON object (unreadable — the caller decides)."""
     try:
-        doc = json.loads(text)
+        doc = json.loads(str(text).lstrip("\ufeff"))
     except (ValueError, TypeError):
         return None
     if not isinstance(doc, dict):
@@ -111,8 +116,19 @@ def package_json_frameworks(text):
     for key in _DEP_KEYS:
         deps = doc.get(key)
         if isinstance(deps, dict):
-            found |= {str(n).strip().lower() for n in deps} & JS_UI_FRAMEWORKS
+            for name, spec in deps.items():
+                found |= {_alias_target(name, spec)} & JS_UI_FRAMEWORKS
     return found
+
+
+def _alias_target(name, spec):
+    """The real package of a dependency: an npm alias (`"ui": "npm:react@18"`)
+    names it in the version spec."""
+    spec = str(spec or "").strip()
+    if spec.startswith("npm:"):
+        real = spec[4:]
+        name = ("@" + real[1:].split("@")[0]) if real.startswith("@") else real.split("@")[0]
+    return str(name).strip().lower()
 
 
 def _is_hand_js(rel):
