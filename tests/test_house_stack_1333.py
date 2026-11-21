@@ -115,7 +115,7 @@ class TestHouseStackRule(unittest.TestCase):
     def test_web_ui_statements_survive_the_merge(self):
         for needle in (
                 "Every web UI MUST use Leptos compiled to WASM, served by Axum",
-                "No exceptions",
+                "No exception without the owner marker above",
                 "`trunk build --release` → static `dist/`",
                 "**SSR** (cargo-leptos on Axum) only when the project "
                 "explicitly requires server functions",
@@ -137,6 +137,45 @@ class TestHouseStackRule(unittest.TestCase):
         for needle in ("`cargo test`", "`wasm-bindgen-test`", "Playwright",
                        "zero browser-console errors"):
             self.assertIn(needle, window, needle)
+
+
+    # --- owner 21.11.: the stack is a living default, never a freeze ------ #
+    def test_every_table_row_carries_a_last_reviewed_cell(self):
+        rows = [ln for ln in self.raw.splitlines() if ln.startswith("| ")]
+        self.assertEqual(rows[0].split("|")[-2].strip(), "Last reviewed")
+        body = rows[1:]
+        self.assertEqual(len(body), 7, body)
+        for row in body:
+            cell = row.split("|")[-2].strip()
+            self.assertRegex(cell, r"^\d{1,2}\.\d{1,2}\.\d{4}", row)
+
+    def _evolution(self):
+        start = self.text.index("#### Stack evolution")
+        return self.text[start:self.text.index("#### Web UI", start)]
+
+    def test_evolution_checks_read_sources_at_every_design_step(self):
+        sec = self._evolution()
+        self.assertIn("At every design step (`Architektúra:`)**, for each layer "
+                      "the work touches", sec)
+        self.assertIn("from READ sources (release notes, the crate's "
+                      "docs/source, benchmarks — never memory)", sec)
+
+    def test_evolution_never_silent_either_way(self):
+        sec = self._evolution()
+        self.assertIn("never silently use it, never silently stay on the "
+                      "weaker one", sec)
+        self.assertIn("(what, why better for this need, cost of moving, "
+                      "affected projects)", sec)
+        self.assertIn("The owner decides.", sec)
+
+    def test_evolution_records_both_outcomes(self):
+        sec = self._evolution()
+        self.assertIn("airuleset updates the row and its \"Last reviewed\" "
+                      "cell", sec)
+        self.assertIn("each affected project gets its own upgrade ticket", sec)
+        self.assertIn("one line under **Considered** below with the reason; "
+                      "never re-raise it without new evidence", sec)
+        self.assertIn("**Considered (rejected, with reason):**", sec)
 
 
 # --------------------------------------------------------------------------- #
