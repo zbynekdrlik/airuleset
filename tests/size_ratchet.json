@@ -35,7 +35,7 @@
     "cli_mdreview_audit.py": 825,
     "cli_model_audit.py": 154,
     "cli_onboard.py": 1019,
-    "cli_onboard_exec.py": 177,
+    "cli_onboard_exec.py": 179,
     "cli_owner_keys.py": 233,
     "cli_owner_vps.py": 168,
     "cli_playwright_mcp.py": 973,

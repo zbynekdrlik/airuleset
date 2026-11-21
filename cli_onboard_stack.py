@@ -12,12 +12,11 @@ the project CLAUDE.md, ONE per technology. This leaf module holds that policy:
   ``audit_drift`` adds ``stack-unpinned`` (a registry row with no known
   ``stack``) and, for ``house`` rows only, one ``stack-deviation`` row per
   technology without its marker: a JS-framework family, a template / UI crate,
-  a hand-written JS web UI (the inline ``<script>`` of a page plus the JS a page
-  serves; never in a ``Trunk.toml`` dir, a leptos / wasm-bindgen crate, or
-  wasm-bindgen / Trunk output; never a gitignored path), other technology in
-  the ``## Stack`` table's Technology cells; every marker and the gate's
+  hand-written JS (every JS / TS file and the inline ``<script>`` of every
+  page, minus a DENY-list of known non-UI files: ``_denied``), other technology
+  in the ``## Stack`` table's Technology cells; every marker and the gate's
   ALLOW-MARKER lines come back as notes (``NOTE_KINDS``) that never count as
-  drift.
+  drift. A count it cannot read is ``StackCheckUnverified``, never clean.
 - ``gates.housestack`` / ``gates.housestate``: ``package_json_frameworks``
   (families) and ``exception_covers`` (one marker, one technology).
 
@@ -28,7 +27,6 @@ local disk (the #1198 tray-check shape). STDLIB ONLY.
 
 import json
 import os
-import posixpath
 import re
 import sys
 import tomllib
@@ -62,15 +60,17 @@ _TECH_ALIASES = dict(FRAMEWORK_FAMILY, **{
 _DEP_KEYS = ("dependencies", "devDependencies", "peerDependencies",
              "optionalDependencies")
 
-# A hand-written JS web UI = the inline <script> of every .html page plus the JS
-# a page SERVES (`<script src>`, an import in its inline script, and the modules
-# those import; audit precision b, 21.11.2026: tooling scripts are no web UI),
-# past this many lines in total: a PWA service worker or a small helper is no
-# app. Exempt: a Trunk.toml dir, a leptos / wasm-bindgen crate, wasm-bindgen /
-# Trunk OUTPUT (`_wasm_output`, audit precision a), the (non-root) dir of a
-# JS-framework package.json (that app is already its own finding), a Bitfocus
-# Companion module (a fleet platform, round 5 item 4), and the files a
-# VENDORED.md lists (round 4 item 6).
+# Hand-written JS = every JS / TS file and the inline <script> lines of every
+# .html page, past this many lines in total: a PWA service worker or a small
+# helper is no app. What loads what is never parsed (round-2 review of the audit
+# precision: an allow-list built by parsing text leaks real UIs, and for an
+# audit a silent false negative is worse than a visible false positive); a
+# DENY-list of known non-UI files instead (`_js_exempt`, `_denied`): a
+# Trunk.toml dir, a leptos / wasm-bindgen crate, wasm-bindgen / Trunk OUTPUT,
+# generated reports, tooling, the (non-root) dir of a JS-framework package.json
+# (that app is already its own finding), a Bitfocus Companion module (a fleet
+# platform, round 5 item 4), the files a VENDORED.md lists (round 4 item 6)
+# and gitignored paths.
 COMPANION_MODULE_DEP = "@companion-module/base"
 HAND_JS_MIN_LINES = 200
 _WASM_CRATES = ("leptos", "wasm-bindgen")
@@ -82,65 +82,67 @@ _JS_SUFFIXES = (".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx")
 _NOT_HAND_JS = re.compile(
     r"(\.min\.[cm]?[jt]sx?|\.d\.ts|\.config\.[cm]?[jt]s|^sw\.js|"
     r"^service-worker\.js|\.(?:test|spec)\.[cm]?[jt]sx?)$")
-# Build output, vendored trees, tests, hidden dirs, docs, generated test and
-# coverage reports: never the project's own UI. The trigger/gate SKIP_DIRS plus
+# Build output, vendored trees, tests, hidden dirs, docs and generated test
+# reports: never the project's own UI. The trigger/gate SKIP_DIRS plus
 # dist/pkg/build (Trunk / wasm-pack JS glue of a Leptos UI).
 _PRUNE_DIRS = tuple(sorted(set(SKIP_DIRS) | {
     "pkg", "build", ".*", "examples", "benches", "docs", "playwright-report",
-    "test-results", "coverage", ".nyc_output"}))
-# wasm-bindgen / Trunk output names (audit precision a): Trunk hashes a bundle
-# as `<name>-<16 hex>.js` + `<name>-<16 hex>_bg.wasm`.
+    "test-results", "htmlcov", "allure-report", "storybook-static"}))
+# Tooling, never a web UI: anything under a dir of these names (any depth).
+_TOOLING_DIRS = frozenset({"scripts", "tools", "ops", "bin"})
+# A `coverage` dir is a generated report only when it holds an lcov report.
+_LCOV = ("lcov-report", "lcov.info")
+# A Trunk hashed bundle: `<name>-<16 hex>.js` (beside its `_bg.wasm`).
 _TRUNK_HASH_JS = re.compile(r"-[0-9a-f]{16}\.js$")
-_TRUNK_HASH_WASM = re.compile(r"-[0-9a-f]{16}_bg\.wasm$")
 _SCAN_DEPTH = str(SCAN_DEPTH)   # the gates' depth (round 4 item 6)
-# The payload of an .html page (h=1) or a JS file (h=0): `n <lines>` (a page:
-# its inline <script> lines, a `src=` script and a one-line one count nothing;
-# a JS file: all its lines), `src <ref>` per `<script src>`, `imp <specifier>`
-# per quoted import / `from` (an inline script, a module). POSIX awk (mawk on
-# dev1 / dev2, gawk on the controller), passed as an argv: no shell quoting.
-# Linear in the line length: `split` once per line, never a substr loop over
-# the rest of a line (quadratic on a one-line bundle).
-_WEB_AWK = r"""
-function grab(s,   part, m, i, c, k) {
-  m = split(s, part, /(from|import)[ \t]*[(]?[ \t]*/)
-  for (i = 2; i <= m; i++) {
-    c = substr(part[i], 1, 1)
-    if (c != "\"" && c != "'") continue
-    k = index(substr(part[i], 2), c)
-    if (k > 1) print "imp " substr(part[i], 2, k - 1)
+# The inline JS lines of an .html page, printed as `n <lines>`: the lines wholly
+# inside a <script> without `src=` whose `type=` is JS (none, module,
+# text/javascript, …; json, importmap, a template, … are data), never inside an
+# HTML comment; a multi-line `<script …>` tag is followed to its `>`. A line
+# over 64 KB is skipped (a bundled blob, no hand-written line). POSIX awk (mawk
+# on dev1 / dev2, gawk on the controller, busybox), passed as an argv (no shell
+# quoting); one `split` per line, never a substr loop over the rest of a line.
+_INLINE_AWK = r"""
+function isjs(t,   ty) {
+  if (t ~ /[ \t]src[ \t]*=/) return 0
+  if (match(t, /[ \t]type[ \t]*=[ \t]*["']?[^ \t"'>]*/)) {
+    ty = substr(t, RSTART, RLENGTH)
+    sub(/^[ \t]type[ \t]*=[ \t]*["']?/, "", ty)
+    if (ty ~ /json|importmap|speculationrules|template|html|shader|text\/plain|markdown/)
+      return 0
   }
+  return 1
 }
-h && s { p = index(tolower($0), "</script>")
-         if (p) { grab(substr($0, 1, p - 1)); s = 0 } else { n++; grab($0) }
-         next }
-h { m = split($0, seg, /<[sS][cC][rR][iI][pP][tT]/)
-    for (i = 2; i <= m; i++) {
-      e = index(seg[i], ">"); q = index(tolower(e ? substr(seg[i], 1, e) : seg[i]), "src=")
-      if (q) {
-        v = substr(seg[i], q + 4); c = substr(v, 1, 1)
-        if (c == "\"" || c == "'") { v = substr(v, 2); k = index(v, c) }
-        else k = match(v, /[ \t>]/)
-        if (k) v = substr(v, 1, k - 1)
-        print "src " v
-      }
-      if (!e) break
-      if (q) continue
-      rest = substr(seg[i], e + 1); k = index(tolower(rest), "</script>")
-      if (k) grab(substr(rest, 1, k - 1))
-      else { grab(rest); if (i == m) s = 1 }
+length($0) > 65536 { next }
+{ b = st; m = split(tolower($0), tok, "<")
+  for (i = 1; i <= m; i++) {
+    x = tok[i]
+    if (i > 1 && st == 0) {
+      if (substr(x, 1, 3) == "!--") { st = 1; x = substr(x, 4) }
+      else if (x ~ /^script([ \t\/>]|$)/) { st = 2; tg = " "; x = substr(x, 7) }
+      else continue
     }
-    next }
-{ grab($0) }
-END { print "n " (h ? n : NR) }
+    if (st == 1) { if (index(x, "-->")) st = 0; continue }
+    if (st == 2) {
+      k = index(x, ">")
+      if (k) { tg = tg " " substr(x, 1, k - 1); st = isjs(tg) ? 3 : 4 } else tg = tg " " x
+      continue
+    }
+    if (i > 1 && x ~ /^\/script/) st = 0
+  }
+  if (b == 3 && st == 3) n++ }
+END { print "n " n + 0 }
 """
 # NUL <path> NUL <payload>: the content of a package.json / Cargo.toml /
-# VENDORED.md, nothing for a Trunk.toml / .wasm / minified file, `_WEB_AWK`'s
-# lines for a page or a JS file. $1 is `_WEB_AWK`.
+# VENDORED.md; nothing for a Trunk.toml / .wasm / lcov.info; `n <lines>` for a
+# JS file (`wc -l`) or a page (`_INLINE_AWK`), plus `fail` when awk fails.
+# $1 is `_INLINE_AWK`.
 _EMIT = ('a=$1; shift; for f; do printf "\\0%s\\0" "$f"; case "$f" in '
          '*/package.json|*/Cargo.toml|*/VENDORED.md) cat "$f";; '
-         '*/Trunk.toml|*.wasm|*.min.*) ;; *.html|*.htm) awk -v h=1 "$a" "$f";; '
-         '*) awk -v h=0 "$a" "$f";; esac; done')
-# ONE runner call: `sh -c _SCAN_SH sh <root> _EMIT _WEB_AWK <find expression>`.
+         '*/Trunk.toml|*.wasm|*/lcov.info) ;; '
+         '*.html|*.htm) awk "$a" "$f" || printf "\\nfail\\n";; '
+         '*) printf "n %s\\n" "$(wc -l < "$f")";; esac; done')
+# ONE runner call: `sh -c _SCAN_SH sh <root> _EMIT _INLINE_AWK <find expression>`.
 # Inside a git work tree it then lists git's untracked IGNORED paths as the
 # payload of a `<root>/:gitignored` record: a pinned release bundle or other
 # ignored output is never the project's code (audit precision a; the gates
@@ -396,19 +398,19 @@ def _rel_dir(rel):
 
 def _scan(root, host=None, run=None):
     """([(relative path, payload)], {gitignored relative path}) for every
-    package.json, Cargo.toml, Trunk.toml, VENDORED.md, JS file, .wasm and .html
-    page within SCAN_DEPTH levels of `root`, in ONE runner call; the second item
-    is git's untracked ignored paths (a dir ends with `/`), empty outside a
-    work tree. find's rc 1 (an unreadable subdir) still leaves valid output;
-    any other rc raises StackCheckUnverified."""
+    package.json, Cargo.toml, Trunk.toml, VENDORED.md, lcov.info, JS file, .wasm
+    and .html page within SCAN_DEPTH levels of `root`, in ONE runner call; the
+    second item is git's untracked ignored paths (a dir ends with `/`), empty
+    outside a work tree. find's rc 1 (an unreadable subdir) still leaves valid
+    output; any other rc raises StackCheckUnverified."""
     prune = []
     for name in _PRUNE_DIRS:
         prune += (["-o"] if prune else []) + ["-name", name]
     match = ["-name", "package.json", "-o", "-name", "Cargo.toml", "-o", "-name",
-             "Trunk.toml", "-o", "-name", "VENDORED.md"]
+             "Trunk.toml", "-o", "-name", "VENDORED.md", "-o", "-name", "lcov.info"]
     for suffix in _JS_SUFFIXES + (".html", ".htm", ".wasm"):
         match += ["-o", "-name", "*" + suffix]
-    argv = (["sh", "-c", _SCAN_SH, "sh", root, _EMIT, _WEB_AWK,
+    argv = (["sh", "-c", _SCAN_SH, "sh", root, _EMIT, _INLINE_AWK,
              "-mindepth", "1", "-maxdepth", _SCAN_DEPTH,
              "(", "-type", "d", "(", *prune, ")", ")", "-prune", "-o",
              "-type", "f", "(", *match, ")"])
@@ -438,11 +440,9 @@ def _gitignored(rel, ignored):
 
 
 def _wasm_output(scanned):
-    """Paths that are wasm-bindgen / Trunk OUTPUT, never hand-written (audit
-    precision a, camera-box's pinned shading release): a JS file whose stem has
-    a `<stem>_bg.wasm` / `<stem>.wasm` sibling, a Trunk hashed
-    `<name>-<16 hex>.js` beside any `.wasm`, and the pages of a dir holding a
-    Trunk hashed `_bg.wasm` (Trunk's generated loader page)."""
+    """JS files that are wasm-bindgen / Trunk OUTPUT, never hand-written (audit
+    precision a): a `.js` beside its same-stem `_bg.wasm`, or a Trunk hashed
+    `<name>-<16 hex>.js` beside a `.wasm`."""
     wasm = {}
     for rel, _ in scanned:
         if rel.endswith(".wasm"):
@@ -450,89 +450,58 @@ def _wasm_output(scanned):
     out = set()
     for rel, _ in scanned:
         names, p = wasm.get(_rel_dir(rel)), PurePosixPath(rel)
-        if not names:
-            continue
-        if p.suffix in (".html", ".htm"):
-            if any(_TRUNK_HASH_WASM.search(n) for n in names):
-                out.add(rel)
-        elif p.suffix in _JS_SUFFIXES and (
-                {p.stem + "_bg.wasm", p.stem + ".wasm"} & names
-                or _TRUNK_HASH_JS.search(p.name)):
+        if names and p.suffix == ".js" and (
+                p.stem + "_bg.wasm" in names or _TRUNK_HASH_JS.search(p.name)):
             out.add(rel)
     return out
 
 
-def _web_payload(text):
-    """(lines, [src refs], [import specifiers]) of a `_WEB_AWK` payload."""
-    n, srcs, imps = 0, [], []
-    for line in (text or "").splitlines():
+def _report_dirs(scanned):
+    """`coverage` dirs that hold an lcov report (`lcov-report/`, `lcov.info`):
+    generated, never a UI; a `coverage` dir without one is judged."""
+    out = set()
+    for rel, _ in scanned:
+        parts = PurePosixPath(rel).parts
+        out.update("/".join(parts[:i + 1]) for i in range(len(parts) - 1)
+                   if parts[i] == "coverage" and parts[i + 1] in _LCOV)
+    return out
+
+
+def _denied(rel, vendored, output, reports):
+    """True for a known non-UI file: wasm-bindgen / Trunk output, a file under
+    a tooling dir or an lcov `coverage` dir, a VENDORED.md entry."""
+    parts = PurePosixPath(rel).parts[:-1]
+    return (rel in output or any(p in _TOOLING_DIRS for p in parts)
+            or any("/".join(parts[:k]) in reports for k in range(1, len(parts) + 1))
+            or any(rel == v or rel.startswith(v + "/") for v in vendored))
+
+
+def _line_count(rel, payload):
+    """The `n <int>` of a JS file / page record. A record without it, or with
+    awk's `fail` line, raises StackCheckUnverified: never a clean result."""
+    lines = (payload or "").splitlines()
+    for line in lines:
         kind, _sep, val = line.partition(" ")
-        if kind == "n" and val.strip().isdigit():
-            n = int(val.strip())
-        elif kind == "src":
-            srcs.append(val.strip())
-        elif kind == "imp":
-            imps.append(val.strip())
-    return n, srcs, imps
-
-
-def _resolve(ref, base, files, module):
-    """The scanned JS file `ref` names from the dir `base`, or None. Relative:
-    from `base`. Root-absolute (`/app.js`): from `base` or any dir above it (the
-    dir a page is served from is the web root). Never a URL; a module import
-    never a bare package; an extensionless import also as `<ref>.<js suffix>`
-    or `<ref>/index.<js suffix>`."""
-    ref = re.split(r"[?#]", ref.strip(), maxsplit=1)[0]
-    if (not ref or "://" in ref or ref.startswith(("//", "data:"))
-            or (module and not ref.startswith((".", "/")))):
-        return None
-    parts = PurePosixPath(base).parts if base else ()
-    bases = ([parts[:k] for k in range(len(parts), -1, -1)] if ref.startswith("/")
-             else [parts])
-    for b in bases:
-        cand = posixpath.normpath(posixpath.join(*b, ref.lstrip("/")))
-        for c in ((cand,) + tuple(cand + s for s in _JS_SUFFIXES)
-                  + tuple(cand + "/index" + s for s in _JS_SUFFIXES)):
-            if c in files:
-                return c
-    return None
+        if kind == "n" and val.strip().isdigit() and "fail" not in lines:
+            return int(val.strip())
+    raise StackCheckUnverified("stack check could not count the lines of %s "
+                               "(awk or wc failed)" % rel)
 
 
 def _hand_js(scanned, exempt_dirs, crates):
-    """{path: lines} of the hand-written JS web UI (audit precision b): the
-    inline <script> lines of every countable page, plus the countable JS those
-    pages serve (`<script src>`, an import in an inline script) and, transitively,
-    the modules a counted file imports. Not countable: an exempt dir or crate
-    (`_js_exempt`), wasm-bindgen / Trunk output, a VENDORED.md entry, a test /
-    minified / declaration / service-worker name."""
-    vendored, output = _vendored(scanned), _wasm_output(scanned)
-
-    def countable(rel):
-        return (_is_hand_js(rel) and rel not in output
-                and not _js_exempt(rel, exempt_dirs, crates)
-                and not any(rel == v or rel.startswith(v + "/") for v in vendored))
-    pages, js = {}, {}
+    """{path: lines} of the hand-written JS: every JS / TS file and the inline
+    <script> lines of every .html page, except a test / minified / declaration
+    / service-worker / `*.config.*` name, an exempt dir or crate (`_js_exempt`)
+    and a known non-UI file (`_denied`). Raises StackCheckUnverified when a
+    counted file's lines could not be read."""
+    vendored, output, reports = _vendored(scanned), _wasm_output(scanned), _report_dirs(scanned)
+    lines = {}
     for rel, payload in scanned:
-        suffix = PurePosixPath(rel).suffix
-        if suffix in (".html", ".htm") and countable(rel):
-            pages[rel] = _web_payload(payload)
-        elif suffix in _JS_SUFFIXES:
-            js[rel] = _web_payload(payload)
-    files = set(js)
-    todo = [_resolve(ref, _rel_dir(page), files, module)
-            for page, (_n, srcs, imps) in pages.items()
-            for refs, module in ((srcs, False), (imps, True)) for ref in refs]
-    lines = {page: n for page, (n, _s, _i) in pages.items() if n}
-    seen = set()
-    while todo:
-        rel = todo.pop()
-        if rel is None or rel in seen or not countable(rel):
-            continue
-        seen.add(rel)
-        n, _srcs, imps = js[rel]
-        if n:
-            lines[rel] = n
-        todo += [_resolve(i, _rel_dir(rel), files, True) for i in imps]
+        if (_is_hand_js(rel) and not _js_exempt(rel, exempt_dirs, crates)
+                and not _denied(rel, vendored, output, reports)):
+            n = _line_count(rel, payload)
+            if n:
+                lines[rel] = n
     return lines
 
 
