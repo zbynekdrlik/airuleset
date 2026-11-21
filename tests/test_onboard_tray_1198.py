@@ -109,7 +109,7 @@ class TestRustWebTrayRule(unittest.TestCase):
         text = RULE.read_text()
         self.assertTrue(text.startswith("---\npaths:\n"), text[:80])
         head = text.split("---", 2)[1]
-        for glob in ('"**/Cargo.toml"', '"**/src/**/*.rs"', '"**/crates/**"'):
+        for glob in ('"**/Cargo.toml"', '"**/Trunk.toml"', '"**/crates/**"'):
             self.assertIn(glob, head)
 
     def test_rule_states_the_convention(self):

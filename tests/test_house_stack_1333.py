@@ -77,9 +77,9 @@ class TestHouseStackRule(unittest.TestCase):
     def test_paths_cover_rust_and_web_files(self):
         self.assertTrue(self.raw.startswith("---\npaths:\n"))
         head = self.raw.split("---", 2)[1]
-        for glob in ('"**/*.rs"', '"**/Cargo.toml"', '"**/Trunk.toml"',
-                     '"**/index.html"', '"**/crates/**"', '"**/src/**/*.rs"'):
-            self.assertIn(glob, head)
+        globs = [ln.strip()[2:] for ln in head.splitlines() if ln.strip().startswith("- ")]
+        # round 3 (I): no index.html / *.rs, which loaded the rule in any project
+        self.assertEqual(globs, ['"**/Cargo.toml"', '"**/Trunk.toml"', '"**/crates/**"'])
 
     def test_every_layer_is_pinned(self):
         for needle in (
@@ -97,11 +97,20 @@ class TestHouseStackRule(unittest.TestCase):
 
     def test_reference_projects_are_named(self):
         for needle in ("fohmixer `crates/fohmixer-ui`",
-                       "fohmixer `fohmixer-hub`, songplayer `sp-server`",
-                       "wall-bridge `crates/wb-tray`", "songplayer `sp-gpu`",
-                       "`wb-spout`", "`wb-scanout`", "Spout senders",
-                       "Tauri 2: fohmixer, iemmixer, songplayer"):
+                       "fohmixer `fohmixer-hub` (`/api/status`, WebSocket); songplayer "
+                       "`sp-server` (WebSocket, `/api/v1/status`)",
+                       "wall-bridge `crates/wb-tray` (tray-icon, Windows); intercom "
+                       "`tray` (tray-icon, Linux / gtk); fohmixer `crates/fohmixer-tray` "
+                       "(Tauri 2 tray, no window)",
+                       "songplayer `sp-gpu`", "`wb-spout`", "`wb-scanout`",
+                       "Spout senders"):
             self.assertIn(needle, self.text, needle)
+        self.assertNotIn("iemmixer", self.text)
+
+    def test_web_ui_row_carries_the_customizable_ui_pattern(self):
+        self.assertIn("a customizable UI (ARRANGE: reorder + hide/show, saved "
+                      "server-side)", self.text)
+        self.assertIn("(ARRANGE: `crates/fohmixer-ui/src/arrange.rs`)", self.text)
 
     def test_references_are_shapes_never_old_versions(self):
         self.assertIn("**never copy a reference project's older version**",
@@ -118,7 +127,10 @@ class TestHouseStackRule(unittest.TestCase):
                 "**An existing project follows its established stack:** its "
                 "platform is the `stack` field of its row in airuleset's "
                 "`projects-registry.json`",
-                "set by airuleset only, never by a project session"):
+                "set by airuleset only, never by a project session",
+                "A new repo extending an existing fleet platform (Odoo, n8n, HA "
+                "add-on, OBS) follows that platform, and airuleset records its "
+                "`stack` at onboarding."):
             self.assertIn(needle, self.text, needle)
 
     def test_every_row_says_when_it_applies(self):
@@ -126,14 +138,19 @@ class TestHouseStackRule(unittest.TestCase):
         self.assertEqual(rows[0].split("|")[2].strip(), "Applies when")
         applies = {r.split("|")[1].strip(): r.split("|")[2].strip()
                    for r in rows[2:]}
-        self.assertEqual(applies["Tray"], "a Windows desktop app with a UI or video")
+        self.assertEqual(applies["Tray"], "a desktop app (Windows or Linux)")
+        self.assertEqual(applies["Service"], "an app that runs as a service or serves "
+                         "a UI / API (not a CLI or library)")
         self.assertEqual(applies["Install"], "a Windows desktop app with a UI or video")
         self.assertEqual(applies["Graphics engine"], "a Windows app that renders video")
-        self.assertIn("A Linux service is the Service + Web UI rows.", self.text)
+        self.assertIn("A headless Linux service is the Service + Web UI rows and opts "
+                      "out of the tray with `<!-- airuleset:tray=n/a <reason> -->`.",
+                      self.text)
 
     def test_both_tray_variants_are_accepted(self):
-        self.assertIn("service-only app: `tray-icon` in a `<prefix>-tray` crate; "
-                      "app with its own desktop window: the Tauri 2 tray", self.text)
+        self.assertIn("`tray-icon` in a `<prefix>-tray` crate, or the Tauri 2 tray "
+                      "(no window needed)", self.text)
+        self.assertIn("runs on a desktop machine (Windows or Linux)", self.text)
         self.assertIn("Both variants are accepted.", self.text)
 
     def test_windows_release_builds_come_from_ci(self):
@@ -142,7 +159,24 @@ class TestHouseStackRule(unittest.TestCase):
 
     def test_stack_section_only_restates_house_rows(self):
         self.assertIn("A project `## Stack` section may only restate house rows; "
-                      "other technology in it needs the marker too.", self.text)
+                      "other technology in its Technology column needs the marker "
+                      "too.", self.text)
+
+    def test_one_marker_per_technology(self):
+        self.assertIn("**One marker per technology:** `<what>` names it (React, "
+                      "askama, plain JavaScript, …), and a marker covers only the "
+                      "technology it names.", self.text)
+
+    def test_enforcement_text_matches_the_gates(self):
+        for needle in ("a PreToolUse gate refuses a `package.json` Write or Edit",
+                       "a PostToolUse check compares the repo's `package.json` "
+                       "files with HEAD",
+                       "a template / UI crate (askama, tera, maud, yew, dioxus, "
+                       "sycamore)",
+                       "hand-written JS outside a `Trunk.toml` dir or a leptos / "
+                       "wasm-bindgen crate",
+                       "it lists every marker and the gate's `ALLOW-MARKER` lines"):
+            self.assertIn(needle, self.text, needle)
 
     def test_exception_needs_the_owner_marker(self):
         self.assertIn("Any other technology in a house project only as an "
@@ -214,14 +248,15 @@ class TestHouseStackRule(unittest.TestCase):
                       "weaker one", sec)
         self.assertIn("(what, why better for this need, cost of moving, "
                       "affected projects)", sec)
-        self.assertIn("The owner decides; until then build on the current row.", sec)
+        self.assertIn("The design ticket links it and keeps working on the current "
+                      "row; the owner decides.", sec)
 
     def test_evolution_proposal_reaches_the_owner(self):
         sec = self._evolution()
-        self.assertIn("label that ticket `needs-decision` (it reaches the owner's "
-                      "`U`)", sec)
-        self.assertIn("the ONE canonical airuleset ticket labelled `stack-proposal`",
-                      sec)
+        self.assertIn("on the ONE canonical airuleset ticket labelled "
+                      "`stack-proposal` + `needs-decision` (it reaches the owner's "
+                      "`U`", sec)
+        self.assertNotIn("label that ticket", sec)
         self.assertIn("an app-token stream files through `python3 "
                       "~/devel/airuleset/airuleset.py gk-request --repo "
                       "zbynekdrlik/airuleset`", sec)
@@ -245,12 +280,12 @@ class TestArchitectureFirstPointer(unittest.TestCase):
             encoding="utf-8")
         bullet = next(ln for ln in raw.splitlines()
                       if ln.startswith("- **Framework-first for new components"))
-        self.assertIn("**House stack (#1333):** a NEW standalone app/deployable "
-                      "defaults to `~/.claude/rules/house-stack.md` (read it before "
-                      "choosing; deviation only with its owner-approved "
-                      "stack-exception marker)", bullet)
-        self.assertIn("an existing project keeps its stack (`stack` in airuleset's "
-                      "`projects-registry.json`)", bullet)
+        self.assertIn("**House stack (#1333):** a NEW standalone app/deployable (a "
+                      "new repo, or a new deployable inside a house project) defaults "
+                      "to `~/.claude/rules/house-stack.md` (read it first; a deviation "
+                      "needs its owner-approved marker)", bullet)
+        self.assertIn("an existing project keeps its stack (the `stack` of its "
+                      "airuleset registry row)", bullet)
         self.assertEqual(raw.count("house-stack.md"), 1)
 
 
