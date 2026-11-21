@@ -485,5 +485,16 @@
     "overrides": [],
     "onboarded": "2026-11-18",
     "account": "companion-updater"
+  },
+  {
+    "name": "wall-songs",
+    "host": "dev1",
+    "path": "/home/wall-songs/devel/wall-songs",
+    "branch_model": "2-branch",
+    "default_branch": "main",
+    "work_branch": "dev",
+    "overrides": [],
+    "onboarded": null,
+    "account": "wall-songs"
   }
 ]

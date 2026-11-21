@@ -1,10 +1,12 @@
 """#1390 (owner 21.11.2026): wall-songs, a new project that replaces Resolume on the
 SNV songs PC (LED-wall visuals for the live band during songs), gets its own
-project account on dev1. Declared PENDING until its root bootstrap ran (#1267):
-no unattended controller path contacts the missing user, no dashboard tab yet.
-It is a brand-new project with no registry row, so the registry row and its peer
-links (airuleset infra, wall-bridge) land at the cutover on the wall-songs
-account, never as a newlevel row (LEGACY_CEILING only goes down)."""
+project account on dev1. Declared pending, then flipped live once the root
+bootstrap ran on dev1 (21.11., uid 1021) and `install` as the account returned 0,
+with the owner + marek tab (alias `wsongs`). A brand-new project has no old
+registry row to move, so the cutover adds the row on the wall-songs account
+(never a newlevel row: LEGACY_CEILING untouched) and its peer links (airuleset
+infra, wall-bridge). The pending path keeps its coverage by re-marking the
+account pending through a REMOTE_HOSTS patch."""
 import io
 import json
 import unittest
@@ -13,6 +15,7 @@ from pathlib import Path
 from unittest import mock
 
 import cli_account_bootstrap as bootstrap
+import cli_accounts
 import cli_drop_lanes as drop
 import cli_fleet
 import cli_peer_channel as cpc
@@ -20,16 +23,27 @@ import cli_project_ci_sync as ci_sync
 import cli_project_gh_token as pgt
 import cli_webterm as w
 import cli_webterm_profiles as profiles
+from cli_aliases import short_target_alias
 
 ROOT = Path(__file__).resolve().parent.parent
 ACCT = "wall-songs"
+INFRA_TOPIC = ("airuleset infra: accounts, permissions, peer links, tooling. Ask or "
+               "report here; airuleset decides and a ticket alone wakes no session")
 
 
 def _json(name):
     return json.loads((ROOT / name).read_text(encoding="utf-8"))
 
 
-class TestWallSongsAccountPending(unittest.TestCase):
+def _pending():
+    """REMOTE_HOSTS with wall-songs marked pending again (the state before its
+    root bootstrap), so the skip paths keep their coverage."""
+    return mock.patch.object(cli_fleet, "REMOTE_HOSTS", [
+        dict(h, pending=True) if h.get("user") == ACCT else h
+        for h in cli_fleet.REMOTE_HOSTS])
+
+
+class TestWallSongsAccount(unittest.TestCase):
     def setUp(self):
         self.spec = bootstrap.account_spec(ACCT)
 
@@ -51,41 +65,69 @@ class TestWallSongsAccountPending(unittest.TestCase):
         # The repo holds only README + CLAUDE.md: no CI, toolchain file or lockfile.
         self.assertEqual(self.spec["tools"], [])
 
-    def test_pending_full_authority_fleet_entry_on_dev1(self):
+    def test_live_full_authority_fleet_entry_on_dev1(self):
         (entry,) = [h for h in cli_fleet.REMOTE_HOSTS if h.get("user") == ACCT]
         self.assertEqual(entry["name"], "wall-songs@dev1")
         self.assertEqual(entry["host"], "100.104.8.125")
-        self.assertIs(entry["pending"], True)
-        self.assertTrue(bootstrap.is_pending(ACCT))
+        self.assertIs(entry["pending"], False)
+        self.assertFalse(bootstrap.is_pending(ACCT))
         self.assertIn(ACCT, cli_fleet.FULL_AUTHORITY_USERS)
+        self.assertIn(ACCT, pgt.github_app_accounts())
 
-    def test_unattended_paths_skip_it_while_pending(self):
-        # #1267: mint --all skips loudly at rc 0, the CI secret sync skips it,
-        # and the peer root leg leaves it out.
+    def _mint_all(self):
         out = io.StringIO()
         with mock.patch.object(pgt, "mint_account", return_value=0) as m, \
                 mock.patch.object(ci_sync, "run_after_mint", return_value=0), \
                 redirect_stdout(out):
             rc = pgt.cmd_project_gh_token(mock.Mock(
                 action="mint", account=None, all=True, dry_run=False, key=None))
+        return rc, [c.args[0] for c in m.call_args_list], out.getvalue()
+
+    def test_mint_all_and_secret_sync_reach_it_once_live(self):
+        rc, minted, out = self._mint_all()
         with mock.patch.object(ci_sync, "sync_account", return_value=0) as s:
             ci_sync.sync_all(run=lambda *a, **k: None)
         self.assertEqual(rc, 0)
-        self.assertIn(ACCT, pgt.github_app_accounts())
-        self.assertNotIn(ACCT, [c.args[0] for c in m.call_args_list])
-        self.assertIn("project-gh-token: %s: SKIPPED — pending" % ACCT, out.getvalue())
-        self.assertNotIn(ACCT, [c.args[0] for c in s.call_args_list])
-        self.assertNotIn(ACCT, cpc.accounts_for_host("dev1"))
+        self.assertIn(ACCT, minted)
+        self.assertNotIn("%s: SKIPPED" % ACCT, out)
+        self.assertIn(ACCT, [c.args[0] for c in s.call_args_list])
 
-    def test_webterm_sessions_declared_but_no_tab_before_the_flip(self):
+    def test_unattended_paths_skip_it_while_pending(self):
+        # #1267: mint --all skips loudly at rc 0; the CI secret sync and the
+        # peer root leg leave it out.
+        with _pending():
+            self.assertTrue(bootstrap.is_pending(ACCT))
+            rc, minted, out = self._mint_all()
+            with mock.patch.object(ci_sync, "sync_account", return_value=0) as s:
+                ci_sync.sync_all(run=lambda *a, **k: None)
+            accts = cpc.accounts_for_host("dev1")
+        self.assertEqual(rc, 0)
+        self.assertNotIn(ACCT, minted)
+        self.assertIn("project-gh-token: %s: SKIPPED — pending" % ACCT, out)
+        self.assertNotIn(ACCT, [c.args[0] for c in s.call_args_list])
+        self.assertNotIn(ACCT, accts)
+
+    def test_the_tab_opens_the_project_chat_for_marek_and_owner_only(self):
         self.assertEqual(set(self.spec["webterm_sessions"]), {"zbynek", "marek"})
         for human in ("zbynek", "marek"):
             self.assertEqual(self.spec["webterm_sessions"][human]["start_dir_chain"],
                              ["devel/wall-songs"])
-        for human, tabs in w.WEBTERM_DASHBOARD_TABS.items():
-            self.assertNotIn(ACCT, tabs, human)
+            tabs = w.WEBTERM_DASHBOARD_TABS[human]
+            self.assertEqual(tabs.index(ACCT), tabs.index("restreamer") + 1)
+        for human in ("david", "dominika", "timo"):
+            self.assertNotIn(ACCT, w.WEBTERM_DASHBOARD_TABS[human])
         for inv in (profiles.marek_inventory(), profiles.zbynek_inventory()):
-            self.assertEqual([e for e in inv if e["id"] == ACCT], [])
+            (entry,) = [e for e in inv if e["id"] == ACCT]
+            self.assertEqual(entry["user"], ACCT)
+
+    def test_tab_alias_is_wsongs_without_a_clash(self):
+        # The 8-char cut "wall-son" reads badly, so it gets a named alias like
+        # mikrotik-pz (mt-pz) and companion-updater (comp).
+        self.assertEqual(short_target_alias(ACCT, "wall-songs-dev1"), "wsongs")
+        users = set(bootstrap.SERVICE_ACCOUNTS) | {
+            h.get("user", "") for h in cli_fleet.REMOTE_HOSTS}
+        clash = [u for u in users - {ACCT} if short_target_alias(u, u) == "wsongs"]
+        self.assertEqual(clash, [])
 
     def test_drop_port_is_fixed_and_free(self):
         # #1237: a project account keeps the base channels (secret/upload/share).
@@ -93,13 +135,27 @@ class TestWallSongsAccountPending(unittest.TestCase):
         self.assertEqual(list(drop._GENERATED_DROP_PORTS.values()).count(8917), 1)
         self.assertNotIn(8917, drop._RESERVED_PORTS)
 
-    def test_no_registry_row_or_peer_link_before_cutover(self):
-        # A peer link needs a registry project on the host (validate_links), and
-        # a newlevel row would raise LEGACY_CEILING: both land at the cutover.
-        self.assertEqual([r for r in _json("projects-registry.json") if r["name"] == ACCT], [])
+    def test_registry_row_on_the_account_at_cutover(self):
+        # A brand-new project: the row is born on the account, never newlevel,
+        # so it is no legacy row and LEGACY_CEILING (1184's exact lock) stays.
+        reg = _json("projects-registry.json")
+        (row,) = [r for r in reg if r["name"] == ACCT]
+        self.assertEqual(row, {
+            "name": ACCT, "host": "dev1", "path": "/home/wall-songs/devel/wall-songs",
+            "branch_model": "2-branch", "default_branch": "main", "work_branch": "dev",
+            "overrides": [], "onboarded": None, "account": ACCT})
+        self.assertFalse(cli_accounts.is_legacy_account(ACCT))
+        self.assertNotIn(ACCT, [r["name"] for r in cli_accounts.legacy_inventory(reg)])
+
+    def test_peer_links_to_airuleset_and_wall_bridge(self):
         dev1 = _json("peer-links.json")["hosts"]["dev1"]
-        self.assertEqual([p for p in dev1["links"] if ACCT in p], [])
-        self.assertEqual([t for t in dev1["topics"] if ACCT in t.split("|")], [])
+        pairs = sorted(sorted(p) for p in dev1["links"] if ACCT in p)
+        self.assertEqual(pairs, [["airuleset", ACCT], ["wall-bridge", ACCT]])
+        self.assertEqual(dev1["topics"]["airuleset|wall-songs"], INFRA_TOPIC)
+        self.assertIn("wall-songs", dev1["topics"]["wall-bridge|wall-songs"])
+        self.assertEqual(cpc.validate_links(_json("peer-links.json"),
+                                            _json("projects-registry.json")), [])
+        self.assertIn(ACCT, cpc.accounts_for_host("dev1"))
 
 
 if __name__ == "__main__":

@@ -523,7 +523,7 @@ REMOTE_HOSTS += [
         ("fleet-backup", "dev1", "100.104.8.125", False),  # #1339, live 16.11.
         ("companion-updater", "dev1", "100.104.8.125", False),  # #1363
         ("restreamer", "dev1", "100.104.8.125", False),  # #1373, live 19.11.
-        ("wall-songs", "dev1", "100.104.8.125", True),   # #1390, pending root bootstrap
+        ("wall-songs", "dev1", "100.104.8.125", False),  # #1390, live 21.11.
     )
 ]
 

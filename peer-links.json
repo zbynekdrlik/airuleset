@@ -230,6 +230,14 @@
         [
           "fleet-backup",
           "mikrotik"
+        ],
+        [
+          "airuleset",
+          "wall-songs"
+        ],
+        [
+          "wall-bridge",
+          "wall-songs"
         ]
       ],
       "topics": {
@@ -289,7 +297,9 @@
         "companion-updater|shading": "the bkshading-simple Companion module: shading's Stream Deck camera-shading controls (aperture steps) and their deploy to the SNV and PP Companions",
         "camera-box|dcontroller": "the Dante controller (dcontroller) on the companion/presenter PCs at SNV and PP: its install, its web UI, and how camera-box's PP rig work uses it (camera-box#1536, dstack#407)",
         "mikrotik-pz|remoteos-mcp": "network facts for the remoteos MCP targets at Granč and PP: a PC's LAN IP and DHCP lease, its WireGuard peer and handshake; mikrotik-pz owns the routers, remoteos-mcp owns the MCP side",
-        "fleet-backup|mikrotik": "backup access on network devices: the fleetbackup user and key per device, host keys, network-collect results; mikrotik owns the devices, fleet-backup owns the backups"
+        "fleet-backup|mikrotik": "backup access on network devices: the fleetbackup user and key per device, host keys, network-collect results; mikrotik owns the devices, fleet-backup owns the backups",
+        "airuleset|wall-songs": "airuleset infra: accounts, permissions, peer links, tooling. Ask or report here; airuleset decides and a ticket alone wakes no session",
+        "wall-bridge|wall-songs": "sibling LED-wall projects at SNV: wall-bridge owns the bridge PC's Spout-to-wall path, wall-songs the songs PC's song visuals; coordinate wall output, never each other's code"
       }
     },
     "subdev": {
