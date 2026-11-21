@@ -25,7 +25,7 @@ What it ensures (each step: detect → act only if absent → report `satisfied`
 
 1. git repo (`git init` if missing)
 2. `.gitignore` hygiene — append-only, never overwrites; untracks already-tracked build artifacts
-3. `CLAUDE.md` skeleton + `## Playbook router` — ONLY if missing (existing file never overwritten)
+3. `CLAUDE.md` skeleton + `## Stack` (the house stack, `rules/house-stack.md`, #1333) + `## Playbook router` — ONLY if missing (existing file never overwritten)
 4. GitHub remote (`gh repo create zbynekdrlik/<name> --private --source . --push` if none)
 5. two/three-branch work branch per existing convention — NEVER changes the existing default branch
 6. foundation-gap tickets — no CI, web-without-version-label, or a Rust web app without a tray icon (`rules/house-stack.md`, #1198) → files a tracked ticket (Scope-gate line; never auto-generates CI)
@@ -40,7 +40,7 @@ python3 ~/devel/airuleset/airuleset.py onboard-project --audit          # whole 
 python3 ~/devel/airuleset/airuleset.py onboard-project <path> --audit   # one project
 ```
 
-`--audit` (alias `--check`) reports drift from the checklist — missing remote, tracked build artifacts, missing Playbook router, branch-model mismatch, missing registry entry, a Rust web app without a tray (`missing-tray`; a server-only app opts out with `<!-- airuleset:tray=n/a <reason> -->` in its CLAUDE.md) — and changes NOTHING. A cross-host entry on a known `REMOTE_HOSTS` box is audited OVER SSH (a healthy remote project reads clean); a host that is neither this box nor a known remote target reads `unreachable`, never a false drift (#583). The fix for drift is an explicit re-run of `onboard-project` on that project, never an auto-fix.
+`--audit` (alias `--check`) reports drift from the checklist — missing remote, tracked build artifacts, missing Playbook router, branch-model mismatch, missing registry entry, a Rust web app without a tray (`missing-tray`; a server-only app opts out with `<!-- airuleset:tray=n/a <reason> -->` in its CLAUDE.md), a CLAUDE.md with no `## Stack` section (`stack-unpinned`), a JS-framework or hand-written JS web UI (`stack-deviation`) — both silenced only by an owner-approved `<!-- airuleset:stack-exception <what> — <owner ref> -->` — and changes NOTHING. A cross-host entry on a known `REMOTE_HOSTS` box is audited OVER SSH (a healthy remote project reads clean); a host that is neither this box nor a known remote target reads `unreachable`, never a false drift (#583). The fix for drift is an explicit re-run of `onboard-project` on that project, never an auto-fix.
 
 ## Rules
 

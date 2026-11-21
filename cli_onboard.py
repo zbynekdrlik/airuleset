@@ -81,6 +81,7 @@ from cli_onboard_exec import (  # noqa: E402
     _write_file as _write_file,
 )
 import cli_onboard_tray as _tray  # noqa: E402  (#1198 Rust web app tray gap)
+import cli_onboard_stack as _stack  # noqa: E402  (#1333 house-stack pin)
 FOUNDATION_TRAY_TITLE = _tray.FOUNDATION_TRAY_TITLE
 import cli_accounts  # noqa: E402  (#1184 per-project account gate)
 import cli_git_identity  # noqa: E402  (#1196 public repo → noreply identity)
@@ -438,11 +439,12 @@ def _claude_md_skeleton(name):
         "Two-branch: work na `dev`, PR `dev`→default. (Ak projekt používa "
         "inú konvenciu, uprav tento riadok — onboarding default branch "
         "nikdy nemení.)\n\n"
+        "%s"  # ## Stack (#1333)
         "## Playbook router\n\n"
         "- <area> → `.claude/rules/<area>.md` (auto-loads on its `paths:`)\n"
         "- build / deploy / release → load `.claude/skills/<area>` "
         "(invoke by name)\n"
-    ) % name
+    ) % (name, _stack.STACK_SECTION)
 
 
 # --------------------------------------------------------------------------- #
@@ -872,6 +874,7 @@ def audit_project(entry, host=None, run=None):
                       "detail": "CLAUDE.md has no Playbook router"})
     if tray := _tray.audit_drift(path, host=host, run=run, claude_md=cm_content or ""):
         drift.append(tray)
+    drift += _stack.audit_drift(path, host=host, run=run, claude_md=cm_content)
     return drift
 
 
