@@ -32,12 +32,26 @@ from cli_onboard_exec import _exec
 from cli_onboard_tray import _deps as _cargo_deps
 from cli_stack_scope import HOUSE, SKIP_DIRS, STACK_IDS
 
-# The npm packages that make a package.json a JS UI-framework app. The meta
-# frameworks (next, nuxt, @sveltejs/kit) imply React / Vue / Svelte.
-JS_UI_FRAMEWORKS = frozenset({
-    "react", "react-dom", "next", "vue", "nuxt", "svelte", "@sveltejs/kit",
-    "angular", "@angular/core", "preact", "solid-js", "lit", "alpinejs",
-    "htmx.org", "astro", "@builder.io/qwik", "ember-source"})
+# The npm packages that make a package.json a JS UI-framework app, each mapped
+# to its FAMILY (round 3 I): a meta framework or a renderer is its base
+# framework, so react-dom next to react, or next where react already is, is
+# nothing new. Families are what the gates, the audit and the markers compare.
+FRAMEWORK_FAMILY = {
+    "react": "react", "react-dom": "react", "next": "react", "vue": "vue",
+    "nuxt": "vue", "svelte": "svelte", "@sveltejs/kit": "svelte",
+    "angular": "angular", "@angular/core": "angular", "preact": "preact",
+    "solid-js": "solid", "lit": "lit", "alpinejs": "alpine", "htmx.org": "htmx",
+    "astro": "astro", "@builder.io/qwik": "qwik", "ember-source": "ember"}
+JS_UI_FRAMEWORKS = frozenset(FRAMEWORK_FAMILY)
+# How a marker's `<what>` may name a technology (round 3 E: one marker per
+# technology). A word not listed names itself (askama, fastapi, electron, ...).
+_TECH_ALIASES = dict(FRAMEWORK_FAMILY, **{
+    "reactjs": "react", "react.js": "react", "next.js": "react", "nextjs": "react",
+    "vuejs": "vue", "vue.js": "vue", "nuxt.js": "vue", "nuxtjs": "vue",
+    "sveltekit": "svelte", "angularjs": "angular", "solid": "solid",
+    "solidjs": "solid", "alpine": "alpine", "alpine.js": "alpine", "htmx": "htmx",
+    "qwik": "qwik", "ember": "ember", "ember.js": "ember", "emberjs": "ember",
+    "js": "javascript", "javascript": "javascript"})
 _DEP_KEYS = ("dependencies", "devDependencies", "peerDependencies",
              "optionalDependencies")
 
@@ -102,14 +116,34 @@ class StackCheckUnverified(Exception):
     """The stack check could not read the target (ssh down, find failed)."""
 
 
-def has_stack_exception(claude_md):
-    """True when the text carries a stack-exception marker that names
-    `<what>` and, after a dash, an `<owner ref>` holding a `#N` or a GitHub
-    URL."""
+def stack_exceptions(claude_md):
+    """[(what, owner ref)] of every valid stack-exception marker: `<what>`,
+    a dash, and an `<owner ref>` holding a `#N` or a GitHub URL."""
+    out = []
     for m in _EXCEPTION_RE.finditer(claude_md or ""):
         parts = _EXCEPTION_SEP_RE.split(m.group(1).strip(), maxsplit=1)
         if (len(parts) == 2 and parts[0].strip()
                 and _OWNER_REF_RE.search(parts[1])):
+            out.append((parts[0].strip(), parts[1].strip()))
+    return out
+
+
+def has_stack_exception(claude_md):
+    return bool(stack_exceptions(claude_md))
+
+
+def tech_key(word):
+    """The technology a word names, for marker matching (`Next.js` -> react)."""
+    w = str(word).strip().strip(".,;:()[]'\"`").lower()
+    return _TECH_ALIASES.get(w, w)
+
+
+def exception_covers(claude_md, tech):
+    """True when a valid marker's `<what>` names `tech` (a family, a crate,
+    `javascript`, a technology word): one marker covers one technology."""
+    want = tech_key(tech)
+    for what, _ref in stack_exceptions(claude_md):
+        if any(tech_key(w) == want for w in re.split(r"[\s,;]+", what)):
             return True
     return False
 
@@ -138,8 +172,8 @@ def non_house_names(claude_md):
 
 
 def package_json_frameworks(text):
-    """The JS UI frameworks a package.json depends on (any dependency table),
-    or None when the text is no JSON object (unreadable — the caller decides)."""
+    """The JS UI framework FAMILIES a package.json depends on (any dependency
+    table), or None when the text is no JSON object (the caller decides)."""
     try:
         doc = json.loads(str(text).lstrip("\ufeff"))
     except (ValueError, TypeError):
@@ -151,7 +185,9 @@ def package_json_frameworks(text):
         deps = doc.get(key)
         if isinstance(deps, dict):
             for name, spec in deps.items():
-                found |= {_alias_target(name, spec)} & JS_UI_FRAMEWORKS
+                fam = FRAMEWORK_FAMILY.get(_alias_target(name, spec))
+                if fam:
+                    found.add(fam)
     return found
 
 

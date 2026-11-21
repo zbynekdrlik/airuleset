@@ -257,11 +257,6 @@
           },
           {
             "type": "command",
-            "command": "bash ~/devel/airuleset/hooks/block-frontend-framework.sh",
-            "timeout": 5
-          },
-          {
-            "type": "command",
             "command": "bash ~/devel/airuleset/hooks/inject-situational-rule.sh"
           }
         ]
@@ -489,6 +484,11 @@
             "type": "command",
             "command": "bash ~/devel/airuleset/hooks/post-record-design-comment.sh",
             "timeout": 15
+          },
+          {
+            "type": "command",
+            "command": "bash ~/devel/airuleset/hooks/check-frontend-framework-state.sh",
+            "timeout": 10
           }
         ]
       },

@@ -172,7 +172,9 @@ RAW_BASH_MATCH_TOPICS = {"cloudflare-api-tokens", "odoo-client-board-stages",
 
 # #1333 ROZHODNUTÉ 2: these topics reach only a checkout whose registry `stack`
 # is `house` -- or an unregistered repo, the moment a new app's stack is chosen.
-# The checkout is the written file's (Write/Edit), else the session cwd.
+# The checkout is the written file's (Write/Edit), else the session cwd; a file
+# outside any repo (the scratchpad body of a `gh -F` comment) resolves through
+# the session cwd (round 3 B).
 REGISTRY_SCOPED_TOPICS = {"house-stack"}
 _scope_memo = {}
 
@@ -181,14 +183,16 @@ def house_scope():
     if "house" not in _scope_memo:
         ok = True
         try:
-            start = payload.get("cwd") or os.getcwd()
+            cwd = payload.get("cwd") or os.getcwd()
+            start, fallback = cwd, None
             ti = payload.get("tool_input")
             fp = ti.get("file_path") if isinstance(ti, dict) else None
             if isinstance(fp, str) and os.path.isabs(fp):
-                start = os.path.dirname(fp)
+                start, fallback = os.path.dirname(fp), cwd
             sys.path.insert(0, repo_root)
             from cli_stack_scope import HOUSE, REGISTRY_FILENAME, stack_for
-            ok = stack_for(start, os.path.join(repo_root, REGISTRY_FILENAME))[1] == HOUSE
+            ok = stack_for(start, os.path.join(repo_root, REGISTRY_FILENAME),
+                           fallback=fallback)[1] == HOUSE
         except Exception:  # airuleset:script-ok an unresolvable scope injects (cheap side)
             ok = True
         _scope_memo["house"] = ok

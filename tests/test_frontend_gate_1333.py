@@ -285,12 +285,19 @@ class TestFailOpen(_GateCase):
                             "cannot read")
 
     def test_edit_whose_old_string_is_not_in_the_file(self):
-        # round 3 I: a CRLF file never matches an LF old_string
+        # round 3 I: a CRLF or stale old_string fails open WITH a log line. The
+        # file is read with universal newlines, so an LF old_string on a CRLF
+        # file is still judged; a CRLF old_string never matches that text.
         (self.proj / "package.json").write_bytes(
             b'{\r\n  "name": "x",\r\n  "dependencies": {}\r\n}\r\n')
+        r = self._edit("package.json", '"name": "x",\r\n  "dependencies": {}',
+                       '"name": "x",\r\n  "dependencies": {"react": "18"}')
+        self.assertFailOpen(r, "old_string not found")
+        r = self._edit("package.json", '"name": "stale"', '"name": "y"')
+        self.assertFailOpen(r, "old_string not found")
         r = self._edit("package.json", '"name": "x",\n  "dependencies": {}',
                        '"name": "x",\n  "dependencies": {"react": "18"}')
-        self.assertFailOpen(r, "old_string not found")
+        self.assertBlocked(r, "react")
 
     def test_unreadable_claude_md(self):
         (self.proj / "CLAUDE.md").unlink()

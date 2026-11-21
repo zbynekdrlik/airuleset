@@ -1,4 +1,5 @@
-"""cli_stack_scope.py — which stack a checkout follows (#1333, ROZHODNUTÉ 1-2).
+"""cli_stack_scope.py — which stack a checkout follows (#1333, ROZHODNUTÉ 1-2,
+round 3 B + I).
 
 The house stack (``rules/house-stack.md``) is the default for a NEW standalone
 app. An existing project follows its established stack, and that platform is
@@ -6,22 +7,29 @@ recorded CENTRALLY: the ``"stack"`` field of the project's
 ``projects-registry.json`` row, set by airuleset only, never by a project
 session. ``STACK_IDS`` is the closed set of values.
 
-``stack_for(start, registry_path)`` resolves a directory (a cwd, or the dir of
-a file being written) to ``(project name, stack)``: git root (a linked worktree
-reads the main repo's config) -> ``origin`` repo name -> the registry row with
-that name / ``github_repo``, else the row whose path IS the git root. A row
-without a ``stack`` and a directory no registry row claims (a brand-new repo:
-the moment the stack is chosen) both read ``house``.
+``stack_for(start, registry_path, fallback=None)`` resolves a directory (a
+cwd, or the dir of a file being written) to ``(project name, stack)``:
 
-Consumers: the situational injector (``hooks/inject-situational-rule.sh``)
-and ``gates.housestack`` skip a non-``house`` project; ``onboard-project
---audit`` reads the field. STDLIB ONLY, no repo imports: both hook consumers
-import it on their hot path, and it never raises.
+- inside a git checkout, git itself names the checkout (``git rev-parse
+  --show-toplevel --git-common-dir``, so a linked worktree resolves through its
+  MAIN checkout); the row is the one whose name / ``github_repo`` is the
+  ``origin`` repo name, else whose path is the main checkout or the worktree;
+- outside any repo, the registry row whose path is the longest prefix of the
+  directory (a non-git project such as mikrotik), else the ``fallback`` (the
+  session cwd: a scratchpad file belongs to the session's project);
+- a row without a ``stack``, and a checkout no row claims (a brand-new repo:
+  the moment the stack is chosen), read ``house``.
+
+Consumers: the situational injector (``hooks/inject-situational-rule.sh``),
+``gates.housestack`` and ``gates.housestate`` skip a non-``house`` project;
+``onboard-project --audit`` reads the field. STDLIB ONLY, no repo imports
+(hook hot path), and it never raises.
 """
 
 import json
 import os
 import re
+import subprocess
 
 HOUSE = "house"
 REGISTRY_FILENAME = "projects-registry.json"
@@ -44,7 +52,7 @@ STACK_IDS = {
 # vendored trees, build output). ONE list for the situational trigger's exclude
 # column and gates.housestack (a test pins the conf regex to it).
 SKIP_DIRS = ("test", "tests", "__tests__", "fixture", "fixtures", "__fixtures__",
-             "testdata", "node_modules", "target", "vendor", "dist")
+             "testdata", "node_modules", "target", "vendor", "dist", "e2e")
 
 # Managed repos with NO registry row. The registry lists the projects airuleset
 # manages; its consumers (checkout freshness, deploy state, peer links, project
@@ -55,60 +63,53 @@ _URL_NAME_RE = re.compile(r"[:/]([^/:\s]+?)(?:\.git)?/?\s*$")
 _SECTION_RE = re.compile(r'^\s*\[\s*remote\s+"origin"\s*\]\s*$')
 
 
-def git_root(start):
-    """The nearest directory at or above `start` that holds `.git` (a dir, or
-    the file of a linked worktree), or None. A `start` that does not exist yet
-    (a file about to be written in a new dir) is walked up from its first
-    existing ancestor."""
+def _existing_dir(start):
     d = os.path.abspath(start or ".")
     while not os.path.isdir(d):
         parent = os.path.dirname(d)
         if parent == d:
             return None
         d = parent
-    while True:
-        if os.path.exists(os.path.join(d, ".git")):
-            return d
-        parent = os.path.dirname(d)
-        if parent == d:
-            return None
-        d = parent
+    return d
 
 
-def _config_path(root):
-    dotgit = os.path.join(root, ".git")
-    if os.path.isdir(dotgit):
-        return os.path.join(dotgit, "config")
-    try:
-        with open(dotgit, encoding="utf-8") as f:
-            line = f.readline().strip()
-    except (OSError, UnicodeDecodeError):
+def git_layout(start):
+    """``(worktree top, main checkout, common git dir)`` of the checkout holding
+    `start`, asked of git itself; None outside a repo, without git, or when git
+    refuses (a foreign owner). A `start` that does not exist yet is walked up
+    from its first existing ancestor."""
+    d = _existing_dir(start)
+    if d is None:
         return None
-    if not line.startswith("gitdir:"):
-        return None
-    gitdir = line[len("gitdir:"):].strip()
-    if not os.path.isabs(gitdir):
-        gitdir = os.path.join(root, gitdir)
-    common = gitdir
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE")}
     try:
-        with open(os.path.join(gitdir, "commondir"), encoding="utf-8") as f:
-            rel = f.read().strip()
-        common = rel if os.path.isabs(rel) else os.path.join(gitdir, rel)
-    except (OSError, UnicodeDecodeError):
-        pass
-    return os.path.join(common, "config")
+        r = subprocess.run(["git", "-C", d, "rev-parse", "--path-format=absolute",
+                            "--show-toplevel", "--git-common-dir"],
+                           capture_output=True, text=True, timeout=5, env=env)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    lines = r.stdout.splitlines() if r.returncode == 0 else []
+    if len(lines) < 2:
+        return None
+    top, common = lines[0], lines[1]
+    main = os.path.dirname(common) if os.path.basename(common) == ".git" else top
+    return top, main, common
 
 
-def origin_repo_name(root):
-    """The repo name of the `origin` remote of the checkout at `root`
+def repo_root(start):
+    """The worktree top of the checkout holding `start`, or None."""
+    layout = git_layout(start)
+    return layout[0] if layout else None
+
+
+def origin_repo_name(common):
+    """The repo name of the `origin` remote in the common git dir's config
     (`git@github.com:o/x.git` / `https://github.com/o/x` -> `x`), or None."""
-    cfg = _config_path(root) if root else None
-    if not cfg:
-        return None
     try:
-        with open(cfg, encoding="utf-8") as f:
+        with open(os.path.join(common, "config"), encoding="utf-8") as f:
             lines = f.read().splitlines()
-    except (OSError, UnicodeDecodeError):
+    except (OSError, UnicodeDecodeError, TypeError):
         return None
     in_origin = False
     for line in lines:
@@ -140,23 +141,48 @@ def _real(path):
         return None
 
 
-def stack_for(start, registry_path):
-    """``(project name or None, stack id)`` for the checkout holding `start`.
+def _row_stack(row):
+    return row.get("name"), str(row.get("stack") or HOUSE)
+
+
+def _row_by_path(rows, path, prefix=False):
+    """The row whose path is `path` (or, with `prefix`, the longest row path
+    that `path` lies under)."""
+    want = _real(path)
+    best = None
+    for row in rows:
+        rp = _real(row["path"]) if row.get("path") else None
+        if not rp or not want:
+            continue
+        if want == rp or (prefix and want.startswith(rp.rstrip(os.sep) + os.sep)):
+            if best is None or len(rp) > len(_real(best["path"])):
+                best = row
+    return best
+
+
+def stack_for(start, registry_path, fallback=None):
+    """``(project name or None, stack id)`` for the checkout holding `start`;
+    outside any repo and registry path, for `fallback` (the session cwd).
     Never raises; anything unresolvable reads ``(None, "house")``."""
     try:
-        root = git_root(start)
-        if root is None:
-            return None, HOUSE
-        name = origin_repo_name(root)
         rows = load_rows(registry_path)
-        real_root = _real(root)
+        layout = git_layout(start)
+        if layout is None:
+            row = _row_by_path(rows, start, prefix=True)
+            if row:
+                return _row_stack(row)
+            if fallback is not None:
+                return stack_for(fallback, registry_path)
+            return None, HOUSE
+        top, main, common = layout
+        name = origin_repo_name(common)
         for row in rows:
             repo = str(row.get("github_repo") or "").rsplit("/", 1)[-1]
             if name and name in (row.get("name"), repo):
-                return row.get("name"), str(row.get("stack") or HOUSE)
-        for row in rows:
-            if row.get("path") and _real(row["path"]) == real_root:
-                return row.get("name"), str(row.get("stack") or HOUSE)
+                return _row_stack(row)
+        row = _row_by_path(rows, main) or _row_by_path(rows, top)
+        if row:
+            return _row_stack(row)
         if name in UNREGISTERED_STACKS:
             return name, UNREGISTERED_STACKS[name]
         return None, HOUSE

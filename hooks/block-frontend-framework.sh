@@ -1,24 +1,24 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Hook: PreToolUse (Write | Edit | Bash matcher) -- THIN ADAPTER (#1333).
+# Hook: PreToolUse (Write | Edit matcher) -- THIN ADAPTER (#1333).
 #
 # The house-stack frontend-framework guard. All logic lives in gates/housestack.py:
 # in a house project (registry `stack`, or an unregistered repo) it refuses a
-# `package.json` Write/Edit, a package-manager / scaffolder command or a heredoc
-# into a package.json that brings a JS UI framework NEW to the git repo, unless a
-# CLAUDE.md (up to the git root, or .claude/CLAUDE.md) carries an owner-approved
-# `<!-- airuleset:stack-exception <what> — <#N or GitHub URL> -->`. The block reason
-# points at ~/.claude/rules/house-stack.md (Leptos/WASM web UI) and the
-# owner-exception path. There is no bypass token: the marker IS the exception.
+# `package.json` Write/Edit whose CONTENT brings a JS UI framework family NEW to
+# the git repo, unless a CLAUDE.md (up to the git root, or .claude/CLAUDE.md)
+# carries that technology's owner-approved
+# `<!-- airuleset:stack-exception <what> — <#N or GitHub URL> -->`. It never parses
+# Bash commands (round 3 A): hooks/check-frontend-framework-state.sh checks the
+# repo state after one. The block reason points at ~/.claude/rules/house-stack.md
+# and the owner-exception path. No bypass token: the marker IS the exception.
 #
 # Exit 2 = block; the reason is on STDERR (the model-visible deny channel). An
 # unreadable payload, package.json or edited file fails OPEN with a logged reason
 # (~/.claude/stack-gate.log), and a python MALFUNCTION fails OPEN too -- a hook bug
 # must not wedge every Write/Edit.
-# Cheap path: a payload that names neither package.json nor a package manager /
-# runner exits here, before python; only those and unrecognisable payloads reach
-# the gate.
+# Cheap path: a Write/Edit payload that never names package.json exits here, before
+# python; only package.json writes and unrecognisable payloads reach the gate.
 # `-P` (#1061 item 5b): a stale in-cwd gates/ can never shadow the real package.
 # Dry-run: echo '{"tool_name":"Write","tool_input":{"file_path":"/x/package.json","content":"{\"dependencies\":{\"react\":\"18\"}}"}}' | bash <this hook>
 
@@ -27,7 +27,7 @@ REPO_ROOT="$(dirname "$HOOK_DIR")"
 PAYLOAD=$(cat 2>/dev/null || echo "")
 [ -z "$PAYLOAD" ] && PAYLOAD="${TOOL_INPUT:-}"
 case "$PAYLOAD" in
-    *package.json* | *"npm "* | *"pnpm "* | *"yarn "* | *"bun "* | *"npx "* | *"pnpx "* | *"bunx "*) ;;
+    *package.json*) ;;
     *'"tool_input"'*) exit 0 ;;
 esac
 command -v python3 &>/dev/null || exit 0
