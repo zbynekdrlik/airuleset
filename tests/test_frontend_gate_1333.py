@@ -234,11 +234,12 @@ class TestMarkers(_GateCase):
                      "https://github.com/o/x/issues/5 -->\n")
         self.assertAllowed(self._write("web/package.json", REACT))
 
-    def test_marker_in_a_nested_or_dot_claude_md_allows(self):
+    def test_only_the_root_claude_md_marker_counts(self):
+        # round 4 (item 6): as the rule says, the project CLAUDE.md at the root
         for rel in ("web/CLAUDE.md", ".claude/CLAUDE.md"):
             with self.subTest(rel=rel):
                 self._claude(MARKER, rel)
-                self.assertAllowed(self._write("web/package.json", REACT))
+                self.assertBlocked(self._write("web/package.json", REACT), "react")
                 (self.proj / rel).unlink()
 
     def test_marker_above_the_git_root_does_not_count(self):
@@ -266,6 +267,40 @@ class TestScope(_GateCase):
                                        root=outside), "react")
         self.assertBlocked(self._write("z/package.json", REACT, cwd=self.tmp / "nowhere",
                                        root=outside), "react")
+
+    def test_outside_any_repo_the_cwd_repo_s_frameworks_and_wording(self):
+        # round 4 (item 3)
+        app = self.proj / "apps" / "a" / "package.json"
+        app.parent.mkdir(parents=True)
+        app.write_text(json.dumps(REACT), encoding="utf-8")
+        outside = self.tmp / "scratch"
+        self.assertAllowed(self._write("x/package.json", REACT, root=outside))
+        r = self._write("y/package.json", {"dependencies": {"vue": "3"}}, root=outside)
+        self.assertBlocked(r, "vue", "new to the session's repo")
+
+    def test_the_existing_set_is_the_git_file_set(self):
+        # round 4 (item 3): `git ls-files -co --exclude-standard`, no own walk
+        (self.proj / ".gitignore").write_text("build-out/\n", encoding="utf-8")
+        ignored = self.proj / "build-out" / "package.json"
+        ignored.parent.mkdir()
+        ignored.write_text(json.dumps(REACT), encoding="utf-8")
+        self.assertBlocked(self._write("web/package.json", REACT), "react")
+        import cli_stack_scope
+        from gates import housestack, housestate
+        self.assertIs(housestack.repo_package_files, housestate.repo_package_files)
+        self.assertIs(housestack.SCAN_DEPTH, cli_stack_scope.SCAN_DEPTH)
+
+    def test_unreadable_registry_skips_with_a_log_line(self):
+        # round 4 (item 4): unknown scope is never house
+        from unittest import mock
+        from gates import housestack
+        with mock.patch.dict(os.environ, {"HOME": self.env["HOME"]}), \
+                mock.patch.object(housestack, "REGISTRY", str(self.tmp / "missing.json")):
+            reason = housestack.classify(
+                "Write", {"file_path": str(self.proj / "package.json"),
+                          "content": json.dumps(REACT)}, str(self.proj))
+        self.assertEqual(reason, "")
+        self.assertIn("registry unreadable", self._log())
 
 
 class TestFailOpen(_GateCase):

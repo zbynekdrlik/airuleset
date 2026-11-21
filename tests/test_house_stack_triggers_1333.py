@@ -191,6 +191,25 @@ class TestRegistryScope(_Inject):
         self.assertNotIn(STACK_MARK, self._write(body, "Architektúra: x\n", cwd=REPO))
         self.assertIn(STACK_MARK, self._write(body, "Architektúra: x\n", cwd=self.unreg))
 
+    def test_the_session_marker_is_checked_before_any_scope_git_call(self):
+        # round 4 (item 4): a deduped topic costs no git subprocess
+        import shutil
+        real_git = shutil.which("git")
+        stub = self.tmp / "stub-bin"
+        stub.mkdir()
+        calls = self.tmp / "git-calls"
+        (stub / "git").write_text("#!/bin/sh\necho x >> %s\nexec %s \"$@\"\n"
+                                  % (calls, real_git))
+        (stub / "git").chmod(0o755)
+        self.env["PATH"] = "%s:%s" % (stub, self.env.get("PATH", ""))
+        first = self._write(self.unreg / "Cargo.toml", session="hst-git-once")
+        n = len(calls.read_text().splitlines()) if calls.exists() else 0
+        again = self._write(self.unreg / "package.json", session="hst-git-once")
+        self.assertIn(STACK_MARK, first)
+        self.assertNotIn(STACK_MARK, again)
+        self.assertGreater(n, 0)
+        self.assertEqual(len(calls.read_text().splitlines()), n)
+
     def test_the_written_file_decides_not_the_session_cwd(self):
         odoo = _fake_repo(self.tmp / "odoo-erp", "git@github.com:zbynekdrlik/odoo-erp.git")
         self.assertNotIn(STACK_MARK, self._write(odoo / "package.json", cwd=self.unreg))

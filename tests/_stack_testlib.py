@@ -38,6 +38,27 @@ def commit_all(root, message="change"):
     git(root, "commit", "-q", "--allow-empty", "-m", message)
 
 
+def add_origin(root, set_head=True):
+    """A bare clone of `root` as its `origin` (fetched), with `origin/HEAD`
+    pointing at `main` unless `set_head` is false."""
+    root = Path(root)
+    bare = root.parent / (root.name + "-origin.git")
+    subprocess.run(["git", "clone", "-q", "--bare", str(root), str(bare)], check=True,
+                   capture_output=True, env=_ENV)
+    git(root, "remote", "add", "origin", str(bare))
+    git(root, "fetch", "-q", "origin")
+    if set_head:
+        git(root, "remote", "set-head", "origin", "main")
+    return bare
+
+
+def add_submodule(superproject, sub_repo, name):
+    """`sub_repo` (a repo with a commit) checked out as submodule `name`."""
+    git(superproject, "-c", "protocol.file.allow=always", "submodule", "add", "-q",
+        str(sub_repo), name)
+    return Path(superproject) / name
+
+
 def git_worktree(main, path, branch="lane"):
     """A linked worktree of `main` (which needs a commit) at `path`."""
     git(main, "worktree", "add", "-q", "-b", branch, str(path))

@@ -28,7 +28,7 @@ sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(REPO / "tests"))
 
 from _hook_state_cleanup import hermetic_hook_env  # noqa: E402  (#1046 hermetic HOME)
-from _stack_testlib import commit_all, git, git_repo  # noqa: E402
+from _stack_testlib import add_origin, commit_all, git, git_repo  # noqa: E402
 
 HOOK = REPO / "hooks" / "check-frontend-framework-state.sh"
 MARKER = "<!-- airuleset:stack-exception React admin panel — owner zbynekdrlik/x#5 -->"
@@ -53,12 +53,13 @@ class _StateCase(unittest.TestCase):
         _pkg(self.proj / "tools" / "package.json", {"@playwright/test": "1"})
         commit_all(self.proj, "base")
 
-    def _post(self, command, cwd=None):
+    def _post(self, command, cwd=None, event="PostToolUse",
+              response=None):
         payload = json.dumps({
-            "session_id": "fs1333", "hook_event_name": "PostToolUse",
+            "session_id": "fs1333", "hook_event_name": event,
             "tool_name": "Bash", "cwd": str(cwd or self.proj),
             "tool_input": {"command": command},
-            "tool_response": {"stdout": "added 3 packages", "stderr": ""}})
+            "tool_response": response or {"stdout": "added 3 packages", "stderr": ""}})
         return subprocess.run(["bash", str(HOOK)], input=payload, capture_output=True,
                               text=True, env=self.env, timeout=30)
 
@@ -85,10 +86,18 @@ class TestWiring(unittest.TestCase):
         self.assertIn("set -euo pipefail", src)
         self.assertIn("Dry-run:", src)
         cfg = json.loads((REPO / "settings" / "hooks.json").read_text(encoding="utf-8"))
-        wired = [(ev, b.get("matcher")) for ev, blocks in cfg["hooks"].items()
-                 for b in blocks for h in b.get("hooks", [])
-                 if "check-frontend-framework-state.sh" in h.get("command", "")]
-        self.assertEqual(wired, [("PostToolUse", "Bash")])
+        wired = sorted((ev, b.get("matcher")) for ev, blocks in cfg["hooks"].items()
+                       for b in blocks for h in b.get("hooks", [])
+                       if "check-frontend-framework-state.sh" in h.get("command", ""))
+        # round 4 (item 1): a failing npm/npx call leaves state too
+        self.assertEqual(wired, [("PostToolUse", "Bash"), ("PostToolUseFailure", "Bash")])
+
+    def test_the_prefilter_reads_the_command_field_only(self):
+        # round 4 (item 4): the tool output never triggers the scan
+        src = HOOK.read_text(encoding="utf-8")
+        self.assertIn(".tool_input.command", src)
+        self.assertIn('case "$CMD" in', src)
+        self.assertNotIn('case "$PAYLOAD" in', src)
 
 
 class TestStateBlocks(_StateCase):
@@ -125,6 +134,84 @@ class TestStateBlocks(_StateCase):
         self.assertNotIn("react", r.stderr.split("framework(s)")[1].splitlines()[0])
 
 
+class TestRoundFour(_StateCase):
+    def test_a_failing_command_is_checked_too(self):
+        _pkg(self.proj / "web" / "package.json", {"react": "18"})
+        r = self._post("npm i react && npm run build", event="PostToolUseFailure",
+                       response={"error": "npm ERR! build failed"})
+        self.assertBlocked(r, "react")
+
+    def test_committing_in_the_same_call_does_not_hide_the_framework(self):
+        add_origin(self.proj)
+        _pkg(self.proj / "web" / "package.json", {"react": "18"})
+        commit_all(self.proj, "add react")
+        r = self._post("npm i react && git add -A && git commit -m ui")
+        self.assertBlocked(r, "react", "committing does not make it allowed")
+
+    def test_the_upstream_is_the_fallback_baseline(self):
+        add_origin(self.proj, set_head=False)
+        git(self.proj, "branch", "-q", "--set-upstream-to", "origin/main")
+        _pkg(self.proj / "web" / "package.json", {"vue": "3"})
+        commit_all(self.proj, "add vue")
+        self.assertBlocked(self._post("npm i vue && git commit -am ui"), "vue")
+
+    def test_without_a_remote_the_baseline_is_head(self):
+        _pkg(self.proj / "web" / "package.json", {"react": "18"})
+        commit_all(self.proj, "react app")
+        self.assertClean(self._post("npm i react-dom"))
+
+    def test_the_message_names_the_uninstall_and_the_history(self):
+        _pkg(self.proj / "web" / "package.json", {"react": "18", "react-dom": "18"})
+        r = self._post("npm i react-dom")
+        self.assertBlocked(r, "present since an earlier change", "npm uninstall react react-dom",
+                           "remove the scaffold dir")
+
+    def test_an_unparseable_baseline_package_json_fails_open_with_a_log_line(self):
+        (self.proj / "tools" / "package.json").write_text('{"name": ', encoding="utf-8")
+        commit_all(self.proj, "broken")
+        _pkg(self.proj / "web" / "package.json", {"react": "18"})
+        r = self._post("npm i react")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("fail-open", r.stderr)
+        self.assertIn("unparseable baseline", self._log())
+
+    def test_the_baseline_is_read_only_when_a_changed_file_names_a_framework(self):
+        (self.proj / "tools" / "package.json").write_text('{"name": ', encoding="utf-8")
+        commit_all(self.proj, "broken")
+        _pkg(self.proj / "web" / "package.json", {"lodash": "4"})
+        self.assertClean(self._post("npm i lodash"))
+        self.assertNotIn("FAIL-OPEN", self._log())
+
+    def test_a_non_repo_house_cwd_gets_a_shallow_scan(self):
+        plain = self.tmp / "plain"
+        _pkg(plain / "ui" / "package.json", {"svelte": "5"})
+        self.assertBlocked(self._post("npm create svelte@latest ui", cwd=plain), "svelte")
+        deep = self.tmp / "deep"
+        _pkg(deep / "a" / "b" / "c" / "package.json", {"react": "18"})
+        self.assertClean(self._post("npm i", cwd=deep))
+
+    def test_a_submodule_of_a_platform_project_is_never_checked(self):
+        from _stack_testlib import add_submodule
+        widget = git_repo(self.tmp / "widget-src", "git@github.com:o/widget.git",
+                          commit=True)
+        odoo = git_repo(self.tmp / "odoo", "git@github.com:zbynekdrlik/odoo-erp.git",
+                        commit=True)
+        sub = add_submodule(odoo, widget, "widget")
+        _pkg(sub / "package.json", {"react": "18"})
+        self.assertClean(self._post("npm i react", cwd=sub))
+
+    def test_unreadable_registry_skips_with_a_log_line(self):
+        import os
+        from unittest import mock
+        sys.path.insert(0, str(REPO))
+        from gates import housestate
+        _pkg(self.proj / "web" / "package.json", {"react": "18"})
+        with mock.patch.dict(os.environ, {"HOME": self.env["HOME"]}), \
+                mock.patch.object(housestate, "REGISTRY", str(self.tmp / "missing.json")):
+            self.assertEqual(housestate.check("npm i react", str(self.proj)), "")
+        self.assertIn("registry unreadable", self._log())
+
+
 class TestStateAllows(_StateCase):
     def test_a_family_already_at_head(self):
         _pkg(self.proj / "a" / "package.json", {"react": "18"})
@@ -148,11 +235,6 @@ class TestStateAllows(_StateCase):
         git(self.proj, "remote", "add", "origin", "git@github.com:zbynekdrlik/odoo-erp.git")
         _pkg(self.proj / "frontline" / "apps" / "new" / "package.json", {"react": "18"})
         self.assertClean(self._post("npm i react"))
-
-    def test_outside_any_repo_nothing_is_checked(self):
-        bare = self.tmp / "plain"
-        _pkg(bare / "package.json", {"react": "18"})
-        self.assertClean(self._post("npm i react", cwd=bare))
 
     def test_the_family_marker_allows_and_is_logged(self):
         (self.proj / "CLAUDE.md").write_text(MARKER, encoding="utf-8")

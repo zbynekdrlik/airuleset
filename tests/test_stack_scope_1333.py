@@ -22,7 +22,7 @@ import cli_onboard as ob  # noqa: E402
 import cli_stack_scope as scope  # noqa: E402
 
 sys.path.insert(0, str(REPO / "tests"))
-from _stack_testlib import git_repo, git_worktree  # noqa: E402
+from _stack_testlib import add_submodule, git_repo, git_worktree  # noqa: E402
 
 REGISTRY = REPO / "projects-registry.json"
 
@@ -142,11 +142,28 @@ class TestStackFor(unittest.TestCase):
         b = _repo(self.tmp / "local")  # no origin at all: the main path decides
         self.assertEqual(scope.stack_for(str(b / "sub"), reg), ("local", "config"))
 
-    def test_broken_registry_and_unreadable_config_read_house(self):
+    def test_unreadable_registry_is_unknown_never_house(self):
+        # round 4 (item 4): an unreadable registry = scope unknown = skip
         bad = self.tmp / "bad.json"
         bad.write_text("{nope")
         root = _repo(self.tmp / "o", "git@github.com:zbynekdrlik/odoo-erp.git")
-        self.assertEqual(scope.stack_for(str(root), str(bad)), (None, "house"))
+        for reg in (str(bad), str(self.tmp / "missing.json")):
+            with self.subTest(reg=reg):
+                self.assertEqual(scope.stack_for(str(root), reg), (None, scope.UNKNOWN))
+                self.assertNotEqual(scope.UNKNOWN, scope.HOUSE)
+
+    def test_a_submodule_resolves_through_its_superproject(self):
+        sub_repo = _repo(self.tmp / "widget-src", "git@github.com:o/widget.git")
+        odoo = _repo(self.tmp / "odoo", "git@github.com:zbynekdrlik/odoo-erp.git")
+        sub = add_submodule(odoo, sub_repo, "vendor-widget")
+        self.assertEqual(scope.stack_for(str(sub / "src"), str(REGISTRY)),
+                         ("odoo-erp", "odoo"))
+
+    def test_git_calls_stay_below_the_hook_timeouts(self):
+        self.assertEqual(scope.GIT_TIMEOUT_S, 4)
+
+    def test_unreadable_config_reads_house(self):
+        root = _repo(self.tmp / "o", "git@github.com:zbynekdrlik/odoo-erp.git")
         (root / ".git" / "config").unlink()
         (root / ".git" / "config").mkdir()      # unreadable even as root
         self.assertEqual(scope.stack_for(str(root), str(REGISTRY)), (None, "house"))
