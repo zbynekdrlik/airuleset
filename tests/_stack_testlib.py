@@ -20,12 +20,12 @@ def git(root, *args):
                           capture_output=True, text=True, env=_ENV).stdout
 
 
-def git_repo(root, url=None, commit=False):
+def git_repo(root, url=None, commit=False, branch="main"):
     """`git init` at `root` (created), with an `origin` remote when `url` is
     given and one empty commit when `commit` is true."""
     root = Path(root)
     root.mkdir(parents=True, exist_ok=True)
-    git(root, "init", "-q", "-b", "main")
+    git(root, "init", "-q", "-b", branch)
     if url:
         git(root, "remote", "add", "origin", url)
     if commit:
@@ -38,7 +38,7 @@ def commit_all(root, message="change"):
     git(root, "commit", "-q", "--allow-empty", "-m", message)
 
 
-def add_origin(root, set_head=True):
+def add_origin(root, set_head=True, branch="main"):
     """A bare clone of `root` as its `origin` (fetched), with `origin/HEAD`
     pointing at `main` unless `set_head` is false."""
     root = Path(root)
@@ -48,7 +48,7 @@ def add_origin(root, set_head=True):
     git(root, "remote", "add", "origin", str(bare))
     git(root, "fetch", "-q", "origin")
     if set_head:
-        git(root, "remote", "set-head", "origin", "main")
+        git(root, "remote", "set-head", "origin", branch)
     return bare
 
 

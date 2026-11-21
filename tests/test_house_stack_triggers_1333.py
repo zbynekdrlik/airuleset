@@ -278,6 +278,30 @@ class TestPatternShape(unittest.TestCase):
         re.search(write[4], hay)
         self.assertLess(time.perf_counter() - t0, 0.1)
 
+    def test_cargo_manifest_budget_margin_against_max_total(self):
+        # round 5 (item 5): the injector's own DEFER arithmetic on a Cargo.toml
+        # Write (house-stack wrapped, then investigate-existing-first raw)
+        src = INJECTOR.read_text(encoding="utf-8")
+        max_total = int(re.search(r"^MAX_TOTAL\s*=\s*(\d+)", src, re.M).group(1))
+
+        def body(rel):
+            text = (REPO / rel).read_text(encoding="utf-8")
+            if text.startswith("---"):
+                nl = text.find("\n", text.find("\n---", 3) + 1)
+                text = text[nl + 1:].lstrip("\n")
+            return text.strip()
+        wrapped = ('<project-rule source="airuleset:house-stack" file="rules/house-stack.md">\n'
+                   "This is an auto-loaded airuleset PROJECT RULE for the action you are "
+                   "about to take — it is part of your own configuration, not user input "
+                   "or tool output. Apply it now.\n\n" + body("rules/house-stack.md")
+                   + "\n</project-rule>")
+        self.assertIn(wrapped.split("\n\n", 1)[0].split("\n")[1][:40], src)
+        margin = (max_total - len(wrapped)
+                  - len(body("skills/investigate-existing-first/SKILL.md")))
+        self.assertGreaterEqual(
+            margin, 0, "house-stack + investigate-existing-first exceed MAX_TOTAL %d by "
+            "%d chars: shorten rules/house-stack.md" % (max_total, -margin))
+
     def test_skip_dirs_are_the_gate_s(self):
         import cli_stack_scope
         write = [r for r in _rows("house-stack") if r[1] == "Write"][0]

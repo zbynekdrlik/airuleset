@@ -32,6 +32,7 @@ sys.path.insert(0, str(REPO / "tests"))
 import cli_onboard as ob  # noqa: E402
 from test_onboard_project import FakeRunner, init_repo  # noqa: E402
 from test_onboard_tray_1198 import SshShellRunner  # noqa: E402
+from _onboard_gate_open import setUpModule, tearDownModule  # noqa: E402,F401  (#1184)
 
 RULE = REPO / "rules" / "house-stack.md"
 MARKER = "<!-- airuleset:stack-exception <what> — <owner ref> -->"
@@ -97,9 +98,23 @@ class TestStackSeed(unittest.TestCase):
         self.assertEqual([r[:2] for r in seeded], [r[:2] for r in _rule_rows()])
         # round 4 (item 7): no frozen technology copy; Stack evolution changes
         # the rule, never a project's seed
-        self.assertEqual({r[2] for r in seeded}, {"the current row of `rules/house-stack.md`"})
+        self.assertEqual({r[2] for r in seeded},
+                         {"the current row of `~/.claude/rules/house-stack.md`"})
         for frozen in ("Leptos", "axum", "tray-icon", "Direct3D", "0.8"):
             self.assertNotIn(frozen, ob._stack.STACK_SECTION)
+
+    def test_an_odoo_row_with_a_rust_repo_gets_no_seed(self):
+        # round 5 (item 5): the registry decides, not the detected kind
+        with tempfile.TemporaryDirectory() as d, tempfile.TemporaryDirectory() as rd:
+            init_repo(d, remote="https://github.com/zbynekdrlik/foo.git")
+            _put(d, "Cargo.toml", '[package]\nname = "x"\n')
+            reg = str(Path(rd) / "projects-registry.json")
+            ob.save_registry(reg, [{"name": "foo", "path": d, "host": "dev1",
+                                    "stack": "odoo"}])
+            ob.onboard_project(d, name="foo", registry_path=reg, run=FakeRunner())
+            text = (Path(d) / "CLAUDE.md").read_text(encoding="utf-8")
+        self.assertIn("## Playbook router", text)
+        self.assertNotIn("## Stack", text)
 
     def test_the_seed_follows_the_registry_stack(self):
         self.assertEqual(ob._stack.seed_section("house"), ob._stack.STACK_SECTION)
@@ -269,6 +284,25 @@ class TestStackAudit(unittest.TestCase):
                  "crates/x-ui/public/helpers.js": "x\n" * 300}
         rows = self._audit(files)
         self.assertEqual(_kinds(rows), {"stack-deviation"})
+
+    def test_companion_modules_are_a_platform_not_a_web_ui(self):
+        # round 5 (item 4): companion-updater and presenter shapes
+        base = '{"name": "m", "dependencies": {"@companion-module/base": "1.13.6"}}'
+        for files in ({"module/bkshading-simple/package.json": base,
+                       "module/bkshading-simple/index.js": "x\n" * 400,
+                       "module/bkshading-simple/lib/controller.js": "x\n" * 300,
+                       "module/bkshading-simple/testing/fake-bkshading.js": "x\n" * 200},
+                      {"ops/companion/presenter/package.json": base,
+                       "ops/companion/presenter/index.js": "x\n" * 500,
+                       "ops/companion/presenter/lib/stream.js": "x\n" * 300}):
+            with self.subTest(first=sorted(files)[0]):
+                self.assertEqual(self._audit(files), [])
+
+    def test_a_root_level_framework_app_does_not_exempt_the_whole_repo(self):
+        files = {"package.json": REACT_PKG, "tools/admin/app.js": "x\n" * 300}
+        techs = sorted(r["detail"].split(":")[0] for r in self._audit(files)
+                       if r["kind"] == "stack-deviation")
+        self.assertEqual(techs, ["javascript", "react"])
 
     def test_a_framework_app_s_own_sources_are_not_counted_again(self):
         # round 4 (item 6): bakerion-ai's React sources also showed as javascript

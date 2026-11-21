@@ -290,6 +290,13 @@ class TestScope(_GateCase):
         self.assertIs(housestack.repo_package_files, housestate.repo_package_files)
         self.assertIs(housestack.SCAN_DEPTH, cli_stack_scope.SCAN_DEPTH)
 
+    def test_the_skip_check_reads_the_repo_relative_path(self):
+        # round 5 (item 5): a checkout that itself lives under a `tests/` dir
+        proj = git_repo(self.tmp / "tests" / "proj")
+        self.assertBlocked(self._write("web/package.json", REACT, cwd=proj, root=proj),
+                           "react")
+        self.assertAllowed(self._write("tests/x/package.json", REACT, cwd=proj, root=proj))
+
     def test_unreadable_registry_skips_with_a_log_line(self):
         # round 4 (item 4): unknown scope is never house
         from unittest import mock

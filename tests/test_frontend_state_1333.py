@@ -212,6 +212,87 @@ class TestRoundFour(_StateCase):
         self.assertIn("registry unreadable", self._log())
 
 
+class TestRoundFive(_StateCase):
+    def test_a_non_git_parent_never_judges_its_repo_subdirs(self):
+        # 🔴 the real dev1 `~/devel` shape: platform repos under a non-git parent
+        devel = self.tmp / "devel"
+        shop = git_repo(devel / "storefront",
+                        "git@github.com:zbynekdrlik/automatizacie-montalu.git")
+        _pkg(shop / "package.json", {"@sveltejs/kit": "2", "svelte": "5"})
+        site = git_repo(devel / "site", "git@github.com:o/brand-site.git")
+        _pkg(site / "package.json", {"astro": "4"})
+        self.assertClean(self._post("npm i", cwd=devel))
+        _pkg(devel / "plain-ui" / "package.json", {"react": "18"})
+        r = self._post("npm i", cwd=devel)
+        self.assertBlocked(r, "react")
+        self.assertNotIn("svelte", r.stderr)
+        self.assertNotIn("astro", r.stderr)
+
+    def test_a_git_failure_fails_open_and_skips_the_shallow_scan(self):
+        broken = self.tmp / "broken"
+        (broken / ".git").mkdir(parents=True)        # git cannot read it
+        _pkg(broken / "sub" / "package.json", {"react": "18"})
+        for cwd in (broken, broken / "sub"):
+            with self.subTest(cwd=cwd.name):
+                r = self._post("npm i react", cwd=cwd)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertIn("fail-open", r.stderr)
+        self.assertIn("git failed", self._log())
+
+    def test_origin_main_then_origin_master_are_the_baseline_before_upstream(self):
+        add_origin(self.proj, set_head=False)        # origin/main, no origin/HEAD
+        _pkg(self.proj / "web" / "package.json", {"react": "18"})
+        commit_all(self.proj, "add react")
+        self.assertBlocked(self._post("npm i react && git commit -am x"),
+                           "absent from origin/main")
+        old = git_repo(self.tmp / "old", commit=True, branch="master")
+        _pkg(old / "tools" / "package.json", {"@playwright/test": "1"})
+        commit_all(old, "base")
+        add_origin(old, set_head=False, branch="master")
+        _pkg(old / "web" / "package.json", {"vue": "3"})
+        commit_all(old, "add vue")
+        self.assertBlocked(self._post("npm i vue", cwd=old), "absent from origin/master")
+
+    def test_a_head_fallback_is_logged_and_worded(self):
+        _pkg(self.proj / "web" / "package.json", {"react": "18"})
+        r = self._post("npm i react")
+        self.assertBlocked(r, "absent from HEAD")
+        self.assertIn("BASELINE HEAD", self._log())
+
+    def test_an_unparseable_changed_package_json_is_logged(self):
+        (self.proj / "web").mkdir()
+        (self.proj / "web" / "package.json").write_text('{"name": ', encoding="utf-8")
+        _pkg(self.proj / "ui" / "package.json", {"react": "18"})
+        self.assertBlocked(self._post("npm i react"), "react")
+        self.assertIn("unparseable changed web/package.json", self._log())
+
+    def test_one_git_layout_per_run_and_no_diff_rehash(self):
+        import shutil
+        real_git = shutil.which("git")
+        stub = self.tmp / "stub-bin"
+        stub.mkdir()
+        calls = self.tmp / "git-calls"
+        (stub / "git").write_text('#!/bin/sh\necho "$*" >> %s\nexec %s "$@"\n'
+                                  % (calls, real_git))
+        (stub / "git").chmod(0o755)
+        self.env["PATH"] = "%s:%s" % (stub, self.env.get("PATH", ""))
+        _pkg(self.proj / "web" / "package.json", {"react": "18"})
+        self.assertBlocked(self._post("npm i react"), "react")
+        lines = calls.read_text().splitlines()
+        self.assertEqual(sum("--show-toplevel" in ln for ln in lines), 1, lines)
+        self.assertFalse([ln for ln in lines if " diff " in " %s " % ln], lines)
+        self.assertTrue([ln for ln in lines if "*package.json" in ln], lines)
+
+    def test_one_deadline_below_the_hook_timeouts(self):
+        import cli_stack_scope
+        cfg = json.loads((REPO / "settings" / "hooks.json").read_text(encoding="utf-8"))
+        timeouts = [h.get("timeout", 60) for blocks in cfg["hooks"].values() for b in blocks
+                    for h in b.get("hooks", [])
+                    if "frontend-framework" in h.get("command", "")]
+        self.assertTrue(timeouts)
+        self.assertLess(cli_stack_scope.HOOK_DEADLINE_S, min(timeouts))
+
+
 class TestStateAllows(_StateCase):
     def test_a_family_already_at_head(self):
         _pkg(self.proj / "a" / "package.json", {"react": "18"})
