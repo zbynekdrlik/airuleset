@@ -139,5 +139,21 @@ class TestHouseStackRule(unittest.TestCase):
             self.assertIn(needle, window, needle)
 
 
+# --------------------------------------------------------------------------- #
+# 2) The always-on pointer: inside the framework-first bullet, one sentence.
+# --------------------------------------------------------------------------- #
+class TestArchitectureFirstPointer(unittest.TestCase):
+    def test_pointer_sits_in_the_framework_first_bullet(self):
+        raw = (REPO / "modules" / "quality" / "architecture-first.md").read_text(
+            encoding="utf-8")
+        bullet = next(ln for ln in raw.splitlines()
+                      if ln.startswith("- **Framework-first for new components"))
+        self.assertIn("**House stack (#1333):** the default for every new app or "
+                      "component is `~/.claude/rules/house-stack.md` — read it "
+                      "before choosing", bullet)
+        self.assertIn("a deviation needs `%s`" % MARKER, bullet)
+        self.assertEqual(raw.count("house-stack.md"), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
