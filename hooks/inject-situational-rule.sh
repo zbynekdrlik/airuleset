@@ -166,8 +166,9 @@ MAX_TOTAL = 14000
 # #1179: odoo-client-board-stages joins -- an `Acceptance-thread:` line lives in
 # the QUOTED/heredoc `gh issue comment` body, which the stripped haystack drops.
 # #1235: linux-box-swap — remote probes quote the command (ssh box 'free -h').
+# #1333: house-stack — the `Architektúra:` section lives in the quoted body.
 RAW_BASH_MATCH_TOPICS = {"cloudflare-api-tokens", "odoo-client-board-stages",
-                         "linux-box-swap"}
+                         "linux-box-swap", "house-stack"}
 
 
 def strip_frontmatter(text):
