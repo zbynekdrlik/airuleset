@@ -438,6 +438,14 @@ SERVICE_ACCOUNTS = {
         "project_dir": "devel/restreamer", "tmux_session": "restreamer",
         "webterm_sessions": {h: {"preferred": "restreamer", "start_dir_chain": ["devel/restreamer"]} for h in ("zbynek", "marek")},
     },
+    # #1390 (owner 21.11.): wall-songs replaces Resolume on the SNV songs PC (LED-wall visuals for
+    # the live band during songs). A new repo that pins nothing yet: the baseline toolchain only.
+    "wall-songs": {
+        "host": "dev1", "sudo": False, "repo": "zbynekdrlik/wall-songs",   # public
+        "github_app": True, "repo_secrets": [], "tools": [], "secrets": [],
+        "project_dir": "devel/wall-songs", "tmux_session": "wall-songs",
+        "webterm_sessions": {h: {"preferred": "wall-songs", "start_dir_chain": ["devel/wall-songs"]} for h in ("zbynek", "marek")},
+    },
     "iemmixer": {
         "host": "dev1",
         "sudo": False,
