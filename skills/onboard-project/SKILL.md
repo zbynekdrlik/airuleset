@@ -28,7 +28,7 @@ What it ensures (each step: detect → act only if absent → report `satisfied`
 3. `CLAUDE.md` skeleton + `## Playbook router` — ONLY if missing (existing file never overwritten)
 4. GitHub remote (`gh repo create zbynekdrlik/<name> --private --source . --push` if none)
 5. two/three-branch work branch per existing convention — NEVER changes the existing default branch
-6. foundation-gap tickets — no CI, web-without-version-label, or a Rust web app without a tray icon (`rules/rust-web-tray.md`, #1198) → files a tracked ticket (Scope-gate line; never auto-generates CI)
+6. foundation-gap tickets — no CI, web-without-version-label, or a Rust web app without a tray icon (`rules/house-stack.md`, #1198) → files a tracked ticket (Scope-gate line; never auto-generates CI)
 7. registry entry in `projects-registry.json`
 
 Then report the printed step table to the user (plain Slovak: čo bolo doplnené, čo už bolo v poriadku).
