@@ -929,7 +929,10 @@ def _print_result(result):
 def _print_audit(report):
     clean = True
     for name in sorted(report):
-        drift = report[name]
+        notes = [d for d in report[name] if d.get("kind") in _stack.NOTE_KINDS]
+        drift = [d for d in report[name] if d not in notes]   # #1333: notes never drift
+        for d in notes:
+            print("  · %-28s %-20s %s" % (name, d["kind"], d["detail"]))
         # `unreachable` is "could not check", NOT drift — surfaced distinctly and
         # never flips the clean tally (#583, requirement 4; kind evolved from the
         # #569 `remote-host` skip).
