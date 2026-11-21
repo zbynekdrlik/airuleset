@@ -312,8 +312,8 @@ class TestStackAudit(unittest.TestCase):
                 self.assertEqual(self._audit(files), [])
 
     def test_a_root_level_framework_app_does_not_exempt_the_whole_repo(self):
-        files = {"package.json": REACT_PKG, "tools/admin/app.js": "x\n" * 300,
-                 "tools/admin/index.html": _page("app.js")}
+        files = {"package.json": REACT_PKG, "admin/app.js": "x\n" * 300,
+                 "admin/index.html": _page("app.js")}
         techs = sorted(r["detail"].split(":")[0] for r in self._audit(files)
                        if r["kind"] == "stack-deviation")
         self.assertEqual(techs, ["javascript", "react"])
