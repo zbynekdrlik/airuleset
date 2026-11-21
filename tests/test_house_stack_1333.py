@@ -78,8 +78,9 @@ class TestHouseStackRule(unittest.TestCase):
         self.assertTrue(self.raw.startswith("---\npaths:\n"))
         head = self.raw.split("---", 2)[1]
         globs = [ln.strip()[2:] for ln in head.splitlines() if ln.strip().startswith("- ")]
-        # round 3 (I): no index.html / *.rs, which loaded the rule in any project
-        self.assertEqual(globs, ['"**/Cargo.toml"', '"**/Trunk.toml"', '"**/crates/**"'])
+        # round 3/4 (I, 8): manifests only; index.html / *.rs / crates/** loaded the
+        # whole rule on any read in a Rust or web project
+        self.assertEqual(globs, ['"**/Cargo.toml"', '"**/Trunk.toml"'])
 
     def test_every_layer_is_pinned(self):
         for needle in (
@@ -97,8 +98,8 @@ class TestHouseStackRule(unittest.TestCase):
 
     def test_reference_projects_are_named(self):
         for needle in ("fohmixer `crates/fohmixer-ui`",
-                       "fohmixer `fohmixer-hub` (`/api/status`, WebSocket); songplayer "
-                       "`sp-server` (WebSocket, `/api/v1/status`)",
+                       "songplayer `sp-server` (`/api/v1/status` with the version, "
+                       "WebSocket); fohmixer `fohmixer-hub` (`/api/version`, WebSocket)",
                        "wall-bridge `crates/wb-tray` (tray-icon, Windows); intercom "
                        "`tray` (tray-icon, Linux / gtk); fohmixer `crates/fohmixer-tray` "
                        "(Tauri 2 tray, no window)",
@@ -108,9 +109,11 @@ class TestHouseStackRule(unittest.TestCase):
         self.assertNotIn("iemmixer", self.text)
 
     def test_web_ui_row_carries_the_customizable_ui_pattern(self):
-        self.assertIn("a customizable UI (ARRANGE: reorder + hide/show, saved "
+        self.assertIn("where the UI shows controls / panels the user arranges, a "
+                      "customizable UI (ARRANGE: reorder + hide/show, saved "
                       "server-side)", self.text)
-        self.assertIn("(ARRANGE: `crates/fohmixer-ui/src/arrange.rs`)", self.text)
+        self.assertIn("(ARRANGE: `crates/fohmixer-ui/src/behave/arrange_drag.rs` + "
+                      "`behave/arrange_edit.rs`)", self.text)
 
     def test_references_are_shapes_never_old_versions(self):
         self.assertIn("**never copy a reference project's older version**",
@@ -128,9 +131,12 @@ class TestHouseStackRule(unittest.TestCase):
                 "platform is the `stack` field of its row in airuleset's "
                 "`projects-registry.json`",
                 "set by airuleset only, never by a project session",
-                "A new repo extending an existing fleet platform (Odoo, n8n, HA "
-                "add-on, OBS) follows that platform, and airuleset records its "
-                "`stack` at onboarding."):
+                "A new repo whose kind matches ANY existing platform id follows "
+                "that platform, and airuleset records its `stack` right after "
+                "onboarding.",
+                "Until a deviating project's migration ticket lands, keep maintaining "
+                "the deviating component; new features go on the house stack or need "
+                "the marker."):
             self.assertIn(needle, self.text, needle)
 
     def test_every_row_says_when_it_applies(self):
@@ -143,7 +149,8 @@ class TestHouseStackRule(unittest.TestCase):
                          "a UI / API (not a CLI or library)")
         self.assertEqual(applies["Install"], "a Windows desktop app with a UI or video")
         self.assertEqual(applies["Graphics engine"], "a Windows app that renders video")
-        self.assertIn("A headless Linux service is the Service + Web UI rows and opts "
+        self.assertIn("A headless Linux service is the Workspace + Service + Web UI "
+                      "rows and opts "
                       "out of the tray with `<!-- airuleset:tray=n/a <reason> -->`.",
                       self.text)
 
@@ -169,13 +176,17 @@ class TestHouseStackRule(unittest.TestCase):
 
     def test_enforcement_text_matches_the_gates(self):
         for needle in ("a PreToolUse gate refuses a `package.json` Write or Edit",
-                       "a PostToolUse check compares the repo's `package.json` "
-                       "files with HEAD",
+                       "after a package-manager Bash call (success or failure) a "
+                       "PostToolUse check compares the repo's `package.json` files "
+                       "with the default branch (the merge-base with `origin/HEAD`: "
+                       "committing does not make a framework allowed)",
+                       "Both honour only the repo-root `CLAUDE.md` marker.",
                        "a template / UI crate (askama, tera, maud, yew, dioxus, "
-                       "sycamore)",
-                       "hand-written JS outside a `Trunk.toml` dir or a leptos / "
-                       "wasm-bindgen crate",
-                       "it lists every marker and the gate's `ALLOW-MARKER` lines"):
+                       "sycamore, actix-web, warp, rocket, egui, iced, slint)",
+                       "hand-written JS (incl. inline `<script>`; vendored files and a "
+                       "framework app's own sources excluded) outside a `Trunk.toml` "
+                       "dir or a leptos / wasm-bindgen crate",
+                       "It lists every marker and the gate's `ALLOW-MARKER` lines"):
             self.assertIn(needle, self.text, needle)
 
     def test_exception_needs_the_owner_marker(self):
@@ -201,8 +212,8 @@ class TestHouseStackRule(unittest.TestCase):
                 "`trunk build --release` → static `dist/`",
                 "**SSR** (cargo-leptos on Axum) only when the project "
                 "explicitly requires server functions",
-                "If you think \"it would be easier without WASM\" — STOP. "
-                "That thought is wrong."):
+                "**Simplicity alone is no reason to leave WASM; a genuinely better "
+                "option goes through Stack evolution.**"):
             self.assertIn(needle, self.text, needle)
 
     def test_forbidden_alternatives_survive_the_merge(self):
@@ -257,6 +268,12 @@ class TestHouseStackRule(unittest.TestCase):
                       "`stack-proposal` + `needs-decision` (it reaches the owner's "
                       "`U`", sec)
         self.assertNotIn("label that ticket", sec)
+        for needle in ("`gh issue create -R zbynekdrlik/airuleset -l stack-proposal "
+                       "-l needs-decision`", "`Scope-gate: needs-user-decision`",
+                       "`Dedup-checked: label stack-proposal`",
+                       "`Requested by <owner>/<repo>#N`",
+                       "then `peer_send` it to airuleset"):
+            self.assertIn(needle, sec)
         self.assertIn("an app-token stream files through `python3 "
                       "~/devel/airuleset/airuleset.py gk-request --repo "
                       "zbynekdrlik/airuleset`", sec)

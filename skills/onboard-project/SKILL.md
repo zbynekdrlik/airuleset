@@ -29,7 +29,7 @@ What it ensures (each step: detect → act only if absent → report `satisfied`
 4. GitHub remote (`gh repo create zbynekdrlik/<name> --private --source . --push` if none)
 5. two/three-branch work branch per existing convention — NEVER changes the existing default branch
 6. foundation-gap tickets — no CI, web-without-version-label, or a Rust web app without a tray icon (`rules/house-stack.md`, #1198) → files a tracked ticket (Scope-gate line; never auto-generates CI)
-7. registry entry in `projects-registry.json`. Its `stack` field (`house` or a platform id from `cli_stack_scope.STACK_IDS`) is set by airuleset by hand after onboarding (a new app = `house`); re-onboarding keeps it
+7. registry entry in `projects-registry.json`. Its `stack` field (`house` or a platform id from `cli_stack_scope.STACK_IDS`) is recorded by airuleset right after onboarding (a new app = `house`; a repo whose kind matches any existing platform id = that id); re-onboarding keeps it
 
 Then report the printed step table to the user (plain Slovak: čo bolo doplnené, čo už bolo v poriadku).
 
