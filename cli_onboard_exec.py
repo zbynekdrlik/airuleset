@@ -59,6 +59,28 @@ def resolve_remote(host):
     return None
 
 
+def account_identity(host, account):
+    """`(REMOTE_HOSTS name, error)` to read a project ACCOUNT's checkout on
+    `host` as that account (#1333 audit precision): the host login (`newlevel`
+    on dev1) cannot read `/home/<account>`, so every account row read
+    `missing-repo`. `cli_account_bootstrap.account_remote` is the one
+    `<account>@<host>` lookup. `(None, None)` for a legacy row (no account,
+    `newlevel`, undeclared, or declared on another host): keep the host login.
+    A declared account with no REMOTE_HOSTS entry, or a pending or paused one
+    (#851), is unreachable: never contacted, never read as the host login."""
+    import cli_account_bootstrap as boot
+    if account not in boot.SERVICE_ACCOUNTS or boot.account_spec(account)["host"] != host:
+        return None, None
+    remote = boot.account_remote(account)
+    if not remote:
+        return None, ("account %s is declared on %s but has no REMOTE_HOSTS entry: "
+                      "not read as the host login" % (account, host))
+    state = "paused" if remote.get("paused") else "pending" if remote.get("pending") else ""
+    if state:
+        return None, "account %s is %s: not contacted (#851)" % (account, state)
+    return remote["name"], None
+
+
 def _ssh_prefix(remote):
     """The `ssh …user@host` argv prefix for a REMOTE_HOSTS entry, reused by
     `_exec` and `_remote_home`. BatchMode=yes + ConnectTimeout make the

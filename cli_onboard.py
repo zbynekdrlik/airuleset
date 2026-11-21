@@ -70,6 +70,7 @@ from cli_onboard_exec import (  # noqa: E402
     _run as _run,
     resolve_remote as resolve_remote,
     is_local_host as is_local_host,
+    account_identity as account_identity,
     _ssh_prefix as _ssh_prefix,
     _exec as _exec,
     _git as _git,
@@ -880,12 +881,15 @@ def audit_project(entry, host=None, run=None):
     return drift
 
 
-def _audit_host_target(host, local_host):
-    """How to reach `host` for an audit: `(exec_host, error)`. This box (or a
-    local alias / empty host) audits LOCALLY (`(None, None)`); a known
+def _audit_host_target(host, local_host, account=None):
+    """How to reach `host` for an audit: `(exec_host, error)`. A row's project
+    `account` is read AS that account (`account_identity`, #1333); else this box
+    (or a local alias / empty host) audits LOCALLY (`(None, None)`); a known
     REMOTE_HOSTS box audits over ssh (`(host, None)`); any other named host is
     genuinely unreachable from here (`(None, <reason>)`) — never audited against
     the local filesystem (which is the #569 MAJOR-3 false-missing-repo bug)."""
+    if (ident := account_identity(host, account)) != (None, None):
+        return ident
     if not host or (local_host and host == local_host):
         return None, None
     if resolve_remote(host) is not None:
@@ -908,7 +912,7 @@ def audit_registry(registry_path=None, run=None, local_host=None):
         name = e.get("name")
         if not name:
             continue
-        exec_host, err = _audit_host_target(e.get("host"), local_host)
+        exec_host, err = _audit_host_target(e.get("host"), local_host, e.get("account"))
         if err:
             out[name] = [{"kind": "unreachable", "detail": err}]
         else:
@@ -981,7 +985,7 @@ def cmd_onboard_project(args):
                 entry = {"name": name, "path": entry_path,
                          "host": host or "dev1", "default_branch": None}
             exec_host, err = _audit_host_target(host or entry.get("host"),
-                                                _current_host())
+                                                _current_host(), entry.get("account"))
             if err:
                 _print_audit({entry["name"]:
                               [{"kind": "unreachable", "detail": err}]})

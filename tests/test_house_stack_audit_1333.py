@@ -12,6 +12,8 @@
   * hand-written JS, exempt only in a dir with a `Trunk.toml` or in a crate that
     depends on leptos / wasm-bindgen (round 3 C: intercom's root-workspace
     `web/app.js` is a deviation, dcontroller's `crates/web/public` is not);
+    every fixture's JS also has the page that loads it, a real UI's shape
+    (the deny-list rules: `test_stack_audit_precision_1333.py`);
   * other technology in the `## Stack` TABLE's Technology cells, negated
     clauses ignored (round 3 D: wall-songs' "No … Electron" is clean).
 - One marker per technology (round 3 E); `--audit` lists every marker and the
@@ -63,6 +65,12 @@ def _put(root, rel, text):
     p = Path(root) / rel
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(text, encoding="utf-8")
+
+
+def _page(*srcs):
+    """An .html page serving `srcs` by `<script src>` (no inline script)."""
+    return "<html><body>\n%s</body></html>\n" % "".join(
+        '  <script src="%s"></script>\n' % s for s in srcs)
 
 
 def _kinds(rows):
@@ -263,7 +271,8 @@ class TestStackAudit(unittest.TestCase):
                                    '[dependencies]\naxum = "0.8"\n',
                  "tray/Cargo.toml": '[package]\nname = "intercom-tray"\n\n'
                                     '[dependencies]\ntray-icon = "0.21"\n',
-                 "web/app.js": "x();\n" * 1298, "web/sw.js": "x\n" * 40}
+                 "web/app.js": "x();\n" * 1298, "web/sw.js": "x\n" * 40,
+                 "web/index.html": _page("/app.js", "/sw.js")}
         rows = self._audit(files)
         self.assertEqual(_kinds(rows), {"stack-deviation"})
         self.assertIn("javascript: hand-written JS web UI: 1298 lines in web/app.js",
@@ -276,12 +285,16 @@ class TestStackAudit(unittest.TestCase):
                  "crates/web/public/mapdrag.js": "x\n" * 300,
                  "crates/glue/Cargo.toml": '[package]\nname = "glue"\n\n'
                                            '[dependencies]\nwasm-bindgen = "0.2"\n',
-                 "crates/glue/static/bridge.js": "x\n" * 300}
+                 "crates/glue/static/bridge.js": "x\n" * 300,
+                 "panel/index.html": _page("static/interop.js"),
+                 "crates/web/index.html": _page("/charts.js", "/mapdrag.js"),
+                 "crates/glue/static/index.html": _page("bridge.js")}
         self.assertEqual(self._audit(files), [])
 
     def test_js_in_a_plain_crate_is_not_exempt(self):
         files = {"crates/x-ui/Cargo.toml": PLAIN_CRATE,
-                 "crates/x-ui/public/helpers.js": "x\n" * 300}
+                 "crates/x-ui/public/helpers.js": "x\n" * 300,
+                 "crates/x-ui/public/index.html": _page("helpers.js")}
         rows = self._audit(files)
         self.assertEqual(_kinds(rows), {"stack-deviation"})
 
@@ -299,7 +312,8 @@ class TestStackAudit(unittest.TestCase):
                 self.assertEqual(self._audit(files), [])
 
     def test_a_root_level_framework_app_does_not_exempt_the_whole_repo(self):
-        files = {"package.json": REACT_PKG, "tools/admin/app.js": "x\n" * 300}
+        files = {"package.json": REACT_PKG, "admin/app.js": "x\n" * 300,
+                 "admin/index.html": _page("app.js")}
         techs = sorted(r["detail"].split(":")[0] for r in self._audit(files)
                        if r["kind"] == "stack-deviation")
         self.assertEqual(techs, ["javascript", "react"])
@@ -307,13 +321,15 @@ class TestStackAudit(unittest.TestCase):
     def test_a_framework_app_s_own_sources_are_not_counted_again(self):
         # round 4 (item 6): bakerion-ai's React sources also showed as javascript
         files = {"frontend/package.json": REACT_PKG,
-                 "frontend/src/App.jsx": "x\n" * 400, "frontend/src/main.ts": "x\n" * 300}
+                 "frontend/src/App.jsx": "x\n" * 400, "frontend/src/main.ts": "x\n" * 300,
+                 "frontend/index.html": _page("/src/main.ts")}
         rows = self._audit(files)
         techs = [r["detail"].split(":")[0] for r in rows if r["kind"] == "stack-deviation"]
         self.assertEqual(techs, ["react"])
 
     def test_every_non_pruned_dir_is_scanned(self):
-        rows = self._audit({"app/main.js": "x();\n" * 250})
+        rows = self._audit({"app/main.js": "x();\n" * 250,
+                            "app/index.html": _page("main.js")})
         self.assertIn("javascript: hand-written JS web UI: 250 lines in app/main.js",
                       rows[0]["detail"])
 
@@ -328,11 +344,14 @@ class TestStackAudit(unittest.TestCase):
     def test_vendored_js_is_excluded(self):
         files = {"VENDORED.md": "# Vendored\n\n- `static/lib/uPlot.js` (uPlot 1.6, MIT)\n",
                  "static/lib/uPlot.js": "x\n" * 900, "vendor/x/big.js": "x\n" * 900,
-                 "static/chart.min.js": "x\n" * 900, "static/helper.js": "x\n" * 40}
+                 "static/chart.min.js": "x\n" * 900, "static/helper.js": "x\n" * 40,
+                 "static/index.html": _page("lib/uPlot.js", "chart.min.js", "helper.js",
+                                            "/vendor/x/big.js")}
         self.assertEqual(self._audit(files), [])
 
     def test_hand_written_web_js_app_is_a_deviation(self):
-        rows = self._audit({"web/app.js": "x();\n" * 250})
+        rows = self._audit({"web/app.js": "x();\n" * 250,
+                            "web/index.html": _page("app.js")})
         self.assertIn("hand-written JS web UI: 250 lines in web/app.js",
                       rows[0]["detail"])
 
@@ -341,7 +360,10 @@ class TestStackAudit(unittest.TestCase):
                  "web/__tests__/a.js": "x\n" * 300, "e2e/static/x.js": "x\n" * 300,
                  "static/sw.js": "x\n" * 300, "static/chart.min.js": "x\n" * 900,
                  "crates/app-ui/dist/app-ui.js": "x\n" * 900,
-                 "web/helper.js": "x\n" * 40}
+                 "web/helper.js": "x\n" * 40,
+                 "web/index.html": _page("app.test.js", "view.spec.ts", "helper.js",
+                                         "__tests__/a.js"),
+                 "static/index.html": _page("sw.js", "chart.min.js")}
         self.assertEqual(self._audit(files), [])
 
     # --- the `## Stack` table (round 3 D) -------------------------------- #
