@@ -1,26 +1,33 @@
 """#1333 audit precision: the three defects the first real
-`onboard-project --audit` showed (21.11.2026).
+`onboard-project --audit` showed (21.11.2026), as reworked by the round-2
+review (ROZHODNUTÉ: a deny-list, never a parsed allow-list; an audit's silent
+false negative is worse than a visible false positive).
 
 (a) Trunk / wasm-bindgen OUTPUT is no hand-written JS: a `.js` beside its
-    `<stem>_bg.wasm` / `<stem>.wasm`, or a Trunk hashed `<name>-<16 hex>.js`
-    beside a `.wasm`, and the loader page of a Trunk dist dir (camera-box's
-    `shading-release/v0.2.1x/bkshading-service/web/`). A gitignored tree (a
-    pinned release bundle) is never the project's code; tracked files count.
-(b) JS is a web UI only where an HTML page serves it: a `<script src>`, an
-    import in the page's inline script, and the modules those import. Tooling
-    (`ops/companion/generate-profile.mjs`, `scripts/dev/...`) and generated
-    reports (`playwright-report`, `test-results`, `coverage`, `.nyc_output`)
-    never count (presenter). The true positives stay: intercom's served
-    `web/app.js` + `web/levels.js`, reaperiem's inline `web/mixer.html`, the
-    wall-bridge inline dashboard; dcontroller's Leptos `public/*.js` stay exempt.
+    same-stem `_bg.wasm`, or a Trunk hashed `<name>-<16 hex>.js` beside a
+    `.wasm`. A gitignored tree (camera-box's pinned `shading-release/`) is
+    never the project's code; tracked files count.
+(b) Every hand-written JS / TS file counts (no page has to serve it: template
+    `src`, `.rs` pages, bundler entries), minus the known non-UI categories:
+    generated reports (`playwright-report`, `test-results`, `htmlcov`,
+    `allure-report`, `storybook-static`, and `coverage` only with an lcov
+    report), tooling (`scripts/`, `tools/`, `ops/`, `bin/`, `*.config.*`),
+    Companion modules, vendored files. Inline `<script>` lines in `.html`
+    count, minus HTML comments and non-JS `type=`; a > 64 KB line is skipped;
+    a failed awk or a record without `n <int>` is unverified, never clean.
+    The true positives stay: intercom `web/app.js` + `web/levels.js`, reaperiem
+    `web/mixer.html`, an inline dashboard; dcontroller's Leptos crate is exempt.
 (c) An account row is read AS its account (`cli_account_bootstrap.
-    account_remote`): `newlevel` cannot read `/home/<account>`, so every
-    account row read `missing-repo`. The gate log is read the same way; a
-    paused account is never contacted; legacy rows keep the host login.
+    account_remote`): `newlevel` cannot read `/home/<account>`. The gate log is
+    read the same way; a paused or pending account, or a declared one with no
+    REMOTE_HOSTS entry, is unreachable and never read as the host login;
+    legacy rows keep the host login.
 """
 
 import contextlib
 import io
+import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -43,6 +50,10 @@ HOUSE = {"name": "app", "stack": "house"}
 COMPANION_PKG = '{"name": "m", "dependencies": {"@companion-module/base": "1.13.6"}}'
 LEPTOS_CARGO = '[package]\nname = "web"\n\n[dependencies]\nleptos = { version = "0.8" }\n'
 AXUM_CARGO = '[package]\nname = "%s"\n\n[dependencies]\naxum = "0.8"\n'
+# Every awk this box has (each gets its own PATH shim named `awk`; busybox
+# dispatches on argv[0]).
+AWKS = sorted({os.path.realpath(p) for p in (shutil.which(n) for n in (
+    "awk", "mawk", "gawk", "nawk", "original-awk", "busybox")) if p})
 
 
 def _put(root, rel, text):
@@ -52,7 +63,7 @@ def _put(root, rel, text):
 
 
 def _page(*srcs, inline=0):
-    """An .html page serving `srcs` by `<script src>`, plus `inline` lines of
+    """An .html page loading `srcs` by `<script src>`, plus `inline` lines of
     inline script."""
     body = "".join('  <script src="%s"></script>\n' % s for s in srcs)
     if inline:
@@ -60,20 +71,18 @@ def _page(*srcs, inline=0):
     return "<!DOCTYPE html>\n<html><body>\n%s</body></html>\n" % body
 
 
-def _trunk_index(stem, inline=60):
+def _trunk_index(stem, inline):
     """camera-box's shading-release/v0.2.10 index.html shape: Trunk's
     modulepreload + inline module loader, then the page's own inline script."""
     return ('<!DOCTYPE html><html><head>\n'
             '<link rel="modulepreload" href="/%s.js" crossorigin="anonymous">\n'
-            '<link rel="preload" href="/%s_bg.wasm" as="fetch" type="application/wasm">\n'
             '    <script type="module">\n'
             "import init, * as bindings from '/%s.js';\n"
             "const wasm = await init({ module_or_path: '/%s_bg.wasm' });\n"
             "window.wasmBindings = bindings;\n"
             "    </script>\n    <script>\n%s    </script>\n"
             "</head><body></body></html>\n"
-            % (stem, stem, stem, stem, "  navigator.serviceWorker.register('/sw.js');\n"
-               * inline))
+            % (stem, stem, stem, "  navigator.serviceWorker.register('/sw.js');\n" * inline))
 
 
 def _deviation(files, git_files=None, ignore=None):
@@ -104,10 +113,24 @@ def _audit(files):
                                      entry=HOUSE)
 
 
+@contextlib.contextmanager
+def _awk_on_path(target=None, script=None):
+    """PATH with a dir whose `awk` is `target` (a real awk) or a `script`."""
+    with tempfile.TemporaryDirectory() as shim:
+        awk = Path(shim) / "awk"
+        if target:
+            awk.symlink_to(target)
+        else:
+            awk.write_text("#!/bin/sh\n" + script, encoding="utf-8")
+            awk.chmod(0o755)
+        with mock.patch.dict(os.environ, {"PATH": shim + os.pathsep + os.environ["PATH"]}):
+            yield
+
+
 class TestWasmBindgenOutput(unittest.TestCase):
     """(a) camera-box: Trunk / wasm-bindgen output is not hand-written JS."""
 
-    def test_camera_box_trunk_release_dirs_are_output(self):
+    def test_camera_box_trunk_bundles_are_output(self):
         files = {}
         for ver, h in (("v0.2.10", "a3a7412ddb48ffa2"), ("v0.2.11", "c69fc818b0d3d5ba"),
                        ("v0.2.12", "46b0c911f9ccbdaf"), ("v0.2.13", "86ef7353219f7ac4")):
@@ -115,29 +138,27 @@ class TestWasmBindgenOutput(unittest.TestCase):
             stem = "bkshading-panel-" + h
             files.update({web + stem + ".js": "export function x() {}\n" * 1237,
                           web + stem + "_bg.wasm": "\0asm",
-                          web + "index.html": _trunk_index(stem),
+                          web + "index.html": _trunk_index(stem, inline=20),
                           web + "sw.js": "self.x = 1;\n" * 17})
         self.assertEqual(_deviation(files), [])
 
-    def test_a_wasm_bindgen_pair_is_output_but_its_neighbour_is_not(self):
+    def test_only_a_bg_wasm_pair_or_a_hashed_name_is_output(self):
         files = {"web/engine.js": "x\n" * 300, "web/engine_bg.wasm": "\0asm",
                  "web/app.js": "x\n" * 250,
-                 "web/index.html": _page("engine.js", "app.js"),
                  "web2/foo.js": "x\n" * 300, "web2/foo.wasm": "\0asm",
-                 "web2/index.html": _page("foo.js")}
+                 "web3/panel-0123456789abcdef.js": "x\n" * 300, "web3/other.wasm": "\0asm"}
         self.assertEqual(_js(_deviation(files)),
-                         ["hand-written JS web UI: 250 lines in web/app.js"])
+                         ["hand-written JS web UI: 550 lines in web/app.js, web2/foo.js"])
 
     def test_a_hashed_name_without_a_wasm_is_not_output(self):
-        files = {"web/bundle-0123456789abcdef.js": "x\n" * 250,
-                 "web/index.html": _page("/bundle-0123456789abcdef.js")}
+        files = {"web/bundle-0123456789abcdef.js": "x\n" * 250}
         self.assertEqual(
             _js(_deviation(files)),
             ["hand-written JS web UI: 250 lines in web/bundle-0123456789abcdef.js"])
 
     def test_a_gitignored_release_bundle_is_not_the_project_s_code(self):
         # camera-box/.gitignore: `shading-release/` (the pinned shading release
-        # assets); its v0.2.8 holds shading's OLD plain app.js, served by its page
+        # assets); its v0.2.8 holds shading's OLD plain app.js
         old = "shading-release/v0.2.8/bkshading-service/web/"
         files = {old + "app.js": "x\n" * 1042, old + "index.html": _page("/app.js"),
                  "web/app.js": "x\n" * 250, "web/index.html": _page("app.js"),
@@ -150,29 +171,48 @@ class TestWasmBindgenOutput(unittest.TestCase):
                          ["hand-written JS web UI: 550 lines in gen/app.js, web/app.js"])
 
 
-class TestServedWebUi(unittest.TestCase):
-    """(b) JS counts only where an HTML page serves it."""
+class TestDenyList(unittest.TestCase):
+    """(b) every hand-written JS / TS file counts, minus known non-UI files."""
 
     def test_presenter_tooling_and_reports_are_no_web_ui(self):
         files = {"package.json": '{"devDependencies": {"@playwright/test": "^1.50"}}',
-                 "playwright.config.ts": "x\n" * 80,
+                 "playwright.config.ts": "x\n" * 80, "vite.config.mjs": "x\n" * 300,
+                 "web/jest.config.cjs": "x\n" * 300,
                  "ops/companion/generate-profile.mjs": "x\n" * 300,
                  "ops/companion/presenter/package.json": COMPANION_PKG,
                  "ops/companion/presenter/index.js": "x\n" * 500,
                  "playwright-report/index.html": _page(inline=600),
                  "test-results/run-1/trace/index.html": _page(inline=300),
-                 "coverage/lcov-report/index.html": _page("prettify.js", inline=300),
-                 "coverage/lcov-report/prettify.js": "x\n" * 300,
+                 "htmlcov/index.html": _page("coverage_html.js", inline=300),
+                 "htmlcov/coverage_html.js": "x\n" * 300,
+                 "allure-report/app.js": "x\n" * 900,
+                 "storybook-static/main.js": "x\n" * 900,
                  "scripts/dev/ai-eval/judge/tests_from_traces.js": "x\n" * 300,
                  "scripts/diag/verify_video_autoplay.mjs": "x\n" * 250,
+                 "tools/gen.mjs": "x\n" * 500, "bin/serve.js": "x\n" * 300,
+                 "crates/x/scripts/seed.ts": "x\n" * 300,
                  "crates/presenter-ui/Trunk.toml": "[build]\n",
                  "crates/presenter-ui/index.html": _page(inline=40)}
         self.assertEqual(_audit(files), [])
 
-    def test_nyc_output_is_pruned(self):
-        self.assertEqual(_deviation({"web/.nyc_output/index.html": _page(inline=400)}), [])
+    def test_coverage_is_a_report_only_with_lcov(self):
+        files = {"coverage/lcov-report/index.html": _page("prettify.js", inline=300),
+                 "coverage/lcov-report/prettify.js": "x\n" * 300,
+                 "web/coverage/lcov.info": "TN:\n", "web/coverage/x.js": "x\n" * 300,
+                 "ui/coverage/index.html": _page("map.js"),
+                 "ui/coverage/map.js": "x\n" * 250}
+        self.assertEqual(_js(_deviation(files)),
+                         ["hand-written JS web UI: 250 lines in ui/coverage/map.js"])
 
-    def test_intercom_served_app_and_levels_stay_a_deviation(self):
+    def test_js_no_page_loads_still_counts(self):
+        # review shapes: a bundler entry, a template-generated `src`, a page
+        # held in a .rs / .j2 file
+        files = {"src/main.ts": "x\n" * 150, "static/js/app.js": "x\n" * 120,
+                 "templates/base.html.j2": '<script src="{{ url_for(\'static\') }}"></script>\n'}
+        self.assertEqual(_js(_deviation(files)), [
+            "hand-written JS web UI: 270 lines in src/main.ts, static/js/app.js"])
+
+    def test_intercom_app_and_levels_stay_a_deviation(self):
         files = {"Cargo.toml": '[workspace]\nmembers = ["hub"]\n',
                  "hub/Cargo.toml": AXUM_CARGO % "intercom-hub",
                  "VENDORED.md": "# Vendored\n\n- `web/janus.js` (Janus 1.2, MIT)\n",
@@ -195,9 +235,9 @@ class TestServedWebUi(unittest.TestCase):
         self.assertEqual(_js(_deviation(files)), [
             "hand-written JS web UI: 1185 lines in web/mixer.html, "
             "web/reaper_interface/iem_mixer.html"])
-        wall_bridge = {"crates/wb-service/Cargo.toml": AXUM_CARGO % "wb-service",
-                       "crates/wb-service/static/index.html": _page(inline=250)}
-        self.assertEqual(_js(_deviation(wall_bridge)), [
+        dashboard = {"crates/wb-service/Cargo.toml": AXUM_CARGO % "wb-service",
+                     "crates/wb-service/static/index.html": _page(inline=250)}
+        self.assertEqual(_js(_deviation(dashboard)), [
             "hand-written JS web UI: 250 lines in crates/wb-service/static/index.html"])
         dcontroller = {"crates/web/Cargo.toml": LEPTOS_CARGO,
                        "crates/web/index.html": _page("/charts.js", "/mapdrag.js", inline=4),
@@ -205,28 +245,36 @@ class TestServedWebUi(unittest.TestCase):
                        "crates/web/public/mapdrag.js": "x\n" * 300}
         self.assertEqual(_deviation(dcontroller), [])
 
-    def test_modules_a_served_script_imports_count(self):
-        files = {"web/index.html": '<script type="module" src="./main.js"></script>\n',
-                 "web/main.js": ("import { start } from './ui/view.js';\n"
-                                 "import './ui/boot';\nimport { h } from 'preact';\n"
-                                 + "start();\n" * 17),
-                 "web/ui/view.js": ('import { fmt } from "../lib/util";\n'
-                                    + "x\n" * 249),
-                 "web/ui/boot.ts": "x\n" * 30, "web/lib/util.js": "x\n" * 20,
-                 "web/lib/unused.js": "x\n" * 400, "tools/gen.mjs": "x\n" * 500}
-        self.assertEqual(_js(_deviation(files)), [
-            "hand-written JS web UI: 320 lines in web/lib/util.js, web/main.js, "
-            "web/ui/boot.ts …"])
 
-    def test_inline_imports_and_root_absolute_refs_resolve(self):
-        files = {"app2/index.html": ("<script type=\"module\">import { boot } from "
-                                     "'/js/app.js'; boot();</script>\n"),
-                 "app2/js/app.js": "x\n" * 260, "app2/js/old.js": "x\n" * 300,
-                 "site/pages/a.html": ('<script src=/assets/app.js?v=3></script>\n'
-                                       '<script src="https://cdn.example/x.js"></script>\n'),
-                 "site/assets/app.js": "x\n" * 250}
-        self.assertEqual(_js(_deviation(files)), [
-            "hand-written JS web UI: 510 lines in app2/js/app.js, site/assets/app.js"])
+# An inline-script page: a commented-out script, JSON and importmap blocks, a
+# Prettier-style multi-line <script> tag (120 JS lines), a src script, a plain
+# inline script (100 lines + one > 64 KB line, skipped) and a one-liner.
+INLINE_PAGE = ("<!DOCTYPE html>\n<html><head>\n<!-- <script>\nold();\n</script> -->\n"
+               '<script type="importmap">\n{"imports": {}}\n</script>\n'
+               "<SCRIPT type='application/ld+json'>\n{\"a\": 1}\n</SCRIPT>\n"
+               '<script\n  type="module"\n  defer\n>\n' + "  a();\n" * 120 + "</script>\n"
+               '<script src="/x.js"></script>\n<script>\n' + "  b();\n" * 100
+               + "  var big = '" + "y" * 70000 + "';\n</script>\n"
+               "<script>one();</script>\n</head></html>\n")
+
+
+class TestInlineScript(unittest.TestCase):
+    """(b) the inline count, under every awk this box has."""
+
+    def test_inline_count_skips_comments_non_js_types_and_long_lines(self):
+        self.assertTrue(AWKS)
+        for awk in AWKS:
+            with self.subTest(awk=awk), _awk_on_path(target=awk):
+                self.assertEqual(_js(_deviation({"web/index.html": INLINE_PAGE})), [
+                    "hand-written JS web UI: 220 lines in web/index.html"])
+
+    def test_a_failed_count_is_unverified_never_clean(self):
+        for script in ("exit 2\n", "exit 0\n", 'echo "n"\n'):
+            with self.subTest(awk=script), _awk_on_path(script=script):
+                with self.assertRaises(ob._stack.StackCheckUnverified):
+                    _deviation({"web/index.html": _page(inline=300)})
+                rows = _audit({"web/index.html": _page(inline=300)})
+                self.assertEqual([r["kind"] for r in rows], ["unverified-stack"])
 
 
 class IdentityRunner:
@@ -297,6 +345,15 @@ class TestAccountIdentity(unittest.TestCase):
                "claude_md=x\n" % roots["intercom"])
         return reg, roots, {"/home/intercom/.claude/stack-gate.log": log}
 
+    def _audit_with(self, account_remote):
+        with tempfile.TemporaryDirectory() as d, mock.patch(
+                "cli_account_bootstrap.account_remote", side_effect=account_remote):
+            reg, roots, logs = self._fleet(d)
+            run = IdentityRunner(roots, logs)
+            report = ob.audit_registry(reg, run=run, local_host="test-box-1333")
+            touched = run.logins_touching(roots["intercom"])
+        return report, run, touched
+
     def test_each_row_is_read_as_its_own_identity(self):
         with tempfile.TemporaryDirectory() as d:
             reg, roots, logs = self._fleet(d)
@@ -321,21 +378,27 @@ class TestAccountIdentity(unittest.TestCase):
         self.assertEqual(len(uses), 1, report["intercom"])
         self.assertIn("framework=react", uses[0])
 
-    def test_a_paused_account_is_never_contacted(self):
+    def test_a_paused_or_pending_account_is_never_contacted(self):
         real = cli_account_bootstrap.account_remote
+        for state, value in (("paused", "owner hold 21.11."), ("pending", True)):
+            def flagged(acct, state=state, value=value):
+                remote = real(acct)
+                return dict(remote, **{state: value}) if acct == "intercom" else remote
+            with self.subTest(state=state):
+                report, run, touched = self._audit_with(flagged)
+                self.assertEqual(touched, set())
+                self.assertNotIn("intercom", {user for user, _ in run.calls})
+                self.assertEqual([r["kind"] for r in report["intercom"]], ["unreachable"])
+                self.assertIn(state, report["intercom"][0]["detail"])
 
-        def paused(acct):
-            remote = real(acct)
-            return dict(remote, paused="owner hold 21.11.") if acct == "intercom" else remote
-        with tempfile.TemporaryDirectory() as d, mock.patch(
-                "cli_account_bootstrap.account_remote", side_effect=paused):
-            reg, roots, logs = self._fleet(d)
-            run = IdentityRunner(roots, logs)
-            report = ob.audit_registry(reg, run=run, local_host="test-box-1333")
-            self.assertEqual(run.logins_touching(roots["intercom"]), set())
-        self.assertNotIn("intercom", {user for user, _ in run.calls})
+    def test_a_declared_account_without_remote_hosts_is_unreachable(self):
+        real = cli_account_bootstrap.account_remote
+        report, run, touched = self._audit_with(
+            lambda acct: None if acct == "intercom" else real(acct))
+        self.assertEqual(touched, set())     # never read as the host login
         self.assertEqual([r["kind"] for r in report["intercom"]], ["unreachable"])
-        self.assertIn("paused", report["intercom"][0]["detail"])
+        self.assertIn("no REMOTE_HOSTS entry", report["intercom"][0]["detail"])
+        self.assertNotIn("unreachable", {r["kind"] for r in report["reaperiem"]})
 
     def test_legacy_rows_keep_the_host_login(self):
         ident = cli_onboard_exec.account_identity
@@ -366,15 +429,17 @@ class TestAccountIdentity(unittest.TestCase):
 
 
 class TestDocs(unittest.TestCase):
-    def test_rule_and_skill_name_the_served_page_rule(self):
+    def test_rule_and_skill_name_the_deny_list(self):
         for path in ("rules/house-stack.md", "skills/onboard-project/SKILL.md"):
             text = (REPO / path).read_text(encoding="utf-8")
             with self.subTest(path=path):
-                for needle in ("served by an HTML page", "wasm-bindgen / Trunk output",
-                               "gitignored"):
+                for needle in ("wasm-bindgen / Trunk output", "generated reports",
+                               "tooling dirs", "gitignored", "non-JS `type=`"):
                     self.assertTrue(needle in text, needle)
+                self.assertFalse("served by an HTML page" in text)
         skill = (REPO / "skills/onboard-project/SKILL.md").read_text(encoding="utf-8")
-        self.assertTrue("as its own account" in skill)
+        for needle in ("as its own account", "no REMOTE_HOSTS entry"):
+            self.assertTrue(needle in skill, needle)
 
 
 if __name__ == "__main__":

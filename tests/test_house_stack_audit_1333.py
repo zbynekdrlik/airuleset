@@ -12,8 +12,8 @@
   * hand-written JS, exempt only in a dir with a `Trunk.toml` or in a crate that
     depends on leptos / wasm-bindgen (round 3 C: intercom's root-workspace
     `web/app.js` is a deviation, dcontroller's `crates/web/public` is not);
-    every fixture's JS has the page that serves it (audit precision: only
-    served JS is a web UI, `test_stack_audit_precision_1333.py`);
+    every fixture's JS also has the page that loads it, a real UI's shape
+    (the deny-list rules: `test_stack_audit_precision_1333.py`);
   * other technology in the `## Stack` TABLE's Technology cells, negated
     clauses ignored (round 3 D: wall-songs' "No … Electron" is clean).
 - One marker per technology (round 3 E); `--audit` lists every marker and the
