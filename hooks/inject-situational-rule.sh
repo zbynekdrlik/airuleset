@@ -31,7 +31,7 @@ INPUT=$(cat 2>/dev/null || echo "")
 CONF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/situational-triggers.conf"
 [ -f "$CONF" ] || exit 0
 
-python3 - "$CONF" "$INPUT" <<'PYEOF' || exit 0
+python3 -P - "$CONF" "$INPUT" <<'PYEOF' || exit 0
 import json
 import os
 import re
@@ -170,6 +170,30 @@ MAX_TOTAL = 14000
 RAW_BASH_MATCH_TOPICS = {"cloudflare-api-tokens", "odoo-client-board-stages",
                          "linux-box-swap", "house-stack"}
 
+# #1333 ROZHODNUTÉ 2: these topics reach only a checkout whose registry `stack`
+# is `house` -- or an unregistered repo, the moment a new app's stack is chosen.
+# The checkout is the written file's (Write/Edit), else the session cwd.
+REGISTRY_SCOPED_TOPICS = {"house-stack"}
+_scope_memo = {}
+
+
+def house_scope():
+    if "house" not in _scope_memo:
+        ok = True
+        try:
+            start = payload.get("cwd") or os.getcwd()
+            ti = payload.get("tool_input")
+            fp = ti.get("file_path") if isinstance(ti, dict) else None
+            if isinstance(fp, str) and os.path.isabs(fp):
+                start = os.path.dirname(fp)
+            sys.path.insert(0, repo_root)
+            from cli_stack_scope import HOUSE, REGISTRY_FILENAME, stack_for
+            ok = stack_for(start, os.path.join(repo_root, REGISTRY_FILENAME))[1] == HOUSE
+        except Exception:  # airuleset:script-ok an unresolvable scope injects (cheap side)
+            ok = True
+        _scope_memo["house"] = ok
+    return _scope_memo["house"]
+
 
 def strip_frontmatter(text):
     if text.startswith("---"):
@@ -217,6 +241,8 @@ for line in open(conf_path, encoding="utf-8"):
         if exclude and re.search(exclude, hay):
             continue
     except re.error:
+        continue
+    if topic in REGISTRY_SCOPED_TOPICS and not house_scope():
         continue
 
     marker = os.path.join(marker_dir, topic)

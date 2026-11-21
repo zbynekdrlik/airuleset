@@ -40,6 +40,12 @@ STACK_IDS = {
     "mobile-rn": "React Native mobile app",
 }
 
+# Directory names never judged as the project's own app (tests, fixtures,
+# vendored trees, build output). ONE list for the situational trigger's exclude
+# column and gates.housestack (a test pins the conf regex to it).
+SKIP_DIRS = ("test", "tests", "__tests__", "fixture", "fixtures", "__fixtures__",
+             "testdata", "node_modules", "target", "vendor", "dist")
+
 # Managed repos with NO registry row. The registry lists the projects airuleset
 # manages; its consumers (checkout freshness, deploy state, peer links, project
 # accounts) must never see airuleset itself, so its stack is recorded here.
