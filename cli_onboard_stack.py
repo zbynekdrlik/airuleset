@@ -33,7 +33,8 @@ from pathlib import Path, PurePosixPath
 
 from cli_onboard_exec import _exec, _read_file, _resolve_remote_path
 from cli_onboard_tray import _deps as _cargo_deps
-from cli_stack_scope import HOUSE, REGISTRY_FILENAME, SKIP_DIRS, STACK_IDS, load_rows
+from cli_stack_scope import (HOUSE, REGISTRY_FILENAME, SCAN_DEPTH, SKIP_DIRS, STACK_IDS,
+                             load_rows)
 
 # The npm packages that make a package.json a JS UI-framework app, each mapped
 # to its FAMILY (round 3 I): a meta framework or a renderer is its base
@@ -58,14 +59,17 @@ _TECH_ALIASES = dict(FRAMEWORK_FAMILY, **{
 _DEP_KEYS = ("dependencies", "devDependencies", "peerDependencies",
              "optionalDependencies")
 
-# Hand-written JS counts only inside a web-asset dir (the tray check's set) and
-# only past this many lines in total: a PWA service worker or a small helper
-# is no app. It is exempt in a Trunk.toml dir or a leptos / wasm-bindgen crate.
-WEB_ASSET_DIRS = ("web", "static", "frontend", "www", "public", "ui")
+# Hand-written JS (and inline <script> in .html) counts in every non-pruned dir,
+# past this many lines in total: a PWA service worker or a small helper is no
+# app. Exempt: a Trunk.toml dir, a leptos / wasm-bindgen crate, the dir of a
+# JS-framework package.json (that app is already its own finding), and the
+# files a VENDORED.md lists (round 4 item 6).
 HAND_JS_MIN_LINES = 200
 _WASM_CRATES = ("leptos", "wasm-bindgen")
-# Rust crates that render HTML or a UI outside Leptos/WASM (round 3 C).
-FORBIDDEN_CRATES = ("askama", "tera", "maud", "yew", "dioxus", "sycamore")
+# Rust crates that render HTML or a UI, or serve HTTP, outside the house stack
+# (round 3 C, round 4 item 6).
+FORBIDDEN_CRATES = ("askama", "tera", "maud", "yew", "dioxus", "sycamore",
+                    "actix-web", "warp", "rocket", "egui", "iced", "slint")
 _JS_SUFFIXES = (".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx")
 _NOT_HAND_JS = re.compile(
     r"(\.min\.[cm]?[jt]sx?|\.d\.ts|\.config\.[cm]?[jt]s|^sw\.js|"
@@ -75,11 +79,19 @@ _NOT_HAND_JS = re.compile(
 # glue of a Leptos UI).
 _PRUNE_DIRS = tuple(sorted(set(SKIP_DIRS) | {
     "pkg", "build", ".*", "examples", "benches", "docs"}))
-_SCAN_DEPTH = "5"
-# ONE runner call: NUL <path> NUL <payload>, the payload being the content of a
-# package.json / Cargo.toml, the line count of a JS file, nothing for Trunk.toml.
+_SCAN_DEPTH = str(SCAN_DEPTH)   # the gates' depth (round 4 item 6)
+# Inline <script> lines of an .html page (a `src=` script and a one-line one
+# count nothing).
+_INLINE_JS_AWK = ("BEGIN{s=0;n=0} {l=tolower($0); if (s) {if (index(l,\"</script>\")) s=0; "
+                  "else n++; next} p=index(l,\"<script\"); if (p) {r=substr(l,p); "
+                  "e=index(r,\">\"); if (e && !index(substr(r,1,e),\"src=\") && "
+                  "!index(r,\"</script>\")) s=1}} END{print n}")
+# ONE runner call: NUL <path> NUL <payload>: the content of a package.json /
+# Cargo.toml / VENDORED.md, nothing for a Trunk.toml, the inline-script line
+# count of an .html page, the line count of a JS file.
 _EMIT = ('for f; do printf "\\0%s\\0" "$f"; case "$f" in '
-         '*/package.json|*/Cargo.toml) cat "$f";; */Trunk.toml) ;; '
+         '*/package.json|*/Cargo.toml|*/VENDORED.md) cat "$f";; */Trunk.toml) ;; '
+         "*.html|*.htm) awk '" + _INLINE_JS_AWK + "' \"$f\";; "
          '*) wc -l < "$f";; esac; done')
 # Non-house technology a house project's `## Stack` table may not name in its
 # Technology cells without the marker (ROZHODNUTÉ 7, round 3 D).
@@ -87,9 +99,12 @@ _NON_HOUSE_TECH_RE = re.compile(
     r"(?<![\w.-])(react|vue(?:\.js)?|svelte(?:kit)?|angular|preact|solid(?:-?js)?|"
     r"lit|alpine\.?js|htmx|astro|qwik|ember(?:\.js)?|next\.js|nuxt|electron|yew|"
     r"dioxus|sycamore|actix(?:-web)?|rocket|warp|django|flask|fastapi|"
-    r"express(?:\.js|js)|node\.?js|deno|opengl|vulkan|qt|gtk|wpf|winforms|"
+    r"express(?:\.js|js)|node\.?js|deno|opengl|vulkan|qt|wpf|winforms|"
     r"asp\.net|\.net)(?![\w-])", re.I)
-_NEGATION_RE = re.compile(r"\b(?:no|not|never|without|nie|bez|žiadn\w*)\b", re.I)
+# A negation drops only the token right after it ("React, no SSR" still names
+# React; "No browser/Electron/web canvas" drops Electron) (round 4 item 6).
+_NEGATED_RE = re.compile(r"\b(?:no|not|never|without|nie|bez|žiadn\w*)\s+[^\s,;.()]+",
+                         re.I)
 NOTE_KINDS = ("stack-exception", "stack-exception-use")
 GATE_LOG = "~/.claude/stack-gate.log"
 
@@ -118,7 +133,8 @@ def _table_rows(text):
 
 def _seed():
     """The `## Stack` seed, its table GENERATED from the rule's rows (Layer |
-    Applies when | Technology; round 3 H), so it can never drift from it."""
+    Applies when; round 3 H); every Technology cell points at the rule, so
+    Stack evolution never leaves a frozen copy in a project (round 4 item 7)."""
     try:
         rows = _table_rows(_RULE.read_text(encoding="utf-8"))[1:]
     except OSError:
@@ -130,7 +146,8 @@ def _seed():
              "here, one per technology.", ""]
     if rows:
         lines += ["| Layer | Applies when | Technology |", "|---|---|---|"]
-        lines += ["| %s | %s | %s |" % tuple(r[:3]) for r in rows if len(r) >= 3]
+        lines += ["| %s | %s | the current row of `rules/house-stack.md` |" % tuple(r[:2])
+                  for r in rows if len(r) >= 3]
     return "\n".join(lines) + "\n\n"
 
 
@@ -178,16 +195,16 @@ def has_stack_section(claude_md):
 
 
 def seed_section(stack):
-    """The `## Stack` seed for a NEW project's CLAUDE.md: only a house
-    candidate (Rust, or nothing detected yet) gets it; a Python / Node repo
-    is a platform project and never gets a Rust pin."""
-    return STACK_SECTION if stack in ("rust", "unknown") else ""
+    """The `## Stack` seed for a NEW project's CLAUDE.md: a registry row with
+    `stack` house, or, with no registry stack, a house candidate (Rust, or
+    nothing detected yet); a platform project never gets a Rust pin."""
+    return STACK_SECTION if stack in ("rust", "unknown", HOUSE) else ""
 
 
 def stack_table_techs(claude_md):
     """Non-house technology named in the Technology cells of the `## Stack`
-    section's table (lowercase, sorted); prose and negated clauses ("No
-    Electron") never count (round 3 D)."""
+    section's table (lowercase, sorted); prose and a negated token ("No
+    Electron") never count (round 3 D, round 4 item 6)."""
     m = _STACK_HEADING_RE.search(claude_md or "")
     if not m:
         return []
@@ -203,9 +220,7 @@ def stack_table_techs(claude_md):
     found = set()
     for row in rows[1:]:
         cell = row[col] if col < len(row) else ""
-        for clause in re.split(r";|\.\s+|\.$", cell):
-            if not _NEGATION_RE.search(clause):
-                found |= {w.lower() for w in _NON_HOUSE_TECH_RE.findall(clause)}
+        found |= {w.lower() for w in _NON_HOUSE_TECH_RE.findall(_NEGATED_RE.sub(" ", cell))}
     return sorted(found)
 
 
@@ -266,22 +281,42 @@ def _crate(text):
     return "package" in doc, names
 
 
-def _js_exempt(rel, trunk_dirs, crates):
-    """A JS file is exempt in a dir with a Trunk.toml, or when the nearest crate
-    above it depends on leptos / wasm-bindgen (round 3 C). A workspace-only
-    root manifest is no crate, so its top-level web dirs are judged."""
+def _js_exempt(rel, exempt_dirs, crates):
+    """A JS / html file is exempt under a Trunk.toml dir or a JS-framework
+    app's dir (`exempt_dirs`), or when the nearest crate above it depends on
+    leptos / wasm-bindgen (round 3 C, round 4 item 6). A workspace-only root
+    manifest is no crate, so its top-level dirs are judged."""
     parts = PurePosixPath(rel).parts[:-1]
     dirs = ["/".join(parts[:k]) for k in range(len(parts), -1, -1)]
-    if any(d in trunk_dirs for d in dirs):
+    if any(d in exempt_dirs for d in dirs):
         return True
     crate = next((d for d in dirs if d in crates), None)
     return crate is not None and bool(crates[crate] & set(_WASM_CRATES))
 
 
 def _is_hand_js(rel):
+    """A JS file or an .html page (its inline <script>), anywhere scanned,
+    not a test / minified / declaration / service-worker file."""
     p = PurePosixPath(rel)
-    return (p.suffix in _JS_SUFFIXES and not _NOT_HAND_JS.search(p.name)
-            and any(part in WEB_ASSET_DIRS for part in p.parts[:-1]))
+    return ((p.suffix in _JS_SUFFIXES and not _NOT_HAND_JS.search(p.name))
+            or p.suffix in (".html", ".htm"))
+
+
+def _vendored(scanned):
+    """Project-relative paths a VENDORED.md lists (each entry relative to the
+    VENDORED.md's dir and to the project root)."""
+    out = set()
+    for rel, text in scanned:
+        if PurePosixPath(rel).name != "VENDORED.md":
+            continue
+        base = _rel_dir(rel)
+        for entry in re.findall(r"(?m)`([^`\s]+)`|^[-*]\s+([^\s`]+)", text or ""):
+            path = (entry[0] or entry[1]).strip("/")
+            if "/" in path or "." in path:
+                out.add(path)
+                if base:
+                    out.add(base + "/" + path)
+    return out
 
 
 def _rel_dir(rel):
@@ -292,15 +327,16 @@ def _rel_dir(rel):
 
 def _scan(root, host=None, run=None):
     """[(relative path, payload)] for every package.json, Cargo.toml,
-    Trunk.toml and JS file within 5 levels of `root`, in ONE runner call.
+    Trunk.toml, VENDORED.md, JS file and .html page within SCAN_DEPTH levels of
+    `root`, in ONE runner call.
     find's rc 1 (an unreadable subdir) still leaves valid output; any other rc
     raises StackCheckUnverified."""
     prune = []
     for name in _PRUNE_DIRS:
         prune += (["-o"] if prune else []) + ["-name", name]
     match = ["-name", "package.json", "-o", "-name", "Cargo.toml", "-o", "-name",
-             "Trunk.toml"]
-    for suffix in _JS_SUFFIXES:
+             "Trunk.toml", "-o", "-name", "VENDORED.md"]
+    for suffix in _JS_SUFFIXES + (".html", ".htm"):
         match += ["-o", "-name", "*" + suffix]
     argv = (["find", "-H", root, "-mindepth", "1", "-maxdepth", _SCAN_DEPTH,
              "(", "-type", "d", "(", *prune, ")", ")", "-prune", "-o",
@@ -324,8 +360,8 @@ def deviation(path, host=None, run=None):
     `javascript`). Raises StackCheckUnverified when the target cannot be read."""
     root = str(path).rstrip("/") or "/"
     scanned = _scan(root, host=host, run=run)
-    trunk_dirs = {_rel_dir(rel) for rel, _ in scanned
-                  if PurePosixPath(rel).name == "Trunk.toml"}
+    exempt_dirs = {_rel_dir(rel) for rel, _ in scanned
+                   if PurePosixPath(rel).name == "Trunk.toml"}
     crates, found = {}, {}
     for rel, payload in scanned:
         name = PurePosixPath(rel).name
@@ -342,14 +378,20 @@ def deviation(path, host=None, run=None):
                       "for the stack check" % rel, file=sys.stderr)
             for fam in sorted(fams or ()):
                 found.setdefault(fam, []).append(rel)
+            if fams:
+                exempt_dirs.add(_rel_dir(rel))     # that app is its own finding
+    vendored = _vendored(scanned)
     js_files, js_lines = [], 0
     for rel, payload in scanned:
-        if _is_hand_js(rel) and not _js_exempt(rel, trunk_dirs, crates):
+        if (_is_hand_js(rel) and not _js_exempt(rel, exempt_dirs, crates)
+                and not any(rel == v or rel.startswith(v + "/") for v in vendored)):
             try:
-                js_lines += int(payload.strip() or 0)
+                n = int(payload.strip() or 0)
             except ValueError:
                 continue
-            js_files.append(rel)
+            if n:
+                js_files.append(rel)
+                js_lines += n
     items = [(tech, ", ".join(sorted(rels)[:3])) for tech, rels in sorted(found.items())]
     if js_lines >= HAND_JS_MIN_LINES:
         items.append(("javascript", "hand-written JS web UI: %d lines in %s" % (
@@ -358,11 +400,17 @@ def deviation(path, host=None, run=None):
     return items
 
 
-def _gate_lines(path, host, run, gate_log):
+def _gate_lines(path, host, run, gate_log, account=None):
     """The gate's ALLOW-MARKER lines for this project (its path in the line),
-    read from the target's `~/.claude/stack-gate.log`; [] when unreadable."""
-    log = gate_log or _resolve_remote_path(GATE_LOG, host, run=run)
-    text = _read_file(log, host=None if gate_log else host, run=run) if log else None
+    read on the target from the project ACCOUNT's `/home/<account>/.claude/
+    stack-gate.log` (round 4 item 6), else the login's `~`; [] unreadable."""
+    if gate_log:
+        log, host = gate_log, None
+    elif account:
+        log = "/home/%s/.claude/stack-gate.log" % account
+    else:
+        log = _resolve_remote_path(GATE_LOG, host, run=run)
+    text = _read_file(log, host=host, run=run) if log else None
     root = str(path).rstrip("/") + "/"
     return [ln.strip() for ln in (text or "").splitlines()
             if "ALLOW-MARKER" in ln and root in ln][-5:]
@@ -381,11 +429,11 @@ def audit_drift(path, host=None, run=None, claude_md=None, entry=None,
         reg = registry_path or os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                             REGISTRY_FILENAME)
         if entry.get("name") not in {r.get("name") for r in load_rows(reg) or []}:
-            detail = ("not in projects-registry.json: onboard it, and airuleset sets "
-                      "its `stack`")
+            detail = ("not in projects-registry.json: onboard it; airuleset records "
+                      "its `stack` right after onboarding")
         else:
-            detail = ("the projects-registry.json row has %s; airuleset sets `house` "
-                      "or a platform id (%s)"
+            detail = ("the projects-registry.json row has %s; airuleset records "
+                      "`house` or a platform id (%s)"
                       % ("an unknown `stack` %r" % stack if stack else "no `stack`",
                          ", ".join(sorted(STACK_IDS))))
         return [{"kind": "stack-unpinned", "detail": detail}]
@@ -395,7 +443,7 @@ def audit_drift(path, host=None, run=None, claude_md=None, entry=None,
     rows = [{"kind": "stack-exception", "detail": "%s — %s" % m} for m in markers]
     if markers:
         rows += [{"kind": "stack-exception-use", "detail": ln}
-                 for ln in _gate_lines(path, host, run, gate_log)]
+                 for ln in _gate_lines(path, host, run, gate_log, entry.get("account"))]
     items = [(t, "`## Stack` table names %s" % t) for t in stack_table_techs(claude_md)]
     try:
         items += deviation(path, host=host, run=run)
