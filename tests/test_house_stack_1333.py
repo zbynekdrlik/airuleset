@@ -310,13 +310,15 @@ class TestStackSeed(unittest.TestCase):
 class TestStackExceptionMarker(unittest.TestCase):
     def test_marker_with_what_and_owner_ref_counts(self):
         for text in (VALID_MARKER,
-                     "<!-- airuleset:stack-exception Odoo module – owner 1.2.2026 -->",
-                     "x\n<!--airuleset:stack-exception n8n flow - owner ticket 9 -->\n"):
+                     "<!-- airuleset:stack-exception Odoo module – owner o/odoo#12 -->",
+                     "x\n<!--airuleset:stack-exception n8n - https://github.com/o/x/issues/9 -->\n"):
             with self.subTest(text=text):
                 self.assertTrue(ob._stack.has_stack_exception(text))
 
     def test_incomplete_markers_are_no_exception(self):
         for text in ("<!-- airuleset:stack-exception -->",
+                     "<!-- airuleset:stack-exception react — owner said ok -->",
+                     "<!-- airuleset:stack-exception react — owner 1.2.2026 -->",
                      "<!-- airuleset:stack-exception python -->",
                      "<!-- airuleset:stack-exception — owner ref -->",
                      "<!-- airuleset:stack-exception python — -->",
