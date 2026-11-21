@@ -7,10 +7,12 @@ a D3D11 engine. Any other technology needs an owner-approved
 ``<!-- airuleset:stack-exception <what> — <owner ref> -->`` in the project
 CLAUDE.md. This leaf module holds that policy for two consumers:
 
-- ``onboard-project``: ``STACK_SECTION`` is seeded into a NEW project's
-  CLAUDE.md; ``audit_drift`` adds ``stack-unpinned`` (no ``## Stack`` section,
-  no marker) and ``stack-deviation`` (a JS-framework or hand-written JS web UI
-  without the marker) to ``--audit``.
+- ``onboard-project``: ``STACK_SECTION`` is seeded into a NEW house-candidate
+  project's CLAUDE.md (``seed_section``); ``audit_drift`` adds ``stack-unpinned``
+  (a registry row with no known ``stack``) and, for ``house`` rows only,
+  ``stack-deviation`` (a JS-framework or hand-written JS web UI, or non-house
+  technology named in ``## Stack``, without the marker) to ``--audit``
+  (review round 1, ROZHODNUTÉ 4 + 7).
 - ``gates.housestack`` (PreToolUse Write|Edit): ``has_stack_exception`` and
   ``package_json_frameworks`` decide whether a ``package.json`` write may add a
   JS UI framework.
@@ -23,9 +25,12 @@ local disk (the #1198 tray-check shape). STDLIB ONLY.
 import json
 import re
 import sys
+import tomllib
 from pathlib import PurePosixPath
 
 from cli_onboard_exec import _exec
+from cli_onboard_tray import _deps as _cargo_deps
+from cli_stack_scope import HOUSE, SKIP_DIRS, STACK_IDS
 
 # The npm packages that make a package.json a JS UI-framework app. The meta
 # frameworks (next, nuxt, @sveltejs/kit) imply React / Vue / Svelte.
@@ -44,16 +49,26 @@ HAND_JS_MIN_LINES = 200
 _JS_SUFFIXES = (".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx")
 _NOT_HAND_JS = re.compile(
     r"(\.min\.[cm]?[jt]sx?|\.d\.ts|\.config\.[cm]?[jt]s|^sw\.js|"
-    r"^service-worker\.js)$")
-# Build output, vendored trees, hidden dirs, docs: never the project's own UI.
-# dist/ and pkg/ hold Trunk / wasm-pack JS glue of a Leptos UI.
-_PRUNE_DIRS = ("target", "node_modules", "vendor", "dist", "pkg", "build",
-               ".*", "examples", "benches", "tests", "docs")
+    r"^service-worker\.js|\.(?:test|spec)\.[cm]?[jt]sx?)$")
+# Build output, vendored trees, tests, hidden dirs, docs: never the project's
+# own UI. The trigger/gate SKIP_DIRS plus dist/pkg/build (Trunk / wasm-pack JS
+# glue of a Leptos UI) and e2e (Playwright).
+_PRUNE_DIRS = tuple(sorted(set(SKIP_DIRS) | {
+    "pkg", "build", ".*", "examples", "benches", "docs", "e2e"}))
 _SCAN_DEPTH = "5"
 # ONE runner call: NUL <path> NUL <payload>, the payload being the content of a
-# package.json or the line count of a JS file.
+# package.json / Cargo.toml, the line count of a JS file, nothing for Trunk.toml.
 _EMIT = ('for f; do printf "\\0%s\\0" "$f"; case "$f" in '
-         '*/package.json) cat "$f";; *) wc -l < "$f";; esac; done')
+         '*/package.json|*/Cargo.toml) cat "$f";; */Trunk.toml) ;; '
+         '*) wc -l < "$f";; esac; done')
+# Non-house technology a house project's `## Stack` section may not name
+# without the marker (ROZHODNUTÉ 7). Word forms only, so prose stays quiet.
+_NON_HOUSE_TECH_RE = re.compile(
+    r"\b(react|vue(?:\.js)?|svelte(?:kit)?|angular|preact|solid(?:-?js)?|lit|"
+    r"alpine\.?js|htmx|astro|qwik|ember(?:\.js)?|next\.js|nuxt|electron|yew|"
+    r"dioxus|sycamore|actix(?:-web)?|rocket|warp|django|flask|fastapi|"
+    r"express(?:\.js|js)|node\.?js|deno|opengl|vulkan|qt|gtk|wpf|winforms|"
+    r"\.net)\b", re.I)
 
 # The marker carries `<what> — <owner ref>`. `<` / `>` cannot occur inside, so
 # the rule's own template line never counts as an exception, and the match
@@ -103,6 +118,25 @@ def has_stack_section(claude_md):
     return bool(_STACK_HEADING_RE.search(claude_md or ""))
 
 
+def seed_section(stack):
+    """The `## Stack` seed for a NEW project's CLAUDE.md: only a house
+    candidate (Rust, or nothing detected yet) gets it; a Python / Node repo
+    is a platform project and never gets a Rust pin."""
+    return STACK_SECTION if stack in ("rust", "unknown") else ""
+
+
+def non_house_names(claude_md):
+    """Non-house technology named in the `## Stack` section (lowercase,
+    sorted), [] when there is no such section."""
+    m = _STACK_HEADING_RE.search(claude_md or "")
+    if not m:
+        return []
+    rest = claude_md[m.end():]
+    nxt = re.search(r"^##[ \t]", rest, re.M)
+    section = rest[:nxt.start()] if nxt else rest
+    return sorted({w.lower() for w in _NON_HOUSE_TECH_RE.findall(section)})
+
+
 def package_json_frameworks(text):
     """The JS UI frameworks a package.json depends on (any dependency table),
     or None when the text is no JSON object (unreadable — the caller decides)."""
@@ -131,10 +165,31 @@ def _alias_target(name, spec):
     return str(name).strip().lower()
 
 
-def _is_hand_js(rel):
+def _is_hand_js(rel, rust_dirs=()):
+    """A JS file in a web-asset dir, not a test / build / vendored file, and
+    not beside a Cargo.toml / Trunk.toml (the dir holding its web-asset dir
+    is no Rust crate or Trunk app)."""
     p = PurePosixPath(rel)
-    return (p.suffix in _JS_SUFFIXES and not _NOT_HAND_JS.search(p.name)
-            and any(part in WEB_ASSET_DIRS for part in p.parts[:-1]))
+    if p.suffix not in _JS_SUFFIXES or _NOT_HAND_JS.search(p.name):
+        return False
+    for k, part in enumerate(p.parts[:-1]):
+        if part in WEB_ASSET_DIRS:
+            return "/".join(p.parts[:k]) not in rust_dirs
+    return False
+
+
+def _rel_dir(rel):
+    """The project-relative dir of a scanned file ("" for the project root)."""
+    parent = str(PurePosixPath(rel).parent)
+    return "" if parent == "." else parent
+
+
+def _leptos(text):
+    try:
+        names, _tray = _cargo_deps(tomllib.loads(text))
+    except (tomllib.TOMLDecodeError, ValueError, TypeError, AttributeError):
+        return False
+    return "leptos" in names
 
 
 def _scan(root, host=None, run=None):
@@ -144,7 +199,8 @@ def _scan(root, host=None, run=None):
     prune = []
     for name in _PRUNE_DIRS:
         prune += (["-o"] if prune else []) + ["-name", name]
-    match = ["-name", "package.json"]
+    match = ["-name", "package.json", "-o", "-name", "Cargo.toml", "-o", "-name",
+             "Trunk.toml"]
     for suffix in _JS_SUFFIXES:
         match += ["-o", "-name", "*" + suffix]
     argv = (["find", "-H", root, "-mindepth", "1", "-maxdepth", _SCAN_DEPTH,
@@ -169,15 +225,21 @@ def deviation(path, host=None, run=None):
     StackCheckUnverified when the target cannot be read."""
     root = str(path).rstrip("/") or "/"
     frameworks, js_files, js_lines = {}, [], 0
-    for rel, payload in _scan(root, host=host, run=run):
-        if PurePosixPath(rel).name == "package.json":
+    scanned = _scan(root, host=host, run=run)
+    rust_dirs = {_rel_dir(rel) for rel, _ in scanned
+                 if PurePosixPath(rel).name in ("Cargo.toml", "Trunk.toml")}
+    leptos = any(_leptos(payload) for rel, payload in scanned
+                 if PurePosixPath(rel).name == "Cargo.toml")
+    for rel, payload in scanned:
+        name = PurePosixPath(rel).name
+        if name == "package.json":
             found = package_json_frameworks(payload)
             if found is None:
                 print("onboard-project: warning: %s does not parse; skipped "
                       "for the stack check" % rel, file=sys.stderr)
             elif found:
                 frameworks[rel] = sorted(found)
-        elif _is_hand_js(rel):
+        elif not leptos and _is_hand_js(rel, rust_dirs):
             try:
                 n = int(payload.strip() or 0)
             except ValueError:
@@ -194,19 +256,27 @@ def deviation(path, host=None, run=None):
     return None
 
 
-def audit_drift(path, host=None, run=None, claude_md=None):
-    """The `--audit` rows: `stack-unpinned` (a CLAUDE.md with neither a
-    `## Stack` section nor a marker; an absent CLAUDE.md is its own drift),
-    `stack-deviation`, or `unverified-stack` when the target could not be read
-    (never shown as clean). [] when the project is pinned and on the stack."""
-    if has_stack_exception(claude_md):
+def audit_drift(path, host=None, run=None, claude_md=None, entry=None):
+    """The `--audit` rows for one registry row (`entry`): `stack-unpinned`
+    when it has no known `stack`; for a `house` row only, `stack-deviation`
+    (non-house technology in `## Stack`, a JS-framework or hand-written JS web
+    UI) unless the CLAUDE.md carries the marker, or `unverified-stack` when
+    the target could not be read (never shown as clean). [] otherwise."""
+    stack = (entry or {}).get("stack")
+    if stack not in STACK_IDS:
+        what = "an unknown `stack` %r" % stack if stack else "no `stack`"
+        return [{"kind": "stack-unpinned", "detail":
+                 "the projects-registry.json row has %s; airuleset sets `house` "
+                 "or a platform id (%s)" % (what, ", ".join(sorted(STACK_IDS)))}]
+    if stack != HOUSE or has_stack_exception(claude_md):
         return []
     rows = []
-    if claude_md is not None and not has_stack_section(claude_md):
-        rows.append({"kind": "stack-unpinned", "detail":
-                     "CLAUDE.md has no `## Stack` section and no "
-                     "`<!-- airuleset:stack-exception <what> — <owner ref> -->`"
-                     " (rules/house-stack.md)"})
+    names = non_house_names(claude_md)
+    if names:
+        rows.append({"kind": "stack-deviation", "detail":
+                     "`## Stack` names non-house technology: %s — only house rows "
+                     "without an owner-approved stack-exception marker"
+                     % ", ".join(names)})
     try:
         reason = deviation(path, host=host, run=run)
     except StackCheckUnverified as e:

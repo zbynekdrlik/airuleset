@@ -431,7 +431,7 @@ def _foundation_version_body(name):
 # --------------------------------------------------------------------------- #
 # CLAUDE.md skeleton.
 # --------------------------------------------------------------------------- #
-def _claude_md_skeleton(name):
+def _claude_md_skeleton(name, stack="unknown"):
     return (
         "# %s — Project Instructions\n\n"
         "## Overview\n\n"
@@ -445,7 +445,7 @@ def _claude_md_skeleton(name):
         "- <area> → `.claude/rules/<area>.md` (auto-loads on its `paths:`)\n"
         "- build / deploy / release → load `.claude/skills/<area>` "
         "(invoke by name)\n"
-    ) % (name, _stack.STACK_SECTION)
+    ) % (name, _stack.seed_section(stack))
 
 
 # --------------------------------------------------------------------------- #
@@ -530,14 +530,14 @@ def step_gitignore(path, stack, host=None, run=None, dry_run=False):
     return _step("gitignore", "applied", detail)
 
 
-def step_claude_md(path, name, host=None, run=None, dry_run=False):
+def step_claude_md(path, name, host=None, run=None, dry_run=False, stack="unknown"):
     cm = Path(path) / "CLAUDE.md"
     if _fs_exists(cm, host=host, run=run):
         return _step("claude_md", "satisfied", "CLAUDE.md present (never overwritten)")
     if dry_run:
         return _step("claude_md", "would-apply",
                      "would create CLAUDE.md skeleton + Playbook router")
-    if not _write_file(cm, _claude_md_skeleton(name), host=host, run=run):
+    if not _write_file(cm, _claude_md_skeleton(name, stack), host=host, run=run):
         return _step("claude_md", "skipped", "failed to write CLAUDE.md")
     _git(path, ["add", "CLAUDE.md"], host=host, run=run)
     cr = _commit_paths(
@@ -808,7 +808,7 @@ def onboard_project(path, host=None, name=None, overrides=None,
     steps = [
         step_git_init(target_path, host, run, dry_run),
         step_gitignore(target_path, stack, host, run, dry_run),
-        step_claude_md(target_path, name, host, run, dry_run),
+        step_claude_md(target_path, name, host, run, dry_run, stack),
         step_remote(target_path, name, host, run, dry_run),
         step_branches(target_path, eff_overrides, host, run, dry_run),
         step_foundation_tickets(target_path, name, host, run, dry_run,
@@ -875,7 +875,7 @@ def audit_project(entry, host=None, run=None):
                       "detail": "CLAUDE.md has no Playbook router"})
     if tray := _tray.audit_drift(path, host=host, run=run, claude_md=cm_content or ""):
         drift.append(tray)
-    drift += _stack.audit_drift(path, host=host, run=run, claude_md=cm_content)
+    drift += _stack.audit_drift(path, host=host, run=run, claude_md=cm_content, entry=entry)
     return drift
 
 
