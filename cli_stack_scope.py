@@ -30,14 +30,20 @@ import json
 import os
 import re
 import subprocess
+import time
 
 HOUSE = "house"
 # An unreadable registry: the scope is unknown, so a consumer skips (and logs),
 # it never assumes house (round 4, item 4).
 UNKNOWN = "unknown"
 REGISTRY_FILENAME = "projects-registry.json"
-# Every git call here and in the gates stays below the 5 s / 10 s hook timeouts.
+# Every git call here and in the gates stays below the 5 s / 10 s hook timeouts:
+# a hook run starts ONE deadline (start_deadline) that all its git calls share;
+# without one (the audit, tests) each call gets GIT_TIMEOUT_S (round 5 item 5).
 GIT_TIMEOUT_S = 4
+HOOK_DEADLINE_S = 4
+_deadline = None
+_layouts = {}
 # ONE depth for the gate's and the state check's package.json set and the
 # audit's find (path components below the project root).
 SCAN_DEPTH = 6
@@ -81,6 +87,33 @@ def _existing_dir(start):
     return d
 
 
+def start_deadline(seconds=HOOK_DEADLINE_S):
+    """Start the one deadline a hook run's git calls share."""
+    global _deadline
+    _deadline = time.monotonic() + seconds
+
+
+def git_timeout():
+    """Seconds left for the next git call (0 once the run's deadline passed)."""
+    if _deadline is None:
+        return GIT_TIMEOUT_S
+    return max(0.0, min(GIT_TIMEOUT_S, _deadline - time.monotonic()))
+
+
+def has_git_ancestor(start):
+    """True when `start` or an ancestor holds a `.git` entry: a git failure
+    there is a failure, never "outside any repo" (round 5 item 2)."""
+    d = _existing_dir(start)
+    while d:
+        if os.path.lexists(os.path.join(d, ".git")):
+            return True
+        parent = os.path.dirname(d)
+        if parent == d:
+            return False
+        d = parent
+    return False
+
+
 def git_env():
     """The environment for a git subprocess: no inherited repo pointers."""
     return {k: v for k, v in os.environ.items()
@@ -95,11 +128,20 @@ def git_layout(start):
     d = _existing_dir(start)
     if d is None:
         return None
+    if d not in _layouts:                     # once per dir per run (round 5)
+        _layouts[d] = _ask_git(d)
+    return _layouts[d]
+
+
+def _ask_git(d):
+    timeout = git_timeout()
+    if timeout <= 0:
+        return None
     try:
         r = subprocess.run(["git", "-C", d, "rev-parse", "--path-format=absolute",
                             "--show-toplevel", "--git-common-dir",
                             "--show-superproject-working-tree"],
-                           capture_output=True, text=True, timeout=GIT_TIMEOUT_S,
+                           capture_output=True, text=True, timeout=timeout,
                            env=git_env())
     except (OSError, subprocess.SubprocessError):
         return None

@@ -61,9 +61,11 @@ _DEP_KEYS = ("dependencies", "devDependencies", "peerDependencies",
 
 # Hand-written JS (and inline <script> in .html) counts in every non-pruned dir,
 # past this many lines in total: a PWA service worker or a small helper is no
-# app. Exempt: a Trunk.toml dir, a leptos / wasm-bindgen crate, the dir of a
-# JS-framework package.json (that app is already its own finding), and the
-# files a VENDORED.md lists (round 4 item 6).
+# app. Exempt: a Trunk.toml dir, a leptos / wasm-bindgen crate, the (non-root)
+# dir of a JS-framework package.json (that app is already its own finding), a
+# Bitfocus Companion module (a fleet platform, round 5 item 4), and the files
+# a VENDORED.md lists (round 4 item 6).
+COMPANION_MODULE_DEP = "@companion-module/base"
 HAND_JS_MIN_LINES = 200
 _WASM_CRATES = ("leptos", "wasm-bindgen")
 # Rust crates that render HTML or a UI, or serve HTTP, outside the house stack
@@ -146,7 +148,8 @@ def _seed():
              "here, one per technology.", ""]
     if rows:
         lines += ["| Layer | Applies when | Technology |", "|---|---|---|"]
-        lines += ["| %s | %s | the current row of `rules/house-stack.md` |" % tuple(r[:2])
+        lines += ["| %s | %s | the current row of `~/.claude/rules/house-stack.md` |"
+                  % tuple(r[:2])
                   for r in rows if len(r) >= 3]
     return "\n".join(lines) + "\n\n"
 
@@ -302,6 +305,16 @@ def _is_hand_js(rel):
             or p.suffix in (".html", ".htm"))
 
 
+def _companion_module(text):
+    """True when a package.json depends on @companion-module/base."""
+    try:
+        doc = json.loads(str(text).lstrip("\ufeff"))
+    except (ValueError, TypeError):
+        return False
+    return isinstance(doc, dict) and any(
+        isinstance(doc.get(k), dict) and COMPANION_MODULE_DEP in doc[k] for k in _DEP_KEYS)
+
+
 def _vendored(scanned):
     """Project-relative paths a VENDORED.md lists (each entry relative to the
     VENDORED.md's dir and to the project root)."""
@@ -378,8 +391,8 @@ def deviation(path, host=None, run=None):
                       "for the stack check" % rel, file=sys.stderr)
             for fam in sorted(fams or ()):
                 found.setdefault(fam, []).append(rel)
-            if fams:
-                exempt_dirs.add(_rel_dir(rel))     # that app is its own finding
+            if (fams and _rel_dir(rel)) or _companion_module(payload):
+                exempt_dirs.add(_rel_dir(rel))     # its own finding / a platform
     vendored = _vendored(scanned)
     js_files, js_lines = [], 0
     for rel, payload in scanned:

@@ -40,8 +40,9 @@ import os
 import subprocess
 import time
 
-from cli_stack_scope import (GIT_TIMEOUT_S, HOUSE, REGISTRY_FILENAME, SCAN_DEPTH,
-                             SKIP_DIRS, UNKNOWN, git_env, repo_root, stack_for)
+from cli_stack_scope import (HOUSE, REGISTRY_FILENAME, SCAN_DEPTH, SKIP_DIRS, UNKNOWN,
+                             git_env, git_timeout, has_git_ancestor, repo_root,
+                             stack_for, start_deadline)
 from gates import allow, emit_block_stderr, read_payload
 
 GATE_LOG = "stack-gate.log"
@@ -92,10 +93,14 @@ def judged(rel):
 
 
 def git(top, args, stdin=None):
-    """git stdout bytes, or None on failure (a GIT_TIMEOUT_S bound)."""
+    """git stdout bytes, or None on failure; bounded by the run's one deadline
+    (cli_stack_scope.start_deadline, round 5 item 5)."""
+    timeout = git_timeout()
+    if timeout <= 0:
+        return None
     try:
         r = subprocess.run(["git", "-C", top, *args], input=stdin, capture_output=True,
-                           timeout=GIT_TIMEOUT_S, env=git_env())
+                           timeout=timeout, env=git_env())
     except (OSError, subprocess.SubprocessError):
         return None
     return r.stdout if r.returncode == 0 else None
@@ -107,9 +112,10 @@ def _names(out):
 
 
 def repo_package_files(top, args=("ls-files", "-z", "--cached", "--others",
-                                  "--exclude-standard")):
+                                  "--exclude-standard", "--", "*package.json")):
     """{rel: text} of the judged package.json files git lists for `top`
-    (default: tracked + untracked, not ignored), read from the working tree."""
+    (default: tracked + untracked, not ignored; a pathspec, so git lists only
+    package.json files), read from the working tree."""
     out = git(top, list(args))
     if out is None:
         fail_open(f"git {args[0]} failed in {top}")
@@ -177,9 +183,16 @@ def classify(tool_name, tool_input, cwd):
     """Block reason for one package.json Write/Edit, or ""."""
     from cli_onboard_stack import package_json_frameworks
     file_path = os.path.abspath(str(tool_input.get("file_path") or "/"))
-    if os.path.basename(file_path) != "package.json" or skipped(file_path):
+    if os.path.basename(file_path) != "package.json":
         return ""
     start = os.path.dirname(file_path)
+    own_root = repo_root(start)
+    if own_root is None and has_git_ancestor(start):
+        fail_open(f"git failed for {start}")
+    # round 5: the skip check reads the REPO-relative path (a checkout may itself
+    # live under a `tests/` dir)
+    if skipped(os.path.relpath(file_path, own_root) if own_root else file_path):
+        return ""
     if not house(start, cwd):
         return ""
     before = read(file_path)
@@ -204,7 +217,7 @@ def classify(tool_name, tool_input, cwd):
     families = after_fw - before_fw
     if not families:
         return ""
-    root = repo_root(start)
+    root = own_root
     where = "this repo"
     if root is None and cwd:
         root, where = repo_root(cwd), "the session's repo"
@@ -231,6 +244,7 @@ def main():
     tool = str(obj.get("tool_name") or "")
     if tool not in ("Write", "Edit"):
         allow()
+    start_deadline()
     reason = classify(tool, tool_input, str(obj.get("cwd") or "") or None)
     if reason:
         log(f"BLOCK {tool} {tool_input.get('file_path')}")
