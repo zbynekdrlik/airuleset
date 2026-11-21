@@ -95,8 +95,8 @@ class RemoteRunner:
             if path.endswith("CLAUDE.md"):
                 if not self.claude_present:
                     return CP(cmd, 1, "", "cat: No such file or directory")
-                # a healthy CLAUDE.md: Playbook router + `## Stack` (#1333), no drift
-                return CP(cmd, 0, "# proj\n\n## Stack\n\n## Playbook router\n- x\n", "")
+                # a healthy CLAUDE.md carries the Playbook router (no drift)
+                return CP(cmd, 0, "# proj\n\n## Playbook router\n- x\n", "")
             if not self.gitignore_present:
                 return CP(cmd, 1, "", "cat: No such file or directory")
             content = self.gitignore_content
@@ -284,7 +284,7 @@ class TestAuditRemote(unittest.TestCase):
     def _entry(self, path, host):
         return {"name": "foo583", "host": host, "path": path,
                 "branch_model": "2-branch", "default_branch": "main",
-                "work_branch": "dev"}
+                "work_branch": "dev", "stack": "house"}  # #1333
 
     def test_healthy_remote_audits_clean(self):
         run = RemoteRunner()
