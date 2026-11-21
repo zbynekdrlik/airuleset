@@ -94,7 +94,18 @@ class TestStackSeed(unittest.TestCase):
         rows = [ln for ln in ob._stack.STACK_SECTION.splitlines() if ln.startswith("| ")]
         self.assertEqual(rows[0], "| Layer | Applies when | Technology |")
         seeded = [[c.strip() for c in r.split("|")[1:4]] for r in rows[2:]]
-        self.assertEqual(seeded, _rule_rows())
+        self.assertEqual([r[:2] for r in seeded], [r[:2] for r in _rule_rows()])
+        # round 4 (item 7): no frozen technology copy; Stack evolution changes
+        # the rule, never a project's seed
+        self.assertEqual({r[2] for r in seeded}, {"the current row of `rules/house-stack.md`"})
+        for frozen in ("Leptos", "axum", "tray-icon", "Direct3D", "0.8"):
+            self.assertNotIn(frozen, ob._stack.STACK_SECTION)
+
+    def test_the_seed_follows_the_registry_stack(self):
+        self.assertEqual(ob._stack.seed_section("house"), ob._stack.STACK_SECTION)
+        self.assertEqual(ob._stack.seed_section("rust"), ob._stack.STACK_SECTION)
+        for stack in ("odoo", "python-tooling", "python", "node"):
+            self.assertEqual(ob._stack.seed_section(stack), "", stack)
 
     def test_a_python_or_node_repo_gets_no_rust_pin(self):
         for stack in ("python", "node"):
@@ -108,7 +119,8 @@ class TestStackSeed(unittest.TestCase):
     def test_onboard_project_passes_the_detected_stack(self):
         import inspect
         src = inspect.getsource(ob.onboard_project)
-        self.assertIn("step_claude_md(target_path, name, host, run, dry_run, stack)", src)
+        self.assertIn("step_claude_md(target_path, name, host, run, dry_run,\n"
+                      "                       (existing or {}).get(\"stack\") or stack)", src)
 
     def test_the_seed_template_is_no_exception_and_no_deviation(self):
         seed = ob._claude_md_skeleton("demo")
@@ -212,7 +224,8 @@ class TestStackAudit(unittest.TestCase):
                 self.assertIn("%s: package.json" % fam, rows[0]["detail"])
 
     def test_forbidden_template_and_ui_crates(self):
-        for crate in ("askama", "tera", "maud", "yew", "dioxus", "sycamore"):
+        for crate in ("askama", "tera", "maud", "yew", "dioxus", "sycamore",
+                      "actix-web", "warp", "rocket", "egui", "iced", "slint"):
             with self.subTest(crate=crate):
                 manifest = '[package]\nname = "x"\n\n[dependencies]\n%s = "1"\n' % crate
                 rows = self._audit({"crates/x/Cargo.toml": manifest})
@@ -257,6 +270,33 @@ class TestStackAudit(unittest.TestCase):
         rows = self._audit(files)
         self.assertEqual(_kinds(rows), {"stack-deviation"})
 
+    def test_a_framework_app_s_own_sources_are_not_counted_again(self):
+        # round 4 (item 6): bakerion-ai's React sources also showed as javascript
+        files = {"frontend/package.json": REACT_PKG,
+                 "frontend/src/App.jsx": "x\n" * 400, "frontend/src/main.ts": "x\n" * 300}
+        rows = self._audit(files)
+        techs = [r["detail"].split(":")[0] for r in rows if r["kind"] == "stack-deviation"]
+        self.assertEqual(techs, ["react"])
+
+    def test_every_non_pruned_dir_is_scanned(self):
+        rows = self._audit({"app/main.js": "x();\n" * 250})
+        self.assertIn("javascript: hand-written JS web UI: 250 lines in app/main.js",
+                      rows[0]["detail"])
+
+    def test_inline_script_in_html_counts(self):
+        # reaperiem's web/mixer.html: 909 inline JS lines
+        html = ("<html><head><script src=\"lib.js\"></script></head><body>\n<script>\n"
+                + "let x = 1;\n" * 909 + "</script>\n</body></html>\n")
+        rows = self._audit({"web/mixer.html": html})
+        self.assertEqual(_kinds(rows), {"stack-deviation"})
+        self.assertIn("909 lines in web/mixer.html", rows[0]["detail"])
+
+    def test_vendored_js_is_excluded(self):
+        files = {"VENDORED.md": "# Vendored\n\n- `static/lib/uPlot.js` (uPlot 1.6, MIT)\n",
+                 "static/lib/uPlot.js": "x\n" * 900, "vendor/x/big.js": "x\n" * 900,
+                 "static/chart.min.js": "x\n" * 900, "static/helper.js": "x\n" * 40}
+        self.assertEqual(self._audit(files), [])
+
     def test_hand_written_web_js_app_is_a_deviation(self):
         rows = self._audit({"web/app.js": "x();\n" * 250})
         self.assertIn("hand-written JS web UI: 250 lines in web/app.js",
@@ -286,6 +326,16 @@ class TestStackAudit(unittest.TestCase):
             self.assertIn(name, details.lower())
         self.assertNotIn("django", details.lower())
 
+    def test_negation_drops_only_the_noun_after_it_and_gtk_is_no_finding(self):
+        cm = ("## Stack\n\n| Layer | Technology |\n|---|---|\n"
+              "| Web UI | React, no SSR |\n| Engine | D3D11. No Electron, no game engine |\n"
+              "| Tray | tray-icon (gtk on Linux) |\n| API | FastAPI without Django |\n")
+        details = " ".join(r["detail"] for r in self._audit({}, claude_md=cm)).lower()
+        for name in ("react", "fastapi"):
+            self.assertIn(name + ":", details)
+        for name in ("electron", "django", "gtk"):
+            self.assertNotIn(name + ":", details)
+
     def test_a_stack_section_restating_house_rows_is_fine(self):
         cm = ob._stack.STACK_SECTION + "## Playbook router\n"
         self.assertEqual(self._audit({}, claude_md=cm), [])
@@ -304,6 +354,27 @@ class TestStackAudit(unittest.TestCase):
         uses = [r["detail"] for r in notes if r["kind"] == "stack-exception-use"]
         self.assertEqual(len(uses), 1)
         self.assertIn("framework=react", uses[0])
+
+    def test_allow_marker_lines_come_from_the_project_account_s_home(self):
+        # round 4 (item 6): /home/<account>/.claude/stack-gate.log, read on the target
+        seen = []
+        with tempfile.TemporaryDirectory() as d:
+            _put(d, "web/package.json", REACT_PKG)
+            log = "1 ALLOW-MARKER `%s/web/package.json` framework=react claude_md=x\n" % d
+
+            def run(argv, **kw):
+                if argv[:1] == ["cat"] and argv[-1].endswith("/.claude/stack-gate.log"):
+                    seen.append(argv[-1])
+                    return subprocess.CompletedProcess(argv, 0, log, "")
+                return FakeRunner()(argv, **kw)
+            rows = ob._stack.audit_drift(d, run=run, entry=dict(HOUSE, account="fohmixer"),
+                                         claude_md="## Playbook router\n" + REACT_MARKER)
+        self.assertEqual(seen, ["/home/fohmixer/.claude/stack-gate.log"])
+        self.assertEqual(len([r for r in rows if r["kind"] == "stack-exception-use"]), 1)
+
+    def test_one_scan_depth_with_the_gate(self):
+        import cli_stack_scope
+        self.assertEqual(ob._stack._SCAN_DEPTH, str(cli_stack_scope.SCAN_DEPTH))
 
     def test_notes_never_flip_the_audit_to_drift(self):
         import contextlib
