@@ -74,6 +74,8 @@ def short_target_alias(user, box_name):
         return "mt-pz"   # #1310: the 8-char cut "mikrotik" reads as the SNV project
     if user == "companion-updater":
         return "comp"   # #1363: the 8-char cut "companio" reads badly
+    if user == "wall-songs":
+        return "wsongs"   # #1390: the 8-char cut "wall-son" reads badly
     mo = re.match(r"^david(\d*)$", user)
     if mo:
         return "d" + (mo.group(1) or "1")   # base `david` == d1
