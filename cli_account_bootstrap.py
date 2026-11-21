@@ -469,7 +469,7 @@ SERVICE_ACCOUNTS = {
     "songplayer": {
         "host": "dev1",
         "sudo": False,
-        "secrets": ["songplayer_peer_api_key", "songplayer_pp_cf_service_token.json"],
+        "secrets": ["songplayer_peer_api_key", "songplayer_pp_cf_service_token.json", "soniox-api-key"],   # #1392
         "repo": "zbynekdrlik/songplayer",
         "github_app": True, "repo_secrets": [],   # GEMINI_API_KEY is set already
         "tools": ["rust-target:wasm32-unknown-unknown", "playwright:1.59.1/chromium"],

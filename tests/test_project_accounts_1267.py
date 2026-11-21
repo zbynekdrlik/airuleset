@@ -81,7 +81,8 @@ class TestDeclaration(unittest.TestCase):
         spec = bootstrap.account_spec("songplayer")
         self.assertEqual(list(spec["secrets"]),
                          ["songplayer_peer_api_key",
-                          "songplayer_pp_cf_service_token.json"])
+                          "songplayer_pp_cf_service_token.json",
+                          "soniox-api-key"])
         # the shared Cloudflare token and the unowned Resolume password stay
         # open questions on #1267, never declared here
         for name in ("cloudflare-newlevel-access", "resolume-snv-newlevel-password"):
