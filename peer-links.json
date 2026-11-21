@@ -238,6 +238,10 @@
         [
           "wall-bridge",
           "wall-songs"
+        ],
+        [
+          "camera-box",
+          "mikrotik"
         ]
       ],
       "topics": {
@@ -299,7 +303,8 @@
         "mikrotik-pz|remoteos-mcp": "network facts for the remoteos MCP targets at Granč and PP: a PC's LAN IP and DHCP lease, its WireGuard peer and handshake; mikrotik-pz owns the routers, remoteos-mcp owns the MCP side",
         "fleet-backup|mikrotik": "backup access on network devices: the fleetbackup user and key per device, host keys, network-collect results; mikrotik owns the devices, fleet-backup owns the backups",
         "airuleset|wall-songs": "airuleset infra: accounts, permissions, peer links, tooling. Ask or report here; airuleset decides and a ticket alone wakes no session",
-        "wall-bridge|wall-songs": "sibling LED-wall projects at SNV: wall-bridge owns the bridge PC's Spout-to-wall path, wall-songs the songs PC's song visuals; coordinate wall output, never each other's code"
+        "wall-bridge|wall-songs": "sibling LED-wall projects at SNV: wall-bridge owns the bridge PC's Spout-to-wall path, wall-songs the songs PC's song visuals; coordinate wall output, never each other's code",
+        "camera-box|mikrotik": "the SNV network: camera-box needs read-only switch/router data (port counters, drops/pause on the stream port, netcfg drift); mikrotik owns the devices and their credentials"
       }
     },
     "subdev": {
