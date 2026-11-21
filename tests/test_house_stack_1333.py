@@ -104,15 +104,60 @@ class TestHouseStackRule(unittest.TestCase):
             self.assertIn(needle, self.text, needle)
 
     def test_reference_projects_are_named(self):
-        for needle in ("fohmixer `crates/fohmixer-ui`", "wall-bridge `wb-service`",
+        for needle in ("fohmixer `crates/fohmixer-ui`",
+                       "fohmixer `fohmixer-hub`, songplayer `sp-server`",
                        "wall-bridge `crates/wb-tray`", "songplayer `sp-gpu`",
-                       "`wb-spout`", "`wb-scanout`", "Spout senders"):
+                       "`wb-spout`", "`wb-scanout`", "Spout senders",
+                       "Tauri 2: fohmixer, iemmixer, songplayer"):
             self.assertIn(needle, self.text, needle)
 
-    def test_exception_needs_the_owner_marker(self):
-        self.assertIn("Any other technology only as an owner-approved exception",
+    def test_references_are_shapes_never_old_versions(self):
+        self.assertIn("**never copy a reference project's older version**",
                       self.text)
+        self.assertIn("Known deviation, never a reference: wall-bridge's dashboard "
+                      "(a static `index.html` from `wb-service`, no WebSocket)",
+                      self.text)
+
+    # --- review round 1, ROZHODNUTÉ 1 + 5 ---------------------------------- #
+    def test_scope_is_a_new_app_and_existing_projects_keep_their_stack(self):
+        for needle in (
+                "**A NEW standalone app or deployable (a new repo, or a new "
+                "deployable inside a house project) is built on the house stack",
+                "**An existing project follows its established stack:** its "
+                "platform is the `stack` field of its row in airuleset's "
+                "`projects-registry.json`",
+                "set by airuleset only, never by a project session"):
+            self.assertIn(needle, self.text, needle)
+
+    def test_every_row_says_when_it_applies(self):
+        rows = [ln for ln in self.raw.splitlines() if ln.startswith("| ")]
+        self.assertEqual(rows[0].split("|")[2].strip(), "Applies when")
+        applies = {r.split("|")[1].strip(): r.split("|")[2].strip()
+                   for r in rows[2:]}
+        self.assertEqual(applies["Tray"], "a Windows desktop app with a UI or video")
+        self.assertEqual(applies["Install"], "a Windows desktop app with a UI or video")
+        self.assertEqual(applies["Graphics engine"], "a Windows app that renders video")
+        self.assertIn("A Linux service is the Service + Web UI rows.", self.text)
+
+    def test_both_tray_variants_are_accepted(self):
+        self.assertIn("service-only app: `tray-icon` in a `<prefix>-tray` crate; "
+                      "app with its own desktop window: the Tauri 2 tray", self.text)
+        self.assertIn("Both variants are accepted.", self.text)
+
+    def test_windows_release_builds_come_from_ci(self):
+        self.assertIn("release artefacts come from the CI Windows runner; the local "
+                      "check is the dev1 cross-build", self.text)
+
+    def test_stack_section_only_restates_house_rows(self):
+        self.assertIn("A project `## Stack` section may only restate house rows; "
+                      "other technology in it needs the marker too.", self.text)
+
+    def test_exception_needs_the_owner_marker(self):
+        self.assertIn("Any other technology in a house project only as an "
+                      "owner-approved exception", self.text)
         self.assertIn(MARKER, self.raw)
+        self.assertIn("where `<owner ref>` is the `#N` or GitHub URL in which the "
+                      "owner approved it", self.text)
         self.assertIn("Never add the marker on your own judgement", self.text)
 
     def test_read_before_choosing_in_an_empty_repo(self):
@@ -122,8 +167,11 @@ class TestHouseStackRule(unittest.TestCase):
     # --- every binding statement of the old rust-web-stack rule ---------- #
     def test_web_ui_statements_survive_the_merge(self):
         for needle in (
-                "Every web UI MUST use Leptos compiled to WASM, served by Axum",
+                "Every web UI of a house app MUST use Leptos compiled to WASM, "
+                "served by Axum",
                 "No exception without the owner marker above",
+                "a clearly better option goes through Stack evolution, never a "
+                "silent switch",
                 "`trunk build --release` → static `dist/`",
                 "**SSR** (cargo-leptos on Axum) only when the project "
                 "explicitly requires server functions",
@@ -174,7 +222,17 @@ class TestHouseStackRule(unittest.TestCase):
                       "weaker one", sec)
         self.assertIn("(what, why better for this need, cost of moving, "
                       "affected projects)", sec)
-        self.assertIn("The owner decides.", sec)
+        self.assertIn("The owner decides; until then build on the current row.", sec)
+
+    def test_evolution_proposal_reaches_the_owner(self):
+        sec = self._evolution()
+        self.assertIn("label that ticket `needs-decision` (it reaches the owner's "
+                      "`U`)", sec)
+        self.assertIn("the ONE canonical airuleset ticket labelled `stack-proposal`",
+                      sec)
+        self.assertIn("an app-token stream files through `python3 "
+                      "~/devel/airuleset/airuleset.py gk-request --repo "
+                      "zbynekdrlik/airuleset`", sec)
 
     def test_evolution_records_both_outcomes(self):
         sec = self._evolution()
@@ -195,10 +253,12 @@ class TestArchitectureFirstPointer(unittest.TestCase):
             encoding="utf-8")
         bullet = next(ln for ln in raw.splitlines()
                       if ln.startswith("- **Framework-first for new components"))
-        self.assertIn("**House stack (#1333):** the default for every new app or "
-                      "component is `~/.claude/rules/house-stack.md` — read it "
-                      "before choosing", bullet)
-        self.assertIn("a deviation needs `%s`" % MARKER, bullet)
+        self.assertIn("**House stack (#1333):** a NEW standalone app/deployable "
+                      "defaults to `~/.claude/rules/house-stack.md` (read it before "
+                      "choosing; deviation only with its owner-approved "
+                      "stack-exception marker)", bullet)
+        self.assertIn("an existing project keeps its stack (`stack` in airuleset's "
+                      "`projects-registry.json`)", bullet)
         self.assertEqual(raw.count("house-stack.md"), 1)
 
 
@@ -206,7 +266,7 @@ class TestArchitectureFirstPointer(unittest.TestCase):
 # 3) Situational triggers: the design comment and the first scaffold file.
 # --------------------------------------------------------------------------- #
 INJECTOR = REPO / "hooks" / "inject-situational-rule.sh"
-STACK_MARK = "House Stack — Every App Is Built On It"
+STACK_MARK = "House Stack — the default for every NEW app"
 INVESTIGATE_MARK = "skills/investigate-existing-first/SKILL.md"
 DASHBOARD_MARK = "skills/version-on-dashboard/SKILL.md"
 
