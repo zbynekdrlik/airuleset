@@ -10,7 +10,6 @@ directory, a row without a stack and any read failure read ``house``.
 """
 
 import json
-import os
 import sys
 import tempfile
 import unittest
@@ -22,29 +21,14 @@ sys.path.insert(0, str(REPO))
 import cli_onboard as ob  # noqa: E402
 import cli_stack_scope as scope  # noqa: E402
 
+sys.path.insert(0, str(REPO / "tests"))
+from _stack_testlib import git_repo, git_worktree  # noqa: E402
+
 REGISTRY = REPO / "projects-registry.json"
 
 
-def _repo(root, url=None, worktree=False):
-    """A fake checkout at `root`: `.git/config` with an origin url, or (with
-    worktree=True) a linked worktree whose `.git` file points at a gitdir with
-    a `commondir` back to a main repo holding the config."""
-    root = Path(root)
-    root.mkdir(parents=True, exist_ok=True)
-    cfg = '[core]\n\tbare = false\n'
-    if url:
-        cfg += '[remote "upstream"]\n\turl = https://github.com/x/other.git\n'
-        cfg += '[remote "origin"]\n\turl = %s\n\tfetch = +refs/heads/*\n' % url
-    if not worktree:
-        (root / ".git").mkdir()
-        (root / ".git" / "config").write_text(cfg)
-        return root
-    main = root.parent / ("main-of-" + root.name)
-    (main / ".git" / "worktrees" / "wt").mkdir(parents=True)
-    (main / ".git" / "config").write_text(cfg)
-    (main / ".git" / "worktrees" / "wt" / "commondir").write_text("../..\n")
-    (root / ".git").write_text("gitdir: %s\n" % (main / ".git" / "worktrees" / "wt"))
-    return root
+def _repo(root, url=None):
+    return git_repo(root, url, commit=True)
 
 
 class TestRegistryStacks(unittest.TestCase):
@@ -96,9 +80,47 @@ class TestStackFor(unittest.TestCase):
                                  want)
 
     def test_linked_worktree_reads_the_main_repo_config(self):
-        root = _repo(self.tmp / "wt", "git@github.com:zbynekdrlik/odoo-erp.git",
-                     worktree=True)
-        self.assertEqual(scope.stack_for(str(root), str(REGISTRY)), ("odoo-erp", "odoo"))
+        main = _repo(self.tmp / "main", "git@github.com:zbynekdrlik/odoo-erp.git")
+        wt = git_worktree(main, self.tmp / "elsewhere" / "wt")
+        self.assertEqual(scope.stack_for(str(wt / "x"), str(REGISTRY)), ("odoo-erp", "odoo"))
+
+    # --- round 3 (I): worktrees via the main checkout, non-git by prefix --- #
+    def test_worktree_of_a_row_whose_origin_name_differs_resolves_by_main_path(self):
+        main = _repo(self.tmp / "vyuctovanie", "git@github.com:o/vyuctovanie.git")
+        reg = self._registry([{"name": "montalu-vyuctovanie", "path": str(main),
+                               "stack": "python-tooling"}])
+        wt = git_worktree(main, main / ".claude" / "worktrees" / "agent-1")
+        self.assertEqual(scope.stack_for(str(wt / "src"), reg),
+                         ("montalu-vyuctovanie", "python-tooling"))
+
+    def test_a_non_git_registry_path_resolves_by_prefix(self):
+        reg = self._registry([{"name": "mikrotik", "path": str(self.tmp / "mikrotik"),
+                               "stack": "config"},
+                              {"name": "deeper", "path": str(self.tmp / "mikrotik" / "pz"),
+                               "stack": "n8n"}])
+        (self.tmp / "mikrotik" / "pz" / "x").mkdir(parents=True)
+        self.assertEqual(scope.stack_for(str(self.tmp / "mikrotik" / "a" / "b.rsc"), reg),
+                         ("mikrotik", "config"))
+        self.assertEqual(scope.stack_for(str(self.tmp / "mikrotik" / "pz" / "x"), reg),
+                         ("deeper", "n8n"))
+
+    # --- round 3 (B): a path outside any repo resolves through the cwd ----- #
+    def test_outside_any_repo_falls_back_to_the_session_cwd(self):
+        odoo = _repo(self.tmp / "odoo", "git@github.com:zbynekdrlik/odoo-erp.git")
+        outside = self.tmp / "scratch" / "x"
+        self.assertEqual(scope.stack_for(str(outside), str(REGISTRY), fallback=str(odoo)),
+                         ("odoo-erp", "odoo"))
+        self.assertEqual(scope.stack_for(str(outside), str(REGISTRY),
+                                         fallback=str(self.tmp / "nowhere")),
+                         (None, "house"))
+
+    def test_inside_a_repo_the_fallback_is_ignored(self):
+        odoo = _repo(self.tmp / "odoo", "git@github.com:zbynekdrlik/odoo-erp.git")
+        foh = _repo(self.tmp / "foh", "https://github.com/zbynekdrlik/fohmixer")
+        self.assertEqual(scope.stack_for(str(foh / "ui"), str(REGISTRY), fallback=str(odoo)),
+                         ("fohmixer", "house"))
+        self.assertEqual(scope.repo_root(str(foh / "ui" / "new")), str(foh.resolve()))
+        self.assertIsNone(scope.repo_root(str(self.tmp / "scratch")))
 
     def test_unknown_directory_and_unknown_origin_are_house(self):
         self.assertEqual(scope.stack_for(str(self.tmp / "nothing"), str(REGISTRY)),
@@ -117,7 +139,7 @@ class TestStackFor(unittest.TestCase):
             {"name": "local", "path": str(self.tmp / "local"), "stack": "config"}])
         a = _repo(self.tmp / "a", "git@github.com:o/obs-yt-player.git")
         self.assertEqual(scope.stack_for(str(a), reg), ("obsytplayer", "obs"))
-        b = _repo(self.tmp / "local")  # no origin at all
+        b = _repo(self.tmp / "local")  # no origin at all: the main path decides
         self.assertEqual(scope.stack_for(str(b / "sub"), reg), ("local", "config"))
 
     def test_broken_registry_and_unreadable_config_read_house(self):
@@ -125,10 +147,9 @@ class TestStackFor(unittest.TestCase):
         bad.write_text("{nope")
         root = _repo(self.tmp / "o", "git@github.com:zbynekdrlik/odoo-erp.git")
         self.assertEqual(scope.stack_for(str(root), str(bad)), (None, "house"))
-        (root / ".git" / "config").chmod(0)
-        self.addCleanup(os.chmod, root / ".git" / "config", 0o644)
-        if os.geteuid() != 0:
-            self.assertEqual(scope.stack_for(str(root), str(REGISTRY)), (None, "house"))
+        (root / ".git" / "config").unlink()
+        (root / ".git" / "config").mkdir()      # unreadable even as root
+        self.assertEqual(scope.stack_for(str(root), str(REGISTRY)), (None, "house"))
 
 
 class TestRegistryEntryKeepsTheStack(unittest.TestCase):

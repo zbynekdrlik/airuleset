@@ -34,6 +34,7 @@ sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(REPO / "tests"))
 
 from _hook_state_cleanup import hermetic_hook_env  # noqa: E402  (#1046 hermetic HOME)
+from _stack_testlib import git_repo  # noqa: E402
 
 INJECTOR = REPO / "hooks" / "inject-situational-rule.sh"
 CONF = REPO / "hooks" / "situational-triggers.conf"
@@ -53,10 +54,7 @@ def _rows(topic):
 
 
 def _fake_repo(root, url):
-    root = Path(root)
-    (root / ".git").mkdir(parents=True)
-    (root / ".git" / "config").write_text('[remote "origin"]\n\turl = %s\n' % url)
-    return root
+    return git_repo(root, url)
 
 
 class _Inject(unittest.TestCase):
@@ -128,7 +126,8 @@ class TestDesignAndScaffoldTriggers(_Inject):
         for rel in ("tests/fixtures/x/package.json", "node_modules/a/package.json",
                     "target/debug/build/x/Cargo.toml", "test/index.html",
                     "__tests__/app.js", "dist/app-ui.js", "vendor/x/go.mod",
-                    "web/app.test.js", "src/view.spec.ts"):
+                    "web/app.test.js", "src/view.spec.ts", "e2e/dashboard.spec.ts",
+                    "e2e/helpers/page.ts"):
             with self.subTest(rel=rel):
                 self.assertNotIn(STACK_MARK, self._write(self.unreg / rel))
 
@@ -183,6 +182,14 @@ class TestRegistryScope(_Inject):
         self.assertIn(STACK_MARK, self._write(foh / "crates" / "x" / "Cargo.toml", cwd=foh))
         new = _fake_repo(self.tmp / "nova", "git@github.com:zbynekdrlik/nova.git")
         self.assertIn(STACK_MARK, self._write(new / "package.json", cwd=REPO))
+
+    def test_outside_any_repo_the_session_cwd_decides(self):
+        # round 3 B: the scratchpad body file of a `gh -F` design comment
+        odoo = _fake_repo(self.tmp / "odoo-erp", "git@github.com:zbynekdrlik/odoo-erp.git")
+        body = self.tmp / "scratchpad" / "design.md"
+        self.assertNotIn(STACK_MARK, self._write(body, "Architektúra: x\n", cwd=odoo))
+        self.assertNotIn(STACK_MARK, self._write(body, "Architektúra: x\n", cwd=REPO))
+        self.assertIn(STACK_MARK, self._write(body, "Architektúra: x\n", cwd=self.unreg))
 
     def test_the_written_file_decides_not_the_session_cwd(self):
         odoo = _fake_repo(self.tmp / "odoo-erp", "git@github.com:zbynekdrlik/odoo-erp.git")
