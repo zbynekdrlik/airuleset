@@ -8,7 +8,7 @@ non-hook surfaces of the fix:
 
 1. ONE rule body, ``rules/house-stack.md``, replacing the two old rules.
 2. The always-on pointer in ``modules/quality/architecture-first.md``.
-3. Situational trigger rows (design comment, first app scaffold file).
+3. Situational trigger rows: ``test_house_stack_triggers_1333.py``.
 4. ``onboard-project``: ``## Stack`` seed + ``stack-unpinned`` /
    ``stack-deviation`` audit.
 
@@ -30,7 +30,6 @@ sys.path.insert(0, str(REPO / "tests"))
 
 import airuleset  # noqa: E402
 import cli_onboard as ob  # noqa: E402
-from _hook_state_cleanup import hermetic_hook_env  # noqa: E402  (#1046 hermetic HOME)
 from test_onboard_project import FakeRunner, init_repo  # noqa: E402
 from test_onboard_tray_1198 import SshShellRunner  # noqa: E402
 
@@ -260,110 +259,6 @@ class TestArchitectureFirstPointer(unittest.TestCase):
         self.assertIn("an existing project keeps its stack (`stack` in airuleset's "
                       "`projects-registry.json`)", bullet)
         self.assertEqual(raw.count("house-stack.md"), 1)
-
-
-# --------------------------------------------------------------------------- #
-# 3) Situational triggers: the design comment and the first scaffold file.
-# --------------------------------------------------------------------------- #
-INJECTOR = REPO / "hooks" / "inject-situational-rule.sh"
-STACK_MARK = "House Stack — the default for every NEW app"
-INVESTIGATE_MARK = "skills/investigate-existing-first/SKILL.md"
-DASHBOARD_MARK = "skills/version-on-dashboard/SKILL.md"
-
-
-class TestHouseStackTriggers(unittest.TestCase):
-    def setUp(self):
-        td = tempfile.TemporaryDirectory()
-        self.addCleanup(td.cleanup)
-        # the injector's once-per-session markers live under TMPDIR
-        self.env = hermetic_hook_env(self, TMPDIR=td.name)
-        self.n = 0
-
-    def _ctx(self, tool_input, tool="Bash", session=None):
-        self.n += 1
-        payload = json.dumps({
-            "session_id": session or "hs1333-%s-%d" % (self.id()[-20:], self.n),
-            "tool_name": tool, "tool_input": tool_input})
-        r = subprocess.run(["bash", str(INJECTOR)], input=payload,
-                           capture_output=True, text=True, env=self.env,
-                           timeout=30)
-        self.assertEqual(r.returncode, 0, r.stderr)
-        out = r.stdout.strip()
-        return json.loads(out)["hookSpecificOutput"]["additionalContext"] if out else ""
-
-    def _write(self, path, content="x"):
-        return self._ctx({"file_path": path, "content": content}, tool="Write")
-
-    def test_heredoc_design_comment_injects(self):
-        cmd = ("gh issue comment 7 -R zbynekdrlik/wall-songs --body-file - <<'EOF'\n"
-               "## Design\nArchitektúra: one axum service + Leptos UI\nEOF")
-        self.assertIn(STACK_MARK, self._ctx({"command": cmd}))
-
-    def test_inline_issue_create_with_architektura_injects(self):
-        cmd = 'gh issue create --title "x" --body "Architektura: a new tool"'
-        self.assertIn(STACK_MARK, self._ctx({"command": cmd}))
-
-    def test_issue_comment_without_a_design_section_stays_quiet(self):
-        cmd = 'gh issue comment 7 --body "status update, CI green"'
-        self.assertNotIn(STACK_MARK, self._ctx({"command": cmd}))
-
-    def test_architektura_outside_a_gh_issue_command_stays_quiet(self):
-        cmd = "grep -rn 'Architektúra:' modules/"
-        self.assertNotIn(STACK_MARK, self._ctx({"command": cmd}))
-
-    def test_design_body_file_written_for_dash_f_injects(self):
-        ctx = self._write("/tmp/scratch/design-7.md",
-                          "## Design\nArchitektúra: service + tray\n")
-        self.assertIn(STACK_MARK, ctx)
-
-    def test_first_scaffold_files_inject(self):
-        for name in ("package.json", "Cargo.toml", "index.html", "Trunk.toml",
-                     "pyproject.toml", "requirements.txt"):
-            with self.subTest(name=name):
-                ctx = self._write("/home/u/devel/new-app/" + name)
-                self.assertIn(STACK_MARK, ctx, name)
-
-    def test_member_crate_manifest_injects(self):
-        self.assertIn(STACK_MARK,
-                      self._write("/home/u/devel/app/crates/app-ui/Cargo.toml"))
-
-    def test_test_fixture_and_vendored_paths_stay_quiet(self):
-        for path in ("/r/tests/fixtures/x/package.json", "/r/node_modules/a/package.json",
-                     "/r/target/debug/build/x/Cargo.toml", "/r/test/index.html"):
-            with self.subTest(path=path):
-                self.assertNotIn(STACK_MARK, self._write(path))
-
-    def test_lookalike_names_and_edits_stay_quiet(self):
-        for path in ("/r/my-package.json", "/r/package.json.bak", "/r/src/main.rs"):
-            with self.subTest(path=path):
-                self.assertNotIn(STACK_MARK, self._write(path))
-        edit = self._ctx({"file_path": "/r/package.json", "old_string": "a",
-                          "new_string": "b"}, tool="Edit")
-        self.assertNotIn(STACK_MARK, edit)
-
-    def test_injected_once_per_session(self):
-        sid = "hs1333-dedup"
-        first = self._ctx({"file_path": "/r/b/package.json", "content": "{}"},
-                          tool="Write", session=sid)
-        again = self._ctx({"file_path": "/r/b/Cargo.toml", "content": "x"},
-                          tool="Write", session=sid)
-        self.assertIn(STACK_MARK, first)
-        self.assertNotIn(STACK_MARK, again)
-
-    def test_cargo_manifest_cofits_with_investigate_existing_first(self):
-        ctx = self._write("/home/u/devel/new-app/Cargo.toml", "[workspace]\n")
-        self.assertIn(STACK_MARK, ctx)
-        self.assertIn(INVESTIGATE_MARK, ctx)
-
-    def test_index_html_cofits_with_version_on_dashboard(self):
-        ctx = self._write("/home/u/devel/new-app/index.html", "<html></html>")
-        self.assertIn(STACK_MARK, ctx)
-        self.assertIn(DASHBOARD_MARK, ctx)
-
-    def test_house_stack_is_a_raw_match_topic(self):
-        src = INJECTOR.read_text(encoding="utf-8")
-        start = src.index("RAW_BASH_MATCH_TOPICS = {")
-        self.assertIn('"house-stack"', src[start:src.index("}", start)])
 
 
 # --------------------------------------------------------------------------- #
