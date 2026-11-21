@@ -379,6 +379,7 @@ def build_registry_entry(orig_path, target_path, host, name, overrides,
         "overrides": list(overrides or []),
         "onboarded": onboarded,
         "account": account or (existing or {}).get("account"),   # #1184
+        "stack": (existing or {}).get("stack"),   # #1333: set by airuleset only
     }
 
 

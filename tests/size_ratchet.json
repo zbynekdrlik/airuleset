@@ -34,7 +34,7 @@
     "cli_logrotate_owner.py": 290,
     "cli_mdreview_audit.py": 825,
     "cli_model_audit.py": 154,
-    "cli_onboard.py": 1010,
+    "cli_onboard.py": 1011,
     "cli_onboard_exec.py": 157,
     "cli_owner_keys.py": 233,
     "cli_owner_vps.py": 168,
