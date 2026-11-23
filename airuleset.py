@@ -5012,19 +5012,20 @@ def _handoff_prod_transfer_preflight(body, *, cwd=None, scan_text=None,
 
 
 def _handoff_epic_preflight(issue, repo, head_sha=None, cwd=None, body=None):
-    """Epic hand-off gates, all 3 composer paths: #1161 gates.epic_rehearsal then
-    #1396 gates.decisions. `(block_reason | None, receipt_fields)`; warn mode
-    (default) prints + allows, enforce refuses, any exception fails open."""
+    """#1161 epic_rehearsal then #1396 decisions gate; each fails open alone."""
+    blk, f = None, {}
     try:
-        import gates.decisions as _dc
         import gates.epic_rehearsal as _er
         blk, f = _er.composer_check(issue, repo, head_sha, cwd=cwd, body=body)
+    except Exception as e:  # noqa: BLE001 -- a gate crash must never block
+        sys.stderr.write("handoff: epic-rehearsal pre-flight skipped (%s) -- fail-open\n" % e)
+    try:
+        import gates.decisions as _dc
         blk2, f2 = (None, {}) if blk else _dc.composer_check(issue, repo, cwd=cwd)
         return blk or blk2, {**f, **f2}
     except Exception as e:  # noqa: BLE001 -- a gate crash must never block
-        sys.stderr.write("handoff: epic-rehearsal pre-flight skipped (%s) -- "
-                         "fail-open\n" % e)
-        return None, {}
+        sys.stderr.write("handoff: decisions pre-flight skipped (%s) -- fail-open\n" % e)
+        return blk, f
 
 
 def _handoff_gk_preflight(issue, repo, body, *, branch=None, cwd=None,
@@ -11121,8 +11122,7 @@ SUBCOMMANDS = {
     "accounts": cmd_accounts,
     "project-gh-token": cmd_project_gh_token,
     "question-block": cmd_question_block,
-    "venue-bypass-sync": cmd_venue_bypass_sync, "publish-app": cmd_publish_app,  # #1370
-    "decisions": cmd_decisions,  # #1396
+    "venue-bypass-sync": cmd_venue_bypass_sync, "publish-app": cmd_publish_app, "decisions": cmd_decisions,  # #1370 #1396
 }
 # Backwards-compatible alias used by main() before SUBCOMMANDS existed.
 commands = SUBCOMMANDS

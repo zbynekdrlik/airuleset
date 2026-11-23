@@ -49,12 +49,15 @@ def _c(cid, created, body, login="david4", slug=SLUG, n=1):
 class FakeGH:
     """`runner(argv) -> (rc, out, err)` over an in-memory issue store."""
 
-    def __init__(self, issues, comments, fail=(), incomplete=False):
+    def __init__(self, issues, comments, fail=(), incomplete=False, total=None,
+                 page=None):
         self.issues = {(i["repository_url"].split("/repos/")[1], i["number"]): i
                        for i in issues}
         self.comments = comments
         self.fail = set(fail)
         self.incomplete = incomplete
+        self.total = total        # a total_count above the items = the 1000 cap
+        self.page = page          # split items into pages of this size
         self.calls = []
 
     def __call__(self, argv):
@@ -70,7 +73,12 @@ class FakeGH:
             num = re.search(r"\b(\d+) in:body", q).group(1)
             items = [i for (s, _), i in self.issues.items()
                      if s == slug and num in (i.get("body") or "")]
-            lines = [json.dumps(self.incomplete)] + [json.dumps(i) for i in items]
+            total = len(items) if self.total is None else self.total
+            size = self.page or max(len(items), 1)
+            lines = []
+            for k in range(0, max(len(items), 1), size):   # gh --paginate -q
+                lines += [json.dumps(self.incomplete), json.dumps(total)]
+                lines += [json.dumps(i) for i in items[k:k + size]]
             return 0, "\n".join(lines), ""
         m = re.match(r"^repos/([^/]+/[^/]+)/issues/(\d+)(/comments)?$", path)
         slug, n, is_c = m.group(1), int(m.group(2)), bool(m.group(3))
@@ -151,6 +159,31 @@ class TestParsing(unittest.TestCase):
         self.assertEqual(dc.checklist_refs(EPIC_BODY),
                          [(None, 8860), (OTHER, 12), (None, 9999)])
         self.assertEqual(dc.checklist_refs("- [ ] write #5 later"), [])
+        self.assertEqual(dc.checklist_refs("1. [ ] #5\n+ [x] #6"),
+                         [(None, 5), (None, 6)])
+
+    def test_traversal_slug_is_skipped(self):
+        self.assertEqual(dc.checklist_refs("- [ ] ../..#5\n- [ ] a/..#6"), [])
+        self.assertEqual(dc.parent_refs("Part of ../..#5"), [])
+
+    def test_parent_refs_line_order(self):
+        self.assertEqual(dc.parent_refs("Epic: #3\nPart of #4"),
+                         [(None, 3), (None, 4)])
+
+    def test_regexes_linear_on_long_lines(self):
+        import time
+        bad = ["Part of" + " " * 100000 + "x", "Epic:" + " " * 100000 + "x",
+               "- [ ]" + " " * 100000 + "x", "ROZHODNUT" + "*" * 100000,
+               "Decisions-checked: #1 (" + " " * 100000 + "x",
+               "Part of" + " *:" * 33000 + "x"]
+        t0 = time.time()
+        for line in bad:
+            dc.parent_refs(line)
+            dc.checklist_refs(line)
+            dc.checked_markers(line)
+            dc.is_decision_comment(line)
+            dc.decision_paragraphs(line)
+        self.assertLess(time.time() - t0, 2.0)
 
     def test_decision_comment_detection(self):
         self.assertTrue(dc.is_decision_comment("ROZHODNUTÉ: x"))
@@ -162,6 +195,9 @@ class TestParsing(unittest.TestCase):
         # A checked-marker comment quoting decisions never counts itself.
         self.assertFalse(dc.is_decision_comment(
             "Decisions-checked: #1 (2 read)\nROZHODNUTÉ: quoted back"))
+        # Only a WELL-FORMED marker exempts; prose naming it does not.
+        self.assertTrue(dc.is_decision_comment(
+            "Decisions-checked: will follow\nROZHODNUTÉ: real"))
 
     def test_body_paragraphs_verbatim(self):
         body = "intro\n\nROZHODNUTÉ: A.\nline two\n\nother\n\n- ROZHODNUTÉ: B"
@@ -217,6 +253,21 @@ class TestCollector(unittest.TestCase):
                                                                fail=fail))
             self.assertIsNone(groups, fail)
             self.assertIn("gate-unavailable", err)
+
+    def test_search_cap_is_an_error(self):
+        # GitHub serves at most 1000 hits with rc 0 and incomplete=false.
+        issues, comments = _family()
+        groups, err = dc.collect(SLUG, EPIC, runner=FakeGH(issues, comments,
+                                                           total=6093))
+        self.assertIsNone(groups)
+        self.assertIn("total_count=6093", err)
+
+    def test_paged_search_is_complete(self):
+        issues, comments = _family()
+        fam, err = dc.resolve_family(SLUG, EPIC, runner=FakeGH(issues, comments,
+                                                               page=2))
+        self.assertIsNone(err)
+        self.assertIn(10457, [m["number"] for m in fam])
 
     def test_incomplete_search_is_an_error(self):
         issues, comments = _family()
@@ -331,6 +382,12 @@ class TestGate(unittest.TestCase):
         self.assertIn("3 read", blk)
         self.assertIn("4", blk)
 
+    def test_edited_decision_makes_marker_stale(self):
+        edited = _c(700, "2026-10-01T08:00:00Z", "ROZHODNUTÉ: edited", n=9999)
+        edited["updated_at"] = "2026-11-24T08:00:00Z"
+        blk, _, _ = self._check([self._marker(5)], extra={(SLUG, 9999): [edited]})
+        self.assertIn("older than", blk)
+
     def test_new_decision_after_marker_goes_stale(self):
         late = {(SLUG, 9999): [_c(600, "2026-11-24T08:00:00Z", "ROZHODNUTÉ: new",
                                   n=9999)]}
@@ -370,11 +427,26 @@ class TestGate(unittest.TestCase):
 
 
 class TestWiring(unittest.TestCase):
-    def test_epic_preflight_runs_decisions_gate(self):
-        import inspect
+    def test_rehearsal_block_skips_decisions_gate(self):
+        import unittest.mock as mk
         import airuleset
-        src = inspect.getsource(airuleset._handoff_epic_preflight)
-        self.assertIn("gates.decisions", src)
+        import gates.epic_rehearsal as er
+        with mk.patch.object(er, "composer_check",
+                             return_value=("handoff BLOCK: r", {"epic": 1})), \
+                mk.patch.object(dc, "composer_check") as dcc:
+            blk, f = airuleset._handoff_epic_preflight(5, SLUG, None, _REPO)
+        self.assertEqual((blk, f), ("handoff BLOCK: r", {"epic": 1}))
+        dcc.assert_not_called()
+
+    def test_decisions_crash_keeps_rehearsal_result(self):
+        import unittest.mock as mk
+        import airuleset
+        import gates.epic_rehearsal as er
+        with mk.patch.object(er, "composer_check", return_value=(None, {"epic": 1})), \
+                mk.patch.object(dc, "composer_check", side_effect=RuntimeError("x")), \
+                contextlib.redirect_stderr(io.StringIO()):
+            blk, f = airuleset._handoff_epic_preflight(5, SLUG, None, _REPO)
+        self.assertEqual((blk, f), (None, {"epic": 1}))
 
     def test_preflight_merges_fields_and_blocks(self):
         import unittest.mock as mk

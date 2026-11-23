@@ -40,17 +40,16 @@ DEFAULT_MODE = "warn"
 MODES = ("warn", "enforce")
 
 _SLUG = r'(?:([\w.-]+/[\w.-]+))?'
+# ONE character class between `of` and the ref: `[ \t]*:?\**[ \t]*` backtracked
+# quadratically on a long `Part of` + spaces line (#1396 review, 32k = 71 s).
 _PART_OF_RE = re.compile(
-    _PREFIX + r'Part[ \t]+of\**[ \t]*:?\**[ \t]*\[?' + _SLUG + r'#(\d+)(?!\d)',
-    re.IGNORECASE)
+    _PREFIX + r'Part[ \t]+of[ \t*:]*\[?' + _SLUG + r'#(\d+)(?!\d)', re.IGNORECASE)
 _EPIC_RE = re.compile(
     _PREFIX + r'Epic\**[ \t]*:\**[ \t]*\[?' + _SLUG + r'#(\d+)(?!\d)',
     re.IGNORECASE)
 _CHECKLIST_RE = re.compile(
-    r'^[ \t]*[-*][ \t]+\[[ xX]\][ \t]+\[?' + _SLUG + r'#(\d+)(?!\d)')
+    r'^[ \t]*(?:[-*+]|\d+[.)])[ \t]+\[[ xX]\][ \t]+\[?' + _SLUG + r'#(\d+)(?!\d)')
 _DECISION_RE = re.compile(_PREFIX + r'ROZHODNUT[ÉE]')
-_CHECKED_ANY_RE = re.compile(_PREFIX + r'Decisions-checked\**[ \t]*:',
-                             re.IGNORECASE)
 _CHECKED_RE = re.compile(
     _PREFIX + r'Decisions-checked\**[ \t]*:\**[ \t]*' + _SLUG
     + r'#(\d+)[ \t]*\([ \t]*(\d+)[ \t]+read[ \t]*\)', re.IGNORECASE)
@@ -63,23 +62,28 @@ def gate_mode(env=None):
     return val if val in MODES else DEFAULT_MODE
 
 
-def _refs(rx, text):
+def _refs(rxs, text):
+    """`[(slug|None, n)]` in LINE order; a slug with a `.`/`..` segment (a
+    path-traversal shape in the gh API path) is skipped."""
     out = []
     for line in _content_lines(text if isinstance(text, str) else ""):
-        m = rx.match(line)
-        if m:
-            out.append((m.group(1), int(m.group(2))))
+        for rx in rxs:
+            m = rx.match(line)
+            if m and not (m.group(1) and set(m.group(1).split("/")) & {".", ".."}):
+                out.append((m.group(1), int(m.group(2))))
+                break
     return out
 
 
 def parent_refs(body):
-    """`[(slug|None, n)]` from line-anchored `Part of #N` / `Epic: #N` lines."""
-    return _refs(_PART_OF_RE, body) + _refs(_EPIC_RE, body)
+    """`[(slug|None, n)]` from line-anchored `Part of #N` / `Epic: #N` lines,
+    in line order (the gate checks the FIRST)."""
+    return _refs((_PART_OF_RE, _EPIC_RE), body)
 
 
 def checklist_refs(body):
     """`[(slug|None, n)]` of `- [ ] #C` / `- [x] #C` items that START with a ref."""
-    return _refs(_CHECKLIST_RE, body)
+    return _refs((_CHECKLIST_RE,), body)
 
 
 def checked_markers(body):
@@ -94,11 +98,11 @@ def checked_markers(body):
 
 def is_decision_comment(body):
     """True iff `body` has a line-anchored ROZHODNUTÉ outside fences / quotes
-    and carries no `Decisions-checked:` line."""
+    and carries no well-formed `Decisions-checked: #E (<n> read)` line."""
     if not isinstance(body, str):
         return False
     lines = list(_content_lines(body))
-    if any(_CHECKED_ANY_RE.match(ln) for ln in lines):
+    if any(_CHECKED_RE.match(ln) for ln in lines):
         return False
     return any(_DECISION_RE.match(ln) for ln in lines)
 
@@ -149,26 +153,41 @@ def _ndjson(out):
 
 def search_children(slug, epic, cwd=None, runner=None):
     """`(items, err)`: issues of `slug` whose body names the number `epic`
-    (search API, re-checked line-anchored by the caller). An incomplete
-    search result is an error, never a silently short family."""
+    (search API, re-checked line-anchored by the caller). An incomplete result
+    or a `total_count` above what was returned (the API serves at most 1000
+    hits: a low or year-like epic number) is an ERROR, never a silently short
+    family. Residual: the search index lags, so a child filed seconds ago can
+    be missing until it is indexed."""
     rc, out, err = _gh(["gh", "api", "-X", "GET", "search/issues",
-                        "-f", "q=repo:%s %d in:body" % (slug, epic),
-                        "-f", "per_page=100", "--paginate",
-                        "-q", ".incomplete_results, .items[]"], cwd, runner)
+                        "-f", "q=repo:%s %d in:body is:issue" % (slug, epic),
+                        "-f", "per_page=100", "--paginate", "-q",
+                        ".incomplete_results, .total_count, .items[]"], cwd, runner)
     if rc != 0:
         return None, ghread._gate_unavailable(err, rc)
-    items = []
+    items, totals, incomplete = [], [], False
     for obj in _ndjson(out):
-        if obj is True:
-            return None, ("%s GitHub search returned incomplete results for "
-                          "%s #%d" % (ghread.GATE_UNAVAILABLE_PREFIX, slug, epic))
-        if isinstance(obj, dict):
+        if isinstance(obj, bool):
+            incomplete = incomplete or obj
+        elif isinstance(obj, int):
+            totals.append(obj)
+        elif isinstance(obj, dict):
             items.append(obj)
+    total = max(totals) if totals else None
+    if incomplete or total is None or total > len(items) or total >= 1000:
+        return None, ("%s GitHub search for %s #%d is not complete (incomplete=%s, "
+                      "total_count=%s, read %d)" % (ghread.GATE_UNAVAILABLE_PREFIX,
+                                                    slug, epic, incomplete, total,
+                                                    len(items)))
     return items, None
 
 
+def _later(a, b):
+    return b if (iso_epoch(b) or 0) > (iso_epoch(a) or 0) else a
+
+
 def read_comments(number, slug, cwd=None, runner=None):
-    """`(comments, err)`: `[{id, created_at, body, author, html_url}]`."""
+    """`(comments, err)`: `[{id, created_at, body, author, html_url}]`; an
+    EDITED comment is dated by its `updated_at` (an edited decision is new)."""
     rc, out, err = _gh(["gh", "api", "repos/%s/issues/%s/comments"
                         % (slug, number), "--paginate", "-q", ".[]"],
                        cwd, runner)
@@ -178,7 +197,8 @@ def read_comments(number, slug, cwd=None, runner=None):
     for obj in _ndjson(out):
         if isinstance(obj, dict) and isinstance(obj.get("body"), str):
             items.append({"id": obj.get("id"), "body": obj["body"],
-                          "created_at": obj.get("created_at"),
+                          "created_at": _later(obj.get("created_at"),
+                                               obj.get("updated_at")),
                           "author": (obj.get("user") or {}).get("login"),
                           "html_url": obj.get("html_url")})
     return items, None
