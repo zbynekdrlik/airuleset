@@ -381,9 +381,17 @@ def _check_tmux(account, spec, s, home):
     return True, "%d login pane(s), ~/.local/bin on the login PATH, claude runs" % len(panes)
 
 
+def _repo_less(spec):
+    """#1394: a declaration with neither ``repo`` nor ``github_app`` (bazos: the
+    owner's private data stays off GitHub) has no repo token or CI secrets."""
+    return "repo" not in spec and "github_app" not in spec
+
+
 def _check_secret_sync(spec):
     """The request path needs the App token AND a DECLARED allow-list — an
     explicit empty ``repo_secrets: []`` is a declared "no CI secrets"."""
+    if _repo_less(spec):
+        return True, "n/a (no repo declared: no CI secrets to sync, #1394)"
     if spec.get("github_app") is not True or "repo_secrets" not in spec:
         return False, ("no CI secret allow-list — declare github_app: True and "
                        "repo_secrets (the names, or [] for none) in "
@@ -689,7 +697,9 @@ def evaluate(account, spec, sections, *, gh_rc, no_transfer=False,
     home = _Home(_one(sections, "env", "home") or "/home/" + account)
     s = sections
     ruff_pin, pw_pins = declared_pins(spec)
-    if spec.get("github_app") is not True:
+    if _repo_less(spec):
+        gh = (True, "n/a (no repo declared: the account holds no repo token, #1394)")
+    elif spec.get("github_app") is not True:
         gh = (False, "no github_app declared — the account has no repo token "
                      "and cannot file airuleset tickets (#1190/#1199)")
     else:

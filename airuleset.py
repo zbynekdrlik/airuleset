@@ -2691,6 +2691,12 @@ def cmd_status(args):
             print("\n" + _bd_row)
     except Exception as e:
         print(f"\nbashrc-drift: error ({e})", file=sys.stderr)
+    try:   # #1394: a built-in plugin switch that differs from the account's declaration
+        from cli_builtin_plugins import status_row as _bp_row
+        if _bp := _bp_row():
+            print("\n" + _bp)
+    except Exception as e:
+        print(f"\nbuiltin-plugins: error ({e})", file=sys.stderr)
 
     # --- gh rate budget (#1040): the SAME supervisor-facing, report-only surface
     # — the last CACHED `gh api rate_limit` reading (never a fresh gh call from a
