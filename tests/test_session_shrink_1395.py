@@ -45,6 +45,8 @@ if mode == "fail":
     sys.exit(3)
 if mode == "noop":
     sys.exit(0)
+if mode == "childtemp":
+    open(path + ".compact.tmp.child01", "w").write("x\n")
 with open(path) as fh:
     lines = fh.readlines()
 last = max(i for i, ln in enumerate(lines) if '"compact_boundary"' in ln)
@@ -192,6 +194,42 @@ class Native(_Box):
         self.assertIn("no new compact boundary", str(cm.exception))
         self.assertEqual(len(self.backups()), 1)
 
+    def test_a_failed_shrink_marks_its_backup_failed(self):
+        p = self.write(_session(self.cwd))
+        with self.assertRaises(ss.Refused) as cm:
+            self.shrink(p, mode="noop")
+        names = self.backups()
+        self.assertEqual(len(names), 1)
+        self.assertTrue(names[0].endswith(".failed.gz"), names)
+        self.assertIn(names[0], str(cm.exception))
+
+    def test_a_failed_backup_blocks_the_next_run_and_is_never_pruned(self):
+        p = self.write(_session(self.cwd))
+        with self.assertRaises(ss.Refused):
+            self.shrink(p, mode="fail")
+        failed = self.backups()
+        self.assertTrue(failed[0].endswith(".failed.gz"))
+        os.remove(self.log)
+        with self.assertRaises(ss.Refused) as cm:
+            self.shrink(p)
+        self.assertIn("failed backup", str(cm.exception))
+        self.assertFalse(os.path.exists(self.log))
+        self.assertEqual(self.backups(), failed)
+
+    def test_a_temp_made_by_the_child_is_cleaned(self):
+        p = self.write(_session(self.cwd))
+        self.shrink(p, mode="childtemp")
+        self.assertFalse(os.path.exists(p + ".compact.tmp.child01"))
+
+    def test_claude_config_dir_is_kept(self):
+        p = self.write(_session(self.cwd))
+        env = dict(os.environ, FAKE_LOG=self.log, FAKE_TRANSCRIPT=p, FAKE_MODE="gc",
+                   CLAUDECODE="1", CLAUDE_CONFIG_DIR=os.path.join(self.home, ".claude"))
+        ss.shrink(p, home=self.home, claude_bin=self.bin, env=env, min_bytes=0)
+        self.assertEqual(json.load(open(self.log))["env"],
+                         {"CLAUDE_CODE_TRANSCRIPT_LOCAL_GC": "1",
+                          "CLAUDE_CONFIG_DIR": os.path.join(self.home, ".claude")})
+
     def test_an_old_boundary_alone_is_not_enough(self):
         p = self.write(_session(self.cwd))
         with self.assertRaises(ss.Refused):
@@ -248,6 +286,18 @@ class Cwd(_Box):
         self.shrink(p)
         call = json.load(open(self.log))
         self.assertEqual(os.path.realpath(call["cwd"]), os.path.realpath(self.cwd))
+
+    def test_a_cwd_over_200_characters_is_refused_honestly(self):
+        deep = os.path.join(self.root, *(["d" * 40] * 6))
+        os.makedirs(deep)
+        name = sanitize(deep)[:200] + "-abc123"
+        self.proj = os.path.join(self.home, ".claude", "projects", name)
+        os.makedirs(self.proj)
+        p = self.write(_session(deep))
+        with self.assertRaises(ss.Refused) as cm:
+            self.shrink(p)
+        self.assertIn("200 characters", str(cm.exception))
+        self.assertFalse(os.path.exists(self.log))
 
     def test_a_vanished_cwd_is_refused(self):
         gone = os.path.join(self.root, "gone")
@@ -341,10 +391,33 @@ class Cli(_Box):
         return subprocess.run([sys.executable, str(ROOT / "airuleset.py"), "session-shrink"]
                               + list(args), capture_output=True, text=True, env=env, timeout=120)
 
+    def big(self):
+        """A 6 MiB session: zero padding, then the real records."""
+        p = os.path.join(self.proj, SID + ".jsonl")
+        with open(p, "wb") as fh:
+            fh.write(b"\n" * (6 * ss.MIB))
+            fh.write(("\n".join(_session(self.cwd)) + "\n").encode())
+        os.utime(p, ns=(OLD_NS, OLD_NS))
+        return p
+
+    def test_the_default_floor_is_100_mib(self):
+        self.assertEqual(ss.DEFAULT_MIN_MIB, 100)
+        p = self.big()
+        r = self.run_cli(p, "--claude-bin", self.bin)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("untouched", r.stdout)
+        self.assertIn("104857600", r.stdout)
+
+    def test_min_mib_never_goes_below_5(self):
+        p = self.big()
+        r = self.run_cli(p, "--claude-bin", self.bin, "--min-mib", "4")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("5", r.stderr)
+
     def test_dry_run_is_the_default_and_runs_nothing(self):
-        p = self.write(_session(self.cwd))
+        p = self.big()
         before = open(p, "rb").read()
-        r = self.run_cli(p, "--claude-bin", self.bin, "--min-mib", "0")
+        r = self.run_cli(p, "--claude-bin", self.bin, "--min-mib", "5")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("would run", r.stdout)
         self.assertIn("/compact", r.stdout)

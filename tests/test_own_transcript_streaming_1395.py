@@ -50,6 +50,19 @@ ALLOWED = (
     "rg -n '.claude/projects/.*jsonl' hooks/",
     # main's #1224 bounded head/tail stays
     "head -n 5 %s" % TP, "tail -c 4000 %s" % TP,
+    # round 4: sort/uniq/cut/grep downstream of a byte bound stay fine
+    "cat %s | sort | uniq -c | cut -c1-80 | head -c 4000" % TP,
+    "python3 ~/devel/airuleset/cli_session_shrink.py %s" % TP,
+    # round 4: grep/rg value options never swallow the pattern (code searches)
+    "rg -n -g '*.py' '.claude/projects' gates/",
+    "rg -n -t py '.claude/projects' gates/", "rg -n -T md '.claude/projects' gates/",
+    "rg -j 2 -n '.claude/projects' gates/", "rg --max-depth 2 -n '.claude/projects' gates/",
+    "rg --type py --type-not md -n '.claude/projects' gates/",
+    "rg --glob '*.py' -n '.claude/projects' gates/",
+    G + " -rn --include='*.py' '.claude/projects' .",
+    G + " -rn --exclude-dir .git --exclude '*.md' '.claude/projects' gates",
+    # round 4: a session-id code search reads code, not the transcript
+    G + " -rn '%s.jsonl' gates/" % SID, "rg -n '%s.jsonl' tests/" % SID,
 )
 
 REFUSED = (
@@ -70,6 +83,23 @@ REFUSED = (
     "ls # it's fine\ncat %s" % TP,
     "wc -l `" + G + " a %s`" % TP,
     G + ' -oE "<command-name>/[a-z-]+</command-name>" %s | sort | uniq -c' % TP,
+    # round 4: a slurping stage anywhere voids the byte bound
+    "cat %s | python3 -c 'import sys; sys.stdin.read()' | head -c 100" % TP,
+    "cat %s | jq -s . | head -c 100" % TP, "cat %s | jq --slurp . | head -c 100" % TP,
+    "tac %s | head -c 100" % TP, "cat %s | tac | head -c 100" % TP,
+    # round 4: session-shrink only as the script itself
+    "python3 -c 'open(\"%s\").read()' airuleset.py session-shrink" % TP,
+    "python3 -m airuleset session-shrink %s" % TP,
+    "python3 -c 'import os' cli_session_shrink.py %s" % TP,
+    # round 4: a recursive search after cd into the projects tree
+    "cd " + PROJ + " && " + G + " -rn NEEDS .",
+    "cd " + PROJ + " && " + G + " -rn NEEDS",
+    "cd " + PROJ + "/x && rg NEEDS",
+    "cd " + PROJ + " && rg -n NEEDS sub/",
+    # round 4: a pattern FILE that is the transcript
+    G + " -f %s x.txt" % TP, G + " --file=%s x.txt" % TP, G + " -c -f %s x.txt" % TP,
+    # round 4: subshells and process substitution
+    "(cat %s)" % TP, "( cat %s )" % TP, "diff <(cat %s) /dev/null" % TP,
 )
 
 

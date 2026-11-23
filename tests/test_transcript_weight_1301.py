@@ -24,6 +24,10 @@ def _sparse(dirpath, size):
     return str(p)
 
 
+def _sparse_segs(dirpath, size):
+    return tw.shrink_segments({"transcript_path": _sparse(dirpath, size)})
+
+
 class RestartSegment(unittest.TestCase):
     def setUp(self):
         d = tempfile.TemporaryDirectory()
@@ -31,10 +35,10 @@ class RestartSegment(unittest.TestCase):
         self.dir = d.name
 
     def test_heavy_transcript_shows_shrink_with_size(self):
-        p = _sparse(self.dir, 97 * MIB + 5)
+        p = _sparse(self.dir, 137 * MIB + 5)
         segs = tw.shrink_segments({"transcript_path": p})
         self.assertEqual(len(segs), 1)
-        self.assertIn("shrink 97M", segs[0])
+        self.assertIn("shrink 137M", segs[0])
         self.assertNotIn("restart", segs[0])
         self.assertIn("\033[38;5;196m", segs[0])     # red: owner action
 
@@ -46,9 +50,10 @@ class RestartSegment(unittest.TestCase):
         p = _sparse(self.dir, tw.RESTART_TRANSCRIPT_BYTES - 1)
         self.assertEqual(tw.shrink_segments({"transcript_path": p}), [])
 
-    def test_threshold_sits_under_the_first_lockup(self):
-        self.assertLess(tw.RESTART_TRANSCRIPT_BYTES, 68 * 1000 * 1000)
-        self.assertGreaterEqual(tw.RESTART_TRANSCRIPT_BYTES, 32 * MIB)
+    def test_threshold_is_the_owners_100_mib(self):
+        # owner 23.11.2026 (#1395): shrink only from 100 MiB, the footer agrees
+        self.assertEqual(tw.RESTART_TRANSCRIPT_BYTES, 100 * MIB)
+        self.assertEqual(_sparse_segs(self.dir, 99 * MIB), [])
 
     def test_degraded_payloads_render_nothing(self):
         for payload in (None, "x", {}, {"transcript_path": ""},
@@ -58,7 +63,7 @@ class RestartSegment(unittest.TestCase):
             self.assertEqual(tw.shrink_segments(payload), [], payload)
 
     def test_never_reads_the_content(self):
-        p = _sparse(self.dir, 70 * MIB)
+        p = _sparse(self.dir, 120 * MIB)
         real_open = open
 
         def no_open(*a, **k):
@@ -73,8 +78,8 @@ class RestartSegment(unittest.TestCase):
 
     def test_deployed_shims_calling_the_old_name_still_render(self):
         # an installed shim keeps calling restart_segments until the next install
-        p = _sparse(self.dir, 70 * MIB)
-        self.assertIn("shrink 70M", tw.restart_segments({"transcript_path": p})[0])
+        p = _sparse(self.dir, 120 * MIB)
+        self.assertIn("shrink 120M", tw.restart_segments({"transcript_path": p})[0])
 
     def test_the_shim_calls_the_new_name(self):
         self.assertIn("transcript_weight.shrink_segments(d)", airuleset.CAVEMAN_SHIM_CONTENT)
@@ -96,16 +101,16 @@ class ShimRendersIt(unittest.TestCase):
 
     def test_heavy_session_footer_carries_shrink(self):
         with tempfile.TemporaryDirectory() as d:
-            p = _sparse(d, 98 * MIB)
+            p = _sparse(d, 128 * MIB)
             r = self._render({"workspace": {"current_dir": d},
                               "transcript_path": p})
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("shrink 98M", r.stdout)
+        self.assertIn("shrink 128M", r.stdout)
         self.assertNotIn("restart", r.stdout)
 
     def test_light_session_footer_has_no_shrink(self):
         with tempfile.TemporaryDirectory() as d:
-            p = _sparse(d, 3 * MIB)
+            p = _sparse(d, 99 * MIB)
             r = self._render({"workspace": {"current_dir": d},
                               "transcript_path": p})
         self.assertEqual(r.returncode, 0, r.stderr)
