@@ -5012,15 +5012,15 @@ def _handoff_prod_transfer_preflight(body, *, cwd=None, scan_text=None,
 
 
 def _handoff_epic_preflight(issue, repo, head_sha=None, cwd=None, body=None):
-    """#1161 part 2 (c) -- the epic-rehearsal hand-off gate for ALL three
-    composer paths (compose, --sign-only, --body-file). The logic lives in
-    gates.epic_rehearsal. Returns `(block_reason | None, receipt_fields)`. A
-    sub-ticket declaring `Epic: #N` needs an `Epic-rehearsal:` on #N newer than
-    its HEAD commit that lists it. Warn mode (the rollout default) prints and
-    allows. Enforce refuses. On any exception it fails open: (None, {})."""
+    """Epic hand-off gates, all 3 composer paths: #1161 gates.epic_rehearsal then
+    #1396 gates.decisions. `(block_reason | None, receipt_fields)`; warn mode
+    (default) prints + allows, enforce refuses, any exception fails open."""
     try:
+        import gates.decisions as _dc
         import gates.epic_rehearsal as _er
-        return _er.composer_check(issue, repo, head_sha, cwd=cwd, body=body)
+        blk, f = _er.composer_check(issue, repo, head_sha, cwd=cwd, body=body)
+        blk2, f2 = (None, {}) if blk else _dc.composer_check(issue, repo, cwd=cwd)
+        return blk or blk2, {**f, **f2}
     except Exception as e:  # noqa: BLE001 -- a gate crash must never block
         sys.stderr.write("handoff: epic-rehearsal pre-flight skipped (%s) -- "
                          "fail-open\n" % e)
@@ -9305,7 +9305,7 @@ from cli_box_queue import (  # noqa: E402, F401
     cmd_box_queue as cmd_box_queue,
     register_parser as _register_box_queue_parser,
 )
-
+from cli_decisions import cmd_decisions, register_parser as _register_decisions_parser  # noqa: E402, F401  #1396
 
 # --- #1184: per-project account policy (legacy inventory + onboarding gate) ---
 from cli_accounts import (  # noqa: E402, F401
@@ -9331,11 +9331,10 @@ from cli_question_block import (  # noqa: E402, F401
 
 
 def _register_leaf_parsers(sub):
-    """Leaf modules that own their argparse subparser (#1138, #1171, #1184) —
-    one call from main() keeps main() from growing per leaf."""
+    """Leaf modules owning their argparse subparser (#1138/#1171/#1184/#1396)."""
     for register in (_register_stream_priority_parser, _register_box_queue_parser,
                      _register_accounts_parser, _register_project_gh_token_parser,
-                     _register_question_block_parser, _register_venue_bypass_parser, _register_publish_app_parser):
+                     _register_question_block_parser, _register_venue_bypass_parser, _register_publish_app_parser, _register_decisions_parser):
         register(sub)
 
 # --- #1062 L1: managed LiteLLM model gateway CLI leaf ---
@@ -11123,6 +11122,7 @@ SUBCOMMANDS = {
     "project-gh-token": cmd_project_gh_token,
     "question-block": cmd_question_block,
     "venue-bypass-sync": cmd_venue_bypass_sync, "publish-app": cmd_publish_app,  # #1370
+    "decisions": cmd_decisions,  # #1396
 }
 # Backwards-compatible alias used by main() before SUBCOMMANDS existed.
 commands = SUBCOMMANDS
