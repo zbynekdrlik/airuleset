@@ -205,11 +205,20 @@ class TestMint(base._Base):
         self.assertIs((pgt.read_state(ACCT, self.state) or {}).get("ok"), False)
 
 
+NOT_LOGGED_IN = ("You are not logged into any GitHub hosts. To log in, run: "
+                 "gh auth login\n")
+
+
 def _probe(primary_rc=1, primary=(), issues=422, pulls=403,
-           gh="/home/bazos/.local/bin/gh"):
+           gh="/home/bazos/.local/bin/gh", primary_file_rc=1, auth=NOT_LOGGED_IN,
+           auth_rc=1):
+    """The repo-less verify probe's stdout: #1199's sections, plus (round 3)
+    whether ~/.config/gh-app-tokens/primary exists and `gh auth status`."""
     return ("%s\n@@primary\n%s@@rc %d\n@@issues\ngh: probe (HTTP %s)\n@@rc 1\n"
-            "@@pulls\ngh: probe (HTTP %s)\n@@rc 1\n"
-            % (gh, "".join(r + "\n" for r in primary), primary_rc, issues, pulls))
+            "@@pulls\ngh: probe (HTTP %s)\n@@rc 1\n@@primaryfile\n@@rc %d\n"
+            "@@auth\n%s@@rc %d\n"
+            % (gh, "".join(r + "\n" for r in primary), primary_rc, issues, pulls,
+               primary_file_rc, auth, auth_rc))
 
 
 class TestVerify(unittest.TestCase):
@@ -239,6 +248,103 @@ class TestVerify(unittest.TestCase):
     def test_gh_off_the_chain_or_a_failed_probe_fails(self):
         self.assertEqual(self.run_verify(_probe(gh="/usr/bin/gh"))[0], 1)
         self.assertEqual(self.run_verify(_probe(), rc=255)[0], 1)
+
+    # round 3: "no repo token" is proven positively, never read from a failure
+    def test_a_primary_token_file_fails(self):
+        got, text = self.run_verify(_probe(primary_file_rc=0))
+        self.assertEqual(got, 1, text)
+        self.assertIn("primary", text)
+
+    def test_a_stored_gh_login_fails(self):
+        logged = "github.com\n  ✓ Logged in to github.com account someone (keyring)\n"
+        got, text = self.run_verify(_probe(auth=logged, auth_rc=0))
+        self.assertEqual(got, 1, text)
+        self.assertIn("gh auth status", text)
+
+    def test_missing_proof_sections_fail(self):
+        # the #1199 probe alone (no primaryfile / auth sections) proves nothing
+        stdout = _probe().split("@@primaryfile")[0]
+        self.assertEqual(self.run_verify(stdout)[0], 1)
+        got = self.run_verify(_probe(auth="", auth_rc=1))[0]   # rc 1 but no message
+        self.assertEqual(got, 1)
+
+    def test_the_probe_checks_the_file_and_the_stored_login(self):
+        calls = []
+
+        def run(argv, **kw):
+            calls.append(argv)
+            return subprocess.CompletedProcess(argv, 0, _probe(), "")
+        with _live(), redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            pgt.verify_account(ACCT, run=run)
+        probe = calls[0][-1]
+        self.assertIn(".config/gh-app-tokens/primary", probe)
+        self.assertIn("gh auth status", probe)
+        self.assertIn("-u GH_TOKEN", probe)
+
+
+class TestRound3(base._Base):
+
+    def mint_bazos(self, gh=None, **kw):
+        with _live():
+            return self.mint(ACCT, gh=gh or FakeGitHub(air="ok"), **kw)
+
+    def test_a_failed_mint_keeps_the_last_good_expiry(self):
+        self.assertEqual(self.mint_bazos()[0], 0)
+        self.assertEqual(self.mint_bazos(gh=FakeGitHub(air=500))[0], 1)
+        st = pgt.read_state(ACCT, self.state)
+        self.assertIs(st["ok"], False)
+        self.assertEqual(st.get("last_ok_expires_at"), base.AIR_EXPIRES)
+        self.assertEqual(self.mint_bazos(gh=FakeGitHub(air=500))[0], 1)
+        self.assertEqual(pgt.read_state(ACCT, self.state).get("last_ok_expires_at"),
+                         base.AIR_EXPIRES)
+
+    def test_peer_repos_never_mint_airuleset_twice(self):
+        with mock.patch("cli_peer_channel.peer_repos", return_value=[pgt.AIRULESET_REPO]):
+            rc, out, err, gh, ssh = self.mint_bazos()
+        self.assertEqual(rc, 0, err)
+        posts = [r for r in gh.requests if r["method"] == "POST"]
+        self.assertEqual(len(posts), 1)
+        self.assertEqual(len(ssh.calls), 1)
+
+    def test_a_wider_airuleset_token_is_refused(self):
+        rc, out, err, gh, ssh = self.mint_bazos(gh=FakeGitHub(air="wide"))
+        self.assertEqual(rc, 1)
+        self.assertIn("refusing", err)
+        self.assertFalse((self.home / ".config" / "gh-app-tokens" / AIR_FILE).exists())
+        self.assertIs(pgt.read_state(ACCT, self.state)["ok"], False)
+
+    def test_accounts_status_says_na_for_the_repo_token(self):
+        self.assertEqual(self.mint_bazos()[0], 0)
+        self.assertEqual(pgt.status_line(ACCT, now=base.NOW, directory=self.state),
+                         "gh-token: n/a (repo_less, #1394)")
+        self.assertIn("airuleset issues: OK", pgt.airuleset_status_line(
+            ACCT, now=base.NOW, directory=self.state))
+
+    def test_mint_all_skips_it_pending_then_mints_it_live(self):
+        def cmd():
+            out = io.StringIO()
+            with mock.patch.object(pgt, "mint_account", return_value=0) as m, \
+                    mock.patch.object(ci_sync, "run_after_mint", return_value=0), \
+                    redirect_stdout(out):
+                rc = pgt.cmd_project_gh_token(mock.Mock(
+                    action="mint", account=None, all=True, dry_run=False, key=None))
+            return rc, [c.args[0] for c in m.call_args_list], out.getvalue()
+        rc, minted, out = cmd()
+        self.assertEqual(rc, 0)
+        self.assertNotIn(ACCT, minted)
+        self.assertIn("project-gh-token: %s: SKIPPED — pending" % ACCT, out)
+        with _live():
+            rc, minted, out = cmd()
+        self.assertEqual(rc, 0)
+        self.assertIn(ACCT, minted)
+        self.assertNotIn("%s: SKIPPED" % ACCT, out)
+
+    def test_the_bootstrap_next_step_names_the_repo_less_gate(self):
+        line = pgt.render_next_steps(bootstrap.account_spec(ACCT))
+        self.assertIn("project-gh-token verify $ACCOUNT", line)
+        self.assertIn("repo-less", line)
+        self.assertNotIn("its repo token", line)
+        self.assertIn("its repo token", pgt.render_next_steps(bootstrap.account_spec("fohmixer")))
 
 
 class TestSecretSyncSkipsRepoLess(unittest.TestCase):
