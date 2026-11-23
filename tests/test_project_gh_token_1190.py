@@ -402,7 +402,7 @@ class TestMintAccount(_Base):
 
     def test_mint_all_covers_exactly_the_github_app_accounts(self):
         # #1267: wall-bridge/songplayer are live since 29.10.; #1390 wall-songs
-        # since 21.11.
+        # since 21.11.; #1394 bazos (repo-less) since 23.11.
         self.assertEqual(pgt.github_app_accounts(),
                          ["bazos", "companion-updater", "dasio", "dcontroller", "devbridge", "dstack", "dsync", "fleet-backup", "fohmixer", "iemmixer", "intercom", "mikrotik-pz", "nlch-finances", "obs", "restreamer", "shading", "songplayer", "tuke", "varos", "vstack",
                           "wall-bridge", "wall-songs"])
@@ -411,20 +411,20 @@ class TestMintAccount(_Base):
                                                     all=True, dry_run=False,
                                                     key=None))
         self.assertEqual(rc, 0)
-        self.assertEqual([c.args[0] for c in m.call_args_list],   # bazos: pending (#1394)
-                         ["companion-updater", "dasio", "dcontroller", "devbridge", "dstack", "dsync", "fleet-backup", "fohmixer", "iemmixer", "intercom", "mikrotik-pz", "nlch-finances", "obs", "restreamer", "shading", "songplayer", "tuke", "varos", "vstack",
+        self.assertEqual([c.args[0] for c in m.call_args_list],
+                         ["bazos", "companion-updater", "dasio", "dcontroller", "devbridge", "dstack", "dsync", "fleet-backup", "fohmixer", "iemmixer", "intercom", "mikrotik-pz", "nlch-finances", "obs", "restreamer", "shading", "songplayer", "tuke", "varos", "vstack",
                           "wall-bridge", "wall-songs"])
 
     def test_mint_all_fails_when_any_account_fails(self):
         with mock.patch.dict(bootstrap.SERVICE_ACCOUNTS["camera-box"],
                              {"github_app": True}), \
                 mock.patch.object(pgt, "mint_account",
-                                  side_effect=[1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]) as m:
+                                  side_effect=[1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]) as m:
             rc = pgt.cmd_project_gh_token(mock.Mock(action="mint", account=None,
                                                     all=True, dry_run=False,
                                                     key=None))
         self.assertEqual(rc, 1)
-        self.assertEqual(m.call_count, 22)   # one failure never skips the rest
+        self.assertEqual(m.call_count, 23)   # one failure never skips the rest
 
     def test_cli_usage(self):
         for ns in (mock.Mock(action="mint", account=None, all=False),
