@@ -24,11 +24,19 @@ So this command does not rewrite anything itself. It is a thin wrapper:
    ``*.jsonl``/``*.jsonl.gz``, so no session list or sweep takes it for a
    session. The backup is written to a random dot-temp opened 0600, fsynced,
    renamed, and given the original's ns atime/mtime.
-3. Run ``claude --resume <id> -p /compact`` with the GC env, in the session's
-   recorded cwd. The /compact is one model call over the current context.
-4. Verify: a compact boundary is present, and every session-metadata type the
-   file had (except Claude Code's reclaimable request/file-history rows) is
-   still present. On any failure the backup stays, and the message names it.
+3. Check liveness AGAIN (the backup took time), then run an ISOLATED
+   ``claude --resume <id> -p /compact``: hooks disabled
+   (``--settings {"disableAllHooks":true}``), ``--strict-mcp-config`` with an
+   empty MCP config, ``--tools ""``, ``--model claude-sonnet-5-5``, and an env
+   with every ``CLAUDE*`` variable dropped (only the GC switch added). It runs
+   in the recorded cwd whose sanitized form IS the ``projects/<dir>`` name, so
+   it resumes this session and no other. The /compact is one model call.
+4. Verify: a compact boundary with a uuid the file did not have before, a
+   smaller file, and every session-metadata type the file had (except Claude
+   Code's reclaimable request/file-history rows). On any failure the backup
+   stays, and the message names it.
+5. Clean this session's leftover native temp (``<file>.compact.tmp.*``) and
+   keep only its newest backup.
 
 Dry-run is the default. ``--apply`` runs it. Only the caller's OWN sessions:
 ``--account X`` refuses unless it runs as X. Streaming reads only (the #1224
@@ -41,6 +49,7 @@ import json
 import os
 import re
 import secrets
+import shlex
 import subprocess
 import sys
 import time
@@ -51,6 +60,9 @@ DEFAULT_OVER_MIB = 64
 DEFAULT_MIN_IDLE_MIN = 10
 NATIVE_TIMEOUT_S = 1800
 GC_ENV = "CLAUDE_CODE_TRANSCRIPT_LOCAL_GC"
+COMPACT_MODEL = "claude-sonnet-5-5"
+ISOLATION_ARGS = ["--settings", '{"disableAllHooks":true}', "--strict-mcp-config",
+                  "--mcp-config", '{"mcpServers":{}}', "--tools", "", "--model", COMPACT_MODEL]
 COMPACT_NEEDLE = b'"compact_boundary"'
 # rows Claude Code's own compactor legitimately reclaims (probe 23.11.2026: the
 # api-request* replay rows went, every other metadata type stayed)
@@ -71,34 +83,43 @@ def session_id(path):
 
 
 def census(path):
-    """``(metadata types present, has a compact boundary)``, streamed."""
-    types, boundary = set(), False
+    """``(metadata types present, compact boundary uuids)``, streamed."""
+    types, boundaries = set(), set()
     with open(path, "rb") as fh:
         for raw in fh:
             m = _META_HEAD.match(raw)
             if m:
                 types.add(m.group(1).decode())
-            elif not boundary and COMPACT_NEEDLE in raw:
+            elif COMPACT_NEEDLE in raw:
                 try:
                     rec = json.loads(raw)
                 except ValueError:
                     print("session-shrink: %s: a torn boundary-like line skipped" % path,
                           file=sys.stderr)
                     continue
-                boundary = rec.get("subtype") == "compact_boundary"
-    return types, boundary
+                if rec.get("subtype") == "compact_boundary":
+                    boundaries.add(rec.get("uuid"))
+    return types, boundaries
+
+
+def sanitize(path):
+    """Claude Code's ``projects/<dir>`` name for a cwd."""
+    return re.sub(r"[^A-Za-z0-9]", "-", path)
 
 
 def recorded_cwd(path, tail=4 * MIB):
-    """The newest ``cwd`` a record of this session carries (read from the tail)."""
+    """The newest recorded ``cwd`` whose sanitized form names this file's
+    projects dir (read from the tail), or None."""
+    want = os.path.basename(os.path.dirname(os.path.abspath(path)))
     size = os.path.getsize(path)
     with open(path, "rb") as fh:
         fh.seek(max(0, size - tail))
         chunk = fh.read()
-    found = _CWD.findall(chunk)
-    if not found:
-        return None
-    return json.loads(b'"' + found[-1] + b'"')
+    for raw in reversed(_CWD.findall(chunk)):
+        cwd = json.loads(b'"' + raw + b'"')
+        if sanitize(cwd) == want:
+            return cwd
+    return None
 
 
 def _pid_alive(pid, kill=os.kill):
@@ -197,7 +218,11 @@ def check(path, home=None, euid=None, min_idle_min=DEFAULT_MIN_IDLE_MIN, proc_di
     if why:
         raise Refused("%s: in live use: %s" % (path, why))
     cwd = recorded_cwd(path)
-    if not cwd or not os.path.isdir(cwd):
+    if not cwd:
+        raise Refused("%s: no recorded cwd matches its projects dir %s; claude --resume "
+                      "would open another project" % (path, os.path.basename(
+                          os.path.dirname(os.path.abspath(path)))))
+    if not os.path.isdir(cwd):
         raise Refused("%s: its recorded cwd %r is gone; claude --resume needs it" % (path, cwd))
     return st, cwd
 
@@ -236,12 +261,14 @@ def backup(path, st, now=None):
 
 
 def native_compact(path, cwd, claude_bin="claude", env=None, timeout=NATIVE_TIMEOUT_S):
-    """``claude --resume <id> -p /compact`` with the GC env, in ``cwd``."""
-    e = dict(os.environ if env is None else env)
+    """An isolated ``claude --resume <id> -p /compact`` with the GC env, in ``cwd``:
+    no hooks, no MCP, no tools, a fixed model, no ``CLAUDE*`` env of the caller."""
+    e = {k: v for k, v in (os.environ if env is None else env).items()
+         if not k.startswith("CLAUDE")}
     e[GC_ENV] = "1"
+    argv = [claude_bin, "--resume", session_id(path), "-p", "/compact"] + ISOLATION_ARGS
     try:
-        r = subprocess.run([claude_bin, "--resume", session_id(path), "-p", "/compact"],
-                           cwd=cwd, env=e, stdin=subprocess.DEVNULL, capture_output=True,
+        r = subprocess.run(argv, cwd=cwd, env=e, stdin=subprocess.DEVNULL, capture_output=True,
                            text=True, timeout=timeout)
     except (OSError, subprocess.TimeoutExpired) as exc:
         return None, str(exc)
@@ -257,21 +284,55 @@ def shrink(path, home=None, claude_bin="claude", env=None, euid=None,
     if st.st_size < min_bytes:
         res["reason"] = "under %d bytes: Claude Code's compactor skips it" % min_bytes
         return res
-    before_types, _ = census(path)
+    before_types, before_bounds = census(path)
     res["backup"] = backup(path, st)
+    why = live_reason(path, home=home, proc_dir=proc_dir, min_idle_min=0)
+    if why:
+        raise Refused("%s: in live use after the backup: %s; nothing ran, backup at %s"
+                      % (path, why, res["backup"]))
     rc, out = native_compact(path, cwd, claude_bin=claude_bin, env=env)
+    clean_native_temps(path)
     if rc != 0:
         raise Refused("%s: claude --resume -p /compact failed (%s): %s; backup kept at %s"
                       % (path, "exit %s" % rc if rc is not None else "did not run", out,
                          res["backup"]))
-    after_types, boundary = census(path)
+    after_types, after_bounds = census(path)
+    after = os.path.getsize(path)
     lost = sorted((before_types - RECLAIMABLE_META) - after_types)
-    if lost or not boundary:
+    if not (after_bounds - before_bounds):
+        problem = "no new compact boundary (the /compact did not run)"
+    elif after >= st.st_size:
+        problem = "the file did not shrink (%d -> %d bytes)" % (st.st_size, after)
+    elif lost:
+        problem = "kept-forever types are gone: %s" % ", ".join(lost)
+    else:
+        problem = ""
+    if problem:
         raise Refused("%s: after the native compactor %s; backup kept at %s"
-                      % (path, "kept-forever types are gone: %s" % ", ".join(lost)
-                         if lost else "no compact boundary is left", res["backup"]))
-    res.update(after=os.path.getsize(path), action="shrunk")
+                      % (path, problem, res["backup"]))
+    prune_backups(path, keep=res["backup"])
+    res.update(after=after, action="shrunk")
     return res
+
+
+def clean_native_temps(path):
+    """Remove this session's leftover ``<file>.compact.tmp.*`` (a native rewrite
+    that died). Only ever this file's own temps, after the run."""
+    d, base = os.path.split(path)
+    for n in os.listdir(d or "."):
+        if n.startswith(base + ".compact.tmp."):
+            os.unlink(os.path.join(d, n))
+            print("session-shrink: removed leftover %s" % n, file=sys.stderr)
+
+
+def prune_backups(path, keep):
+    """Keep only the newest backup of this session (``keep``)."""
+    d, base = os.path.split(path)
+    for n in os.listdir(d or "."):
+        full = os.path.join(d, n)
+        if n.startswith(base + ".shrink-") and n.endswith(".gz") and full != keep:
+            os.unlink(full)
+            print("session-shrink: removed older backup %s" % n, file=sys.stderr)
 
 
 def candidates(home, over_bytes):
@@ -339,9 +400,10 @@ def _run(a):
                     print("%s: untouched (%d bytes, under the %d-byte floor)"
                           % (path, st.st_size, min_bytes))
                 else:
-                    print("%s: would run (cd %s && %s=1 %s --resume %s -p /compact): "
+                    print("%s: would run (cd %s && %s=1 %s --resume %s -p /compact %s): "
                           "%d bytes, backup %s.shrink-<ts>.gz first; --apply to run"
-                          % (path, cwd, GC_ENV, a.claude_bin, session_id(path), st.st_size,
+                          % (path, cwd, GC_ENV, a.claude_bin, session_id(path),
+                             " ".join(shlex.quote(x) for x in ISOLATION_ARGS), st.st_size,
                              path))
         except Refused as e:
             print("session-shrink: REFUSED %s" % e, file=sys.stderr)
