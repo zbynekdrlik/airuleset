@@ -168,6 +168,8 @@ def _stages(text):
             cut(True)
             if text.startswith("|&", i):
                 i += 1
+        elif c == "&" and ((cur and cur[-1].endswith((">", "<"))) or text.startswith("&>", i)):
+            cur.append(c)                   # 2>&1, >&2, &>file: a redirection
         elif c in ";&\n":
             cut(False)
         else:
