@@ -516,8 +516,8 @@ def sync_all(*, run=None, now=None, dry_run=False, clock=time.monotonic,
     deadline = (clock() if started is None else started) + SYNC_BUDGET_S
     rc = 0
     for account in pgt.github_app_accounts():
-        if bootstrap.is_pending(account):
-            continue
+        if bootstrap.is_pending(account) or bootstrap.account_spec(account).get("repo_less") is True:
+            continue    # #1394: a repo-less account has no repo to set CI secrets on
         rc |= sync_account(account, run=run, now=now, dry_run=dry_run,
                            deadline=deadline, clock=clock)
     return rc

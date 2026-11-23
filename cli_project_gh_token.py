@@ -374,11 +374,12 @@ def status_line(account, now=None, directory=None):
     st = read_state(account, directory)
     if st is None:
         return "gh-token: never minted (controller state)"
+    if st.get("repo_less") is True:   # #1394: its issues tokens are the next lines
+        return "gh-token: n/a (repo_less, #1394)"
     if st.get("ok"):
         exp = st.get("expires_at", "?")
         left = _minutes_left(exp, now)
-        scope = " (also %s)" % ", ".join((st.get("scope") or [])[1:]) if st.get(
-            "scope", [])[1:] else ""
+        scope = " (also %s)" % ", ".join((st.get("scope") or [])[1:]) if st.get("scope", [])[1:] else ""
         skipped = st.get("extra_skipped") or []
         return "gh-token: expires %s%s%s%s" % (
             exp, left, scope, " SKIPPED %s" % ", ".join(skipped) if skipped else "")
@@ -532,10 +533,12 @@ def mint_account(account, *, key_path=None, dry_run=False, now=None, run=None,
               file=sys.stderr)
         return 1
     spec = bootstrap.account_spec(account)
+    if spec.get("repo_less") is True:   # #1394: the issues-only tokens, never a repo token
+        from cli_project_gh_token_repoless import mint as mint_repo_less
+        return mint_repo_less(account, key_path=key_path, dry_run=dry_run, now=now, run=run, urlopen=urlopen, directory=directory)
     if spec.get("github_app") is not True or not spec.get("repo"):
-        print("project-gh-token: %s does not declare github_app: True with a "
-              "repo (cli_account_bootstrap.SERVICE_ACCOUNTS)" % account,
-              file=sys.stderr)
+        print("project-gh-token: %s does not declare github_app: True with a repo "
+              "(cli_account_bootstrap.SERVICE_ACCOUNTS)" % account, file=sys.stderr)
         return 1
     repo = spec["repo"]
     try:
@@ -810,6 +813,8 @@ def verify_account(account, *, run=None):
     import cli_remote
     run = run or subprocess.run
     spec = bootstrap.account_spec(account) if account in bootstrap.SERVICE_ACCOUNTS else {}
+    if spec.get("repo_less") is True:   # #1394: its own probe proves there is no repo token
+        return __import__("cli_project_gh_token_repoless").verify(account, run=run)
     repo = spec.get("repo")
     try:
         token_file_name(repo)
@@ -820,8 +825,7 @@ def verify_account(account, *, run=None):
         return 1
     prefix, _why = cli_remote._ssh_prefix(remote, True)
     if prefix is None:
-        print("project-gh-token verify: %s has no pinned ssh identity" % account,
-              file=sys.stderr)
+        print("project-gh-token verify: %s has no pinned ssh identity" % account, file=sys.stderr)
         return 1
     try:
         r = run(prefix + ["%s@%s" % (remote["user"], remote["host"]),
@@ -852,17 +856,16 @@ def verify_account(account, *, run=None):
 
 
 def render_next_steps(spec):
-    """The bootstrap's extra printed next step for a ``github_app`` account
-    (``''`` for any other): the #1190/#1199 go-live gate is REQUIRED, plus
-    (#1199) how the project session requests a CI secret sync."""
+    """The bootstrap's printed next step for a ``github_app`` account (``''`` otherwise): the
+    #1190/#1199 go-live gate is REQUIRED, plus (#1199) how to request a CI secret sync."""
     import cli_project_ci_sync as ci_sync
     if spec.get("github_app") is not True:
         return ""
     return ('echo "  4. REQUIRED go-live gate (#1190/#1199), on the controller: '
             'python3 ~/devel/airuleset/airuleset.py project-gh-token mint $ACCOUNT '
             '&& python3 ~/devel/airuleset/airuleset.py project-gh-token verify '
-            '$ACCOUNT — the account is NOT live until verify prints OK (its repo '
-            'token + airuleset issues write)"\n'
+            '$ACCOUNT — the account is NOT live until verify prints OK (%s)"\n'
+            % ("repo-less: no repo token, airuleset issues write" if spec.get("repo_less") is True else "its repo token + airuleset issues write")
             + ci_sync.render_next_steps(spec))
 
 

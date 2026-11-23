@@ -653,7 +653,9 @@ def _reconcile_settings_file():
         settings = json.loads(raw) if raw.strip() else {}
     except json.JSONDecodeError:
         return "invalid"
-    new_str = json.dumps(reconcile_managed_plugins(settings), indent=2) + "\n"
+    import cli_builtin_plugins   # #1394: the account's declared built-in plugin switches
+    new_str = json.dumps(cli_builtin_plugins.apply_for_this_account(
+        reconcile_managed_plugins(settings)), indent=2) + "\n"
     if new_str.strip() != raw.strip():
         if airuleset.SETTINGS_JSON.exists():
             shutil.copy2(airuleset.SETTINGS_JSON, airuleset.SETTINGS_JSON.with_suffix(".json.bak"))
