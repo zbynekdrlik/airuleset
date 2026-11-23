@@ -537,5 +537,19 @@
     "onboarded": "2026-11-21",
     "account": "wall-songs",
     "stack": "house"
+  },
+  {
+    "name": "bazos",
+    "host": "dev1",
+    "path": "/home/bazos/devel/bazos",
+    "branch_model": "2-branch",
+    "default_branch": "main",
+    "work_branch": "dev",
+    "overrides": [
+      "no-git"
+    ],
+    "onboarded": "2026-11-23",
+    "account": "bazos",
+    "stack": "python-tooling"
   }
 ]
