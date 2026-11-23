@@ -404,14 +404,14 @@ class TestMintAccount(_Base):
         # #1267: wall-bridge/songplayer are live since 29.10.; #1390 wall-songs
         # since 21.11.
         self.assertEqual(pgt.github_app_accounts(),
-                         ["companion-updater", "dasio", "dcontroller", "devbridge", "dstack", "dsync", "fleet-backup", "fohmixer", "iemmixer", "intercom", "mikrotik-pz", "nlch-finances", "obs", "restreamer", "shading", "songplayer", "tuke", "varos", "vstack",
+                         ["bazos", "companion-updater", "dasio", "dcontroller", "devbridge", "dstack", "dsync", "fleet-backup", "fohmixer", "iemmixer", "intercom", "mikrotik-pz", "nlch-finances", "obs", "restreamer", "shading", "songplayer", "tuke", "varos", "vstack",
                           "wall-bridge", "wall-songs"])
         with mock.patch.object(pgt, "mint_account", return_value=0) as m:
             rc = pgt.cmd_project_gh_token(mock.Mock(action="mint", account=None,
                                                     all=True, dry_run=False,
                                                     key=None))
         self.assertEqual(rc, 0)
-        self.assertEqual([c.args[0] for c in m.call_args_list],
+        self.assertEqual([c.args[0] for c in m.call_args_list],   # bazos: pending (#1394)
                          ["companion-updater", "dasio", "dcontroller", "devbridge", "dstack", "dsync", "fleet-backup", "fohmixer", "iemmixer", "intercom", "mikrotik-pz", "nlch-finances", "obs", "restreamer", "shading", "songplayer", "tuke", "varos", "vstack",
                           "wall-bridge", "wall-songs"])
 

@@ -384,6 +384,8 @@ def _check_tmux(account, spec, s, home):
 def _check_secret_sync(spec):
     """The request path needs the App token AND a DECLARED allow-list — an
     explicit empty ``repo_secrets: []`` is a declared "no CI secrets"."""
+    if spec.get("repo_less") is True:
+        return True, "n/a (repo_less: no repo to set CI secrets on, #1394)"
     if spec.get("github_app") is not True or "repo_secrets" not in spec:
         return False, ("no CI secret allow-list — declare github_app: True and "
                        "repo_secrets (the names, or [] for none) in "
