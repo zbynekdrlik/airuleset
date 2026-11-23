@@ -14,21 +14,28 @@ and tool-results paths, which are ordinary files.
 
 Per command segment (``&&``/``||``/``;``/``|``/``&`` and every ``$(…)`` or
 backtick body):
-* a content READER (``READERS``) that names the transcript, a ``*.jsonl``
-  under ``.claude/projects``, or reads ``.claude/projects`` recursively
-  (``-r``, ``rg``) is refused; a command that only NAMES such a path
-  (``gh --body``, ``git commit -m``, ``echo``) is text;
+* a command whose arguments name the transcript, a ``*.jsonl`` under
+  ``.claude/projects`` (or a ``*.jsonl.*`` backup there), or that reads
+  ``.claude/projects`` recursively (``-r``, ``rg``) is judged below; a TEXT head
+  that only NAMES such a path (``gh --body``, ``git commit -m``, ``echo``) is
+  never a read (live false positive, 2026-10-13);
 * a heredoc body is data, unless an interpreter consumes it
   (``python3 - <<EOF``) and its program names a transcript;
 * metadata (``ALLOWED_HEADS``) passes, and ``head``/``tail`` pass with ONE
   numeric ``-n`` ≤ ``MAX_LINES`` or ``-c`` ≤ ``MAX_BYTES`` (never ``+N``/follow);
-* #1395: a STREAMING reader passes when its output is bounded (``_streams``):
-  ``grep``/``rg`` with a counting/matching flag (``-c -l -L -q -o -m``), ``awk``,
-  ``sed -n <line address>p``, ``jq --stream``, ``airuleset.py session-shrink``,
-  and ``grep``/``cut``/``sort``/``uniq``/``zcat`` whose output is piped onward. A
-  1 GB transcript streams through ``grep -c`` in ~1 s at a few MB RSS; what froze
-  dev1 was a whole-file LOAD (``python3 -`` at 2.0 GB). Segments are split
-  quote-aware, so a ``;`` inside ``python3 -c '…'`` stays one command.
+* #1395, DENY BY DEFAULT per pipeline: every stage whose arguments name a
+  transcript (any head but the text/metadata ones) must be either
+  COUNT/LOCATE-only (``grep``/``rg -c -l -L -q``, ``wc``, a bounded head/tail,
+  ``airuleset.py session-shrink``, ``ls``/``stat``/``du``), or a STREAMING
+  reader (grep family, ``awk``, ``sed`` without ``-i``, ``cut``, ``zcat``,
+  ``jq --stream``) followed by a LAST stage that bounds the output (head/tail
+  -n <= 50 or -c <= 64 KiB, ``wc``, ``grep -c/-q/-l``). ``sort``/``uniq``/``cat``
+  and the interpreters are never the first reader. A 1 GB transcript streams
+  through ``grep -c`` in ~1 s at a few MB RSS; what froze dev1 was a whole-file
+  LOAD (``python3 -`` at 2.0 GB), and an unbounded stream (``awk '{print}'``,
+  ``| cat``) dumps the same bytes into the session. Stages split quote-aware:
+  ``'…'``, ``"…"``, ``$'…'``, ``$(…)``, backticks, and a ``#`` comment runs to its
+  newline, so an apostrophe in a comment never hides the next command.
 An inline ``# airuleset:own-transcript-ok <reason>`` marker passes a deliberate
 repair. A resource guard against an accident, not a boundary.
 """
@@ -42,29 +49,22 @@ from gates import allow, command_of, emit_block, read_payload
 ALLOWED_HEADS = frozenset({"ls", "stat", "wc", "du", "test", "[", "file",
                            "readlink", "realpath"})
 BOUNDED_HEADS = frozenset({"head", "tail"})    # only with a small numeric -n/-c
-# Only these READ a file's content. Anything else that merely NAMES a path
-# (gh --body, git commit -m, echo, printf) is text, never a read (live false
-# positive on this ticket's own evidence comment, 2026-10-13).
-READERS = frozenset({"cat", "tac", "nl", "grep", "egrep", "fgrep", "zgrep", "rg",
-                     "ag", "ack", "jq", "sed", "awk", "gawk", "mawk", "perl",
-                     "python", "python3", "node", "ruby", "less", "more", "cut",
-                     "sort", "uniq", "strings", "xxd", "od", "base64", "zcat",
-                     "gzip", "gunzip", "cp", "dd"}) | BOUNDED_HEADS
 # A heredoc body is data, except when one of these consumes it as a program.
 INTERPRETERS = frozenset({"python", "python3", "bash", "sh", "node", "perl", "ruby"})
 MAX_LINES = 50
 MAX_BYTES = 65536
 _WRAPPERS = frozenset({"env", "sudo", "command", "nice", "ionice", "timeout",
                        "nohup", "stdbuf", "time", "exec"})
-# #1395 streaming readers: output bounded by a flag, or piped onward
+# #1395 deny by default: heads that only NAME a path (text), never read it
+TEXT_HEADS = frozenset({"echo", "printf", "gh", "git", "true", "false", ":", "cd",
+                        "pushd", "popd", "export", "for", "case", "mkdir"})
 _GREPS = frozenset({"grep", "egrep", "fgrep", "zgrep", "rg"})
-_GREP_BOUND_SHORT = frozenset("clLqom")
-_GREP_BOUND_LONG = ("--count", "--files-with-matches", "--files-without-match", "--quiet",
-                    "--silent", "--only-matching", "--max-count")
-_PIPED_ONLY = frozenset({"cut", "sort", "uniq", "zcat", "gzip", "gunzip"})
-_AWKS = frozenset({"awk", "gawk", "mawk"})
-_SED_ADDRESS = re.compile(r"^\s*(\d+|\$)(\s*,\s*(\d+|\$|\+\d+))?\s*[pl]\s*(;\s*q\s*)?$")
-_SHELL_WORDS = frozenset({"do", "then", "else", "elif", "!", "{"})
+_GREP_COUNT_SHORT = frozenset("clLq")
+_GREP_COUNT_LONG = ("--count", "--files-with-matches", "--files-without-match", "--quiet",
+                    "--silent")
+_STREAMERS = frozenset({"awk", "gawk", "mawk", "sed", "cut", "zcat", "gzip", "gunzip",
+                        "jq"}) | _GREPS
+_SHELL_WORDS = frozenset({"do", "then", "else", "elif", "!", "{", "(", "if", "while", "until"})
 # a command substitution body is a command of its own (never split on a bare
 # paren: python -c 'open("x.jsonl")' must stay one command)
 _SUBST_RE = re.compile(r"\$\(([^()]*)\)|`([^`]*)`")
@@ -125,7 +125,9 @@ def _bounded(head, args):
 
 def _stages(text):
     """``[(segment, piped)]``: split on ``; & && || | |&`` and newlines OUTSIDE
-    quotes, ``$(…)`` and backticks; ``piped`` = its stdout feeds a ``|``."""
+    quotes (``'…'``, ``"…"``, ``$'…'``), ``$(…)`` and backticks; a ``#`` that
+    starts a word comments out the rest of its line. ``piped`` = its stdout
+    feeds a ``|``."""
     out, cur, i, n = [], [], 0, len(text)
     quote, depth = "", 0
 
@@ -139,8 +141,17 @@ def _stages(text):
             if c == "\\" and quote != "'" and i + 1 < n:
                 cur.append(text[i + 1])
                 i += 1
-            elif c == quote:
+            elif c == quote[-1]:
                 quote = ""
+        elif c == "#" and depth == 0 and (i == 0 or text[i - 1] in " \t\n;&|("):
+            while i < n and text[i] != "\n":
+                i += 1
+            continue
+        elif c == "$" and text.startswith("$'", i) and depth == 0:
+            quote = "$'"
+            cur.append("$'")
+            i += 2
+            continue
         elif depth:
             cur.append(c)
             if text.startswith("$(", i):
@@ -179,31 +190,21 @@ def _stages(text):
     return [(seg, piped) for seg, piped in out if seg.strip()]
 
 
-def _grep_bounded(args):
+def _grep_counts(args):
+    """``grep``/``rg`` that prints counts, names or nothing (-c -l -L -q)."""
     for a in args:
         if a == "--":
             break
         if a.startswith("--"):
-            if a.split("=", 1)[0] in _GREP_BOUND_LONG:
+            if a.split("=", 1)[0] in _GREP_COUNT_LONG:
                 return True
         elif a.startswith("-") and len(a) > 1 and not a[1].isdigit():
             for ch in a[1:]:
-                if ch in _GREP_BOUND_SHORT:
+                if ch in _GREP_COUNT_SHORT:
                     return True
-                if ch in "efABCd":          # the rest of the cluster is its value
+                if ch in "efABCdmM":        # the rest of the cluster is its value
                     break
     return False
-
-
-def _sed_bounded(args):
-    if "-n" not in args and "--quiet" not in args and "--silent" not in args:
-        return False
-    if any(a == "-i" or a.startswith("-i") or a.startswith("--in-place") for a in args):
-        return False
-    scripts = [args[k + 1] for k, a in enumerate(args[:-1]) if a == "-e"]
-    if not scripts:
-        scripts = [a for a in args if not a.startswith("-")][:1]
-    return bool(scripts) and all(_SED_ADDRESS.match(x) for x in scripts)
 
 
 def _runs_session_shrink(args):
@@ -212,23 +213,68 @@ def _runs_session_shrink(args):
         "airuleset.py" in names and "session-shrink" in args)
 
 
-def _streams(head, args, piped, recursive):
-    """#1395: a streaming read of a transcript whose output stays bounded."""
-    if recursive:
-        return False
+def _self_bounded(head, args):
+    """A reader whose own output is a count, a name or a bounded slice."""
     if head in _GREPS:
-        return piped or _grep_bounded(args)
-    if head in _AWKS:
-        return True
-    if head == "sed":
-        return _sed_bounded(args)
-    if head == "jq":
-        return "--stream" in args
-    if head in _PIPED_ONLY:
-        return piped
+        return _grep_counts(args)
+    if head in BOUNDED_HEADS:
+        return _bounded(head, args)
     if head in INTERPRETERS:
         return _runs_session_shrink(args)
-    return False
+    return head in ALLOWED_HEADS
+
+
+def _streamer(head, args):
+    """A one-pass reader whose output a LATER bounding stage can cap."""
+    if head == "sed":
+        return not any(a.startswith("-i") or a.startswith("--in-place") for a in args)
+    if head == "jq":
+        return "--stream" in args
+    if head in ("gzip", "gunzip"):
+        return any(a in ("-c", "-dc", "-cd", "--stdout") for a in args)
+    return head in _STREAMERS
+
+
+def _bounding_last(head, args):
+    """The pipeline's LAST stage caps what reaches the session."""
+    if head in BOUNDED_HEADS:
+        return _bounded(head, args)
+    if head in _GREPS:
+        return _grep_counts(args)
+    return head == "wc"
+
+
+def _pipelines(stages):
+    """Group ``_stages`` output into pipelines (lists of segments)."""
+    out, cur = [], []
+    for seg, piped in stages:
+        cur.append(seg)
+        if not piped:
+            out.append(cur)
+            cur = []
+    if cur:
+        out.append(cur)
+    return out
+
+
+def _pipeline_ok(segments, sid, projects):
+    cmds = [_command(_words(seg)) for seg in segments]
+    last = cmds[-1]
+    for k, (head, args) in enumerate(cmds):
+        if not head or head in TEXT_HEADS:
+            continue
+        recursive = projects and (any(a in _RECURSIVE for a in args) or (
+            head == "rg" and not any(a.endswith(".jsonl") for a in args)))
+        if not (recursive or _touches(args, sid, projects)):
+            continue
+        if recursive:
+            return False
+        if _self_bounded(head, args):
+            continue
+        if k < len(cmds) - 1 and _streamer(head, args) and _bounding_last(*last):
+            continue
+        return False
+    return True
 
 
 def _touches(words, sid, under_projects):
@@ -236,7 +282,7 @@ def _touches(words, sid, under_projects):
     for w in words:
         if sid and sid + ".jsonl" in w:
             return True
-        if under_projects and (w.endswith(".jsonl") or w.endswith("*.jsonl")):
+        if under_projects and (w.endswith(".jsonl") or ".jsonl." in w):
             return True
     return False
 
@@ -274,19 +320,10 @@ def violation(cmd, transcript_path):
     skeleton = _capture_heredocs(cmd)[2]          # heredoc bodies are data
     projects = ".claude/projects" in skeleton
     bodies = [a or b for a, b in _SUBST_RE.findall(skeleton)]
-    for segment, piped in _stages(skeleton) + [x for b in bodies for x in _stages(b)]:
-        head, args = _command(_words(segment))
-        if head not in READERS:
-            continue
-        recursive = projects and (any(a in _RECURSIVE for a in args) or (
-            head == "rg" and not any(a.endswith(".jsonl") for a in args)))
-        if not (recursive or _touches(args, sid, projects)):
-            continue
-        if head in BOUNDED_HEADS and not recursive and _bounded(head, args):
-            continue
-        if _streams(head, args, piped, recursive):
-            continue
-        return _message(transcript_path)
+    for text in [skeleton] + bodies:
+        for pipeline in _pipelines(_stages(text)):
+            if not _pipeline_ok(pipeline, sid, projects):
+                return _message(transcript_path)
     return ""
 
 
@@ -296,8 +333,9 @@ def _message(transcript_path):
                 "one froze dev1 for 19 min. Your last ❓ block is printed by "
                 "`python3 ~/devel/airuleset/airuleset.py question-block`; decisions "
                 "live on the ticket. ls/stat/wc/du and head/tail with -n <= %d or "
-                "-c <= %d stay allowed, and a bounded STREAM too (#1395): grep -c/-o/-m, "
-                "awk, sed -n <N>p, or a pipe onward (grep x f | head -n 5). "
+                "-c <= %d stay allowed, and a bounded STREAM too (#1395): a count or "
+                "locate (grep -c / -l / -q, wc), or a grep/awk/sed/cut/zcat pipe that ENDS "
+                "in a bound (grep x f | head -n 5, ... | sort | uniq -c | head -n 50). "
                 "`airuleset.py session-shrink` shrinks a heavy session. A deliberate repair: append "
                 "`# airuleset:own-transcript-ok <reason>`."
                 % (os.path.basename(transcript_path) or "*.jsonl", MAX_LINES, MAX_BYTES))
