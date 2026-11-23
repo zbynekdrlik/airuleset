@@ -39,7 +39,7 @@ SUFFIX = "@builtin"
 # `user@host` accounts whose UNDECLARED `<switchable plugin>@builtin: false`
 # install REMOVES. Empty on purpose: newlevel@dev2 keeps its switch until bazos
 # runs in its own account (#1394); the supervisor adds "newlevel@dev2" then.
-REMOVE_UNDECLARED_ON = frozenset()
+REMOVE_UNDECLARED_ON = frozenset({"newlevel@dev2"})   # #1394: bazos moved to bazos@dev1 (23.11.)
 
 
 def _identity():
