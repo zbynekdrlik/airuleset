@@ -1,11 +1,16 @@
-"""#1395: `session-shrink` archives a transcript's pre-compact records.
+"""#1395: `session-shrink` drives Claude Code's OWN on-disk transcript compactor.
 
-The fixtures follow the record shapes measured on a real Claude Code 2.1.330
-transcript: a `compact_boundary` system record (`parentUuid: null`,
-`logicalParentUuid`, `compactMetadata.preservedSegment` / `preservedMessages`)
-followed by the `isCompactSummary` user record, the preserved records sitting
-BEFORE the boundary, and session-metadata records (`{"type":"ai-title",…}`)
-between chain records.
+Claude Code 2.1.330 rewrites a transcript itself (`performCompactTranscript`)
+when `CLAUDE_CODE_TRANSCRIPT_LOCAL_GC` is on in a non-interactive session and a
+`/compact` runs (`requestCompact`). Proven live on a scratch session: 7 890 993
+-> 135 681 bytes, the resume answer unchanged. `session-shrink` is a thin wrapper:
+refuse a live or foreign session, back the file up (gzip, name NOT `*.jsonl.gz`,
+0600 at create, mtime <= the original), run `claude --resume <id> -p /compact`
+with the GC env in the session's recorded cwd as the file's owner, then verify
+every kept-forever metadata type survived.
+
+The `claude` binary is a fake here (`--claude-bin`): it records its argv, env
+and cwd, and rewrites the file the way the native compactor does.
 """
 import gzip
 import json
@@ -23,239 +28,229 @@ sys.path.insert(0, str(ROOT))
 import cli_session_shrink as ss  # noqa: E402
 
 SID = "73cdd596-56bb-4f55-a02a-7d87ec16ef8b"
-OLD = time.time() - 3600
+OLD_NS = (int(time.time()) - 3600) * 10 ** 9 + 123456789
 
-
-def _u(n):
-    return "00000000-0000-4000-8000-%012d" % n
-
-
-def _msg(n, parent, role="user", text="hello"):
-    rec = {"parentUuid": parent, "isSidechain": False, "type": role,
-           "message": {"role": role, "content": text}, "uuid": _u(n),
-           "timestamp": "2026-11-23T10:00:%02dZ" % (n % 60), "sessionId": SID}
-    return json.dumps(rec, separators=(",", ":"))
+FAKE = r'''#!/usr/bin/env python3
+"""fake claude: log the call, then compact like the native GC does."""
+import json, os, sys
+log, mode = os.environ["FAKE_LOG"], os.environ.get("FAKE_MODE", "gc")
+with open(log, "w") as fh:
+    json.dump({"argv": sys.argv[1:], "cwd": os.getcwd(),
+               "gc": os.environ.get("CLAUDE_CODE_TRANSCRIPT_LOCAL_GC")}, fh)
+path = os.environ["FAKE_TRANSCRIPT"]
+keep = []
+with open(path) as fh:
+    lines = fh.readlines()
+last = max(i for i, ln in enumerate(lines) if '"compact_boundary"' in ln)
+meta = {}
+for ln in lines[:last]:
+    t = json.loads(ln).get("type")
+    if ln.startswith('{"type":') and not t.startswith("api-request"):
+        meta[t] = ln
+if mode == "drop":
+    meta.pop("content-replacement", None)
+if mode == "fail":
+    sys.exit(3)
+with open(path, "w") as fh:
+    fh.writelines(list(meta.values()) + lines[last:])
+'''
 
 
 def _meta(typ, **kw):
     return json.dumps(dict({"type": typ, "sessionId": SID}, **kw), separators=(",", ":"))
 
 
-def _boundary(n, logical, preserved=None):
-    meta = {"trigger": "manual", "preTokens": 1000, "postTokens": 100}
-    if preserved:
-        head, tail, anchor, uuids = preserved
-        meta["preservedSegment"] = {"headUuid": head, "anchorUuid": anchor, "tailUuid": tail}
-        meta["preservedMessages"] = {"anchorUuid": anchor, "uuids": uuids, "allUuids": uuids}
-    rec = {"parentUuid": None, "logicalParentUuid": logical, "isSidechain": False,
-           "type": "system", "subtype": "compact_boundary",
-           "content": "Conversation compacted", "level": "info",
-           "compactMetadata": meta, "uuid": _u(n), "sessionId": SID}
+def _rec(n, parent, cwd, **kw):
+    rec = dict({"parentUuid": parent, "isSidechain": False, "type": "user",
+                "message": {"role": "user", "content": "x" * 200},
+                "uuid": "u%d" % n, "cwd": cwd, "sessionId": SID}, **kw)
     return json.dumps(rec, separators=(",", ":"))
 
 
-def _summary(n, parent):
-    rec = {"parentUuid": parent, "isSidechain": False, "type": "user",
-           "message": {"role": "user", "content": "This session is being continued "
-                       "from a previous conversation. Summary: PELICAN-42"},
-           "isCompactSummary": True, "uuid": _u(n), "sessionId": SID}
-    return json.dumps(rec, separators=(",", ":"))
+def _session(cwd, pad=50):
+    lines = [_meta("ai-title", aiTitle="t1"), _meta("content-replacement", ids=["a"]),
+             _meta("data-flow-records", n=1), _meta("fork-context-ref", ref="r"),
+             _meta("frame-link", url="u"), _meta("memory-mode", on=True),
+             _meta("api-request", body="b" * 100)]
+    lines += [_rec(i, "u%d" % (i - 1) if i else None, cwd) for i in range(pad)]
+    lines += [json.dumps({"parentUuid": None, "logicalParentUuid": "u%d" % (pad - 1),
+                          "type": "system", "subtype": "compact_boundary",
+                          "uuid": "b1", "cwd": cwd, "sessionId": SID},
+                         separators=(",", ":")),
+              _rec(900, "b1", cwd, isCompactSummary=True),
+              _meta("ai-title", aiTitle="t2")]
+    return lines
 
 
-def two_compacts():
-    """lines, index of the first kept line: 2 compacts, the second preserving
-    records 20-21 that sit before it."""
-    L = [_meta("ai-title", aiTitle="first title"),
-         _meta("file-history-snapshot", messageId=_u(1)),
-         _msg(1, None), _msg(2, _u(1), "assistant", "mentions \\\"compact_boundary\\\" text"),
-         _boundary(3, _u(2)), _summary(4, _u(3)),
-         _msg(5, _u(4)), _msg(6, _u(5), "assistant"),
-         _meta("mode", mode="normal"),
-         _msg(20, _u(6)), _msg(21, _u(20), "assistant", "kept tail"),
-         _boundary(30, _u(21), (_u(20), _u(21), _u(31), [_u(20), _u(21)])),
-         _summary(31, _u(30)),
-         _msg(32, _u(31)), _msg(33, _u(32), "assistant", "answer"),
-         _meta("mode", mode="auto"),
-         _meta("last-prompt", leafUuid=_u(33))]
-    return L, 9
-
-
-class _Dir(unittest.TestCase):
+class _Box(unittest.TestCase):
     def setUp(self):
         d = tempfile.TemporaryDirectory()
         self.addCleanup(d.cleanup)
-        self.dir = d.name
+        self.root = d.name
         self.home = os.path.join(d.name, "home")
         os.makedirs(os.path.join(self.home, ".claude", "sessions"))
+        self.cwd = os.path.join(d.name, "work")
+        os.makedirs(self.cwd)
+        self.proj = os.path.join(self.home, ".claude", "projects", "-work")
+        os.makedirs(self.proj)
+        self.bin = os.path.join(d.name, "claude")
+        with open(self.bin, "w") as fh:
+            fh.write(FAKE)
+        os.chmod(self.bin, 0o755)
+        self.log = os.path.join(d.name, "fake.json")
 
-    def write(self, lines, name=SID + ".jsonl", mode=0o600):
-        p = os.path.join(self.dir, name)
+    def write(self, lines, mode=0o600):
+        p = os.path.join(self.proj, SID + ".jsonl")
         with open(p, "w") as fh:
             fh.write("\n".join(lines) + "\n")
         os.chmod(p, mode)
-        os.utime(p, (OLD, OLD))
+        os.utime(p, ns=(OLD_NS, OLD_NS))
         return p
 
-    def shrink(self, p, **kw):
-        return ss.shrink(p, home=self.home, **kw)
+    def shrink(self, p, mode="gc", **kw):
+        env = dict(os.environ, FAKE_LOG=self.log, FAKE_TRANSCRIPT=p, FAKE_MODE=mode)
+        kw.setdefault("min_bytes", 0)
+        return ss.shrink(p, home=self.home, claude_bin=self.bin, env=env, **kw)
+
+    def backups(self):
+        return [n for n in os.listdir(self.proj) if ".shrink-" in n]
 
 
-class Shrink(_Dir):
-    def test_two_compacts_keep_the_last_boundary_tail_byte_identical(self):
-        lines, first = two_compacts()
-        p = self.write(lines)
+class Native(_Box):
+    def test_runs_claudes_own_compactor_in_the_sessions_cwd(self):
+        p = self.write(_session(self.cwd))
+        res = self.shrink(p)
+        call = json.load(open(self.log))
+        self.assertEqual(call["argv"], ["--resume", SID, "-p", "/compact"])
+        self.assertEqual(call["gc"], "1")
+        self.assertEqual(os.path.realpath(call["cwd"]), os.path.realpath(self.cwd))
+        self.assertLess(res["after"], res["before"])
+
+    def test_the_backup_is_a_full_gzip_copy_not_a_jsonl_gz(self):
+        p = self.write(_session(self.cwd))
         orig = open(p, "rb").read()
         res = self.shrink(p)
-        new = open(p, "rb").read()
-        tail = ("\n".join(lines[first:]) + "\n").encode()
-        self.assertTrue(new.endswith(tail))
-        carried = new[:-len(tail)].decode().splitlines()
-        self.assertEqual([json.loads(c)["type"] for c in carried], ["ai-title"])
-        with gzip.open(res["archive"], "rb") as gz:
-            self.assertEqual(gz.read(), orig[:len(orig) - len(tail)])
-        self.assertTrue(res["archive"].startswith(p + ".pre-"))
-        self.assertTrue(res["archive"].endswith(".jsonl.gz"))
+        b = res["backup"]
+        self.assertFalse(b.endswith(".jsonl.gz"))
+        self.assertFalse(b.endswith(".jsonl"))
+        self.assertTrue(b.startswith(p + ".shrink-") and b.endswith(".gz"))
+        with gzip.open(b, "rb") as gz:
+            self.assertEqual(gz.read(), orig)
+        st = os.stat(b)
+        self.assertEqual(st.st_mode & 0o777, 0o600)
+        self.assertLessEqual(st.st_mtime_ns, OLD_NS)
+        self.assertEqual(self.backups(), [os.path.basename(b)])
 
-    def test_the_parent_chain_of_the_kept_records_is_intact(self):
-        lines, _ = two_compacts()
-        p = self.write(lines)
+    def test_every_kept_forever_type_must_survive(self):
+        p = self.write(_session(self.cwd))
+        with self.assertRaises(ss.Refused) as cm:
+            self.shrink(p, mode="drop")
+        self.assertIn("content-replacement", str(cm.exception))
+        self.assertIn(".shrink-", str(cm.exception))       # names the backup
+        self.assertEqual(len(self.backups()), 1)
+
+    def test_a_failed_native_run_keeps_the_backup_and_says_so(self):
+        p = self.write(_session(self.cwd))
+        with self.assertRaises(ss.Refused) as cm:
+            self.shrink(p, mode="fail")
+        self.assertIn("exit 3", str(cm.exception))
+        self.assertEqual(len(self.backups()), 1)
+
+    def test_no_temp_file_is_left_behind(self):
+        p = self.write(_session(self.cwd))
         self.shrink(p)
-        recs = [json.loads(x) for x in open(p)]
-        chain = [r for r in recs if "parentUuid" in r]
-        uuids = {r["uuid"] for r in chain}
-        boundary = [r for r in chain if r.get("subtype") == "compact_boundary"]
-        self.assertEqual(len(boundary), 1)
-        preserved = set(boundary[0]["compactMetadata"]["preservedMessages"]["uuids"])
-        self.assertLessEqual(preserved, uuids)
-        for r in chain:
-            if r["parentUuid"] is not None and r["uuid"] not in preserved:
-                self.assertIn(r["parentUuid"], uuids, r["uuid"])
-        summary = [r for r in recs if r.get("isCompactSummary")]
-        self.assertEqual(summary[0]["parentUuid"], boundary[0]["uuid"])
+        self.assertEqual([n for n in os.listdir(self.proj) if n.startswith(".")], [])
 
-    def test_mode_and_times_are_kept(self):
-        lines, _ = two_compacts()
-        p = self.write(lines, mode=0o640)
-        self.shrink(p)
-        st = os.stat(p)
-        self.assertEqual(st.st_mode & 0o777, 0o640)
-        self.assertAlmostEqual(st.st_mtime, OLD, places=3)
+    def test_a_small_file_is_left_alone(self):
+        p = self.write(_session(self.cwd))
+        res = self.shrink(p, min_bytes=10 ** 9)
+        self.assertEqual(res["action"], "skip")
+        self.assertFalse(os.path.exists(self.log))
+        self.assertEqual(self.backups(), [])
 
-    def test_without_preserved_records_the_cut_is_the_boundary(self):
-        lines = [_msg(1, None), _msg(2, _u(1), "assistant"), _boundary(3, _u(2)),
-                 _summary(4, _u(3)), _msg(5, _u(4))]
-        p = self.write(lines)
-        self.shrink(p)
-        self.assertEqual(open(p).read(), "\n".join(lines[2:]) + "\n")
-
-    def test_a_session_without_a_compact_is_untouched(self):
-        lines = [_meta("ai-title", aiTitle="t"), _msg(1, None), _msg(2, _u(1), "assistant")]
-        p = self.write(lines)
-        before = open(p, "rb").read()
-        res = self.shrink(p)
-        self.assertEqual(res["cut"], 0)
-        self.assertEqual(open(p, "rb").read(), before)
-        self.assertEqual(os.stat(p).st_mtime, OLD)
-        self.assertEqual([n for n in os.listdir(self.dir) if n.endswith(".gz")], [])
-
-    def test_a_text_mention_of_compact_boundary_is_not_a_boundary(self):
-        lines = [_msg(1, None), _msg(2, _u(1), "assistant", 'a "compact_boundary" b')]
-        p = self.write(lines)
-        self.assertEqual(ss.plan(p)["cut"], 0)
-
-    def test_a_missing_preserved_record_is_refused(self):
-        lines = [_msg(1, None), _boundary(3, _u(1), (_u(90), _u(91), _u(4), [_u(90), _u(91)])),
-                 _summary(4, _u(3))]
-        p = self.write(lines)
-        before = open(p, "rb").read()
+    def test_a_vanished_cwd_is_refused(self):
+        p = self.write(_session(os.path.join(self.root, "gone")))
         with self.assertRaises(ss.Refused):
             self.shrink(p)
-        self.assertEqual(open(p, "rb").read(), before)
+        self.assertFalse(os.path.exists(self.log))
 
-    def test_a_kept_record_whose_parent_would_be_archived_is_refused(self):
-        lines = [_msg(1, None), _msg(2, _u(1), "assistant"), _boundary(3, _u(2)),
-                 _summary(4, _u(3)), _msg(5, _u(2))]          # points over the cut
-        p = self.write(lines)
+
+class Guards(_Box):
+    def test_a_foreign_owned_file_is_refused(self):
+        p = self.write(_session(self.cwd))
+        with self.assertRaises(ss.Refused) as cm:
+            self.shrink(p, euid=os.geteuid() + 1)
+        self.assertIn("owner", str(cm.exception))
+        self.assertFalse(os.path.exists(self.log))
+
+    def test_a_symlink_is_refused(self):
+        p = self.write(_session(self.cwd))
+        link = os.path.join(self.proj, "11111111-1111-4111-8111-111111111111.jsonl")
+        os.symlink(p, link)
         with self.assertRaises(ss.Refused):
-            self.shrink(p)
+            self.shrink(link)
 
-    def test_a_stale_last_prompt_is_not_carried(self):
-        lines = [_msg(1, None), _meta("last-prompt", leafUuid=_u(1)),
-                 _meta("queue-operation", op="x"), _boundary(3, _u(1)), _summary(4, _u(3))]
-        p = self.write(lines)
-        self.shrink(p)
-        self.assertEqual(open(p).read(), "\n".join(lines[3:]) + "\n")
-
-
-class Live(_Dir):
     def test_a_file_held_open_by_another_process_is_refused(self):
-        lines, _ = two_compacts()
-        p = self.write(lines)
+        p = self.write(_session(self.cwd))
         holder = subprocess.Popen([sys.executable, "-c",
                                    "import sys,time\nf=open(sys.argv[1])\nprint('ok',flush=True)\n"
                                    "time.sleep(60)", p], stdout=subprocess.PIPE, text=True)
         self.addCleanup(holder.wait)
         self.addCleanup(holder.kill)
         self.assertEqual(holder.stdout.readline().strip(), "ok")
-        before = open(p, "rb").read()
         with self.assertRaises(ss.Refused) as cm:
             self.shrink(p)
         self.assertIn("holds the file open", str(cm.exception))
-        self.assertEqual(open(p, "rb").read(), before)
+        self.assertFalse(os.path.exists(self.log))
 
     def test_a_running_session_record_is_refused(self):
-        lines, _ = two_compacts()
-        p = self.write(lines)
+        p = self.write(_session(self.cwd))
         with open(os.path.join(self.home, ".claude", "sessions", "1.json"), "w") as fh:
             json.dump({"pid": os.getpid(), "sessionId": SID}, fh)
-        with self.assertRaises(ss.Refused) as cm:
+        with self.assertRaises(ss.Refused):
             self.shrink(p)
-        self.assertIn("running claude", str(cm.exception))
 
-    def test_a_dead_session_record_is_not_live(self):
-        lines, _ = two_compacts()
-        p = self.write(lines)
-        with open(os.path.join(self.home, ".claude", "sessions", "1.json"), "w") as fh:
-            json.dump({"pid": 2 ** 22 + 7, "sessionId": SID}, fh)
-        self.assertEqual(ss.live_reason(p, home=self.home), "")
+    def test_eperm_counts_as_alive(self):
+        def kill(pid, sig):
+            raise PermissionError(1, "Operation not permitted")
+        self.assertTrue(ss._pid_alive(1, kill=kill))
+
+        def gone(pid, sig):
+            raise ProcessLookupError(3, "No such process")
+        self.assertFalse(ss._pid_alive(1, kill=gone))
 
     def test_a_recently_written_file_is_refused(self):
-        lines, _ = two_compacts()
-        p = self.write(lines)
+        p = self.write(_session(self.cwd))
         os.utime(p, None)
         with self.assertRaises(ss.Refused):
             self.shrink(p)
 
-    def test_only_a_claude_command_line_counts(self):
+    def test_claude_command_lines_native_and_npm(self):
         self.assertTrue(ss._is_claude(b"claude\0--resume\0" + SID.encode()))
         self.assertTrue(ss._is_claude(b"/home/x/.local/share/claude/versions/2.1.330\0-c"))
+        self.assertTrue(ss._is_claude(
+            b"node\0/usr/lib/node_modules/@anthropic-ai/claude-code/cli.js\0-c"))
+        self.assertTrue(ss._is_claude(b"/usr/bin/node\0/home/x/.npm-global/bin/claude\0-c"))
         self.assertFalse(ss._is_claude(b"bash\0-c\0grep x " + SID.encode()))
+        self.assertFalse(ss._is_claude(b"node\0/srv/app/server.js"))
 
 
-class Cli(_Dir):
+class Cli(_Box):
     def run_cli(self, *args):
         env = dict(os.environ, HOME=self.home)
         return subprocess.run([sys.executable, str(ROOT / "airuleset.py"), "session-shrink"]
                               + list(args), capture_output=True, text=True, env=env, timeout=120)
 
-    def test_dry_run_is_the_default_and_writes_nothing(self):
-        lines, _ = two_compacts()
-        p = self.write(lines)
+    def test_dry_run_is_the_default_and_runs_nothing(self):
+        p = self.write(_session(self.cwd))
         before = open(p, "rb").read()
-        r = self.run_cli(p)
+        r = self.run_cli(p, "--claude-bin", self.bin, "--min-mib", "0")
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("would shrink", r.stdout)
-        self.assertIn("cut before line 10", r.stdout)
+        self.assertIn("would run", r.stdout)
+        self.assertIn("/compact", r.stdout)
         self.assertEqual(open(p, "rb").read(), before)
-        self.assertEqual([n for n in os.listdir(self.dir) if n.endswith(".gz")], [])
-
-    def test_apply_writes(self):
-        lines, _ = two_compacts()
-        p = self.write(lines)
-        r = self.run_cli(p, "--apply")
-        self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("shrunk", r.stdout)
-        self.assertEqual(len([n for n in os.listdir(self.dir) if n.endswith(".gz")]), 1)
+        self.assertFalse(os.path.exists(self.log))
+        self.assertEqual(self.backups(), [])
 
     def test_another_account_is_refused(self):
         r = self.run_cli("--account", "nobody-else-1395")
@@ -263,12 +258,10 @@ class Cli(_Dir):
         self.assertIn("sudo -u nobody-else-1395", r.stderr)
 
     def test_over_lists_only_big_own_sessions(self):
-        proj = os.path.join(self.home, ".claude", "projects", "-x")
-        os.makedirs(proj)
-        big = os.path.join(proj, "a.jsonl")
+        big = os.path.join(self.proj, "a.jsonl")
         with open(big, "wb") as fh:
             fh.truncate(3 * ss.MIB)
-        with open(os.path.join(proj, "b.jsonl"), "w") as fh:
+        with open(os.path.join(self.proj, "b.jsonl"), "w") as fh:
             fh.write("{}\n")
         self.assertEqual(ss.candidates(self.home, 2 * ss.MIB), [big])
 
