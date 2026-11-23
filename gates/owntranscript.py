@@ -14,30 +14,42 @@ and tool-results paths, which are ordinary files.
 
 Per command segment (``&&``/``||``/``;``/``|``/``&`` and every ``$(…)`` or
 backtick body):
-* a command whose arguments name the transcript, a ``*.jsonl`` under
-  ``.claude/projects`` (or a ``*.jsonl.*`` backup there), or that reads
-  ``.claude/projects`` recursively (``-r``, ``rg``) is judged below; a TEXT head
-  that only NAMES such a path (``gh --body``, ``git commit -m``, ``echo``) is
-  never a read (live false positive, 2026-10-13);
+* a content READER (``READERS``) that names the transcript, a ``*.jsonl``
+  under ``.claude/projects``, or reads ``.claude/projects`` recursively
+  (``-r``, ``rg``) is refused; a command that only NAMES such a path
+  (``gh --body``, ``git commit -m``, ``echo``) is text;
 * a heredoc body is data, unless an interpreter consumes it
   (``python3 - <<EOF``) and its program names a transcript;
 * metadata (``ALLOWED_HEADS``) passes, and ``head``/``tail`` pass with ONE
-  numeric ``-n`` ≤ ``MAX_LINES`` or ``-c`` ≤ ``MAX_BYTES`` (never ``+N``/follow);
-* #1395, DENY BY DEFAULT per pipeline: every stage whose arguments name a
-  transcript (any head but the text/metadata ones) must be either
-  COUNT/LOCATE-only (``grep``/``rg -c -l -L -q``, ``wc``, a bounded head/tail,
-  ``airuleset.py session-shrink``, ``ls``/``stat``/``du``), or a STREAMING
-  reader (grep family, ``awk``, ``sed`` without ``-i``, ``cut``, ``zcat``,
-  ``jq --stream``) followed by a LAST stage that bounds the output (head/tail
-  -n <= 50 or -c <= 64 KiB, ``wc``, ``grep -c/-q/-l``). ``sort``/``uniq``/``cat``
-  and the interpreters are never the first reader. A 1 GB transcript streams
-  through ``grep -c`` in ~1 s at a few MB RSS; what froze dev1 was a whole-file
-  LOAD (``python3 -`` at 2.0 GB), and an unbounded stream (``awk '{print}'``,
-  ``| cat``) dumps the same bytes into the session. Stages split quote-aware:
-  ``'…'``, ``"…"``, ``$'…'``, ``$(…)``, backticks, and a ``#`` comment runs to its
-  newline, so an apostrophe in a comment never hides the next command.
+  numeric ``-n`` ≤ ``MAX_LINES`` or ``-c`` ≤ ``MAX_BYTES`` (never ``+N``/follow).
+
+#1395 (owner 23.11.2026: inspecting a big transcript must stay possible), a
+SMALL allow-list on top (supervisor ROZHODNUTÉ round 3):
+* COUNT/LOCATE readers pass: ``grep``/``rg`` with ``-c -l -L -q``, ``wc``,
+  ``ls``/``stat``/``du``, ``find`` without ``-exec``/``-ok``/``-delete``/
+  ``-fprint``, and ``python3 … airuleset.py session-shrink``;
+* any other reader passes only when its pipeline ENDS in a BYTE bound
+  (``head -c``/``tail -c`` ≤ ``MAX_BYTES``, ``wc``, ``grep -c/-q/-l``), and
+  never an interpreter or ``sort`` (they load the whole file whatever the
+  output bound);
+* a recursive ``grep``/``rg`` counts as a projects read only when a PATH
+  operand is under ``.claude/projects``: a code search for the string
+  (``grep -rn '.claude/projects' gates/``) is not a read.
+Segments split quote-aware (``'…'``, ``"…"``, ``$'…'``, ``$(…)``, backticks; a
+word-initial ``#`` comments to its newline), so a ``;`` inside
+``python3 -c '…'`` stays one command.
+
+Accepted residuals (a guardrail against an accident, not a security boundary:
+three review rounds showed a command-text parser cannot be complete, and
+``session-shrink`` removes the root risk, the 1 GB file itself):
+* a read with no command head: ``x=$(<F)``, ``while read l; do …; done < F``;
+* a path the text never names: ``F=…; cat "$F"``, names fed through ``xargs``,
+  a copy read later (``cp F /tmp/x; cat /tmp/x`` reads the copy);
+* a program in a string: ``bash -c "cat F"``, ``eval``, an alias or function,
+  an obfuscated head (``$'\\x63at' F``), a script file that opens F;
+* the Read tool (this gate sees Bash only).
 An inline ``# airuleset:own-transcript-ok <reason>`` marker passes a deliberate
-repair. A resource guard against an accident, not a boundary.
+repair.
 """
 import os
 import re
@@ -49,28 +61,35 @@ from gates import allow, command_of, emit_block, read_payload
 ALLOWED_HEADS = frozenset({"ls", "stat", "wc", "du", "test", "[", "file",
                            "readlink", "realpath"})
 BOUNDED_HEADS = frozenset({"head", "tail"})    # only with a small numeric -n/-c
+# Only these READ a file's content. Anything else that merely NAMES a path
+# (gh --body, git commit -m, echo, printf) is text, never a read (live false
+# positive on this ticket's own evidence comment, 2026-10-13).
+READERS = frozenset({"cat", "tac", "nl", "grep", "egrep", "fgrep", "zgrep", "rg",
+                     "ag", "ack", "jq", "sed", "awk", "gawk", "mawk", "perl",
+                     "python", "python3", "node", "ruby", "less", "more", "cut",
+                     "sort", "uniq", "strings", "xxd", "od", "base64", "zcat",
+                     "gzip", "gunzip", "cp", "dd", "find"}) | BOUNDED_HEADS
 # A heredoc body is data, except when one of these consumes it as a program.
 INTERPRETERS = frozenset({"python", "python3", "bash", "sh", "node", "perl", "ruby"})
 MAX_LINES = 50
 MAX_BYTES = 65536
 _WRAPPERS = frozenset({"env", "sudo", "command", "nice", "ionice", "timeout",
                        "nohup", "stdbuf", "time", "exec"})
-# #1395 deny by default: heads that only NAME a path (text), never read it
-TEXT_HEADS = frozenset({"echo", "printf", "gh", "git", "true", "false", ":", "cd",
-                        "pushd", "popd", "export", "for", "case", "mkdir"})
+# #1395 count/locate readers and byte bounds
 _GREPS = frozenset({"grep", "egrep", "fgrep", "zgrep", "rg"})
 _GREP_COUNT_SHORT = frozenset("clLq")
 _GREP_COUNT_LONG = ("--count", "--files-with-matches", "--files-without-match", "--quiet",
                     "--silent")
-_STREAMERS = frozenset({"awk", "gawk", "mawk", "sed", "cut", "zcat", "gzip", "gunzip",
-                        "jq"}) | _GREPS
-_SHELL_WORDS = frozenset({"do", "then", "else", "elif", "!", "{", "(", "if", "while", "until"})
+_GREP_VALUE_SHORT = frozenset("efABCdmM")    # the rest of the cluster is its value
+_FIND_ACTIONS = frozenset({"-exec", "-execdir", "-ok", "-okdir", "-delete", "-fprint",
+                           "-fprint0", "-fprintf", "-fls"})
+_NEVER_BOUNDED = INTERPRETERS | BOUNDED_HEADS | {"sort"}   # head/tail keep their #1224 rule
+_SHELL_WORDS = frozenset({"do", "then", "else", "elif", "!", "{"})
 # a command substitution body is a command of its own (never split on a bare
 # paren: python -c 'open("x.jsonl")' must stay one command)
 _SUBST_RE = re.compile(r"\$\(([^()]*)\)|`([^`]*)`")
 _BYPASS_RE = re.compile(r"#\s*airuleset:own-transcript-ok\s+\S")
 _ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
-_RECURSIVE = frozenset({"-r", "-R", "--recursive", "-rn", "-rl", "-ri", "-Rn"})
 
 
 def _session_id(transcript_path):
@@ -104,8 +123,9 @@ def _command(words):
     return os.path.basename(words[i]), words[i + 1:]
 
 
-def _bounded(head, args):
-    """``head``/``tail`` with ONE small numeric -n/-c bound, no ``+N``/follow."""
+def _bounded(head, args, bytes_only=False):
+    """``head``/``tail`` with ONE small numeric -n/-c bound, no ``+N``/follow
+    (``bytes_only``: a ``-c`` bound only)."""
     limit = None
     it = iter(args)
     for a in it:
@@ -114,7 +134,7 @@ def _bounded(head, args):
         m = re.fullmatch(r"-([nc])(\d*)", a)
         if m:
             val = m.group(2) or next(it, "")
-            if not val.isdigit():
+            if not val.isdigit() or (bytes_only and m.group(1) == "n"):
                 return False
             cap = MAX_LINES if m.group(1) == "n" else MAX_BYTES
             limit = int(val) <= cap
@@ -190,62 +210,7 @@ def _stages(text):
     return [(seg, piped) for seg, piped in out if seg.strip()]
 
 
-def _grep_counts(args):
-    """``grep``/``rg`` that prints counts, names or nothing (-c -l -L -q)."""
-    for a in args:
-        if a == "--":
-            break
-        if a.startswith("--"):
-            if a.split("=", 1)[0] in _GREP_COUNT_LONG:
-                return True
-        elif a.startswith("-") and len(a) > 1 and not a[1].isdigit():
-            for ch in a[1:]:
-                if ch in _GREP_COUNT_SHORT:
-                    return True
-                if ch in "efABCdmM":        # the rest of the cluster is its value
-                    break
-    return False
-
-
-def _runs_session_shrink(args):
-    names = [os.path.basename(a) for a in args]
-    return "cli_session_shrink.py" in names or (
-        "airuleset.py" in names and "session-shrink" in args)
-
-
-def _self_bounded(head, args):
-    """A reader whose own output is a count, a name or a bounded slice."""
-    if head in _GREPS:
-        return _grep_counts(args)
-    if head in BOUNDED_HEADS:
-        return _bounded(head, args)
-    if head in INTERPRETERS:
-        return _runs_session_shrink(args)
-    return head in ALLOWED_HEADS
-
-
-def _streamer(head, args):
-    """A one-pass reader whose output a LATER bounding stage can cap."""
-    if head == "sed":
-        return not any(a.startswith("-i") or a.startswith("--in-place") for a in args)
-    if head == "jq":
-        return "--stream" in args
-    if head in ("gzip", "gunzip"):
-        return any(a in ("-c", "-dc", "-cd", "--stdout") for a in args)
-    return head in _STREAMERS
-
-
-def _bounding_last(head, args):
-    """The pipeline's LAST stage caps what reaches the session."""
-    if head in BOUNDED_HEADS:
-        return _bounded(head, args)
-    if head in _GREPS:
-        return _grep_counts(args)
-    return head == "wc"
-
-
 def _pipelines(stages):
-    """Group ``_stages`` output into pipelines (lists of segments)."""
     out, cur = [], []
     for seg, piped in stages:
         cur.append(seg)
@@ -257,24 +222,42 @@ def _pipelines(stages):
     return out
 
 
-def _pipeline_ok(segments, sid, projects):
-    cmds = [_command(_words(seg)) for seg in segments]
-    last = cmds[-1]
-    for k, (head, args) in enumerate(cmds):
-        if not head or head in TEXT_HEADS:
-            continue
-        recursive = projects and (any(a in _RECURSIVE for a in args) or (
-            head == "rg" and not any(a.endswith(".jsonl") for a in args)))
-        if not (recursive or _touches(args, sid, projects)):
-            continue
-        if recursive:
-            return False
-        if _self_bounded(head, args):
-            continue
-        if k < len(cmds) - 1 and _streamer(head, args) and _bounding_last(*last):
-            continue
-        return False
-    return True
+def _grep_split(args):
+    """``(counts, recursive, operands)`` of a grep/rg argument list; operands
+    are the non-option words after the pattern (the PATHS)."""
+    counts = recursive = False
+    words, pattern_given, it = [], False, iter(args)
+    for a in it:
+        if a == "--":
+            words.extend(it)
+            break
+        if a.startswith("--"):
+            key = a.split("=", 1)[0]
+            counts |= key in _GREP_COUNT_LONG
+            recursive |= key in ("--recursive", "--dereference-recursive")
+            if key in ("--regexp", "--file"):
+                pattern_given = True
+                if "=" not in a:
+                    next(it, None)
+        elif a.startswith("-") and len(a) > 1 and not a[1].isdigit():
+            for k, ch in enumerate(a[1:]):
+                counts |= ch in _GREP_COUNT_SHORT
+                recursive |= ch in "rR"
+                if ch in _GREP_VALUE_SHORT:
+                    if ch in "ef":
+                        pattern_given = True
+                    if k == len(a) - 2:
+                        next(it, None)
+                    break
+        else:
+            words.append(a)
+    return counts, recursive, (words if pattern_given else words[1:])
+
+
+def _runs_session_shrink(args):
+    names = [os.path.basename(a) for a in args]
+    return "cli_session_shrink.py" in names or (
+        "airuleset.py" in names and "session-shrink" in args)
 
 
 def _touches(words, sid, under_projects):
@@ -282,9 +265,46 @@ def _touches(words, sid, under_projects):
     for w in words:
         if sid and sid + ".jsonl" in w:
             return True
-        if under_projects and (w.endswith(".jsonl") or ".jsonl." in w):
+        if under_projects and (w.endswith(".jsonl") or w.endswith("*.jsonl")):
             return True
     return False
+
+
+def _reads(head, args, sid, projects):
+    """Does this reader stage read a transcript (``(reads, recursive)``)?"""
+    if head in _GREPS:
+        _, recursive, operands = _grep_split(args)
+        recursive = recursive or head == "rg"
+        hits = (_touches(operands, sid, projects) or any(sid and sid + ".jsonl" in a
+                                                          for a in args))
+        if recursive and any(".claude/projects" in o for o in operands):
+            return True, True
+        if head == "rg" and not operands and projects:
+            return False, False
+        return hits, False
+    if head == "find":
+        return any(".claude/projects" in a for a in args) or _touches(args, sid, projects), False
+    return _touches(args, sid, projects), False
+
+
+def _stage_ok(head, args, bounded_pipe):
+    if head in _GREPS and _grep_split(args)[0]:
+        return True                                # counts / names / quiet
+    if head == "find":
+        return not any(a in _FIND_ACTIONS for a in args)
+    if head in INTERPRETERS and _runs_session_shrink(args):
+        return True
+    if head in BOUNDED_HEADS and _bounded(head, args):
+        return True
+    return bounded_pipe and head not in _NEVER_BOUNDED
+
+
+def _byte_bounded_last(head, args):
+    if head in BOUNDED_HEADS:
+        return _bounded(head, args, bytes_only=True)
+    if head in _GREPS:
+        return _grep_split(args)[0]
+    return head == "wc"
 
 
 def _names_transcript(text, sid):
@@ -322,23 +342,31 @@ def violation(cmd, transcript_path):
     bodies = [a or b for a, b in _SUBST_RE.findall(skeleton)]
     for text in [skeleton] + bodies:
         for pipeline in _pipelines(_stages(text)):
-            if not _pipeline_ok(pipeline, sid, projects):
+            cmds = [_command(_words(seg)) for seg in pipeline]
+            bounded_pipe = len(cmds) > 1 and _byte_bounded_last(*cmds[-1])
+            for k, (head, args) in enumerate(cmds):
+                if head not in READERS:
+                    continue
+                reads, _ = _reads(head, args, sid, projects)
+                if not reads:
+                    continue
+                if _stage_ok(head, args, bounded_pipe and k < len(cmds) - 1):
+                    continue
                 return _message(transcript_path)
     return ""
 
 
 def _message(transcript_path):
     return ("BLOCKED (#1224): this reads a Claude session TRANSCRIPT (%s), a "
-                "single-line-per-record jsonl that grows to hundreds of MB. Loading "
-                "one froze dev1 for 19 min. Your last ❓ block is printed by "
-                "`python3 ~/devel/airuleset/airuleset.py question-block`; decisions "
-                "live on the ticket. ls/stat/wc/du and head/tail with -n <= %d or "
-                "-c <= %d stay allowed, and a bounded STREAM too (#1395): a count or "
-                "locate (grep -c / -l / -q, wc), or a grep/awk/sed/cut/zcat pipe that ENDS "
-                "in a bound (grep x f | head -n 5, ... | sort | uniq -c | head -n 50). "
-                "`airuleset.py session-shrink` shrinks a heavy session. A deliberate repair: append "
-                "`# airuleset:own-transcript-ok <reason>`."
-                % (os.path.basename(transcript_path) or "*.jsonl", MAX_LINES, MAX_BYTES))
+            "single-line-per-record jsonl that grows to hundreds of MB. Loading "
+            "one froze dev1 for 19 min. Your last ❓ block is printed by "
+            "`python3 ~/devel/airuleset/airuleset.py question-block`; decisions "
+            "live on the ticket. Allowed: ls/stat/wc/du, find without -exec, "
+            "head/tail with -n <= %d or -c <= %d, a count or locate (grep -c / -l / -q), "
+            "or a pipe that ENDS in a byte bound (... | sort | uniq -c | head -c 4000). "
+            "`airuleset.py session-shrink` shrinks a heavy session (#1395). A deliberate "
+            "repair: append `# airuleset:own-transcript-ok <reason>`."
+            % (os.path.basename(transcript_path) or "*.jsonl", MAX_LINES, MAX_BYTES))
 
 
 def main():
