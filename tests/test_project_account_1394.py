@@ -38,11 +38,14 @@ class TestBazosAccount(unittest.TestCase):
         for grant in ("devices", "rtprio", "userns", "system_packages", "sudo_commands"):
             self.assertFalse(self.spec.get(grant), grant)
 
-    def test_no_repo_and_no_github_app(self):
-        # The owner's private sales data never goes to GitHub.
-        for key in ("repo", "github_app", "extra_repos", "repo_secrets", "code_only"):
+    def test_repo_less_with_only_its_issues_tokens(self):
+        # The owner's private sales data never goes to GitHub; the App token
+        # is the airuleset issues-only one (#1199), never a repo token.
+        for key in ("repo", "extra_repos", "repo_secrets", "code_only"):
             self.assertNotIn(key, self.spec, key)
-        self.assertNotIn(ACCT, pgt.github_app_accounts())
+        self.assertIs(self.spec.get("repo_less"), True)
+        self.assertIs(self.spec.get("github_app"), True)
+        self.assertIn(ACCT, pgt.github_app_accounts())
 
     def test_privacy_plugin_off_for_this_account_only(self):
         self.assertEqual(self.spec["builtin_plugins_off"], ["cc-plugin-privacy"])
@@ -78,6 +81,7 @@ class TestBazosAccount(unittest.TestCase):
         with mock.patch.object(ci_sync, "sync_account", return_value=0) as s:
             ci_sync.sync_all(run=lambda *a, **k: None)
         self.assertEqual(rc, 0)
+        self.assertIn("project-gh-token: %s: SKIPPED — pending" % ACCT, out.getvalue())
         self.assertNotIn(ACCT, [c.args[0] for c in m.call_args_list])
         self.assertNotIn(ACCT, [c.args[0] for c in s.call_args_list])
         self.assertNotIn(ACCT, cpc.accounts_for_host("dev1"))

@@ -6,19 +6,18 @@ AS that account, write `"<plugin>@builtin": false` into its ~/.claude/settings.j
 `false` (newlevel@dev2's hand-set switch, from before the bazos account existed)
 is reported as drift and KEPT, unless that `user@host` is named in the opt-in
 `REMOVE_UNDECLARED_ON`: the supervisor removes newlevel's switch only after the
-bazos cutover. Plus `accounts verify` reads a repo-less declaration (no repo, no
-github_app) as n/a on gh-token and secret-sync, never a FAIL forever."""
+bazos cutover. (The repo-less verify half lives in test_repo_less_1394.)"""
 import io
 import json
+import os
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
 import airuleset
-import cli_account_bootstrap as bootstrap
-import cli_account_verify as verify
+import cli_account_policy as policy
 import cli_builtin_plugins as bp
 import cli_caveman_plugins as cav
 import cli_config
@@ -90,6 +89,11 @@ class _SettingsFile(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         self.path = Path(tmp.name) / "settings.json"
         p = mock.patch.object(airuleset, "SETTINGS_JSON", self.path)
+        p.start()
+        self.addCleanup(p.stop)
+        # the account's own home: the switch is applied only there (round 2)
+        p = mock.patch.object(bp, "_passwd_home", return_value=os.path.expanduser("~"),
+                              create=True)
         p.start()
         self.addCleanup(p.stop)
 
@@ -165,26 +169,70 @@ class TestStatusRow(_SettingsFile):
         self.assertIn("from cli_builtin_plugins import status_row", src)
 
 
-class TestVerifyRepoLess(unittest.TestCase):
+class TestRound2(_SettingsFile):
+    """#1394 review round 2 (the 🔵 findings)."""
 
-    def _results(self, spec):
-        with mock.patch.dict(bootstrap.SERVICE_ACCOUNTS, {"bazos": spec}):
-            rows = verify.evaluate("bazos", bootstrap.account_spec("bazos"), {}, gh_rc=None,
-                                   claudy_read=lambda name: "")
-        return {name: (ok, why) for name, ok, why in rows}
+    def test_the_declaration_counts_only_on_its_declared_host(self):
+        out, _ = bp.reconcile({}, "bazos", "dev2")      # bazos is declared on dev1
+        self.assertEqual(out, {})
+        out, _ = bp.reconcile({}, "bazos", "dev1")
+        self.assertEqual(out, {"enabledPlugins": {KEY: False}})
 
-    def test_a_repo_less_account_is_na_on_gh_token_and_secret_sync(self):
-        res = self._results(dict(bootstrap.SERVICE_ACCOUNTS["bazos"]))
-        for check in ("gh-token", "secret-sync"):
-            ok, why = res[check]
-            self.assertTrue(ok, check)
-            self.assertIn("n/a (no repo declared", why)
+    def test_an_unhashable_name_is_an_error_not_a_crash(self):
+        try:
+            errs = policy.validate_builtin_plugins_off({"builtin_plugins_off": [["x"]]})
+        except TypeError:
+            errs = None
+        self.assertTrue(errs)
 
-    def test_a_repo_without_github_app_still_fails(self):
-        spec = dict(bootstrap.SERVICE_ACCOUNTS["bazos"], repo="zbynekdrlik/bazos")
-        res = self._results(spec)
-        self.assertFalse(res["gh-token"][0])
-        self.assertFalse(res["secret-sync"][0])
+    def test_install_names_the_switch_it_applied(self):
+        self.who("bazos", "dev1")
+        self.write({"enabledPlugins": {}})
+        out = io.StringIO()
+        with redirect_stdout(out):
+            cav._reconcile_settings_file()
+        self.assertIn("%s: false (declared off for bazos@dev1" % KEY, out.getvalue())
+
+    def test_a_home_that_is_not_the_passwd_home_is_refused(self):
+        # A $HOME that is not the account's own (sudo -E, a test home) never
+        # gets the account's switch, and status says why instead of guessing.
+        self.who("bazos", "dev1")
+        p = mock.patch.object(bp, "_passwd_home", return_value="/nonexistent/other", create=True)
+        p.start()
+        self.addCleanup(p.stop)
+        out = io.StringIO()
+        with redirect_stdout(out):
+            got = bp.apply_for_this_account({"enabledPlugins": {}})
+        self.assertEqual(got, {"enabledPlugins": {}})
+        self.assertIn("not the passwd home", out.getvalue())
+        self.assertIn("not the passwd home", bp.status_row() or "")
+
+    def test_status_reads_the_passwd_home_settings(self):
+        self.who("bazos", "dev1")
+        home = self.path.parent / "acct"
+        (home / ".claude").mkdir(parents=True)
+        (home / ".claude" / "settings.json").write_text(json.dumps({"enabledPlugins": {}}))
+        with mock.patch.object(bp, "_passwd_home", return_value=str(home), create=True), \
+                mock.patch.dict(os.environ, {"HOME": str(home)}):
+            self.assertIn("not applied", bp.status_row() or "")
+
+    def test_a_failing_switch_never_aborts_the_plugin_reconcile(self):
+        self.who("bazos", "dev1")
+        self.write({"enabledPlugins": {}})
+        err = io.StringIO()
+        with mock.patch.object(bp, "reconcile", side_effect=RuntimeError("boom")), \
+                redirect_stdout(io.StringIO()), redirect_stderr(err):
+            try:
+                status = cav._reconcile_settings_file()
+            except RuntimeError:
+                status = "raised"
+        self.assertEqual(status, "wrote")
+        self.assertIs(self.read()["enabledPlugins"]["superpowers@claude-plugins-official"], True)
+        self.assertIn("builtin-plugins", err.getvalue())
+
+    def test_the_docstring_says_removing_a_declaration_needs_the_opt_in(self):
+        self.assertIn("dropping builtin_plugins_off", bp.__doc__)
+        self.assertIn("REMOVE_UNDECLARED_ON", bp.__doc__)
 
 
 if __name__ == "__main__":
