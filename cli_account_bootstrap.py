@@ -72,7 +72,7 @@ _NEVER_PROJECT_ACCOUNTS = frozenset({"newlevel", "root", "airuleset",
 _ALLOWED_KEYS = frozenset({
     "host", "sudo", "sudo_reason", "sudo_commands",
     "secrets", "webterm_sessions", "system_packages", "repo",
-    "project_dir", "tmux_session", "github_app", "repo_secrets", "tools", "code_only", "handover", "statuses_write", "extra_repos", "rtprio", "devices", "nic_noqueue", "target_cap_gb", "cargo_full_debug", "userns", "builtin_plugins_off",
+    "project_dir", "tmux_session", "github_app", "repo_secrets", "tools", "code_only", "handover", "statuses_write", "extra_repos", "rtprio", "devices", "nic_noqueue", "target_cap_gb", "cargo_full_debug", "userns", "builtin_plugins_off", "repo_less",
 })
 
 # The defaults every declaration inherits. They are the SAFE direction: no
@@ -447,9 +447,11 @@ SERVICE_ACCOUNTS = {
         "webterm_sessions": {h: {"preferred": "wall-songs", "start_dir_chain": ["devel/wall-songs"]} for h in ("zbynek", "marek")},
     },
     # #1394 (owner 23.11.): the owner's private Bazos/Bazar sales scripts move from newlevel@dev2
-    # to dev1, with the privacy plugin off for this account only. No repo: the ads stay off GitHub.
+    # to dev1, with the privacy plugin off for this account only. No repo: the ads stay off GitHub;
+    # its App tokens are issues-only (airuleset + peers, #1199).
     "bazos": {
         "host": "dev1", "sudo": False, "secrets": [], "builtin_plugins_off": ["cc-plugin-privacy"],
+        "repo_less": True, "github_app": True,
         "tools": ["playwright:1.62.0/chromium"],   # the scripts' pip playwright 1.62.0 (chromium 1234)
         "project_dir": "devel/bazos", "tmux_session": "bazos",
         "webterm_sessions": {h: {"preferred": "bazos", "start_dir_chain": ["devel/bazos"]} for h in ("zbynek", "marek")},
@@ -604,7 +606,7 @@ def validate_account(account, raw):
     if spec["host"] not in boxes:
         errs.append("host %r is not a fleet box (known: %s)"
                     % (spec["host"], ", ".join(sorted(boxes))))
-    errs += policy.validate_sudo(spec, account, declared=SERVICE_ACCOUNTS) + policy.validate_rtprio(spec) + policy.validate_host_grants(spec) + policy.validate_build_budget(spec) + policy.validate_userns(spec) + policy.validate_builtin_plugins_off(spec)
+    errs += policy.validate_sudo(spec, account, declared=SERVICE_ACCOUNTS) + policy.validate_rtprio(spec) + policy.validate_host_grants(spec) + policy.validate_build_budget(spec) + policy.validate_userns(spec) + policy.validate_builtin_plugins_off(spec) + policy.validate_repo_less(spec)
     secrets = spec["secrets"]
     if not isinstance(secrets, (list, tuple)):
         errs.append("secrets must be a list")

@@ -213,7 +213,7 @@ def validate_github_app(spec, account=None, declared=()):
     (``declared`` = every declaration, for the one-repo-one-account check)."""
     if "github_app" in spec and not isinstance(spec["github_app"], bool):
         return ["github_app must be True or False"]
-    if spec.get("github_app") and "repo" not in spec:
+    if spec.get("github_app") and "repo" not in spec and spec.get("repo_less") is not True:
         return ["github_app: True needs the repo the token is scoped to"]
     if "code_only" in spec and not isinstance(spec["code_only"], bool):
         return ["code_only must be True or False (#1220, gates.codeonly)"]
@@ -298,7 +298,27 @@ def validate_builtin_plugins_off(spec):
         return ["builtin_plugins_off must be a list of built-in plugin names"]
     errs = ["builtin_plugins_off: %r is not a switchable built-in plugin (known: %s)"
             % (n, ", ".join(sorted(SWITCHABLE_BUILTIN_PLUGINS)))
-            for n in names if n not in SWITCHABLE_BUILTIN_PLUGINS]
+            for n in names if not isinstance(n, str) or n not in SWITCHABLE_BUILTIN_PLUGINS]
     if len(set(map(str, names))) != len(names):
         errs.append("builtin_plugins_off lists a plugin twice")
+    return errs
+
+
+# #1394 round 2: an account whose data never goes to GitHub declares it, never
+# by leaving `repo` out (claudy has a real repo and declares neither key). It
+# keeps its airuleset issues token (#1199): `cli_project_gh_token_repoless`.
+_REPO_KEYS = ("repo", "extra_repos", "repo_secrets", "code_only", "statuses_write", "handover")
+
+
+def validate_repo_less(spec):
+    """``repo_less`` is ``True`` or absent; True excludes every repo key and
+    needs ``github_app: True`` (the issues-only tokens)."""
+    if "repo_less" not in spec:
+        return []
+    if spec["repo_less"] is not True:
+        return ["repo_less must be True when declared (leave it out otherwise)"]
+    errs = ["repo_less: True excludes %s" % k for k in _REPO_KEYS if k in spec]
+    if spec.get("github_app") is not True:
+        errs.append("repo_less: True needs github_app: True (its airuleset issues "
+                    "token, #1199)")
     return errs

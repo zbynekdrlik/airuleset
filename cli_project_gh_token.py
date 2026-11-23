@@ -532,10 +532,12 @@ def mint_account(account, *, key_path=None, dry_run=False, now=None, run=None,
               file=sys.stderr)
         return 1
     spec = bootstrap.account_spec(account)
+    if spec.get("repo_less") is True:   # #1394: the issues-only tokens, never a repo token
+        from cli_project_gh_token_repoless import mint as mint_repo_less
+        return mint_repo_less(account, key_path=key_path, dry_run=dry_run, now=now, run=run, urlopen=urlopen, directory=directory)
     if spec.get("github_app") is not True or not spec.get("repo"):
-        print("project-gh-token: %s does not declare github_app: True with a "
-              "repo (cli_account_bootstrap.SERVICE_ACCOUNTS)" % account,
-              file=sys.stderr)
+        print("project-gh-token: %s does not declare github_app: True with a repo "
+              "(cli_account_bootstrap.SERVICE_ACCOUNTS)" % account, file=sys.stderr)
         return 1
     repo = spec["repo"]
     try:
@@ -812,7 +814,7 @@ def verify_account(account, *, run=None):
     spec = bootstrap.account_spec(account) if account in bootstrap.SERVICE_ACCOUNTS else {}
     repo = spec.get("repo")
     try:
-        token_file_name(repo)
+        token_file_name(AIRULESET_REPO if spec.get("repo_less") is True else repo)
         remote = account_target(account)
     except MintError as e:
         print("project-gh-token verify: %s: FAILED — %s" % (account, e),
@@ -820,8 +822,7 @@ def verify_account(account, *, run=None):
         return 1
     prefix, _why = cli_remote._ssh_prefix(remote, True)
     if prefix is None:
-        print("project-gh-token verify: %s has no pinned ssh identity" % account,
-              file=sys.stderr)
+        print("project-gh-token verify: %s has no pinned ssh identity" % account, file=sys.stderr)
         return 1
     try:
         r = run(prefix + ["%s@%s" % (remote["user"], remote["host"]),
@@ -832,6 +833,8 @@ def verify_account(account, *, run=None):
               % (account, type(e).__name__), file=sys.stderr)
         return 1
     gh_path, sections = _probe_sections(r.stdout)
+    if spec.get("repo_less") is True:   # #1394: the airuleset write, and no repo token
+        return __import__("cli_project_gh_token_repoless").verify_verdict(account, r.returncode, gh_path, sections)
     primary = sections.get("primary", ([], None))
     got = [ln.strip().lower() for ln in primary[0] if ln.strip()]
     wanted = [repo] + (spec.get("extra_repos") or [])
