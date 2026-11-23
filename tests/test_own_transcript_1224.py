@@ -109,7 +109,8 @@ class TestGate(unittest.TestCase):
 class TestHook(unittest.TestCase):
 
     def test_the_hook_blocks_and_names_the_way_out(self):
-        r = _hook(self, "grep -c NEEDS %s" % TP)
+        # #1395: grep -c is a count-only reader now, so the example is a cat
+        r = _hook(self, "cat %s | head -n 5" % TP)
         self.assertEqual(r.returncode, 2, r.stderr)
         self.assertIn("airuleset.py question-block", r.stderr)
 

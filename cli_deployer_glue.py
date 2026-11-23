@@ -342,9 +342,9 @@ try:
     rel = statusbar.release_idle_segment(cwd=cwd)
     if rel:
         segs.append(rel)
-    try:   # #1301 `restart <N>M`: OWN guard, a missing module never blanks the footer
+    try:   # #1301/#1395 `shrink <N>M`: OWN guard, a missing module never blanks the footer
         import transcript_weight
-        segs += transcript_weight.restart_segments(d)
+        segs += transcript_weight.shrink_segments(d)
     except Exception as _twe:  # airuleset:script-ok optional segment, logged
         _shim_log("transcript-weight %s" % _twe)
     # --- 'ctx 570K' (#37/#223; #928 removed the '~$<cost>' suffix, 7.9.2026) ---

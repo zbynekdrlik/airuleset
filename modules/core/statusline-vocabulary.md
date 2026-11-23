@@ -14,7 +14,7 @@ The footer is exactly **6 segments — `I · M · U · W · gk · skip`** (8 whe
 - `· skip K` (was `· skipped K`) — tickets labeled `autopilot-skip` (excluded from `I N`); hidden at 0.
 - `disk NN%` (#834/#854/#925) — the box's disk pressure, shown ONLY when **actionable**: **≥ 95 %** (red) OR the drain ladder reported **exhausted** (could not free space at ≥ 90 %); the 90-94 % band the guard handles itself is **hidden**. From `~/.claude/disk-guard/status.json` (Job 40), hidden when stale (> 10 min); the owner's only disk surface (never a Discord ping). Shared-stream boxes add `quota NN%` (#950): per-account usrquota at **≥ 90 %** with < 1 GiB room (#1380).
 - `nudges <profile> · recovery on` (#1174) — declared box profile (gk/stream/…); `+N`/`-N` = runtime deviation; `recovery on` = resume/goal-arm/… always fire
-- `restart <N>M` (#1301) — this session's transcript is N MiB (≥ 64): restart it, it pins a CPU core
+- `shrink <N>M` (#1395) — transcript N MiB (≥ 100): exit, `airuleset.py session-shrink --over 100 --apply`, `claude -c`
 - `<email>` — the account identity block, at the end of the line. `<email>` is `oauthAccount.emailAddress` from `~/.claude.json`, rendered in a readable colour. (#928: the `sub <D.M.>(<Nd>)` renewal anchor was removed.)
 
 **Width budget:** the whole line is fit inside the live tmux pane's width MINUS a reserve for Claude Code's own right-edge indicators (the `◎ /goal` glyph — a full pane once truncated the line off the row, misread as "the goal died"). When it would overflow, the LEAST important segments are dropped dynamically, in this order: the account email first, then the caveman tag. Unmeasurable width (no tmux) = no trim.

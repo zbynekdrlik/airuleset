@@ -9328,6 +9328,10 @@ from cli_question_block import (  # noqa: E402, F401
     cmd_question_block as cmd_question_block,
     register_parser as _register_question_block_parser,
 )
+from cli_session_shrink import (  # noqa: E402, F401  #1395
+    cmd_session_shrink as cmd_session_shrink,
+    register_parser as _register_session_shrink_parser,
+)
 
 
 def _register_leaf_parsers(sub):
@@ -9335,7 +9339,8 @@ def _register_leaf_parsers(sub):
     one call from main() keeps main() from growing per leaf."""
     for register in (_register_stream_priority_parser, _register_box_queue_parser,
                      _register_accounts_parser, _register_project_gh_token_parser,
-                     _register_question_block_parser, _register_venue_bypass_parser, _register_publish_app_parser):
+                     _register_question_block_parser, _register_venue_bypass_parser, _register_publish_app_parser,
+                     _register_session_shrink_parser):
         register(sub)
 
 # --- #1062 L1: managed LiteLLM model gateway CLI leaf ---
@@ -11123,6 +11128,7 @@ SUBCOMMANDS = {
     "project-gh-token": cmd_project_gh_token,
     "question-block": cmd_question_block,
     "venue-bypass-sync": cmd_venue_bypass_sync, "publish-app": cmd_publish_app,  # #1370
+    "session-shrink": cmd_session_shrink,  # #1395
 }
 # Backwards-compatible alias used by main() before SUBCOMMANDS existed.
 commands = SUBCOMMANDS
