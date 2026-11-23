@@ -49,9 +49,8 @@ def _hook(testcase, cmd, tp=TP):
 class TestGate(unittest.TestCase):
 
     def test_content_reads_of_the_own_transcript_are_refused(self):
-        # #1395: a bounded STREAMING grep (-c/-o/-m) now passes; the songplayer
-        # loader shapes (python, cat, jq, an unbounded grep) stay refused
-        for cmd in ("python3 - < %s" % TP,
+        for cmd in ("grep -o 'Otázka — projekt songplayer[^\"]\\{0,1500\\}' %s" % TP,
+                    "python3 - < %s" % TP,
                     "cat %s | grep NEEDS" % TP,
                     "jq -c . %s" % TP,
                     "cd ~/.claude/projects/x && python3 -c 'open(\"%s.jsonl\").read()'" % SID,
@@ -110,6 +109,7 @@ class TestGate(unittest.TestCase):
 class TestHook(unittest.TestCase):
 
     def test_the_hook_blocks_and_names_the_way_out(self):
+        # #1395: grep -c is a count-only reader now, so the example is a cat
         r = _hook(self, "cat %s | head -n 5" % TP)
         self.assertEqual(r.returncode, 2, r.stderr)
         self.assertIn("airuleset.py question-block", r.stderr)
