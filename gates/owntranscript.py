@@ -29,15 +29,22 @@ SMALL allow-list on top (supervisor ROZHODNUTÉ round 3):
   ``ls``/``stat``/``du``, ``find`` without ``-exec``/``-ok``/``-delete``/
   ``-fprint``, and ``python3 … airuleset.py session-shrink``;
 * any other reader passes only when its pipeline ENDS in a BYTE bound
-  (``head -c``/``tail -c`` ≤ ``MAX_BYTES``, ``wc``, ``grep -c/-q/-l``), and
-  never an interpreter or ``sort`` (they load the whole file whatever the
-  output bound);
-* a recursive ``grep``/``rg`` counts as a projects read only when a PATH
-  operand is under ``.claude/projects``: a code search for the string
-  (``grep -rn '.claude/projects' gates/``) is not a read.
+  (``head -c``/``tail -c`` ≤ ``MAX_BYTES``, ``wc``, ``grep -c/-q/-l``) and no
+  stage of it slurps (an interpreter, ``tac``, ``jq -s``); ``sort`` or
+  ``head``/``tail`` is never the first reader (``sort``/``uniq``/``cut``/``grep``
+  downstream are fine);
+* ``session-shrink`` passes only as the interpreter's SCRIPT (first non-option
+  argument; ``-c``/``-m`` never);
+* a ``grep``/``rg`` reads only its PATH operands and ``-f``/``--file`` pattern
+  files: a code search for the string or the session id
+  (``grep -rn '.claude/projects' gates/``) is not a read, a value option
+  (``-g -t -T -j --include --exclude --type …``) never shifts the pattern, a
+  pattern FILE that is a transcript is always refused, and a recursive search
+  with no or a relative operand after ``cd`` into ``.claude/projects`` reads
+  the tree.
 Segments split quote-aware (``'…'``, ``"…"``, ``$'…'``, ``$(…)``, backticks; a
-word-initial ``#`` comments to its newline), so a ``;`` inside
-``python3 -c '…'`` stays one command.
+word-initial ``#`` comments to its newline; a ``(…)`` subshell or ``<(…)`` is
+its own command), so a ``;`` inside ``python3 -c '…'`` stays one command.
 
 Accepted residuals (a guardrail against an accident, not a security boundary:
 three review rounds showed a command-text parser cannot be complete, and
@@ -80,11 +87,23 @@ _GREPS = frozenset({"grep", "egrep", "fgrep", "zgrep", "rg"})
 _GREP_COUNT_SHORT = frozenset("clLq")
 _GREP_COUNT_LONG = ("--count", "--files-with-matches", "--files-without-match", "--quiet",
                     "--silent")
-_GREP_VALUE_SHORT = frozenset("efABCdmM")    # the rest of the cluster is its value
+# short options whose value is the rest of the cluster (or the next word)
+_VALUE_SHORT = {"grep": frozenset("efABCdDm"), "rg": frozenset("efABCmMgtTjErd")}
+_VALUE_LONG = frozenset({"--regexp", "--file", "--after-context", "--before-context",
+                         "--context", "--max-count", "--include", "--exclude",
+                         "--exclude-dir", "--exclude-from", "--type", "--type-not",
+                         "--type-add", "--type-clear", "--glob", "--iglob", "--max-depth",
+                         "--threads", "--encoding", "--replace", "--max-columns",
+                         "--max-filesize", "--devices", "--directories", "--binary-files",
+                         "--label", "--sort", "--sortr", "--pre", "--pre-glob",
+                         "--ignore-file", "--path-separator", "--context-separator",
+                         "--field-match-separator", "--field-context-separator",
+                         "--engine", "--colors", "--color", "--colour", "--dfa-size-limit",
+                         "--regex-size-limit"})
 _FIND_ACTIONS = frozenset({"-exec", "-execdir", "-ok", "-okdir", "-delete", "-fprint",
                            "-fprint0", "-fprintf", "-fls"})
-_NEVER_BOUNDED = INTERPRETERS | BOUNDED_HEADS | {"sort"}   # head/tail keep their #1224 rule
-_SHELL_WORDS = frozenset({"do", "then", "else", "elif", "!", "{"})
+_NEVER_BOUNDED = INTERPRETERS | BOUNDED_HEADS | {"sort", "tac"}   # never the first reader
+_SHELL_WORDS = frozenset({"do", "then", "else", "elif", "!", "{", "}"})
 # a command substitution body is a command of its own (never split on a bare
 # paren: python -c 'open("x.jsonl")' must stay one command)
 _SUBST_RE = re.compile(r"\$\(([^()]*)\)|`([^`]*)`")
@@ -201,8 +220,8 @@ def _stages(text):
                 i += 1
         elif c == "&" and ((cur and cur[-1].endswith((">", "<"))) or text.startswith("&>", i)):
             cur.append(c)                   # 2>&1, >&2, &>file: a redirection
-        elif c in ";&\n":
-            cut(False)
+        elif c in ";&\n()":
+            cut(False)                      # a (…) subshell / <(…) is its own command
         else:
             cur.append(c)
         i += 1
@@ -222,42 +241,60 @@ def _pipelines(stages):
     return out
 
 
-def _grep_split(args):
-    """``(counts, recursive, operands)`` of a grep/rg argument list; operands
-    are the non-option words after the pattern (the PATHS)."""
+def _grep_split(head, args):
+    """``(counts, recursive, operands, pattern_files)`` of a grep/rg argument
+    list. ``operands`` are the PATHS (the non-option words after the pattern);
+    a value option's value is never taken for the pattern."""
+    kind = "rg" if head == "rg" else "grep"
+    values = _VALUE_SHORT[kind]
     counts = recursive = False
-    words, pattern_given, it = [], False, iter(args)
+    words, files, pattern_given, it = [], [], False, iter(args)
     for a in it:
         if a == "--":
             words.extend(it)
             break
         if a.startswith("--"):
-            key = a.split("=", 1)[0]
+            key, eq, val = a.partition("=")
             counts |= key in _GREP_COUNT_LONG
             recursive |= key in ("--recursive", "--dereference-recursive")
-            if key in ("--regexp", "--file"):
-                pattern_given = True
-                if "=" not in a:
-                    next(it, None)
+            if key in _VALUE_LONG:
+                if not eq:
+                    val = next(it, "")
+                if key in ("--regexp", "--file"):
+                    pattern_given = True
+                if key == "--file":
+                    files.append(val)
         elif a.startswith("-") and len(a) > 1 and not a[1].isdigit():
             for k, ch in enumerate(a[1:]):
                 counts |= ch in _GREP_COUNT_SHORT
-                recursive |= ch in "rR"
-                if ch in _GREP_VALUE_SHORT:
+                recursive |= kind == "grep" and ch in "rR"
+                if ch in values:
+                    val = a[k + 2:] or next(it, "")
                     if ch in "ef":
                         pattern_given = True
-                    if k == len(a) - 2:
-                        next(it, None)
+                    if ch == "f":
+                        files.append(val)
                     break
         else:
             words.append(a)
-    return counts, recursive, (words if pattern_given else words[1:])
+    return counts, recursive, (words if pattern_given else words[1:]), files
 
 
 def _runs_session_shrink(args):
-    names = [os.path.basename(a) for a in args]
-    return "cli_session_shrink.py" in names or (
-        "airuleset.py" in names and "session-shrink" in args)
+    """The interpreter's SCRIPT is session-shrink (never ``-c``/``-m`` code)."""
+    it = iter(args)
+    for a in it:
+        if a.startswith("-") and a != "-":
+            if not a.startswith("--") and ("c" in a[1:] or "m" in a[1:]):
+                return False
+            if a in ("-X", "-W"):
+                next(it, None)
+            continue
+        base = os.path.basename(a)
+        if base == "cli_session_shrink.py":
+            return True
+        return base == "airuleset.py" and next(it, None) == "session-shrink"
+    return False
 
 
 def _touches(words, sid, under_projects):
@@ -270,25 +307,32 @@ def _touches(words, sid, under_projects):
     return False
 
 
-def _reads(head, args, sid, projects):
-    """Does this reader stage read a transcript (``(reads, recursive)``)?"""
+def _relative(path):
+    return not path.startswith(("/", "~", "$"))
+
+
+def _reads(head, args, sid, projects, in_projects):
+    """``""`` (no transcript read), ``"read"`` or ``"hard"`` (refused whatever
+    else holds: a transcript as a grep PATTERN file)."""
     if head in _GREPS:
-        _, recursive, operands = _grep_split(args)
+        _, recursive, operands, files = _grep_split(head, args)
+        if any(_touches([f], sid, True) or ".claude/projects" in f for f in files):
+            return "hard"
         recursive = recursive or head == "rg"
-        hits = (_touches(operands, sid, projects) or any(sid and sid + ".jsonl" in a
-                                                          for a in args))
         if recursive and any(".claude/projects" in o for o in operands):
-            return True, True
-        if head == "rg" and not operands and projects:
-            return False, False
-        return hits, False
+            return "read"
+        if recursive and in_projects and (not operands or any(map(_relative, operands))):
+            return "read"
+        return "read" if _touches(operands, sid, projects) else ""
     if head == "find":
-        return any(".claude/projects" in a for a in args) or _touches(args, sid, projects), False
-    return _touches(args, sid, projects), False
+        hit = (any(".claude/projects" in a for a in args) or _touches(args, sid, projects)
+               or in_projects)
+        return "read" if hit else ""
+    return "read" if _touches(args, sid, projects) else ""
 
 
 def _stage_ok(head, args, bounded_pipe):
-    if head in _GREPS and _grep_split(args)[0]:
+    if head in _GREPS and _grep_split(head, args)[0]:
         return True                                # counts / names / quiet
     if head == "find":
         return not any(a in _FIND_ACTIONS for a in args)
@@ -303,8 +347,24 @@ def _byte_bounded_last(head, args):
     if head in BOUNDED_HEADS:
         return _bounded(head, args, bytes_only=True)
     if head in _GREPS:
-        return _grep_split(args)[0]
+        return _grep_split(head, args)[0]
     return head == "wc"
+
+
+def _slurps(head, args):
+    """A stage that holds its whole input in memory whatever the output bound."""
+    if head in INTERPRETERS or head == "tac":
+        return True
+    return head == "jq" and any(a == "--slurp" or (a.startswith("-") and not a.startswith("--")
+                                                   and "s" in a[1:]) for a in args)
+
+
+def _cd_into_projects(text):
+    for seg, _ in _stages(text):
+        head, args = _command(_words(seg))
+        if head in ("cd", "pushd") and any(".claude/projects" in a for a in args):
+            return True
+    return False
 
 
 def _names_transcript(text, sid):
@@ -340,17 +400,20 @@ def violation(cmd, transcript_path):
     skeleton = _capture_heredocs(cmd)[2]          # heredoc bodies are data
     projects = ".claude/projects" in skeleton
     bodies = [a or b for a, b in _SUBST_RE.findall(skeleton)]
+    in_projects = _cd_into_projects(skeleton)
     for text in [skeleton] + bodies:
         for pipeline in _pipelines(_stages(text)):
             cmds = [_command(_words(seg)) for seg in pipeline]
-            bounded_pipe = len(cmds) > 1 and _byte_bounded_last(*cmds[-1])
+            bounded_pipe = (len(cmds) > 1 and _byte_bounded_last(*cmds[-1])
+                            and not any(_slurps(h, a) for h, a in cmds))
             for k, (head, args) in enumerate(cmds):
                 if head not in READERS:
                     continue
-                reads, _ = _reads(head, args, sid, projects)
+                reads = _reads(head, args, sid, projects, in_projects)
                 if not reads:
                     continue
-                if _stage_ok(head, args, bounded_pipe and k < len(cmds) - 1):
+                if reads != "hard" and _stage_ok(head, args,
+                                                 bounded_pipe and k < len(cmds) - 1):
                     continue
                 return _message(transcript_path)
     return ""
