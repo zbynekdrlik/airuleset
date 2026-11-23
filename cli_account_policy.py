@@ -281,3 +281,24 @@ def validate_repo_secrets(spec, account=None, declared=()):
              if other != account and isinstance(raw, dict)
              and str(raw.get("repo", "")).lower() == repo]
     return errs
+
+
+# #1394: the Claude Code BUILT-IN plugins a declaration may switch off for its
+# account. CC 2.1.330 reads a built-in with `enabledFromTrustedSettingsOnly`
+# only from user / flag / policy settings, never from a project's settings, so
+# the account's ~/.claude/settings.json is the smallest scope there is.
+SWITCHABLE_BUILTIN_PLUGINS = frozenset({"cc-plugin-privacy"})
+
+
+def validate_builtin_plugins_off(spec):
+    """``builtin_plugins_off`` is a list of distinct names from
+    ``SWITCHABLE_BUILTIN_PLUGINS`` (fail-closed: an unknown name is an error)."""
+    names = spec.get("builtin_plugins_off", [])
+    if not isinstance(names, list):
+        return ["builtin_plugins_off must be a list of built-in plugin names"]
+    errs = ["builtin_plugins_off: %r is not a switchable built-in plugin (known: %s)"
+            % (n, ", ".join(sorted(SWITCHABLE_BUILTIN_PLUGINS)))
+            for n in names if n not in SWITCHABLE_BUILTIN_PLUGINS]
+    if len(set(map(str, names))) != len(names):
+        errs.append("builtin_plugins_off lists a plugin twice")
+    return errs

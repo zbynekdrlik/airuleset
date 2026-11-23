@@ -98,6 +98,7 @@ _GENERATED_DROP_PORTS = {
     ("dev1", "companion-updater"): 8915,   # #1363
     ("dev1", "restreamer"): 8916,   # #1373 (ss -ltn on dev1: free)
     ("dev1", "wall-songs"): 8917,   # #1390 (ss -ltn on dev1: free)
+    ("dev1", "bazos"): 8918,   # #1394 (ss -Hltn on dev1: free)
     ("subdev", "david5"): 8911, ("subdev", "david6"): 8912,   # #1341 (ss -ltn: free)
     ("subdev", "david7"): 8913, ("subdev", "david8"): 8914,
 }
