@@ -1,18 +1,20 @@
-"""#1301 -- the `restart <N>M` footer segment: this session has grown too heavy.
+"""#1301 / #1395 -- the `shrink <N>M` footer segment: this session's FILE is heavy.
 
-A long-lived Claude Code session keeps its whole history in its process, and the
-per-turn work grows with it until the Node main thread saturates: david3@subdev
+A long-lived Claude Code session keeps its whole history in its transcript, and
+the per-turn work grows with it until the Node main thread saturates: david3@subdev
 pinned a core at a 68 MB transcript (10.11.2026) and again at 97 MB (13.11.,
-keystrokes lagging, owner report "nedá sa písať"). Only a FRESH session fixes it,
-and only the owner (or the person at that terminal) restarts a session -- the
-watchdog never kills or restarts one. So the lever is a signal in the one place
-that person looks: the session's own footer.
+keystrokes lagging, owner report "nedá sa písať"). #1301 said `restart`, but a
+`claude -c` restart reloads the same file. #1395: `airuleset.py session-shrink`
+archives every record before the last /compact, so the session keeps working on
+/compact (never /clear) with a small file. Only the person at that terminal exits
+the session (the shrink refuses a live one); the watchdog never kills it. So the
+lever is a signal in the one place that person looks: the session's own footer.
 
-The statusline shim calls `restart_segments(payload)` on every render. It reads
+The statusline shim calls `shrink_segments(payload)` on every render. It reads
 the session's own `transcript_path` from the payload with ONE `os.stat` (never
 the content: a transcript reaches hundreds of MB) and returns a red
-`restart <N>M` segment at or above `RESTART_TRANSCRIPT_BYTES`, else nothing. A
-new session starts a new transcript, so the segment disappears by itself.
+`shrink <N>M` segment at or above `RESTART_TRANSCRIPT_BYTES`, else nothing.
+`restart_segments` stays as an alias for shims installed before #1395.
 Stdlib only, never raises (a footer segment must never break the render).
 """
 import os
@@ -36,13 +38,16 @@ def transcript_bytes(payload):
         return None
 
 
-def restart_segments(payload, limit=RESTART_TRANSCRIPT_BYTES):
-    """`["restart <N>M"]` (red) when this session's transcript is at least
+def shrink_segments(payload, limit=RESTART_TRANSCRIPT_BYTES):
+    """`["shrink <N>M"]` (red) when this session's transcript is at least
     `limit` bytes, else `[]`. A list so the shim can `segs += ...` it."""
     try:
         size = transcript_bytes(payload)
         if size is None or size < limit:
             return []
-        return [_RED % ("restart %dM" % (size // (1024 * 1024)))]
+        return [_RED % ("shrink %dM" % (size // (1024 * 1024)))]
     except Exception:  # noqa: BLE001 — a footer segment never breaks the render
         return []
+
+
+restart_segments = shrink_segments   # shims installed before #1395 call this name
