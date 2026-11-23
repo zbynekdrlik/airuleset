@@ -44,6 +44,9 @@ STREAMING = (
     "for f in ~/.claude/projects/*/*.jsonl; do grep -c x \"$f\"; done",
     "python3 ~/devel/airuleset/airuleset.py session-shrink %s" % TP,
     "python3 cli_session_shrink.py %s --apply" % TP,
+    "grep -c x %s 2>&1 | tail -n 3" % TP, "grep x %s 2>/dev/null | head -n 2" % TP,
+    "grep x %s |& head -n 2" % TP, "grep x %s 2>&1 | head -n 2" % TP,
+    "grep x %s &>/dev/stdout | wc -l" % TP,
 )
 
 LOADERS = (
@@ -61,6 +64,7 @@ LOADERS = (
     "sed -n '/x/p' %s" % TP,
     "cut -c1-100 %s" % TP, "sort %s" % TP, "zcat %s" % GZ,
     "wc -l `grep a %s`" % TP,
+    "grep x %s 2>&1" % TP, "grep x %s >&2" % TP, "grep x %s & wait" % TP,
 )
 
 
