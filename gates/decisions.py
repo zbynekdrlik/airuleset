@@ -13,8 +13,10 @@ from GitHub every time (no second copy to keep in sync):
   decision  = a comment with a line-anchored `ROZHODNUTÉ` (outside code fences,
               never a `>` quote; a bullet / heading / bold prefix is allowed),
               verbatim; and each body paragraph from such a line to its end.
-              A comment that carries `Decisions-checked:` is never a decision
-              source (a design quoting the decisions must not count itself).
+              A comment that carries a well-formed `Decisions-checked: #E (<n>
+              read)` line is never a decision source (a design quoting the
+              decisions must not count itself) -- so a ruling never goes into
+              such a comment.
 
 The gate (the shape of `gates.epic_rehearsal.composer_check`): a ticket that is
 `Part of #E` / `Epic: #E` may be handed off only when it carries a comment with
@@ -187,7 +189,9 @@ def _later(a, b):
 
 def read_comments(number, slug, cwd=None, runner=None):
     """`(comments, err)`: `[{id, created_at, body, author, html_url}]`; an
-    EDITED comment is dated by its `updated_at` (an edited decision is new)."""
+    EDITED comment is dated by its `updated_at` (an edited decision is new);
+    `posted_at` keeps the creation time (a marker is dated by it, so editing an
+    old marker never re-attests it)."""
     rc, out, err = _gh(["gh", "api", "repos/%s/issues/%s/comments"
                         % (slug, number), "--paginate", "-q", ".[]"],
                        cwd, runner)
@@ -199,6 +203,7 @@ def read_comments(number, slug, cwd=None, runner=None):
             items.append({"id": obj.get("id"), "body": obj["body"],
                           "created_at": _later(obj.get("created_at"),
                                                obj.get("updated_at")),
+                          "posted_at": obj.get("created_at"),
                           "author": (obj.get("user") or {}).get("login"),
                           "html_url": obj.get("html_url")})
     return items, None
@@ -254,13 +259,14 @@ def collect_full(slug, epic, cwd=None, runner=None):
         return None, None, err
     groups = []
     for m in members:
-        found = [{"kind": "body", "text": p, "author": m["author"],
+        here = {"slug": m["slug"], "number": m["number"]}
+        found = [here | {"kind": "body", "text": p, "author": m["author"],
                   "created_at": m["created_at"], "html_url": m["html_url"]}
                  for p in decision_paragraphs(m["body"])]
         comments, err = read_comments(m["number"], m["slug"], cwd=cwd, runner=runner)
         if err:
             return None, None, err
-        found += [{"kind": "comment", "text": c["body"], "author": c["author"],
+        found += [here | {"kind": "comment", "text": c["body"], "author": c["author"],
                    "created_at": c["created_at"], "html_url": c["html_url"]}
                   for c in comments if is_decision_comment(c["body"])]
         if found:
@@ -282,9 +288,28 @@ def flatten(groups):
     return _newest_first([d for g in groups or [] for d in g["decisions"]])
 
 
+def names_decision(body, decisions, ticket_slug):
+    """True iff `body` (marker lines and `>` quotes excluded) names at least one
+    decision: its `issuecomment-<id>` or its ticket (`#N` same-repo,
+    `owner/repo#N`). The #1161 lesson: a marker line alone is no evidence."""
+    text = "\n".join(ln for ln in _content_lines(body or "")
+                     if not _CHECKED_RE.match(ln) and not ln.lstrip().startswith(">"))
+    for d in decisions:
+        url = d.get("html_url") or ""
+        if "#issuecomment-" in url and url.rsplit("#", 1)[1] in text:
+            return True
+        refs = ["%s#%d" % (re.escape(d.get("slug") or ""), d.get("number") or 0)]
+        if (d.get("slug") or "").lower() == ticket_slug.lower():
+            refs.append("#%d" % (d.get("number") or 0))
+        if any(re.search(r"(?<![\w/#.-])%s(?!\d)" % r, text) for r in refs):
+            return True
+    return False
+
+
 def evaluate(ticket_slug, epic_slug, epic, comments, decisions):
     """`{verdict, reason, marker}`; verdict `pass` | `no-decisions` | `missing`
-    | `stale` | `count-mismatch`."""
+    | `stale` | `count-mismatch` | `no-evidence`. A marker is dated by when it
+    was POSTED; a decision by its last edit."""
     count = len(decisions)
     if not count:
         return {"verdict": "no-decisions", "reason": None, "marker": None}
@@ -303,10 +328,12 @@ def evaluate(ticket_slug, epic_slug, epic, comments, decisions):
         return {"verdict": "missing", "marker": None,
                 "reason": "epic %s has %d decisions (ROZHODNUTÉ), but this ticket "
                           "has no `Decisions-checked:` line. %s." % (ref, count, how)}
-    marks.sort(key=lambda cn: iso_epoch(cn[0].get("created_at")) or 0)
+    def posted(c):
+        return iso_epoch(c.get("posted_at") or c.get("created_at")) or 0
+    marks.sort(key=lambda cn: posted(cn[0]))
     mark, n_read = marks[-1]
     newest = decisions[0]
-    if (iso_epoch(mark.get("created_at")) or 0) <= (iso_epoch(newest.get("created_at")) or 0):
+    if posted(mark) <= (iso_epoch(newest.get("created_at")) or 0):
         return {"verdict": "stale", "marker": mark,
                 "reason": "the newest `Decisions-checked:` (comment %s, %s) is "
                           "older than the newest decision of epic %s (%s, %s). "
@@ -318,6 +345,12 @@ def evaluate(ticket_slug, epic_slug, epic, comments, decisions):
                 "reason": "the `Decisions-checked:` (comment %s) says %d read, but "
                           "epic %s now has %d decisions. %s."
                           % (mark.get("id"), n_read, ref, count, how)}
+    if not names_decision(mark.get("body"), decisions, ticket_slug):
+        return {"verdict": "no-evidence", "marker": mark,
+                "reason": "the `Decisions-checked:` (comment %s) names no decision "
+                          "of epic %s: list each applicable decision (its ticket "
+                          "or issuecomment link) and how the design meets it. %s."
+                          % (mark.get("id"), ref, how)}
     return {"verdict": "pass", "reason": None, "marker": mark}
 
 
@@ -342,32 +375,43 @@ def composer_check(issue, repo, *, cwd=None, runner=None, env=None,
         print("handoff: decisions gate state unknown (ticket #%s unreadable: %s) "
               "-- skipped, fail-open (#1396)" % (issue, err), file=out)
         return None, {"decisions_gate": "unknown"}
-    refs = parent_refs(obj.get("body"))
-    if not refs:
+    epics = []                      # EVERY distinct parent ref, never only the first
+    for s, n in parent_refs(obj.get("body")):
+        key = ((s or slug).lower(), n)
+        if key != (slug.lower(), int(issue)) and key not in [k for k, _ in epics]:
+            epics.append((key, (s or slug, n)))
+    if not epics:
         return None, {}
-    eslug, epic = refs[0][0] or slug, refs[0][1]
-    if epic == int(issue) and eslug.lower() == slug.lower():
-        return None, {}
-    fields = {"decisions_epic": "%s#%d" % (eslug, epic), "decisions_count": None,
-              "decisions_gate": mode}
-    groups, err = collect(eslug, epic, cwd=cwd, runner=runner)
-    comments, cerr = (None, None) if err else read_comments(int(issue), slug,
-                                                            cwd=cwd, runner=runner)
-    if err or cerr:
-        print("handoff: decisions gate state unknown (epic %s family unreadable: "
-              "%s) -- skipped, fail-open (#1396)" % (fields["decisions_epic"],
-                                                     err or cerr), file=out)
+    fields = {"decisions_epic": ", ".join("%s#%d" % e for _, e in epics),
+              "decisions_count": None, "decisions_gate": mode}
+    comments, err = read_comments(int(issue), slug, cwd=cwd, runner=runner)
+    if err:
+        print("handoff: decisions gate state unknown (ticket #%s comments "
+              "unreadable: %s) -- skipped, fail-open (#1396)" % (issue, err), file=out)
         fields["decisions_gate"] = "unknown"
         return None, fields
-    decisions = flatten(groups)
-    fields["decisions_count"] = len(decisions)
-    res = evaluate(slug, eslug, epic, comments, decisions)
-    if res["verdict"] in ("pass", "no-decisions"):
-        fields["decisions_gate"] = res["verdict"]
+    reasons, unknown, count = [], False, 0
+    for _, (eslug, epic) in epics:
+        groups, err = collect(eslug, epic, cwd=cwd, runner=runner)
+        if err:
+            print("handoff: decisions gate state unknown (epic %s#%d family "
+                  "unreadable: %s) -- skipped, fail-open (#1396)" % (eslug, epic, err),
+                  file=out)
+            unknown = True
+            continue
+        decisions = flatten(groups)
+        count += len(decisions)
+        res = evaluate(slug, eslug, epic, comments, decisions)
+        if res["verdict"] not in ("pass", "no-decisions"):
+            reasons.append(res["reason"])
+    fields["decisions_count"] = count
+    if not reasons:
+        fields["decisions_gate"] = ("unknown" if unknown else
+                                    "pass" if count else "no-decisions")
         return None, fields
     if mode == "enforce":
-        return "handoff BLOCK: %s (#1396)" % res["reason"], fields
+        return "handoff BLOCK: %s (#1396)" % " | ".join(reasons), fields
     print("handoff WARN (decisions gate, warn mode -- allowed; `%s=enforce` "
-          "refuses): %s (#1396)" % (MODE_ENV, res["reason"]), file=out)
+          "refuses): %s (#1396)" % (MODE_ENV, " | ".join(reasons)), file=out)
     fields["decisions_gate"] = "warn"
     return None, fields

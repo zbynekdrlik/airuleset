@@ -175,7 +175,8 @@ class TestParsing(unittest.TestCase):
         bad = ["Part of" + " " * 100000 + "x", "Epic:" + " " * 100000 + "x",
                "- [ ]" + " " * 100000 + "x", "ROZHODNUT" + "*" * 100000,
                "Decisions-checked: #1 (" + " " * 100000 + "x",
-               "Part of" + " *:" * 33000 + "x"]
+               "Part of" + " *:" * 33000 + "x", "Part of " + "a" * 100000,
+               "- [x] a/" + "a." * 50000, "Epic: " + "a-" * 50000 + "#"]
         t0 = time.time()
         for line in bad:
             dc.parent_refs(line)
@@ -262,6 +263,14 @@ class TestCollector(unittest.TestCase):
         self.assertIsNone(groups)
         self.assertIn("total_count=6093", err)
 
+    def test_exactly_1000_or_no_total_is_an_error(self):
+        from gates import decisions as d
+        for out in ("false\n1000\n" + "\n".join('{"number": %d}' % i for i in range(1000)),
+                    'false\n{"number": 1}'):
+            items, err = d.search_children(SLUG, 1, runner=lambda argv, o=out: (0, o, ""))
+            self.assertIsNone(items)
+            self.assertIn("not complete", err)
+
     def test_paged_search_is_complete(self):
         issues, comments = _family()
         fam, err = dc.resolve_family(SLUG, EPIC, runner=FakeGH(issues, comments,
@@ -342,7 +351,34 @@ class TestGate(unittest.TestCase):
 
     def _marker(self, n, created="2026-11-23T12:00:00Z", ref="#6656"):
         return _c(500, created, "Design ...\nDecisions-checked: %s (%d read)\n"
-                  "- ROZHODNUTÉ q3 met: summed once" % (ref, n), n=self.TICKET)
+                  "- ROZHODNUTÉ q3 (#8860) met: summed once" % (ref, n),
+                  n=self.TICKET)
+
+    def test_bare_marker_is_no_evidence(self):
+        bare = _c(501, "2026-11-23T12:00:00Z", "Decisions-checked: #6656 (4 read)",
+                  n=self.TICKET)
+        blk, _, _ = self._check([bare])
+        self.assertIn("names no decision", blk)
+        cited = dict(bare, body=bare["body"] + "\n- issuecomment-90: brand none")
+        self.assertIsNone(self._check([cited])[0])
+
+    def test_every_parent_ref_is_gated(self):
+        for decoy in ("Part of #10385", "Part of #9999"):   # self ref, no-decision epic
+            issues, comments = _family()
+            for i in issues:
+                if i["number"] == self.TICKET:
+                    i["body"] = decoy + "\nEpic: #6656"
+            blk, f = dc.composer_check(self.TICKET, SLUG, runner=FakeGH(issues, comments),
+                                       env=ENFORCE, authority="fork-no-merge",
+                                       out=io.StringIO())
+            self.assertIn("handoff BLOCK", blk or "", decoy)
+            self.assertIn("#6656", f["decisions_epic"])
+
+    def test_edited_old_marker_does_not_reattest(self):
+        old = self._marker(4, created="2026-11-22T12:00:00Z")
+        old["updated_at"] = "2026-11-23T12:00:00Z"
+        blk, _, _ = self._check([old])
+        self.assertIn("older than", blk)
 
     def test_pass_fresh_and_counted(self):
         blk, f, out = self._check([self._marker(4)])
