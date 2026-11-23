@@ -37,11 +37,22 @@ PEER = "zbynekdrlik/wall-songs"
 PEER_TOKEN = base.GHS + "Fake1394PeerToken" * 3
 
 
-def _live():
-    """REMOTE_HOSTS with bazos past its root bootstrap (pending False)."""
+def _with_pending(flag):
     return mock.patch.object(cli_fleet, "REMOTE_HOSTS", [
-        dict(h, pending=False) if h.get("user") == ACCT else h
+        dict(h, pending=flag) if h.get("user") == ACCT else h
         for h in cli_fleet.REMOTE_HOSTS])
+
+
+def _live():
+    """REMOTE_HOSTS with bazos past its root bootstrap (pending False; the
+    real state since its flip on 23.11., kept explicit for these tests)."""
+    return _with_pending(False)
+
+
+def _pending():
+    """REMOTE_HOSTS with bazos marked pending again (the state before its
+    root bootstrap), so the skip paths keep their coverage."""
+    return _with_pending(True)
 
 
 class FakeGitHub(base.FakeGitHub):
@@ -191,7 +202,8 @@ class TestMint(base._Base):
 
     def test_the_pending_account_is_still_never_contacted(self):
         # mint <acct> refuses a pending account loudly (as for every account)
-        rc, out, err, gh, ssh = self.mint(ACCT, gh=FakeGitHub(air="ok"))
+        with _pending():
+            rc, out, err, gh, ssh = self.mint(ACCT, gh=FakeGitHub(air="ok"))
         self.assertEqual(rc, 1)
         self.assertIn("pending", err)
         self.assertEqual(ssh.calls, [])
@@ -329,7 +341,8 @@ class TestRound3(base._Base):
                 rc = pgt.cmd_project_gh_token(mock.Mock(
                     action="mint", account=None, all=True, dry_run=False, key=None))
             return rc, [c.args[0] for c in m.call_args_list], out.getvalue()
-        rc, minted, out = cmd()
+        with _pending():
+            rc, minted, out = cmd()
         self.assertEqual(rc, 0)
         self.assertNotIn(ACCT, minted)
         self.assertIn("project-gh-token: %s: SKIPPED — pending" % ACCT, out)
