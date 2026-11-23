@@ -12,14 +12,21 @@ renames atomically. It runs in a NON-interactive session with
 ``CLAUDE_CODE_TRANSCRIPT_LOCAL_GC=1`` when a ``/compact`` completes
 (``requestCompact``). It skips a file under 5 MiB or a low-yield rewrite. Proven
 on a scratch session: 7 890 993 -> 135 681 bytes, with the same resume answer.
-So this command does not rewrite anything itself. It is a thin wrapper:
+So this command does not rewrite anything itself. It is a thin wrapper.
+
+Owner 23.11.2026: only sessions of at least 100 MiB are shrunk (the default
+floor, ``DEFAULT_MIN_MIB``; ``--min-mib`` may lower it with an explicit value,
+never below Claude Code's own 5 MiB), and the footer ``shrink <N>M`` shows from
+the same 100 MiB.
 
 1. Refuse when:
    * the file is not a regular file owned by the caller (run it AS the owner);
    * the session is live: an open fd, a ``~/.claude/sessions`` record of a live
      pid (EPERM = alive), a running claude (native or npm) naming the id, or
      an mtime within ``--min-idle-min``;
-   * the recorded cwd is gone.
+   * no recorded cwd sanitizes to the ``projects/<dir>`` name (a cwd over 200
+     characters is refused with that reason: Claude Code shortens such names);
+   * a ``<file>.shrink-*.failed.gz`` from an earlier failed run exists.
 2. Back the file up to ``<file>.shrink-<UTC ts>.gz``. That name is not
    ``*.jsonl``/``*.jsonl.gz``, so no session list or sweep takes it for a
    session. The backup is written to a random dot-temp opened 0600, fsynced,
@@ -28,15 +35,17 @@ So this command does not rewrite anything itself. It is a thin wrapper:
    ``claude --resume <id> -p /compact``: hooks disabled
    (``--settings {"disableAllHooks":true}``), ``--strict-mcp-config`` with an
    empty MCP config, ``--tools ""``, ``--model claude-sonnet-5-5``, and an env
-   with every ``CLAUDE*`` variable dropped (only the GC switch added). It runs
+   with every ``CLAUDE*`` variable dropped except ``CLAUDE_CONFIG_DIR`` (only
+   the GC switch added). It runs
    in the recorded cwd whose sanitized form IS the ``projects/<dir>`` name, so
    it resumes this session and no other. The /compact is one model call.
 4. Verify: a compact boundary with a uuid the file did not have before, a
    smaller file, and every session-metadata type the file had (except Claude
-   Code's reclaimable request/file-history rows). On any failure the backup
-   stays, and the message names it.
-5. Clean this session's leftover native temp (``<file>.compact.tmp.*``) and
-   keep only its newest backup.
+   Code's reclaimable request/file-history rows). On any failure after the
+   run the backup is renamed ``<file>.shrink-<ts>.failed.gz`` (the only clean
+   copy: never pruned, and it blocks the next run until a person looks).
+5. Clean this session's native temps (``<file>.compact.tmp.*``) that predate
+   the run or that its own child left, and keep only its newest backup.
 
 Dry-run is the default. ``--apply`` runs it. Only the caller's OWN sessions:
 ``--account X`` refuses unless it runs as X. Streaming reads only (the #1224
@@ -56,7 +65,9 @@ import time
 
 MIB = 1024 * 1024
 NATIVE_MIN_BYTES = 5 * MIB           # Claude Code's own floor (d6a = 5242880)
-DEFAULT_OVER_MIB = 64
+DEFAULT_MIN_MIB = 100                # owner 23.11.2026: shrink only from 100 MiB
+DEFAULT_OVER_MIB = DEFAULT_MIN_MIB
+_LONG_DIR = 200                      # Claude Code shortens a longer projects dir name
 DEFAULT_MIN_IDLE_MIN = 10
 NATIVE_TIMEOUT_S = 1800
 GC_ENV = "CLAUDE_CODE_TRANSCRIPT_LOCAL_GC"
@@ -118,6 +129,19 @@ def recorded_cwd(path, tail=4 * MIB):
     for raw in reversed(_CWD.findall(chunk)):
         cwd = json.loads(b'"' + raw + b'"')
         if sanitize(cwd) == want:
+            return cwd
+    return None
+
+
+def _long_cwd(path, tail=4 * MIB):
+    """A recorded cwd whose sanitized name is over 200 characters, or None."""
+    size = os.path.getsize(path)
+    with open(path, "rb") as fh:
+        fh.seek(max(0, size - tail))
+        chunk = fh.read()
+    for raw in reversed(_CWD.findall(chunk)):
+        cwd = json.loads(b'"' + raw + b'"')
+        if len(sanitize(cwd)) > _LONG_DIR:
             return cwd
     return None
 
@@ -214,10 +238,18 @@ def check(path, home=None, euid=None, min_idle_min=DEFAULT_MIN_IDLE_MIN, proc_di
     if st.st_uid != euid:
         raise Refused("%s: owner uid %d is not you (uid %d): run it as the owner"
                       % (path, st.st_uid, euid))
+    failed = [n for n in _siblings(path, ".shrink-") if n.endswith(".failed.gz")]
+    if failed:
+        raise Refused("%s: an earlier failed backup %s exists; look at it (it is the clean "
+                      "copy) and move it away before another run" % (path, failed[0]))
     why = live_reason(path, home=home, proc_dir=proc_dir, min_idle_min=min_idle_min)
     if why:
         raise Refused("%s: in live use: %s" % (path, why))
     cwd = recorded_cwd(path)
+    if not cwd and _long_cwd(path):
+        raise Refused("%s: its cwd %r is over %d characters once sanitized; Claude Code "
+                      "shortens such projects dir names and session-shrink cannot prove "
+                      "which cwd resumes it" % (path, _long_cwd(path), _LONG_DIR))
     if not cwd:
         raise Refused("%s: no recorded cwd matches its projects dir %s; claude --resume "
                       "would open another project" % (path, os.path.basename(
@@ -264,7 +296,7 @@ def native_compact(path, cwd, claude_bin="claude", env=None, timeout=NATIVE_TIME
     """An isolated ``claude --resume <id> -p /compact`` with the GC env, in ``cwd``:
     no hooks, no MCP, no tools, a fixed model, no ``CLAUDE*`` env of the caller."""
     e = {k: v for k, v in (os.environ if env is None else env).items()
-         if not k.startswith("CLAUDE")}
+         if not k.startswith("CLAUDE") or k == "CLAUDE_CONFIG_DIR"}
     e[GC_ENV] = "1"
     argv = [claude_bin, "--resume", session_id(path), "-p", "/compact"] + ISOLATION_ARGS
     try:
@@ -276,13 +308,13 @@ def native_compact(path, cwd, claude_bin="claude", env=None, timeout=NATIVE_TIME
 
 
 def shrink(path, home=None, claude_bin="claude", env=None, euid=None,
-           min_idle_min=DEFAULT_MIN_IDLE_MIN, min_bytes=NATIVE_MIN_BYTES, proc_dir="/proc"):
+           min_idle_min=DEFAULT_MIN_IDLE_MIN, min_bytes=DEFAULT_MIN_MIB * MIB, proc_dir="/proc"):
     """Run the native compactor on one idle session. Returns a result dict."""
     st, cwd = check(path, home=home, euid=euid, min_idle_min=min_idle_min, proc_dir=proc_dir)
     res = {"path": path, "before": st.st_size, "after": st.st_size, "cwd": cwd,
            "backup": None, "action": "skip"}
     if st.st_size < min_bytes:
-        res["reason"] = "under %d bytes: Claude Code's compactor skips it" % min_bytes
+        res["reason"] = "under the %d-byte floor" % min_bytes
         return res
     before_types, before_bounds = census(path)
     res["backup"] = backup(path, st)
@@ -290,12 +322,15 @@ def shrink(path, home=None, claude_bin="claude", env=None, euid=None,
     if why:
         raise Refused("%s: in live use after the backup: %s; nothing ran, backup at %s"
                       % (path, why, res["backup"]))
+    stale = set(_siblings(path, ".compact.tmp."))
     rc, out = native_compact(path, cwd, claude_bin=claude_bin, env=env)
-    clean_native_temps(path)
+    # the child has exited (or was killed by the timeout): a temp it left is its
+    # own; with no child exit code only the pre-run leftovers are ours to clean
+    clean_native_temps(path, None if rc is not None else stale)
     if rc != 0:
         raise Refused("%s: claude --resume -p /compact failed (%s): %s; backup kept at %s"
                       % (path, "exit %s" % rc if rc is not None else "did not run", out,
-                         res["backup"]))
+                         _mark_failed(res["backup"])))
     after_types, after_bounds = census(path)
     after = os.path.getsize(path)
     lost = sorted((before_types - RECLAIMABLE_META) - after_types)
@@ -309,28 +344,44 @@ def shrink(path, home=None, claude_bin="claude", env=None, euid=None,
         problem = ""
     if problem:
         raise Refused("%s: after the native compactor %s; backup kept at %s"
-                      % (path, problem, res["backup"]))
+                      % (path, problem, _mark_failed(res["backup"])))
     prune_backups(path, keep=res["backup"])
     res.update(after=after, action="shrunk")
     return res
 
 
-def clean_native_temps(path):
-    """Remove this session's leftover ``<file>.compact.tmp.*`` (a native rewrite
-    that died). Only ever this file's own temps, after the run."""
+def _siblings(path, infix):
     d, base = os.path.split(path)
-    for n in os.listdir(d or "."):
-        if n.startswith(base + ".compact.tmp."):
-            os.unlink(os.path.join(d, n))
-            print("session-shrink: removed leftover %s" % n, file=sys.stderr)
+    return sorted(n for n in os.listdir(d or ".") if n.startswith(base + infix))
+
+
+def _mark_failed(backup_path):
+    """Rename a backup whose run failed to ``….failed.gz``: it is the only clean
+    copy, so pruning must never take it."""
+    failed = backup_path[:-len(".gz")] + ".failed.gz"
+    os.rename(backup_path, failed)
+    return failed
+
+
+def clean_native_temps(path, only=None):
+    """Remove this session's native ``<file>.compact.tmp.*`` temps: all of them
+    once the child has exited (``only`` None), else only the names in ``only``
+    (the ones that predate the run)."""
+    d = os.path.dirname(path) or "."
+    for n in _siblings(path, ".compact.tmp."):
+        if only is not None and n not in only:
+            continue
+        os.unlink(os.path.join(d, n))
+        print("session-shrink: removed native temp %s" % n, file=sys.stderr)
 
 
 def prune_backups(path, keep):
-    """Keep only the newest backup of this session (``keep``)."""
-    d, base = os.path.split(path)
-    for n in os.listdir(d or "."):
+    """Keep only the newest backup of this session (``keep``); a ``.failed.gz``
+    is never pruned."""
+    d = os.path.dirname(path) or "."
+    for n in _siblings(path, ".shrink-"):
         full = os.path.join(d, n)
-        if n.startswith(base + ".shrink-") and n.endswith(".gz") and full != keep:
+        if n.endswith(".gz") and not n.endswith(".failed.gz") and full != keep:
             os.unlink(full)
             print("session-shrink: removed older backup %s" % n, file=sys.stderr)
 
@@ -425,9 +476,21 @@ def _add_options(p):
     p.add_argument("--dry-run", dest="dry_run", action="store_true", help="never run (default)")
     p.add_argument("--min-idle-min", dest="min_idle_min", type=float,
                    default=DEFAULT_MIN_IDLE_MIN, help="refuse a file modified more recently")
-    p.add_argument("--min-mib", dest="min_mib", type=float, default=NATIVE_MIN_BYTES / MIB,
-                   help=argparse.SUPPRESS)
+    p.add_argument("--min-mib", dest="min_mib", type=_min_mib, default=DEFAULT_MIN_MIB,
+                   help="size floor in MiB (default %d, never below %d)"
+                   % (DEFAULT_MIN_MIB, NATIVE_MIN_BYTES // MIB))
     p.add_argument("--claude-bin", dest="claude_bin", default="claude", help=argparse.SUPPRESS)
+
+
+def _min_mib(text):
+    try:
+        v = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError("not a number: %r" % text) from None
+    if v < NATIVE_MIN_BYTES / MIB:
+        raise argparse.ArgumentTypeError("--min-mib %s is below %d MiB (Claude Code's own "
+                                         "floor)" % (text, NATIVE_MIN_BYTES // MIB))
+    return v
 
 
 def cmd_session_shrink(args):

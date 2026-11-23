@@ -19,8 +19,9 @@ Stdlib only, never raises (a footer segment must never break the render).
 """
 import os
 
-# Just under the first observed lockup (david3, 68 MB on 10.11.2026).
-RESTART_TRANSCRIPT_BYTES = 64 * 1024 * 1024
+# Owner 23.11.2026 (#1395): shrink from 100 MiB; the footer shows the same floor
+# (the first lockup was david3 at 68 MB, 10.11.2026).
+RESTART_TRANSCRIPT_BYTES = 100 * 1024 * 1024
 _RED = "\033[38;5;196m%s\033[0m"
 
 
