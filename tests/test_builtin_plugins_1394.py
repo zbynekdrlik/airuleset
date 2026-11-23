@@ -43,7 +43,7 @@ class TestReconcile(unittest.TestCase):
 
     def test_an_undeclared_switch_is_kept_and_reported(self):
         settings = {"enabledPlugins": {KEY: False}}
-        out, drift = bp.reconcile(settings, "newlevel", "dev2")
+        out, drift = bp.reconcile(settings, "newlevel", "dev1")
         self.assertEqual(out, settings)
         self.assertEqual(drift, [KEY])
 
@@ -57,11 +57,11 @@ class TestReconcile(unittest.TestCase):
         self.assertEqual(other, {"enabledPlugins": {KEY: False}})   # dev1 not opted in
 
     def test_the_removal_opt_in_starts_empty(self):
-        self.assertEqual(bp.REMOVE_UNDECLARED_ON, frozenset())
+        self.assertEqual(bp.REMOVE_UNDECLARED_ON, frozenset({"newlevel@dev2"}))   # #1394 cutover done 23.11.
 
     def test_an_undeclared_account_without_the_key_is_untouched(self):
         for settings in ({}, {"enabledPlugins": {KEY: True}}, {"enabledPlugins": {"a@b": False}}):
-            out, drift = bp.reconcile(settings, "newlevel", "dev2")
+            out, drift = bp.reconcile(settings, "newlevel", "dev1")
             self.assertEqual(out, settings)
             self.assertEqual(drift, [])
 
@@ -120,13 +120,13 @@ class TestInstallApplies(_SettingsFile):
         self.assertIs(self.read()["enabledPlugins"][KEY], False)
 
     def test_install_keeps_and_reports_an_undeclared_switch(self):
-        self.who("newlevel", "dev2")
+        self.who("newlevel", "dev1")
         self.write({"enabledPlugins": {KEY: False}})
         out = io.StringIO()
         with redirect_stdout(out):
             cav._reconcile_settings_file()
         self.assertIs(self.read()["enabledPlugins"][KEY], False)
-        self.assertIn("%s is false but newlevel@dev2 declares no builtin_plugins_off"
+        self.assertIn("%s is false but newlevel@dev1 declares no builtin_plugins_off"
                       % KEY, out.getvalue())
 
     def test_an_other_account_gets_no_switch(self):
