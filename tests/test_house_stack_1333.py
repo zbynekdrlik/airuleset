@@ -89,7 +89,7 @@ class TestHouseStackRule(unittest.TestCase):
                 "Leptos (latest 0.8.x) CSR → WASM", "built by Trunk", "PWA",
                 "version visible on the dashboard",
                 "`tray-icon` in a `<prefix>-tray` crate",
-                "`windows` crate Direct3D 11", "Spout / NDI in and out",
+                "`windows` crate Direct3D 11", "NDI between PCs, Spout inside one PC",
                 "paced on vblank",
                 "`cargo build --release --target x86_64-pc-windows-gnu`",
                 "system-wide", "scheduled tasks",
