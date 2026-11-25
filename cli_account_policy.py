@@ -110,7 +110,10 @@ def _validate_sudo_commands(account, reason, cmds):
         if problem:
             errs.append("sudo_commands entry %r is not an exact project script "
                         "path: %s" % (c, problem))
-    if len(set(map(repr, cmds))) != len(cmds):
+    # #1394: `<p>` and `<p> ARGS` are the same script (review): one form only.
+    paths = [hardening.sudo_script_path(c) if isinstance(c, str) else repr(c)
+             for c in cmds]
+    if len(set(paths)) != len(paths):
         errs.append("sudo_commands has a duplicate path")
     return errs
 

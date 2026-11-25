@@ -2,11 +2,11 @@
 # bazos-usbdisk — root-owned helper for the USB disks the owner sells (#1394).
 # Installed root:root 0755 at /usr/local/sbin/bazos-usbdisk; the bazos account
 # may run it through one sudoers line. The disk is always named by its SERIAL,
-# must be a whole disk on the usb transport, and is never the disk that holds /.
+# must be a whole disk on the usb transport, and is never a disk under /.
 #
 #   bazos-usbdisk list
 #   bazos-usbdisk info   SERIAL     SMART identity + health
-#   bazos-usbdisk mount  SERIAL     every partition read-only under /mnt/bazos/SERIAL/
+#   bazos-usbdisk mount  SERIAL     every filesystem read-only under /mnt/bazos/SERIAL/
 #   bazos-usbdisk umount SERIAL
 #   bazos-usbdisk wipe   SERIAL LABEL   zero the whole disk, then one empty GPT/NTFS partition
 set -euo pipefail
@@ -44,99 +44,122 @@ fi
 [ "$(id -u)" -eq 0 ] || { echo "bazos-usbdisk: run it with sudo" >&2; exit 1; }
 
 log() { printf '%s uid=%s %s\n' "$(date -Is)" "${SUDO_UID:-?}" "$*" >>"$LOG"; }
+die() { echo "bazos-usbdisk: $*" >&2; log "$ACTION ${SERIAL:-} refused: $*"; exit 1; }
 
-# The whole disk that holds /, so it can never be a target.
+# Every whole disk under / (through partitions, LUKS, LVM, md), fail closed.
 ROOT_SRC=$(findmnt -no SOURCE /)
-ROOT_DISK=$(lsblk -no PKNAME "$ROOT_SRC" | head -1)
-[ -n "$ROOT_DISK" ] || ROOT_DISK=$(basename "$ROOT_SRC")
+mapfile -t ROOT_DISKS < <(lsblk -sno NAME,TYPE "$ROOT_SRC" |
+    awk '$2 == "disk" {sub(/^[^[:alnum:]]+/, "", $1); print $1}')
+[ "${#ROOT_DISKS[@]}" -gt 0 ] || die "cannot resolve the system disk"
+is_root_disk() {
+    local r
+    for r in "${ROOT_DISKS[@]}"; do [ "$r" = "$1" ] && return 0; done
+    return 1
+}
+
+# A real root-owned directory (never a symlink), created when missing.
+safe_dir() {
+    if [ -L "$1" ]; then die "$1 is a symlink"; fi
+    if [ -e "$1" ]; then
+        [ -d "$1" ] || die "$1 is not a directory"
+        [ "$(stat -c '%u %a' "$1")" = "0 755" ] || die "$1 is not root:root 0755"
+    else
+        install -d -o root -g root -m 0755 "$1"
+    fi
+}
 
 # Exactly one whole usb disk with this serial, else refuse.
 disk_for() {
     local name
     mapfile -t name < <(lsblk -dnr -o NAME,TRAN,TYPE,SERIAL |
         awk -v s="$1" '$2 == "usb" && $3 == "disk" && $4 == s {print $1}')
-    if [ "${#name[@]}" -ne 1 ]; then
-        echo "bazos-usbdisk: no single usb disk with serial $1" >&2
-        log "$ACTION $1 refused: ${#name[@]} usb disks match"
-        exit 1
-    fi
-    if [ "${name[0]}" = "$ROOT_DISK" ]; then
-        echo "bazos-usbdisk: $1 is the system disk" >&2
-        log "$ACTION $1 refused: system disk"
-        exit 1
-    fi
-    echo "/dev/${name[0]}"
+    [ "${#name[@]}" -eq 1 ] || die "no single usb disk with serial $1 (${#name[@]} match)"
+    if is_root_disk "${name[0]}"; then die "$1 is the system disk"; fi
+    echo "${name[0]}"
 }
 
 case "$ACTION" in
 list)
     lsblk -dnr -o NAME,TRAN,TYPE | awk '$2 == "usb" && $3 == "disk" {print $1}' |
         while read -r d; do
-            [ "$d" = "$ROOT_DISK" ] && continue
+            if is_root_disk "$d"; then continue; fi
             lsblk -o NAME,SIZE,MODEL,SERIAL,TRAN,FSTYPE,LABEL,MOUNTPOINT "/dev/$d"
         done
     ;;
 info)
-    DEV=$(disk_for "$SERIAL")
-    log "info $SERIAL $DEV"
-    smartctl -i -H "$DEV" || smartctl -i -H -d sat "$DEV" ||
-        smartctl -i -H -d sntasmedia "$DEV" || smartctl -i -H -d sntjmicron "$DEV"
+    D=$(disk_for "$SERIAL")
+    log "info $SERIAL /dev/$D"
+    smartctl -i -H "/dev/$D" || smartctl -i -H -d sat "/dev/$D" ||
+        smartctl -i -H -d sntasmedia "/dev/$D" || smartctl -i -H -d sntjmicron "/dev/$D"
     ;;
 mount)
-    DEV=$(disk_for "$SERIAL")
+    D=$(disk_for "$SERIAL")
     BAZOS_UID=$(id -u bazos)
     BAZOS_GID=$(id -g bazos)
-    log "mount $SERIAL $DEV"
+    log "mount $SERIAL /dev/$D"
+    safe_dir "$MNT"
+    safe_dir "$MNT/$SERIAL"
+    n=0
+    # The disk line too: a filesystem on the whole disk (no partition table).
     while read -r part fstype; do
         [ -n "$fstype" ] || continue
-        dir="$MNT/$SERIAL/$part"
-        mkdir -p "$dir"
-        findmnt -rn "$dir" >/dev/null && continue
-        opts=ro,nosuid,nodev,noexec
         case "$fstype" in
-            ntfs|ntfs3|vfat|exfat) opts="$opts,uid=$BAZOS_UID,gid=$BAZOS_GID,umask=022" ;;
-            ext[234]) opts="$opts,noload" ;;
+            ntfs) t=ntfs3; extra=",uid=$BAZOS_UID,gid=$BAZOS_GID,umask=022" ;;
+            vfat|exfat) t=$fstype; extra=",uid=$BAZOS_UID,gid=$BAZOS_GID,umask=022" ;;
+            ext2|ext3|ext4) t=ext4; extra=",noload" ;;
+            *) echo "skip /dev/$part: filesystem $fstype is not on the allow-list"; continue ;;
         esac
-        mount -o "$opts" "/dev/$part" "$dir" && echo "mounted /dev/$part ($fstype) at $dir"
-    done < <(lsblk -nr -o NAME,FSTYPE "$DEV" | tail -n +2)
+        dir="$MNT/$SERIAL/$part"
+        safe_dir "$dir"
+        if findmnt -rn --mountpoint "$dir" >/dev/null; then n=$((n + 1)); continue; fi
+        mount -t "$t" -o "ro,nosuid,nodev,noexec$extra" "/dev/$part" "$dir" ||
+            die "mount /dev/$part ($fstype) failed"
+        echo "mounted /dev/$part ($fstype) at $dir"
+        n=$((n + 1))
+    done < <(lsblk -nr -o NAME,FSTYPE "/dev/$D")
+    [ "$n" -gt 0 ] || die "nothing mountable on $SERIAL"
     ;;
 umount)
-    DEV=$(disk_for "$SERIAL")
-    log "umount $SERIAL $DEV"
-    if [ -d "$MNT/$SERIAL" ]; then
+    D=$(disk_for "$SERIAL")
+    log "umount $SERIAL /dev/$D"
+    if [ -e "$MNT/$SERIAL" ]; then
+        safe_dir "$MNT"
+        safe_dir "$MNT/$SERIAL"
         for dir in "$MNT/$SERIAL"/*; do
-            [ -d "$dir" ] || continue
-            if findmnt -rn "$dir" >/dev/null; then umount "$dir"; fi
-            rmdir "$dir"
+            [ -e "$dir" ] || [ -L "$dir" ] || continue
+            safe_dir "$dir"
+            if findmnt -rn --mountpoint "$dir" >/dev/null; then umount -- "$dir"; fi
+            rmdir -- "$dir"
         done
-        rmdir "$MNT/$SERIAL"
+        rmdir -- "$MNT/$SERIAL"
     fi
     sync
     echo "unmounted $SERIAL"
     ;;
 wipe)
-    DEV=$(disk_for "$SERIAL")
-    if lsblk -nr -o MOUNTPOINT "$DEV" | grep -q .; then
-        echo "bazos-usbdisk: $SERIAL is mounted, run umount first" >&2
-        log "wipe $SERIAL refused: mounted"
-        exit 1
-    fi
-    log "wipe $SERIAL $DEV label=$LABEL start"
-    wipefs -a "$DEV" >/dev/null
+    D=$(disk_for "$SERIAL")
+    if lsblk -nr -o MOUNTPOINT "/dev/$D" | grep -q .; then die "$SERIAL is mounted, run umount first"; fi
+    for h in /sys/block/"$D"/holders/* /sys/block/"$D"/"$D"*/holders/*; do
+        if [ -e "$h" ]; then die "$SERIAL is in use by $(basename "$h")"; fi
+    done
+    log "wipe $SERIAL /dev/$D label=$LABEL start"
+    wipefs -a "/dev/$D" >/dev/null
+    DDERR=$(mktemp)
+    trap 'rm -f "$DDERR"' EXIT
     set +e
-    dd if=/dev/zero of="$DEV" bs=4M oflag=direct status=progress 2>>"$LOG"
+    dd if=/dev/zero of="/dev/$D" bs=4M oflag=direct status=progress 2>"$DDERR"
     rc=$?
     set -e
-    tail -c 300 "$LOG" | grep -q "No space left on device" || {
-        log "wipe $SERIAL dd failed rc=$rc"
-        exit 1
-    }
+    tail -c 2000 "$DDERR" >>"$LOG"
+    # dd ends with rc 1 + ENOSPC when it reaches the end of the disk.
+    [ "$rc" -eq 1 ] && grep -q "No space left on device" "$DDERR" || die "dd failed rc=$rc"
     sync
-    parted -s "$DEV" mklabel gpt mkpart primary ntfs 1MiB 100%
-    partprobe "$DEV"
+    parted -s "/dev/$D" mklabel gpt mkpart primary ntfs 1MiB 100%
+    partprobe "/dev/$D"
     udevadm settle
-    PART=$(lsblk -nr -o NAME "$DEV" | sed -n 2p)
-    mkfs.ntfs -Q -L "$LABEL" "/dev/$PART" >>"$LOG" 2>&1
+    mapfile -t parts < <(lsblk -nr -o NAME,TYPE "/dev/$D" | awk '$2 == "part" {print $1}')
+    [ "${#parts[@]}" -eq 1 ] || die "expected one new partition, found ${#parts[@]}"
+    mkfs.ntfs -Q -L "$LABEL" "/dev/${parts[0]}" >>"$LOG" 2>&1
     log "wipe $SERIAL done: zeroed, GPT + NTFS $LABEL"
     echo "wiped $SERIAL: zeroed, one empty NTFS partition labelled $LABEL"
     ;;
