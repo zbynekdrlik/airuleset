@@ -40,6 +40,15 @@ class Grammar(unittest.TestCase):
         self.assertTrue(errs)
 
 
+class DuplicateForms(unittest.TestCase):
+
+    def test_path_declared_with_and_without_args_is_refused(self):
+        spec = {"sudo": "commands", "sudo_reason": "x", "sudo_commands": [
+            "/usr/local/sbin/bazos-usbdisk", ENTRY]}
+        errs = policy.validate_sudo(spec, "bazos", declared=("bazos",))
+        self.assertTrue(any("duplicate" in e for e in errs), errs)
+
+
 class Render(unittest.TestCase):
 
     def _render(self, cmds):
@@ -91,7 +100,9 @@ class Script(unittest.TestCase):
     def test_guards_present(self):
         src = SCRIPT.read_text()
         for needle in ('TRAN', '"usb"', 'findmnt -no SOURCE /', 'ro,nosuid,nodev,noexec',
-                       '/var/log/bazos-usbdisk.log', 'export PATH=/usr/sbin:/usr/bin:/sbin:/bin'):
+                       '/var/log/bazos-usbdisk.log', 'export PATH=/usr/sbin:/usr/bin:/sbin:/bin',
+                       'lsblk -sno NAME,TYPE', '/holders', 'mount -t "$t"',
+                       'safe_dir', 'DDERR'):
             with self.subTest(needle=needle):
                 self.assertIn(needle, src)
 
