@@ -106,6 +106,15 @@ class Script(unittest.TestCase):
             with self.subTest(needle=needle):
                 self.assertIn(needle, src)
 
+    def test_mounted_dir_is_unmounted_before_its_owner_check(self):
+        # Live 25.11.: a mounted ntfs/vfat dir shows uid=bazos, so the root:root
+        # check must run on the free dir, after umount (and before mount).
+        src = SCRIPT.read_text()
+        um = src[src.index("umount)"):src.index("wipe)")]
+        self.assertLess(um.index("umount -- "), um.index('safe_dir "$dir"'))
+        mo = src[src.index("mount)"):src.index("umount)")]
+        self.assertLess(mo.index("findmnt -rn --mountpoint"), mo.index('safe_dir "$dir"'))
+
 
 if __name__ == "__main__":
     unittest.main()
