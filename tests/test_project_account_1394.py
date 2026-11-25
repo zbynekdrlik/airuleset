@@ -51,9 +51,12 @@ class TestBazosAccount(unittest.TestCase):
     def setUp(self):
         self.spec = bootstrap.account_spec(ACCT)
 
-    def test_declaration_is_valid_on_dev1_without_sudo_or_grants(self):
+    def test_declaration_is_valid_on_dev1_with_only_the_usb_disk_sudo(self):
         self.assertEqual(bootstrap.validate_account(ACCT, self.spec), [])
-        self.assertIs(self.spec["sudo"], False)
+        # owner 25.11.: the one USB-disk script, nothing else (#1394)
+        self.assertEqual(self.spec["sudo"], "commands")
+        self.assertEqual(self.spec["sudo_commands"],
+                         ["/usr/local/sbin/bazos-usbdisk ARGS"])
         self.assertEqual(self.spec["host"], "dev1")
         self.assertEqual(self.spec["secrets"], [])
         self.assertEqual(self.spec["project_dir"], "devel/bazos")
