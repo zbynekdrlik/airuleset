@@ -110,9 +110,9 @@ class Script(unittest.TestCase):
         # Live 25.11.: a mounted ntfs/vfat dir shows uid=bazos, so the root:root
         # check must run on the free dir, after umount (and before mount).
         src = SCRIPT.read_text()
-        um = src[src.index("umount)"):src.index("wipe)")]
+        um = src[src.index("\numount)\n"):src.index("\nwipe)\n")]
         self.assertLess(um.index("umount -- "), um.index('safe_dir "$dir"'))
-        mo = src[src.index("mount)"):src.index("umount)")]
+        mo = src[src.index("\nmount)\n"):src.index("\numount)\n")]
         self.assertLess(mo.index("findmnt -rn --mountpoint"), mo.index('safe_dir "$dir"'))
 
 
