@@ -69,6 +69,8 @@ if [ -z "$TRIMMED" ]; then
 else
     case "$TRIMMED" in
         "<task-notification>"*)   AUTO="task-notification" ;;
+        # #1397: a peer project's message (peer plugin) is not the owner.
+        '<channel source="plugin:peer:'*) AUTO="peer-channel" ;;
         "lane-check: "*)          AUTO="machine-nudge-lane-check" ;;
         "stuck-check: "*)         AUTO="machine-nudge-stuck-check" ;;
         "bounce-backstop: "*)     AUTO="machine-nudge-bounce-backstop" ;;

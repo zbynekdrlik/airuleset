@@ -34,6 +34,9 @@ MACHINE_PROMPT_PREFIXES = (
     "gk-request backstop:", "/goal ", "nudge:",  # #1157 s3: every machine nudge
     *DISCORD_ANSWER_PREFIXES,
     "<task-notification>", "<local-command", "<command-", "<system-reminder",
+    # #1397 -- a peer project's message (peer plugin) is not the owner
+    # (camera-box re-asked one question 12x overnight on peer wakes).
+    '<channel source="plugin:peer:',
     # #339 adversarial-review MINOR: a Stop-hook-rejected turn is ALSO
     # machine-injected, not human-typed -- this repo's own
     # a `_STOP_FEEDBACK_PREFIX` constant used to carry the identical literal
