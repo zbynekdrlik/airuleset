@@ -246,6 +246,10 @@
         [
           "airuleset",
           "bazos"
+        ],
+        [
+          "dcontroller",
+          "iemmixer"
         ]
       ],
       "topics": {
@@ -309,7 +313,8 @@
         "airuleset|wall-songs": "airuleset infra: accounts, permissions, peer links, tooling. Ask or report here; airuleset decides and a ticket alone wakes no session",
         "wall-bridge|wall-songs": "sibling LED-wall projects at SNV: wall-bridge owns the bridge PC's Spout-to-wall path, wall-songs the songs PC's song visuals; coordinate wall output, never each other's code",
         "camera-box|mikrotik": "the SNV network: camera-box needs read-only switch/router data (port counters, drops/pause on the stream port, netcfg drift); mikrotik owns the devices and their credentials",
-        "airuleset|bazos": "airuleset infra: accounts, permissions, peer links, tooling. Ask or report here; airuleset decides and a ticket alone wakes no session"
+        "airuleset|bazos": "airuleset infra: accounts, permissions, peer links, tooling. Ask or report here; airuleset decides and a ticket alone wakes no session",
+        "dcontroller|iemmixer": "how dcontroller reads and shows iem-mixer's RX latency per subscription, and the values iemmixer reports (iemmixer#142 playout_override 0.67 ms vs dcontroller's 1 ms)"
       }
     },
     "subdev": {
