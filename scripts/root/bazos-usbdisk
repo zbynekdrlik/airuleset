@@ -110,8 +110,10 @@ mount)
             *) echo "skip /dev/$part: filesystem $fstype is not on the allow-list"; continue ;;
         esac
         dir="$MNT/$SERIAL/$part"
-        safe_dir "$dir"
+        if [ -L "$dir" ]; then die "$dir is a symlink"; fi
+        # A mounted dir shows the filesystem's owner; check the dir only when free.
         if findmnt -rn --mountpoint "$dir" >/dev/null; then n=$((n + 1)); continue; fi
+        safe_dir "$dir"
         mount -t "$t" -o "ro,nosuid,nodev,noexec$extra" "/dev/$part" "$dir" ||
             die "mount /dev/$part ($fstype) failed"
         echo "mounted /dev/$part ($fstype) at $dir"
@@ -127,8 +129,9 @@ umount)
         safe_dir "$MNT/$SERIAL"
         for dir in "$MNT/$SERIAL"/*; do
             [ -e "$dir" ] || [ -L "$dir" ] || continue
-            safe_dir "$dir"
+            if [ -L "$dir" ]; then die "$dir is a symlink"; fi
             if findmnt -rn --mountpoint "$dir" >/dev/null; then umount -- "$dir"; fi
+            safe_dir "$dir"
             rmdir -- "$dir"
         done
         rmdir -- "$MNT/$SERIAL"
