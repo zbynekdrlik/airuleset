@@ -46,5 +46,21 @@ class AliasRemotes(unittest.TestCase):
         self.assertEqual(got, ("upstream", None))
 
 
+class NoPullRequestRead(unittest.TestCase):
+    """Live 25.11.: the david* App token has no pull_requests:read, gh answers
+    'Resource not accessible by integration (HTTP 403)'. That is a missing
+    permission, not a quota: say so, so nobody waits for a reset."""
+
+    def test_meta_fn_maps_integration_403_to_no_access(self):
+        from unittest import mock
+        fake = mock.Mock(returncode=1, stdout="", stderr=(
+            "gh: Resource not accessible by integration (HTTP 403)"))
+        with mock.patch.object(rs.subprocess, "run", return_value=fake):
+            self.assertIs(rs._default_pr_meta_fn("o/r")(5), rs.NO_PR_ACCESS)
+        fake.stderr = "gh: API rate limit exceeded (HTTP 403)"
+        with mock.patch.object(rs.subprocess, "run", return_value=fake):
+            self.assertIs(rs._default_pr_meta_fn("o/r")(5), rs.QUOTA)
+
+
 if __name__ == "__main__":
     unittest.main()
