@@ -74,8 +74,8 @@ import watchdog
 from watchdog import send_outcome as _send_outcome
 
 
-_GITHUB_REMOTE_RE = re.compile(
-    r"github\.com[:/]+[^/\s]+/([^/\s]+?)(?:\.git)?/?\s*$")
+_GITHUB_REMOTE_RE = re.compile(r"(?:github\.com[:/]+|^[\w.-]+@github-[\w.-]+:|"
+    r"^ssh://[\w.-]+@github-[\w.-]+/)[^/\s]+/([^/\s]+?)(?:\.git)?/?\s*$")  # #1399 ssh aliases
 
 
 def _parse_github_repo_name(url):

@@ -201,7 +201,10 @@ def _default_is_ancestor(oid, root):
     return r.returncode == 0
 
 
-_GITHUB_SLUG_RE = re.compile(r"github\.com[:/]+([^/\s]+/[^/\s]+?)(?:\.git)?/?$")
+# #1399: also an ssh host alias for GitHub (`git@github-fork:o/r.git`, ssh://).
+_GITHUB_SLUG_RE = re.compile(
+    r"(?:github\.com[:/]+|^[\w.-]+@github-[\w.-]+:|^ssh://[\w.-]+@github-[\w.-]+/)"
+    r"([^/\s]+/[^/\s]+?)(?:\.git)?/?$")
 
 
 def _default_remote_slug(root, name):
