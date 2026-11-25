@@ -100,6 +100,13 @@ def sudo_command_problem(cmd):
 # generic system tool (systemctl, apt, docker) can never be granted; the rule
 # then allows each script with NO arguments (`""`).
 SUDO_SCRIPT_DIR = "/usr/local/sbin"
+SUDO_ARGS_SUFFIX = " ARGS"
+
+
+def sudo_script_path(entry):
+    """The script path of a ``sudo: "commands"`` entry (``<path>`` or
+    ``<path> ARGS``)."""
+    return entry[:-len(SUDO_ARGS_SUFFIX)] if entry.endswith(SUDO_ARGS_SUFFIX) else entry
 
 
 def sudo_script_problem(account, path):
@@ -107,8 +114,10 @@ def sudo_script_problem(account, path):
     ``account`` (exactly ``/usr/local/sbin/<account>-<name>``: one lowercase
     ``[a-z0-9._-]`` component, no argument, wildcard or sudoers metachar),
     else why not."""
+    # #1394: an explicit trailing " ARGS" lets the script receive argv (the
+    # script itself must validate every argument).
     want = (re.escape(SUDO_SCRIPT_DIR + "/" + account + "-")
-            + r"[a-z0-9][a-z0-9._-]*")
+            + r"[a-z0-9][a-z0-9._-]*(" + re.escape(SUDO_ARGS_SUFFIX) + ")?")
     if not re.fullmatch(want, path) or ".." in path:
         return ("%r is not exactly %s/%s-<name> (one lowercase component, no "
                 "arguments or wildcards)" % (path, SUDO_SCRIPT_DIR, account))
@@ -232,11 +241,15 @@ def render_sudo_step(account, spec):
         # #1186: exactly the declared project scripts. NOT NOEXEC (an installer
         # script must run its child commands), so each path is proven
         # root-owned and account-unwritable before the rule lands.
-        paths = list(spec["sudo_commands"])
+        entries = list(spec["sudo_commands"])
+        paths = [sudo_script_path(e) for e in entries]
         # `""` = the command may run with NO arguments (sudoers(5)), so a
-        # script's argument parsing is never root attack surface.
+        # script's argument parsing is never root attack surface. #1394: a
+        # `<path> ARGS` entry omits it — that script validates its own argv.
         rule = "%s ALL=(root) NOPASSWD: %s" % (
-            account, ", ".join('%s ""' % p for p in paths))
+            account, ", ".join(
+                sudo_script_path(e) if e != sudo_script_path(e) else '%s ""' % e
+                for e in entries))
         header = "# airuleset:managed — project account %s (#1184/#1186): %s" % (
             account, spec["sudo_reason"].strip())
         return out + (

@@ -1,0 +1,143 @@
+#!/bin/bash
+# bazos-usbdisk — root-owned helper for the USB disks the owner sells (#1394).
+# Installed root:root 0755 at /usr/local/sbin/bazos-usbdisk; the bazos account
+# may run it through one sudoers line. The disk is always named by its SERIAL,
+# must be a whole disk on the usb transport, and is never the disk that holds /.
+#
+#   bazos-usbdisk list
+#   bazos-usbdisk info   SERIAL     SMART identity + health
+#   bazos-usbdisk mount  SERIAL     every partition read-only under /mnt/bazos/SERIAL/
+#   bazos-usbdisk umount SERIAL
+#   bazos-usbdisk wipe   SERIAL LABEL   zero the whole disk, then one empty GPT/NTFS partition
+set -euo pipefail
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+umask 022
+
+LOG=/var/log/bazos-usbdisk.log
+MNT=/mnt/bazos
+SERIAL_RE='^[A-Za-z0-9_-]{4,40}$'
+LABEL_RE='^[A-Za-z0-9_-]{1,32}$'
+
+usage() {
+    echo "usage: bazos-usbdisk list | info SERIAL | mount SERIAL | umount SERIAL | wipe SERIAL LABEL" >&2
+    exit 2
+}
+
+ACTION=${1:-}
+case "$ACTION" in
+    list) [ $# -eq 1 ] || usage ;;
+    info|mount|umount) [ $# -eq 2 ] || usage ;;
+    wipe) [ $# -eq 3 ] || usage ;;
+    *) usage ;;
+esac
+SERIAL=${2:-}
+if [ "$ACTION" != list ] && ! [[ $SERIAL =~ $SERIAL_RE ]]; then
+    echo "bazos-usbdisk: bad serial" >&2
+    exit 2
+fi
+LABEL=${3:-}
+if [ "$ACTION" = wipe ] && ! [[ $LABEL =~ $LABEL_RE ]]; then
+    echo "bazos-usbdisk: bad label (A-Z a-z 0-9 _ -, max 32)" >&2
+    exit 2
+fi
+
+[ "$(id -u)" -eq 0 ] || { echo "bazos-usbdisk: run it with sudo" >&2; exit 1; }
+
+log() { printf '%s uid=%s %s\n' "$(date -Is)" "${SUDO_UID:-?}" "$*" >>"$LOG"; }
+
+# The whole disk that holds /, so it can never be a target.
+ROOT_SRC=$(findmnt -no SOURCE /)
+ROOT_DISK=$(lsblk -no PKNAME "$ROOT_SRC" | head -1)
+[ -n "$ROOT_DISK" ] || ROOT_DISK=$(basename "$ROOT_SRC")
+
+# Exactly one whole usb disk with this serial, else refuse.
+disk_for() {
+    local name
+    mapfile -t name < <(lsblk -dnr -o NAME,TRAN,TYPE,SERIAL |
+        awk -v s="$1" '$2 == "usb" && $3 == "disk" && $4 == s {print $1}')
+    if [ "${#name[@]}" -ne 1 ]; then
+        echo "bazos-usbdisk: no single usb disk with serial $1" >&2
+        log "$ACTION $1 refused: ${#name[@]} usb disks match"
+        exit 1
+    fi
+    if [ "${name[0]}" = "$ROOT_DISK" ]; then
+        echo "bazos-usbdisk: $1 is the system disk" >&2
+        log "$ACTION $1 refused: system disk"
+        exit 1
+    fi
+    echo "/dev/${name[0]}"
+}
+
+case "$ACTION" in
+list)
+    lsblk -dnr -o NAME,TRAN,TYPE | awk '$2 == "usb" && $3 == "disk" {print $1}' |
+        while read -r d; do
+            [ "$d" = "$ROOT_DISK" ] && continue
+            lsblk -o NAME,SIZE,MODEL,SERIAL,TRAN,FSTYPE,LABEL,MOUNTPOINT "/dev/$d"
+        done
+    ;;
+info)
+    DEV=$(disk_for "$SERIAL")
+    log "info $SERIAL $DEV"
+    smartctl -i -H "$DEV" || smartctl -i -H -d sat "$DEV" ||
+        smartctl -i -H -d sntasmedia "$DEV" || smartctl -i -H -d sntjmicron "$DEV"
+    ;;
+mount)
+    DEV=$(disk_for "$SERIAL")
+    BAZOS_UID=$(id -u bazos)
+    BAZOS_GID=$(id -g bazos)
+    log "mount $SERIAL $DEV"
+    while read -r part fstype; do
+        [ -n "$fstype" ] || continue
+        dir="$MNT/$SERIAL/$part"
+        mkdir -p "$dir"
+        findmnt -rn "$dir" >/dev/null && continue
+        opts=ro,nosuid,nodev,noexec
+        case "$fstype" in
+            ntfs|ntfs3|vfat|exfat) opts="$opts,uid=$BAZOS_UID,gid=$BAZOS_GID,umask=022" ;;
+            ext[234]) opts="$opts,noload" ;;
+        esac
+        mount -o "$opts" "/dev/$part" "$dir" && echo "mounted /dev/$part ($fstype) at $dir"
+    done < <(lsblk -nr -o NAME,FSTYPE "$DEV" | tail -n +2)
+    ;;
+umount)
+    DEV=$(disk_for "$SERIAL")
+    log "umount $SERIAL $DEV"
+    if [ -d "$MNT/$SERIAL" ]; then
+        for dir in "$MNT/$SERIAL"/*; do
+            [ -d "$dir" ] || continue
+            if findmnt -rn "$dir" >/dev/null; then umount "$dir"; fi
+            rmdir "$dir"
+        done
+        rmdir "$MNT/$SERIAL"
+    fi
+    sync
+    echo "unmounted $SERIAL"
+    ;;
+wipe)
+    DEV=$(disk_for "$SERIAL")
+    if lsblk -nr -o MOUNTPOINT "$DEV" | grep -q .; then
+        echo "bazos-usbdisk: $SERIAL is mounted, run umount first" >&2
+        log "wipe $SERIAL refused: mounted"
+        exit 1
+    fi
+    log "wipe $SERIAL $DEV label=$LABEL start"
+    wipefs -a "$DEV" >/dev/null
+    set +e
+    dd if=/dev/zero of="$DEV" bs=4M oflag=direct status=progress 2>>"$LOG"
+    rc=$?
+    set -e
+    tail -c 300 "$LOG" | grep -q "No space left on device" || {
+        log "wipe $SERIAL dd failed rc=$rc"
+        exit 1
+    }
+    sync
+    parted -s "$DEV" mklabel gpt mkpart primary ntfs 1MiB 100%
+    partprobe "$DEV"
+    udevadm settle
+    PART=$(lsblk -nr -o NAME "$DEV" | sed -n 2p)
+    mkfs.ntfs -Q -L "$LABEL" "/dev/$PART" >>"$LOG" 2>&1
+    log "wipe $SERIAL done: zeroed, GPT + NTFS $LABEL"
+    echo "wiped $SERIAL: zeroed, one empty NTFS partition labelled $LABEL"
+    ;;
+esac

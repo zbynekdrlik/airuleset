@@ -81,6 +81,18 @@ DEVBRIDGE_VIRSH_SUDO = {
 # --------------------------------------------------------------------------- #
 # sudo
 # --------------------------------------------------------------------------- #
+# #1394 (owner 25.11.2026): bazos handles the USB disks the owner sells. One
+# root-owned script (source scripts/root/bazos-usbdisk) picks the disk by
+# serial, usb transport only, never the disk holding /; ARGS = it gets argv.
+BAZOS_USB_SUDO = {
+    "sudo": "commands",
+    "sudo_reason": "USB disks the owner sells: list, SMART, read-only mount, "
+                   "wipe, by serial, never the system disk (#1394)",
+    "sudo_commands": ["/usr/local/sbin/bazos-usbdisk ARGS"],
+    "system_packages": ["smartmontools"],
+}
+
+
 def _validate_sudo_commands(account, reason, cmds):
     """#1186 ``sudo: "commands"``: a one-line reason plus a non-empty list of
     distinct exact ``/usr/local/sbin/<account>-<name>`` script paths."""

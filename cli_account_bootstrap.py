@@ -450,7 +450,7 @@ SERVICE_ACCOUNTS = {
     # to dev1, with the privacy plugin off for this account only. No repo: the ads stay off GitHub;
     # its App tokens are issues-only (airuleset + peers, #1199).
     "bazos": {
-        "host": "dev1", "sudo": False, "secrets": [], "builtin_plugins_off": ["cc-plugin-privacy"],
+        "host": "dev1", "secrets": [], "builtin_plugins_off": ["cc-plugin-privacy"], **policy.BAZOS_USB_SUDO,
         "repo_less": True, "github_app": True,
         "tools": ["playwright:1.62.0/chromium"],   # the scripts' pip playwright 1.62.0 (chromium 1234)
         "project_dir": "devel/bazos", "tmux_session": "bazos",
