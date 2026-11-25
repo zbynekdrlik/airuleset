@@ -129,6 +129,7 @@ class _QuotaSentinel:
 
 
 QUOTA = _QuotaSentinel()
+NO_PR_ACCESS = _QuotaSentinel()   # #1399: token lacks pull_requests:read (david* App)
 
 # gh prints a rate-limit / 403 / 429 to STDERR; a plain not-found does not.
 _QUOTA_STDERR_RE = re.compile(r"(?i)(rate limit|HTTP 403|\b403\b|\b429\b)")
@@ -328,8 +329,7 @@ def _default_cache_path(slug, home=None):
 
 
 def _default_pr_meta_fn(slug):
-    """A `pr_meta_fn(pr) -> (title, body) | QUOTA | None` that reads ONE PR via
-    `gh api repos/<slug>/pulls/<N>`.
+    """A `pr_meta_fn(pr) -> (title, body) | QUOTA | None`: ONE PR via `gh api`.
 
       * (title, body) on success;
       * QUOTA (#1090 guard d) when `gh` failed with a rate-limit / 403 / 429 —
@@ -347,7 +347,7 @@ def _default_pr_meta_fn(slug):
             return None
         if r.returncode != 0:
             if _QUOTA_STDERR_RE.search(r.stderr or ""):
-                return QUOTA
+                return NO_PR_ACCESS if "by integration" in r.stderr else QUOTA
             return None
         try:
             d = json.loads(r.stdout or "{}")
@@ -565,8 +565,8 @@ def _compute_merged_unreleased(root, git_fn, git_full_fn, pr_meta_fn, cache_path
                 unread += 1
                 continue
             meta = pr_meta_fn(pr)
-            if meta is QUOTA:
-                quota_hit = True
+            if meta is QUOTA or meta is NO_PR_ACCESS:
+                quota_hit = "no pull_requests:read" if meta is NO_PR_ACCESS else True
                 break        # (d) stop hammering; M is partial this refresh
             if meta is None:
                 unread += 1  # REST failed — leave uncached, retry next refresh
@@ -585,10 +585,10 @@ def _compute_merged_unreleased(root, git_fn, git_full_fn, pr_meta_fn, cache_path
                 _save_cache(cache_path, cache)
         (docs if entry.get("docs") else issues).update(   # #1228
             int(n) for n in entry.get("issues", []))
+    why = quota_hit if isinstance(quota_hit, str) else "gh quota hit"
     if quota_hit:
-        sys.stderr.write(
-            "merged-unreleased: gh quota hit — M partial this refresh\n")
-    _PARTIAL[root] = ("gh quota hit" if quota_hit else "%d merged PRs not "
+        sys.stderr.write("merged-unreleased: %s — M partial this refresh\n" % why)
+    _PARTIAL[root] = (why if quota_hit else "%d merged PRs not "
                       "read yet" % unread if unread else "")
     return cli_commit_kind.MergedUnreleased(issues, docs=docs)
 
