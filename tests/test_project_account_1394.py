@@ -61,7 +61,8 @@ class TestBazosAccount(unittest.TestCase):
         self.assertEqual(self.spec["secrets"], [])
         self.assertEqual(self.spec["project_dir"], "devel/bazos")
         self.assertEqual(self.spec["tmux_session"], "bazos")
-        for grant in ("devices", "rtprio", "userns", "system_packages", "sudo_commands"):
+        self.assertEqual(self.spec["system_packages"], ["smartmontools"])
+        for grant in ("devices", "rtprio", "userns"):
             self.assertFalse(self.spec.get(grant), grant)
 
     def test_repo_less_with_only_its_issues_tokens(self):
