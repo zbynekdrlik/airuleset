@@ -42,5 +42,22 @@ class TestFleetAccountRemote(unittest.TestCase):
         self.assertIsNone(cpc._account_remote("newlevel"))
 
 
+class TestTellScriptPath(unittest.TestCase):
+    """A `locals` path is `~/...`; the remote Peer resolves its project from the cwd,
+    and realpath("~/x") is a relative path, so it must be expanded first."""
+
+    def test_tilde_path_resolves_to_the_relay_project(self):
+        import peer_channel as pc
+        projects = {"gatekeeper": {"account": "gatekeeper", "path": "~/devel/odoo/odoo-erp"}}
+        ns = {}
+        line = next(x for x in cpc._TELL_SCRIPT.splitlines() if "pc.Peer(" in x)
+        cwd_expr = line.split("os.getuid(), ", 1)[1].split(", home", 1)[0]
+        import os
+        ns.update(os=os, req={"path": "~/devel/odoo/odoo-erp"})
+        cwd = eval(cwd_expr, ns)  # noqa: S307 - the script's own cwd expression
+        home = os.path.expanduser("~")
+        self.assertEqual(pc.resolve_project(projects, "gatekeeper", cwd, home), "gatekeeper")
+
+
 if __name__ == "__main__":
     unittest.main()
