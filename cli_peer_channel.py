@@ -761,10 +761,21 @@ def uncommitted_config():
     return [ln[3:] for ln in r.stdout.splitlines()]
 
 
+def _account_remote(account):
+    """A project account's own entry, else (#1399) the ONE fleet row of that user,
+    e.g. ``gatekeeper`` that relays to gk-infra; a user on several boxes stays None."""
+    import cli_account_bootstrap as bootstrap
+    import cli_fleet
+    remote = bootstrap.account_remote(account)
+    if remote or account in bootstrap.SERVICE_ACCOUNTS:
+        return remote
+    rows = [h for h in cli_fleet.REMOTE_HOSTS if h.get("user") == account]
+    return rows[0] if len(rows) == 1 and not rows[0].get("paused") else None
+
+
 def _account_reachable(account):
     import cli_account_bootstrap as bootstrap
-    remote = bootstrap.account_remote(account)
-    return bool(remote) and not bootstrap.is_pending(account)
+    return bool(_account_remote(account)) and not bootstrap.is_pending(account)
 
 
 def relay_for(to, links_doc=None, registry=None, usable=_account_reachable):
@@ -773,7 +784,7 @@ def relay_for(to, links_doc=None, registry=None, usable=_account_reachable):
     links_doc = load_links() if links_doc is None else links_doc
     registry = load_registry() if registry is None else registry
     for host in links_doc.get("hosts", {}):
-        projects = peer_channel.host_projects(registry, host)
+        projects = peer_channel.host_projects(registry, host, links_doc)
         if to not in projects:
             continue
         for other in peer_channel.linked_to(peer_channel.host_links(links_doc, host), to):
@@ -789,18 +800,17 @@ sys.path.insert(0, os.path.join(home, "devel/airuleset"))
 import peer_channel as pc
 req = json.loads(%r)
 me = pwd.getpwuid(os.getuid()).pw_name
-print(pc.Peer(pc.FLEET_HOST.get(socket.gethostname(), socket.gethostname()), me, os.getuid(), req["path"], home, armed=False)
+print(pc.Peer(pc.FLEET_HOST.get(socket.gethostname(), socket.gethostname()), me, os.getuid(), os.path.expanduser(req["path"]), home, armed=False)
       .send(req["to"], req["text"]))
 """
 
 
 def _ssh_for(account):
-    import cli_account_bootstrap as bootstrap
     import cli_remote
-    prefix, reason = cli_remote._ssh_prefix(bootstrap.account_remote(account), True)
+    remote = _account_remote(account)
+    prefix, reason = cli_remote._ssh_prefix(remote, True)
     if prefix is None:
         raise SystemExit("tell: no ssh path to %s: %s" % (account, reason))
-    remote = bootstrap.account_remote(account)
     return prefix + ["%s@%s" % (remote["user"], remote["host"])]
 
 
