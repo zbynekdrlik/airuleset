@@ -28,5 +28,19 @@ class TestRelayLocals(unittest.TestCase):
         self.assertEqual(got[0], "gatekeeper")
 
 
+class TestFleetAccountRemote(unittest.TestCase):
+    """The relay account `gatekeeper` is a fleet user, not a project account:
+    account_remote() alone returns None, so the controller never reached it."""
+
+    def test_fleet_user_resolves_to_its_one_remote_row(self):
+        got = cpc._account_remote("gatekeeper")
+        self.assertIsNotNone(got)
+        self.assertEqual(got["host"], "100.90.94.41")
+        self.assertTrue(cpc._account_reachable("gatekeeper"))
+
+    def test_user_on_several_boxes_stays_unresolved(self):
+        self.assertIsNone(cpc._account_remote("newlevel"))
+
+
 if __name__ == "__main__":
     unittest.main()
