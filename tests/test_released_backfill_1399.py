@@ -87,6 +87,21 @@ class ReleasedBeforeObserved(unittest.TestCase):
         self.assertEqual(asked[0], 200 + rs.MERGED_UNRELEASED_META_BUDGET + 4,
                          "newest released PR first")
 
+    def test_an_unreadable_pr_is_not_asked_again(self):
+        # review: a `(#N)` that is no PR (pulls/N 404) must not eat the budget forever
+        with TemporaryDirectory() as repo, TemporaryDirectory() as d:
+            _released_fork(repo)
+            cache = str(Path(d) / "c.json")
+            asked = []
+
+            def meta(pr):
+                asked.append(pr)
+                return META.get(pr) if pr == 101 else None
+            for _ in range(2):
+                rs._reset_memo()
+                rs.merged_unreleased_issues(repo, pr_meta_fn=meta, cache_path=cache, slug="o/r")
+        self.assertEqual(sorted(asked), [101, 102], "each released PR is read once")
+
 
 class ForkMainIsUpstream(unittest.TestCase):
 
