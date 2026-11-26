@@ -102,6 +102,45 @@ class ReleasedBeforeObserved(unittest.TestCase):
                 rs.merged_unreleased_issues(repo, pr_meta_fn=meta, cache_path=cache, slug="o/r")
         self.assertEqual(sorted(asked), [101, 102], "each released PR is read once")
 
+    def test_plain_commits_do_not_push_a_pr_out_of_the_window(self):
+        # live david3: 1500 commits reached back only to 19.11., the delivered PRs
+        # of early November sat below it. The window counts PR merges only.
+        import cli_release_backfill as bf
+        with TemporaryDirectory() as repo, TemporaryDirectory() as d:
+            fix = _released_fork(repo)
+            for k in range(12):
+                _commit(repo, "fix: plain commit %d" % k)
+            for br in ("main", "develop", "staging"):
+                _git(repo, "update-ref", "refs/remotes/upstream/%s" % br, "HEAD")
+            cache = str(Path(d) / "c.json")
+            old = bf.BACKFILL_COMMITS
+            bf.BACKFILL_COMMITS = 5
+            try:
+                rs.merged_unreleased_issues(repo, pr_meta_fn=META.get, cache_path=cache,
+                                            slug="o/r")
+            finally:
+                bf.BACKFILL_COMMITS = old
+            got = rs.merged_released_oids(repo, {55}, cache_path=cache, slug="o/r")
+        self.assertEqual(got, {55: [fix]})
+
+    def test_a_finished_backfill_skips_the_scan_until_main_moves(self):
+        import cli_release_backfill as bf
+        with TemporaryDirectory() as repo, TemporaryDirectory() as d:
+            _released_fork(repo)
+            cache = str(Path(d) / "c.json")
+            rs.merged_unreleased_issues(repo, pr_meta_fn=META.get, cache_path=cache, slug="o/r")
+            scans = []
+            real = bf._default_git_backfill
+            bf_git = lambda root, ref, limit: scans.append(ref) or real(root, ref, limit)
+            self.assertIsNone(bf.backfill(repo, "upstream", rs._load_cache(cache), cache,
+                                          META.get, 15, git_fn=bf_git))
+            self.assertEqual(scans, [], "main unchanged since the finished pass: no scan")
+            _commit(repo, "Merge pull request #103 from dev/y")
+            _git(repo, "update-ref", "refs/remotes/upstream/main", "HEAD")
+            bf.backfill(repo, "upstream", rs._load_cache(cache), cache, META.get, 15,
+                        git_fn=bf_git)
+            self.assertEqual(scans, ["upstream/main"])
+
 
 class ForkMainIsUpstream(unittest.TestCase):
 
