@@ -186,16 +186,17 @@ def _default_git_log_full(root, rng):
     return rows
 
 
-def _default_is_ancestor(oid, root):
-    """True IFF commit `oid` is an ancestor of origin/main in the repo at `root`
+def _default_is_ancestor(oid, root, main_ref="origin/main"):
+    """True IFF commit `oid` is an ancestor of `main_ref` in the repo at `root`
     (the /goal release proof's own predicate; cf. cli_quals._commit_is_released).
-    Fail-safe False (git error, unknown/unfetched commit, missing origin/main)."""
+    #1399: a fork clone passes `upstream/main`, its `origin/main` is the fork's.
+    Fail-safe False (git error, unknown/unfetched commit, missing ref)."""
     if not oid or not root:
         return False
     try:
         r = subprocess.run(
             ["git", "-C", str(root), "merge-base", "--is-ancestor",
-             str(oid), "origin/main"],
+             str(oid), main_ref],
             capture_output=True, text=True, timeout=10)
     except Exception:
         return False
@@ -409,16 +410,22 @@ def _pr_introducing_commits(root, git_fn, prefix="origin"):
     for br in _UNRELEASED_BRANCHES:
         rng = "%s/main..%s/%s" % (prefix, prefix, br)
         for oid, subj in git_fn(root, rng):
-            mm = _MERGE_PR_RE.search(subj)
-            if mm:
-                pr = mm.group(1)
-            else:
-                sq = _SQUASH_PR_RE.search(subj)   # trailing (#N) = the PR number
-                if not sq:
-                    continue
-                pr = sq.group(1)
-            out.setdefault(int(pr), oid)
+            pr = _pr_number(subj)
+            if pr is not None:
+                out.setdefault(pr, oid)
     return out
+
+
+def _pr_number(subj):
+    """The PR a commit subject introduces: `Merge pull request #N`, else the
+    trailing `(#N)` of a squash merge; None for any other commit."""
+    mm = _MERGE_PR_RE.search(subj) or _SQUASH_PR_RE.search(subj)
+    return int(mm.group(1)) if mm else None
+
+
+def _new_entry(title, body, pr, oid):
+    return {"issues": sorted(_issue_refs(title, body, pr)), "oid": oid, "v": _CACHE_V,
+            "docs": cli_commit_kind.implements_nothing(title)}
 
 
 def _two_branch_main_ref(root, prefix, ref_exists_fn):
@@ -530,7 +537,9 @@ def _compute_merged_unreleased(root, git_fn, git_full_fn, pr_meta_fn, cache_path
             and not ref_exists_fn(root, "%s/staging" % prefix)):
         return _compute_two_branch(root, git_full_fn, prefix, ref_exists_fn)
     pr_commits = _pr_introducing_commits(root, git_fn, prefix)
-    if not pr_commits:
+    # #1399: an empty range still backfills released PRs, on a real release train.
+    train = any(ref_exists_fn(root, "%s/%s" % (prefix, br)) for br in _UNRELEASED_BRANCHES)
+    if not pr_commits and not train:
         return frozenset()   # two-branch repo / no merged-unreleased commits
     # (b) Range cap. A range far past a normal between-cuts backlog means stale /
     # forked refs, not real release readiness — hide `M`, ZERO REST calls.
@@ -571,10 +580,7 @@ def _compute_merged_unreleased(root, git_fn, git_full_fn, pr_meta_fn, cache_path
             if meta is None:
                 unread += 1  # REST failed — leave uncached, retry next refresh
                 continue
-            title, body = meta
-            entry = {"issues": sorted(_issue_refs(title, body, pr)), "oid": oid,
-                     "v": _CACHE_V,
-                     "docs": cli_commit_kind.implements_nothing(title)}
+            entry = _new_entry(meta[0], meta[1], pr, oid)
             cache[key] = entry
             new_metas += 1
             _save_cache(cache_path, cache)   # (c) save after EVERY new entry
@@ -585,6 +591,12 @@ def _compute_merged_unreleased(root, git_fn, git_full_fn, pr_meta_fn, cache_path
                 _save_cache(cache_path, cache)
         (docs if entry.get("docs") else issues).update(   # #1228
             int(n) for n in entry.get("issues", []))
+    if train and not quota_hit and not unread and new_metas < MERGED_UNRELEASED_META_BUDGET:
+        import cli_release_backfill
+        refused = cli_release_backfill.backfill(root, prefix, cache, cache_path, pr_meta_fn,
+                                                MERGED_UNRELEASED_META_BUDGET - new_metas)
+        if refused is not None:
+            quota_hit = "no pull_requests:read" if refused is NO_PR_ACCESS else True
     why = quota_hit if isinstance(quota_hit, str) else "gh quota hit"
     if quota_hit:
         sys.stderr.write("merged-unreleased: %s — M partial this refresh\n" % why)
@@ -646,8 +658,11 @@ def merged_released_oids(root, open_numbers, is_ancestor_fn=None,
     cache = _load_cache(cache_path)
     if not isinstance(cache, dict) or not cache:
         return {}
-    if is_ancestor_fn is None:
-        is_ancestor_fn = _default_is_ancestor
+    if is_ancestor_fn is None:   # #1399: the canonical main, `upstream/main` on a fork
+        import cli_release_backfill
+        is_ancestor_fn = cli_release_backfill.on_main_fn(root, _resolve_slug(root, slug, slug_fn))
+        if is_ancestor_fn is None:
+            return {}
     out, docs, judged = {}, {}, {}
     for key, entry in cache.items():
         if not isinstance(entry, dict):

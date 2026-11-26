@@ -43,7 +43,7 @@
     "cli_push_gate.py": 218,
     "cli_quals.py": 3429,
     "cli_quals_cmd.py": 1598,
-    "cli_release_state.py": 673,
+    "cli_release_state.py": 688,
     "cli_remote.py": 2117,
     "cli_resource_guards.py": 881,
     "cli_scratch_sweep.py": 1976,
