@@ -237,16 +237,16 @@ def on_main_states(oids, instances, version_at):
     one must be live); `instances` is None when the repo declares no deploy
     state, else the `fetch_deploy_state` rows (`main_version`/`prod_version`);
     `version_at(oid)` reads the version that shipped the commit (None =
-    unknown). A ticket whose state cannot be told is left out: it keeps its
-    label bucket."""
+    unknown). An unreadable PROD version makes every one PENDING (#1399); a
+    ticket whose own version cannot be told is left out (its label bucket)."""
     if not oids:
         return {}
     if instances is None:
         return {int(n): ts.RELEASED for n in oids}
     rows = [i for i in instances if isinstance(i, dict)]
     prods = [i.get("prod_version") for i in rows]
-    if not prods or not all(prods):
-        return {}      # a PROD version not read: nothing can be told
+    if not prods or not all(prods):   # #1399: on main, live state not told = M
+        return {int(n): ts.PENDING for n in oids}
     from watchdog import release_watch
 
     def ahead(version):
