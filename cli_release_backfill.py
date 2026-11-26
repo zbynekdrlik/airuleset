@@ -50,10 +50,13 @@ def backfill(root, prefix, cache, cache_path, pr_meta_fn, budget, git_fn=None):
         meta = pr_meta_fn(pr)
         if meta is rs.QUOTA or meta is rs.NO_PR_ACCESS:
             return meta
-        if meta is None:
-            continue
-        cache[str(pr)] = rs._new_entry(meta[0], meta[1], pr, oid)
-        rs._save_cache(cache_path, cache)
+        # None = no readable PR (a `(#N)` naming an issue, a 404): cached empty, so
+        # it never eats the budget again (review); it names no ticket.
+        entry = rs._new_entry(*(meta or ("", "")), pr, oid)
+        cache[str(pr)] = entry
+        fresh = rs._load_cache(cache_path)   # merge: other panes refresh too (review)
+        rs._save_cache(cache_path, {**(fresh if isinstance(fresh, dict) else {}),
+                                    str(pr): entry})
     return None
 
 
