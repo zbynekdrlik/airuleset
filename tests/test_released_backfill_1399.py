@@ -131,7 +131,10 @@ class ReleasedBeforeObserved(unittest.TestCase):
             rs.merged_unreleased_issues(repo, pr_meta_fn=META.get, cache_path=cache, slug="o/r")
             scans = []
             real = bf._default_git_backfill
-            bf_git = lambda root, ref, limit: scans.append(ref) or real(root, ref, limit)
+
+            def bf_git(root, ref, limit):
+                scans.append(ref)
+                return real(root, ref, limit)
             self.assertIsNone(bf.backfill(repo, "upstream", rs._load_cache(cache), cache,
                                           META.get, 15, git_fn=bf_git))
             self.assertEqual(scans, [], "main unchanged since the finished pass: no scan")
