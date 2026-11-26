@@ -282,12 +282,16 @@ class OnMainFact(unittest.TestCase):
         # 1 is on PROD, 2 waits for the deploy, 3 cannot be told → unknown
         self.assertEqual(got, {1: ts.DEPLOYED, 2: ts.PENDING})
 
-    def test_an_unread_prod_version_is_unknown(self):
+    def test_an_unread_prod_version_is_pending(self):
+        # #1399 (owner 26.11.2026): odoo-erp's PROD version sources were never
+        # provisioned, so 40 delivered david3 tickets stayed I forever. A fix on
+        # main whose PROD cannot be read is M (on main, live state not told),
+        # never C and never "workable now".
         self.assertEqual(self.f.on_main_states(
             {1: "a"}, self._inst("2.5.0", "2.5.0", None), lambda o: "1.0"),
-            {})
+            {1: ts.PENDING})
         self.assertEqual(self.f.on_main_states({1: "a"}, [], lambda o: "1"),
-                         {})
+                         {1: ts.PENDING})
 
 
 class FactsCache(unittest.TestCase):
@@ -594,7 +598,7 @@ class ReviewRound1(unittest.TestCase):
             got = self.f._default_deploy("/r", "o/r")
         self.assertEqual(got, {"instances": [], "version_file": None})
         self.assertEqual(self.f.on_main_states({1: "a"}, got["instances"],
-                                               lambda o: "1"), {})
+                                               lambda o: "1"), {1: ts.PENDING})
 
     def test_the_declaration_matches_the_canonical_slug(self):
         from watchdog import deploy_state as ds
