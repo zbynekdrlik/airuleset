@@ -419,7 +419,7 @@ def refresh(root, slug, numbers, *, gh_fn, merged=(), handed=None, home=None,
     # only when a live (C) candidate exists.
     reopened = read_reopened(
         slug, gh_fn, [n for n, st in states.items()
-                      if st in (ts.DEPLOYED, ts.RELEASED)])
+                      if st in (ts.DEPLOYED, ts.RELEASED, ts.PENDING)])
     wait_entry, unbacked = _wait_facts(
         prev, {int(n) for n in (wait or ()) if str(n).isdecimal()}, now,
         root, own_stream, wait_fn)

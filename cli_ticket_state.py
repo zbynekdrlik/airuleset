@@ -486,10 +486,13 @@ def classify(row, facts=None, box=None, number=None):
                      "(#1141)")
     docs_wait = facts.merged_docs and facts.on_main in (DEPLOYED, RELEASED)
     if facts.merged or facts.on_main == PENDING or docs_wait:
-        if _BOUNCE not in names:
+        if facts.reopened and facts.on_main == PENDING:   # #1399 review
+            reason += "; on main, but reopened: more work is owed (#1399)"
+        elif _BOUNCE not in names:
             return "M", (_M_MERGED if facts.merged else
                          _M_DOCS if docs_wait else _M_PENDING)
-        reason += "; merged, but prio:bounce keeps it here (#1083)"
+        else:
+            reason += "; merged, but prio:bounce keeps it here (#1083)"
     if facts.handed and bucket == "I" and box.kind == "slice":
         if facts.handed == "released":
             return "gk", "released: done for the stream, counted in gk (#1009)"
