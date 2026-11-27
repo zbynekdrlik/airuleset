@@ -65,6 +65,36 @@ cidr_ok() {
     [[ $1 == */* ]] || return 1
     ipv4_ok "${1%/*}" && [[ ${1#*/} =~ ^([0-9]|[12][0-9]|3[0-2])$ ]]
 }
+metric_ok() { [[ $1 =~ ^(0|[1-9][0-9]{0,3})$ ]]; }   # 0..9999
+# A non-empty comma list (no empty item) whose every item passes $1.
+list_ok() {
+    local item IFS=,
+    [[ $2 =~ ^[^,]+(,[^,]+)*$ ]] || return 1
+    for item in $2; do "$1" "$item" || return 1; done
+}
+# One ipv4.routes entry: "A.B.C.D/N [NEXT-HOP] [METRIC]", never a /0 target.
+route_ok() {
+    local IFS=' ' w
+    [[ $1 =~ ^[^\ ]+(\ [^\ ]+){0,2}$ ]] || return 1
+    read -r -a w <<<"$1"
+    cidr_ok "${w[0]}" && [ "${w[0]#*/}" != 0 ] || return 1
+    [ "${#w[@]}" -lt 2 ] || ipv4_ok "${w[1]}" || return 1
+    [ "${#w[@]}" -lt 3 ] || metric_ok "${w[2]}"
+}
+# The value rule of each nm modify key; only the list keys may be cleared ("").
+value_ok() {
+    case "$1" in
+    ipv4.method) [[ $2 =~ ^(manual|auto|disabled|link-local)$ ]] ;;   # never "shared"
+    ipv4.gateway) [ -z "$2" ] || ipv4_ok "$2" ;;
+    ipv4.dns) [ -z "$2" ] || list_ok ipv4_ok "$2" ;;
+    ipv4.addresses) [ -z "$2" ] || list_ok cidr_ok "$2" ;;
+    ipv4.routes) [ -z "$2" ] || list_ok route_ok "$2" ;;
+    ipv4.route-metric) metric_ok "$2" ;;
+    ipv4.never-default|ipv4.ignore-auto-dns|connection.autoconnect) [[ $2 =~ ^(yes|no)$ ]] ;;
+    ipv6.method) [[ $2 =~ ^(auto|link-local|ignore|disabled)$ ]] ;;
+    *) return 1 ;;
+    esac
+}
 # A user-named input file: plain path, a regular file, never a symlink.
 file_ok() {
     [[ $1 =~ $FILE_RE ]] && [[ $1 != *..* ]] && [ ! -L "$1" ] && [ -f "$1" ]
@@ -115,7 +145,7 @@ nm)
         [ $# -eq 3 ] || usage
         check_profile "$1"
         in_list "$2" "$MODIFY_KEYS" || bad "bad key $2"
-        [[ $3 =~ $VALUE_RE ]] && [[ $3 != -* ]] || bad "bad value (A-Z a-z 0-9 . / : , space _ -, max 200)"
+        [[ $3 =~ $VALUE_RE ]] && [[ $3 != -* ]] && value_ok "$2" "$3" || bad "bad value for $2: $3"
         CMD=(nmcli connection modify id "$1" "$2" "$3")
         ;;
     add-ethernet)
