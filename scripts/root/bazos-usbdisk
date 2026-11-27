@@ -4,8 +4,10 @@
 # may run it through one sudoers line. The disk is always named by its SERIAL,
 # must be a whole disk on the usb transport, and is never a disk under /.
 #
-#   bazos-usbdisk list
-#   bazos-usbdisk info   SERIAL     SMART identity + health
+#   bazos-usbdisk list               usb disks + blkid of each partition
+#   bazos-usbdisk info   SERIAL     SMART identity + health + blkid
+#   bazos-usbdisk smart  SERIAL     full smartctl -a (read-only)
+#   bazos-usbdisk readtest SERIAL   read the whole disk to /dev/null, count errors
 #   bazos-usbdisk mount  SERIAL     every filesystem read-only under /mnt/bazos/SERIAL/
 #   bazos-usbdisk umount SERIAL
 #   bazos-usbdisk wipe   SERIAL LABEL   zero the whole disk, then one empty GPT/NTFS partition
@@ -19,14 +21,14 @@ SERIAL_RE='^[A-Za-z0-9_-]{4,40}$'
 LABEL_RE='^[A-Za-z0-9_-]{1,32}$'
 
 usage() {
-    echo "usage: bazos-usbdisk list | info SERIAL | mount SERIAL | umount SERIAL | wipe SERIAL LABEL" >&2
+    echo "usage: bazos-usbdisk list | info|smart|readtest|mount|umount SERIAL | wipe SERIAL LABEL" >&2
     exit 2
 }
 
 ACTION=${1:-}
 case "$ACTION" in
     list) [ $# -eq 1 ] || usage ;;
-    info|mount|umount) [ $# -eq 2 ] || usage ;;
+    info|smart|readtest|mount|umount) [ $# -eq 2 ] || usage ;;
     wipe) [ $# -eq 3 ] || usage ;;
     *) usage ;;
 esac
@@ -78,12 +80,47 @@ disk_for() {
     echo "${name[0]}"
 }
 
+# TYPE / PARTLABEL / LABEL of the disk and each partition (LDM, BitLocker, ...).
+show_blkid() {
+    local p t
+    while read -r p t; do
+        blkid -c /dev/null -s TYPE -s PARTLABEL -s LABEL "/dev/$p" ||
+            echo "/dev/$p: no known signature"
+    done < <(lsblk -nr -o NAME,TYPE "/dev/$1")
+}
+
+# smartctl ARGS on /dev/$D through the -d chain `info` uses. A type counts when
+# smartctl opened the device and ran its commands (exit bits 0-2 clear); the
+# higher bits describe the disk's health and are part of the answer.
+smart_chain() {
+    local t out rc
+    for t in auto sat sntasmedia sntjmicron; do
+        set +e
+        if [ "$t" = auto ]; then
+            out=$(smartctl "$@" "/dev/$D")
+        else
+            out=$(smartctl "$@" -d "$t" "/dev/$D")
+        fi
+        rc=$?
+        set -e
+        if [ $((rc & 7)) -eq 0 ]; then
+            printf '%s\n' "$out"
+            echo "(smartctl -d $t, exit $rc)"
+            return 0
+        fi
+        echo "smartctl -d $t: exit $rc" >&2
+    done
+    printf '%s\n' "$out"
+    return 1
+}
+
 case "$ACTION" in
 list)
     lsblk -dnr -o NAME,TRAN,TYPE | awk '$2 == "usb" && $3 == "disk" {print $1}' |
         while read -r d; do
             if is_root_disk "$d"; then continue; fi
             lsblk -o NAME,SIZE,MODEL,SERIAL,TRAN,FSTYPE,LABEL,MOUNTPOINT "/dev/$d"
+            show_blkid "$d"
         done
     ;;
 info)
@@ -91,6 +128,56 @@ info)
     log "info $SERIAL /dev/$D"
     smartctl -i -H "/dev/$D" || smartctl -i -H -d sat "/dev/$D" ||
         smartctl -i -H -d sntasmedia "/dev/$D" || smartctl -i -H -d sntjmicron "/dev/$D"
+    show_blkid "$D"
+    ;;
+smart)
+    D=$(disk_for "$SERIAL")
+    log "smart $SERIAL /dev/$D"
+    smart_chain -a || die "smartctl could not read $SERIAL with any -d type"
+    ;;
+readtest)
+    D=$(disk_for "$SERIAL")
+    # Reading never changes the disk, but a rw mount could change under the read.
+    while read -r p _; do
+        while read -r opts; do
+            case ",$opts," in
+                *,rw,*) die "/dev/$p is mounted read-write, run umount first" ;;
+            esac
+        done < <(findmnt -rn -S "/dev/$p" -o OPTIONS || true)
+    done < <(lsblk -nr -o NAME,TYPE "/dev/$D")
+    SIZE=$(blockdev --getsize64 "/dev/$D")
+    log "readtest $SERIAL /dev/$D size=$SIZE start"
+    DDERR=$(mktemp)
+    trap 'rm -f "$DDERR"' EXIT
+    T0=$(date +%s.%N)
+    set +e
+    # stdin closed: runs fine in the background; progress goes to stderr too.
+    dd if=/dev/$D of=/dev/null bs=4M iflag=direct conv=noerror status=progress \
+        </dev/null 2> >(tee "$DDERR" >&2)
+    rc=$?
+    wait $!
+    set -e
+    T1=$(date +%s.%N)
+    BYTES=$(tr '\r' '\n' <"$DDERR" | awk '/^[0-9]+ bytes/ {b = $1} END {print b + 0}')
+    ERRS=$(grep -c 'error reading' "$DDERR" || true)
+    if KMSG=$(journalctl -k -o cat --no-pager --since "@${T0%.*}"); then
+        KERR=$(printf '%s\n' "$KMSG" | grep -cE "(I/O|medium) error, dev $D," || true)
+    else
+        KERR=unknown
+    fi
+    SECS=$(awk -v a="$T0" -v b="$T1" 'BEGIN {printf "%.1f", b - a}')
+    MBS=$(awk -v n="$BYTES" -v a="$T0" -v b="$T1" 'BEGIN {d = b - a; printf "%.1f", (d > 0 ? n / d / 1e6 : 0)}')
+    if [ "$rc" -ne 0 ] || [ "$ERRS" -ne 0 ] || { [ "$KERR" != unknown ] && [ "$KERR" -ne 0 ]; }; then
+        RESULT=ERRORS
+    elif [ "$BYTES" -ne "$SIZE" ]; then
+        RESULT=INCOMPLETE
+    else
+        RESULT=OK
+    fi
+    SUMMARY="bytes=$BYTES size=$SIZE seconds=$SECS MB/s=$MBS dd_read_errors=$ERRS kernel_io_errors=$KERR dd_rc=$rc result=$RESULT"
+    log "readtest $SERIAL /dev/$D $SUMMARY"
+    echo "readtest $SERIAL /dev/$D $SUMMARY"
+    [ "$RESULT" = OK ] || exit 1
     ;;
 mount)
     D=$(disk_for "$SERIAL")
