@@ -139,9 +139,11 @@ done
 echo @@dups
 for d in __DUPS__; do if compgen -G "$HOME/$d" >/dev/null; then echo "dup=$d"; fi; done
 echo @@git
-if [ -d "$HOME"/__PROJECT__/.git ]; then
-  echo "email=$(git -C "$HOME"/__PROJECT__ config --local user.email)"
-  echo "visibility=$(gh repo view __REPO__ --json visibility -q .visibility 2>/dev/null)"
+G="$HOME"/__PROJECT__   # 1401: else its ONE child repo (the footer's #61 fallback)
+if [ ! -d "$G/.git" ]; then set -- "$G"/*/.git; [ $# -eq 1 ] && [ -d "$1" ] && G=${1%/.git}; fi
+if [ -d "$G/.git" ]; then
+  echo "email=$(git -C "$G" config --local user.email)"
+  echo "visibility=$(cd "$G" && gh repo view __REPO__ --json visibility -q .visibility 2>/dev/null)"
 fi
 echo @@session
 echo "count=$(ls "$HOME/.claude/projects/"__KEY__/*.jsonl 2>/dev/null | wc -l)"
