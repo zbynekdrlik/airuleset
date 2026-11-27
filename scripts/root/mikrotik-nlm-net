@@ -36,8 +36,8 @@ CAPTURE_IFACES=" enp38s0 enp38s0.70 enp39s0 "
 PROFILES=" dev1-lan dante-vlan router2-backup mikrotik-pz-setup "
 OWN_RE='^mknlm-[a-z0-9-]{1,30}$'
 UUID_RE='^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
-MODIFY_KEYS=" ipv4.method ipv4.addresses ipv4.gateway ipv4.dns ipv4.routes ipv4.route-metric ipv4.never-default ipv4.ignore-auto-dns ipv6.method connection.autoconnect "
-VALUE_RE='^[A-Za-z0-9./:, _-]{0,200}$'
+MODIFY_KEYS=" ipv4.method ipv4.addresses ipv4.gateway ipv4.dns ipv4.routes +ipv4.routes -ipv4.routes ipv4.route-metric ipv4.never-default ipv4.ignore-auto-dns ipv6.method connection.autoconnect "
+VALUE_RE='^[A-Za-z0-9./:, _=-]{0,200}$'
 # "]" first and "-" last are literal inside a POSIX bracket expression.
 BPF_RE='^[][A-Za-z0-9.:/_()!<>=&|*+ -]{1,200}$'
 FILE_RE='^[A-Za-z0-9._/+-]{1,255}$'
@@ -78,14 +78,34 @@ list_ok() {
     [[ $2 =~ ^[^,]+(,[^,]+)*$ ]] || return 1
     for item in $2; do "$1" "$item" || return 1; done
 }
-# One ipv4.routes entry: "A.B.C.D/N [NEXT-HOP] [METRIC]", never a /0 target.
+# One route entry: "A.B.C.D/N [NEXT-HOP] [METRIC] [table=N] [onlink=true|false]"
+# (attributes last, each at most once, table 1..252 or 254), never a /0 target.
 route_ok() {
-    local IFS=' ' w
-    [[ $1 =~ ^[^\ ]+(\ [^\ ]+){0,2}$ ]] || return 1
+    local IFS=' ' w i=1 seen=" " key
+    [[ $1 =~ ^[^\ ]+(\ [^\ ]+){0,4}$ ]] || return 1
     read -r -a w <<<"$1"
     cidr_ok "${w[0]}" && [ "${w[0]#*/}" != 0 ] || return 1
-    [ "${#w[@]}" -lt 2 ] || ipv4_ok "${w[1]}" || return 1
-    [ "${#w[@]}" -lt 3 ] || metric_ok "${w[2]}"
+    if [ "$i" -lt "${#w[@]}" ] && ipv4_ok "${w[$i]}"; then i=$((i + 1)); fi
+    if [ "$i" -lt "${#w[@]}" ] && metric_ok "${w[$i]}"; then i=$((i + 1)); fi
+    while [ "$i" -lt "${#w[@]}" ]; do
+        case "${w[$i]}" in
+        table=*)
+            [[ ${w[$i]#table=} =~ ^[1-9][0-9]{0,2}$ ]] || return 1
+            [ "${w[$i]#table=}" -le 252 ] || [ "${w[$i]#table=}" -eq 254 ] || return 1 ;;
+        onlink=true|onlink=false) ;;
+        *) return 1 ;;
+        esac
+        key=${w[$i]%%=*}
+        if in_list "$key" "$seen"; then return 1; fi
+        seen+="$key "
+        i=$((i + 1))
+    done
+}
+# A non-empty comma list of route entries, one optional space after a comma.
+routes_ok() {
+    local item IFS=,
+    [[ $1 =~ ^[^,]+(,\ ?[^,]+)*$ ]] || return 1
+    for item in $1; do route_ok "${item# }" || return 1; done
 }
 # The value rule of each nm modify key; only the list keys may be cleared ("").
 value_ok() {
@@ -94,7 +114,8 @@ value_ok() {
     ipv4.gateway) [ -z "$2" ] || ipv4_ok "$2" ;;
     ipv4.dns) [ -z "$2" ] || list_ok ipv4_ok "$2" ;;
     ipv4.addresses) [ -z "$2" ] || list_ok cidr_ok "$2" ;;
-    ipv4.routes) [ -z "$2" ] || list_ok route_ok "$2" ;;
+    ipv4.routes) [ -z "$2" ] || routes_ok "$2" ;;
+    +ipv4.routes|-ipv4.routes) routes_ok "$2" ;;   # append / remove (nmcli's +/- forms)
     ipv4.route-metric) metric_ok "$2" ;;
     ipv4.never-default|ipv4.ignore-auto-dns|connection.autoconnect) [[ $2 =~ ^(yes|no)$ ]] ;;
     ipv6.method) [[ $2 =~ ^(auto|link-local|ignore|disabled)$ ]] ;;

@@ -289,5 +289,61 @@ class SafeLog(unittest.TestCase):
         self.assertEqual(self._ip_calls(sb), [])
 
 
+ROUTE_KEYS = ("ipv4.routes", "+ipv4.routes", "-ipv4.routes")
+
+
+class RouteAppendRemove(unittest.TestCase):
+    """Live request 27.11.: add a main-table route 10.77.7.0/24 via 10.77.8.1
+    to dev1-lan, whose 0.0.0.0/0 10.77.8.1 table=77 route must stay. So
+    +ipv4.routes / -ipv4.routes append and remove single routes, and an
+    entry may carry table=N (1..252, 254) and onlink=true|false. A /0 target
+    stays refused for every key the account writes."""
+
+    def _modify(self, sb, key, value):
+        return sb.run("nm", "modify", "dev1-lan", key, value)
+
+    def test_append_reaches_nmcli_as_its_append_form(self):
+        sb = Sandbox(self)
+        for value in ("10.77.7.0/24 10.77.8.1", "10.77.7.0/24 10.77.8.1 table=254",
+                      "10.77.7.0/24 10.77.8.1 100 table=252 onlink=true",
+                      "10.77.7.0/24 10.77.8.1, 10.77.9.0/24 10.77.8.1 table=1"):
+            with self.subTest(value=value):
+                res = self._modify(sb, "+ipv4.routes", value)
+                self.assertEqual(res.returncode, 0, res.stderr)
+                self.assertEqual(sb.nm_calls()[-1], ["connection", "modify", "id", "dev1-lan",
+                                                     "+ipv4.routes", value])
+
+    def test_remove_and_full_list_accept_the_same_grammar(self):
+        sb = Sandbox(self)
+        for key in ("-ipv4.routes", "ipv4.routes"):
+            with self.subTest(key=key):
+                value = "10.77.7.0/24 10.77.8.1 table=254 onlink=false"
+                res = self._modify(sb, key, value)
+                self.assertEqual(res.returncode, 0, res.stderr)
+                self.assertEqual(sb.nm_calls()[-1][4:], [key, value])
+
+    def test_refused_entries(self):
+        sb = Sandbox(self)
+        bad = ["10.77.7.0/24 10.77.8.1 table=%s" % t for t in ("253", "255", "0", "abc", "")]
+        bad += ["0.0.0.0/0 10.77.8.1", "0.0.0.0/0 10.77.8.1 table=77", "10.0.0.0/0",
+                "10.77.7.0/24 10.77.8.1,0.0.0.0/0 10.77.8.1 table=77"]
+        bad += ["10.77.7.0/24 10.77.8.1 src=10.77.8.2", "10.77.7.0/24 10.77.8.1 type=blackhole",
+                "10.77.7.0/24 10.77.8.1 lock-mtu=true", "10.77.7.0/24 10.77.8.1 lock-mtu",
+                "10.77.7.0/24 10.77.8.1 onlink=yes", "10.77.7.0/24 10.77.8.1 table=1 table=2",
+                "10.77.7.0/24 10.77.8.1 table=254 100", "10.77.7.0/24 10.77.8.1,  10.77.9.0/24",
+                "10.77.7.0/24  10.77.8.1", "10.77.7.0/24 10.77.8.1,"]
+        for key in ROUTE_KEYS:
+            for value in bad:
+                with self.subTest(key=key, value=value):
+                    self.assertEqual(self._modify(sb, key, value).returncode, 2)
+        for key in ("+ipv4.routes", "-ipv4.routes"):
+            with self.subTest(key=key, value=""):
+                self.assertEqual(self._modify(sb, key, "").returncode, 2)
+        for key in ("+ipv4.addresses", "-ipv4.dns", "+ipv4.method"):
+            with self.subTest(key=key):
+                self.assertEqual(self._modify(sb, key, "10.0.0.1/24").returncode, 2)
+        self.assertEqual(sb.nm_calls(), [])
+
+
 if __name__ == "__main__":
     unittest.main()
