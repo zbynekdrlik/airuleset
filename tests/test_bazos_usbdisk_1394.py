@@ -134,7 +134,7 @@ class NewActionsArgv(Script):
         for name in ("smart", "readtest"):
             with self.subTest(name=name):
                 sec = self._section(name)
-                self.assertIn('D=$(disk_for "$SERIAL")', sec.split("\n")[1])
+                self.assertIn('D=$(disk_for "$SERIAL")', sec.split("\n")[2])
 
     def test_readtest_only_reads(self):
         sec = self._section("readtest")
