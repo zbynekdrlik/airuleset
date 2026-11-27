@@ -42,7 +42,15 @@ usage() {
 }
 bad() { echo "mikrotik-nlm-net: $*" >&2; exit 2; }
 
-in_list() { [[ "$2" == *" $1 "* ]]; }
+# Exact, word-by-word: an argument with any whitespace never matches.
+in_list() {
+    local w
+    [[ $1 =~ ^[^[:space:]]+$ ]] || return 1
+    for w in $2; do
+        [ "$w" = "$1" ] && return 0
+    done
+    return 1
+}
 check_profile() {
     in_list "$1" "$PROFILES" || [[ $1 =~ $OWN_RE ]] || bad "bad profile $1"
 }
