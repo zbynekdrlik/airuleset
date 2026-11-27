@@ -717,7 +717,7 @@ WEBTERM_DASHBOARD_TABS = {
     # REMOVED, the montalu client is gone.
     "zbynek": [
         "ar", "claudy", "fohmixer", "varos", "wall-bridge", "songplayer",  # #1220, #1267
-        "dstack", "dasio", "iemmixer", "dcontroller", "dsync", "intercom", "obs", "shading", "vstack", "nlch-finances", "tuke", "mikrotik-pz", "devbridge", "fleet-backup", "companion-updater", "restreamer", "wall-songs", "bazos", "dev1", "dev2", "gatekeeper",  # #1270, #1295, #1296, #1310, #1320, #1339, #1363, #1373, #1390, #1394
+        "dstack", "dasio", "iemmixer", "dcontroller", "dsync", "intercom", "obs", "shading", "vstack", "nlch-finances", "tuke", "mikrotik-pz", "devbridge", "fleet-backup", "companion-updater", "restreamer", "wall-songs", "bazos", "mikrotik-nlm", "dev1", "dev2", "gatekeeper",  # #1270, #1295, #1296, #1310, #1320, #1339, #1363, #1373, #1390, #1394, #1401
         "david1-subdev", "david2-subdev", "david3-subdev", "david4-subdev",
         "david5-subdev", "david6-subdev", "david7-subdev", "david8-subdev",  # #1341
         "miva1-subdev", "spinbike-vps",
@@ -736,7 +736,7 @@ WEBTERM_DASHBOARD_TABS = {
         "miva1-subdev", "david3-subdev",  # david3: owner 11.11.2026
         "david5-subdev", "david6-subdev", "david7-subdev", "david8-subdev",  # #1341, owner 16.11.2026
         "ar", "claudy", "fohmixer", "varos", "wall-bridge", "songplayer",  # #1267
-        "dstack", "dasio", "iemmixer", "dcontroller", "dsync", "intercom", "obs", "shading", "vstack", "nlch-finances", "tuke", "mikrotik-pz", "devbridge", "fleet-backup", "companion-updater", "restreamer", "wall-songs", "bazos", "dev1", "dev2", "gatekeeper", "forestshop",  # #1270, #1295, #1296, #1310, #1320, #1339, #1363, #1373, #1390, #1394
+        "dstack", "dasio", "iemmixer", "dcontroller", "dsync", "intercom", "obs", "shading", "vstack", "nlch-finances", "tuke", "mikrotik-pz", "devbridge", "fleet-backup", "companion-updater", "restreamer", "wall-songs", "bazos", "mikrotik-nlm", "dev1", "dev2", "gatekeeper", "forestshop",  # #1270, #1295, #1296, #1310, #1320, #1339, #1363, #1373, #1390, #1394, #1401
     ],
     # david.newlevel.media -- David's working accounts. The david GATEWAY renders
     # its own physically-scoped inventory (cli_webterm_profiles.david_inventory,

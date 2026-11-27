@@ -45,7 +45,7 @@
         ],
         [
           "iemmixer",
-          "mikrotik"
+          "mikrotik-nlm"
         ],
         [
           "airuleset",
@@ -73,7 +73,7 @@
         ],
         [
           "airuleset",
-          "mikrotik"
+          "mikrotik-nlm"
         ],
         [
           "airuleset",
@@ -105,7 +105,7 @@
         ],
         [
           "dasio",
-          "mikrotik"
+          "mikrotik-nlm"
         ],
         [
           "camera-box",
@@ -181,7 +181,7 @@
         ],
         [
           "dstack",
-          "mikrotik"
+          "mikrotik-nlm"
         ],
         [
           "airuleset",
@@ -229,7 +229,7 @@
         ],
         [
           "fleet-backup",
-          "mikrotik"
+          "mikrotik-nlm"
         ],
         [
           "airuleset",
@@ -241,7 +241,7 @@
         ],
         [
           "camera-box",
-          "mikrotik"
+          "mikrotik-nlm"
         ],
         [
           "airuleset",
@@ -262,7 +262,7 @@
         "dstack|fohmixer": "the Dante side of the FOH PC: clock, devices, a Dante bug seen from fohmixer",
         "dasio|fohmixer": "the shared FOH PC: who holds the audio devices, CPU pinning, restarts of Ableton",
         "dstack|songplayer": "dsync and genlock on the SongPlayer PCs, the ASIO output through Dante Virtual Soundcard: a Dante bug goes to dstack",
-        "iemmixer|mikrotik": "the SNV network under the IEM mixer: Dante VLAN 70, QoS, multicast, switch ports and link faults",
+        "iemmixer|mikrotik-nlm": "the SNV network under the IEM mixer: Dante VLAN 70, QoS, multicast, switch ports and link faults",
         "fohmixer|iemmixer": "band lineups and channel names shared by the two mixers; a change in one mixer that affects the other",
         "airuleset|camera-box": "airuleset infra: accounts, permissions, peer links, tooling. Ask or report here; airuleset decides and a ticket alone wakes no session",
         "airuleset|dasio": "airuleset infra: accounts, permissions, peer links, tooling. Ask or report here; airuleset decides and a ticket alone wakes no session",
@@ -274,7 +274,7 @@
         "airuleset|devbridge": "airuleset infra: accounts, permissions, peer links, tooling. Ask or report here; airuleset decides and a ticket alone wakes no session",
         "airuleset|fohmixer": "airuleset infra: accounts, permissions, peer links, tooling. Ask or report here; airuleset decides and a ticket alone wakes no session",
         "airuleset|iemmixer": "airuleset infra: accounts, permissions, peer links, tooling. Ask or report here; airuleset decides and a ticket alone wakes no session",
-        "airuleset|mikrotik": "airuleset infra: accounts, permissions, peer links, tooling. Ask or report here; airuleset decides and a ticket alone wakes no session",
+        "airuleset|mikrotik-nlm": "airuleset infra: accounts, permissions, peer links, tooling. Ask or report here; airuleset decides and a ticket alone wakes no session",
         "airuleset|songplayer": "airuleset infra: accounts, permissions, peer links, tooling. Ask or report here; airuleset decides and a ticket alone wakes no session",
         "airuleset|wall-bridge": "airuleset infra: accounts, permissions, peer links, tooling. Ask or report here; airuleset decides and a ticket alone wakes no session",
         "dstack|dsync": "dsync is a critical part of dstack: every request to dsync comes through dstack, which decides it, and audio stability outranks video",
@@ -282,7 +282,7 @@
         "camera-box|intercom": "the intercom: camera-box pins a released hub and intercom-vban and installs them on the boxes; intercom owns code, config and tests",
         "dstack|intercom": "the hub's Dante device: a Dante need or bug goes to dstack, intercom only moves the stack version",
         "airuleset|intercom": "airuleset infra: accounts, permissions, peer links, tooling. Ask or report here; airuleset decides and a ticket alone wakes no session",
-        "dasio|mikrotik": "the network: a switch, router or VLAN need of dasio's test machines goes to mikrotik, which owns that configuration",
+        "dasio|mikrotik-nlm": "the network: a switch, router or VLAN need of dasio's test machines goes to mikrotik-nlm, which owns that configuration",
         "camera-box|obs": "the forked OBS: camera-box owns the picture, the boxes and the deploy and pins released OBS builds; obs owns the fork. Other projects ask for OBS changes through camera-box",
         "dstack|obs": "the Dante OBS source: a Dante need or bug goes to dstack, obs only moves the stack version",
         "airuleset|obs": "airuleset infra: accounts, permissions, peer links, tooling. Ask or report here; airuleset decides and a ticket alone wakes no session",
@@ -301,7 +301,7 @@
         "camera-box|restreamer": "the E2E YouTube leg: camera-box measures the stream end to end; restreamer owns its av-gate session and the egress to YouTube",
         "presenter|songplayer": "SongPlayer playback and the Presenter screens at SNV: what plays and what is shown, and the cues between them",
         "dstack|presenter": "the Dante side of presenter's PC (SNV, presenter.lan): its audio in by dlink instead of VBAN (the preacher's audio for translation), and SNV's network (one NIC, Dante as VLAN 70)",
-        "dstack|mikrotik": "one NIC per production PC (dstack #155): Dante VLAN 70 plus a LAN VLAN, CRS310 port tagging, .lan records to LAN addresses; dstack coordinates, mikrotik owns switch and router config",
+        "dstack|mikrotik-nlm": "one NIC per production PC (dstack #155): Dante VLAN 70 plus a LAN VLAN, CRS310 port tagging, .lan records to LAN addresses; dstack coordinates, mikrotik-nlm owns switch and router config",
         "camera-box|fohmixer": "the FOH mix and the camera-box rig: the FOH audio that reaches the stream and OBS, and tests or windows on the SNV show rig that touch the FOH mixer; a Dante question still goes to dstack",
         "airuleset|fleet-backup": "airuleset infra: accounts, permissions, peer links, tooling. Ask or report here; airuleset decides and a ticket alone wakes no session",
         "airuleset|companion-updater": "airuleset infra: accounts, permissions, peer links, tooling. Ask or report here; airuleset decides and a ticket alone wakes no session",
@@ -309,10 +309,10 @@
         "companion-updater|shading": "the bkshading-simple Companion module: shading's Stream Deck camera-shading controls (aperture steps) and their deploy to the SNV and PP Companions",
         "camera-box|dcontroller": "the Dante controller (dcontroller) on the companion/presenter PCs at SNV and PP: its install, its web UI, and how camera-box's PP rig work uses it (camera-box#1536, dstack#407)",
         "mikrotik-pz|remoteos-mcp": "network facts for the remoteos MCP targets at Granč and PP: a PC's LAN IP and DHCP lease, its WireGuard peer and handshake; mikrotik-pz owns the routers, remoteos-mcp owns the MCP side",
-        "fleet-backup|mikrotik": "backup access on network devices: the fleetbackup user and key per device, host keys, network-collect results; mikrotik owns the devices, fleet-backup owns the backups",
+        "fleet-backup|mikrotik-nlm": "backup access on network devices: the fleetbackup user and key per device, host keys, network-collect results; mikrotik-nlm owns the devices, fleet-backup owns the backups",
         "airuleset|wall-songs": "airuleset infra: accounts, permissions, peer links, tooling. Ask or report here; airuleset decides and a ticket alone wakes no session",
         "wall-bridge|wall-songs": "sibling LED-wall projects at SNV: wall-bridge owns the bridge PC's Spout-to-wall path, wall-songs the songs PC's song visuals; coordinate wall output, never each other's code",
-        "camera-box|mikrotik": "the SNV network: camera-box needs read-only switch/router data (port counters, drops/pause on the stream port, netcfg drift); mikrotik owns the devices and their credentials",
+        "camera-box|mikrotik-nlm": "the SNV network: camera-box needs read-only switch/router data (port counters, drops/pause on the stream port, netcfg drift); mikrotik-nlm owns the devices and their credentials",
         "airuleset|bazos": "airuleset infra: accounts, permissions, peer links, tooling. Ask or report here; airuleset decides and a ticket alone wakes no session",
         "dcontroller|iemmixer": "how dcontroller reads and shows iem-mixer's RX latency per subscription, and the values iemmixer reports (iemmixer#142 playout_override 0.67 ms vs dcontroller's 1 ms)"
       }
