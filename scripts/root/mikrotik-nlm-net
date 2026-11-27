@@ -24,6 +24,8 @@ LOG=/var/log/mikrotik-nlm-net.log
 ROOT_UID=0
 ROOT_GID=0
 STAGE_PARENT=/run
+MAX_STAGE_BYTES=268435456   # 256 MiB per staged netinstall input
+STAGE_TIMEOUT=120           # seconds to read one input as the account
 # Root-only list of the connection UUIDs add-ethernet created: only those
 # mknlm-* profiles are the account's to change or delete.
 STATE_DIR=/var/lib/mikrotik-nlm-net
@@ -307,16 +309,28 @@ netinstall)
     # never opens a path the account could not read itself.
     STAGE=$(mktemp -d "$STAGE_PARENT/mikrotik-nlm-net.XXXXXX")
     trap 'rm -rf -- "$STAGE"' EXIT
+    # At most MAX_STAGE_BYTES, within STAGE_TIMEOUT seconds.
     stage() {
-        local dst="$STAGE/$1"
-        runuser -u mikrotik-nlm -- cat -- "$2" >"$dst" || die "cannot read $2 as $ACCOUNT"
+        local dst="$STAGE/$1" size
+        local -a st
+        set +e
+        timeout "$STAGE_TIMEOUT" runuser -u mikrotik-nlm -- cat -- "$2" |
+            head -c "$((MAX_STAGE_BYTES + 1))" >"$dst"
+        st=("${PIPESTATUS[@]}")
+        set -e
+        size=$(stat -c %s -- "$dst")
+        [ "$size" -le "$MAX_STAGE_BYTES" ] || die "$2 is larger than $MAX_STAGE_BYTES bytes"
+        [ "${st[0]}" -eq 0 ] && [ "${st[1]}" -eq 0 ] ||
+            die "cannot read $2 as $ACCOUNT (rc ${st[0]}, timeout ${STAGE_TIMEOUT}s)"
         echo "$dst"
     }
+    STAGED=()
     ARGS=("${NI_FLAGS[@]}")
     i=0
     while [ "$i" -lt "${#NI_FILES[@]}" ]; do
         f=$(stage "opt$i" "${NI_FILES[$((i + 1))]}")
         ARGS+=("${NI_FILES[$i]}" "$f")
+        STAGED+=("$f")
         i=$((i + 2))
     done
     n=0
@@ -324,7 +338,12 @@ netinstall)
         mkdir -m 0700 "$STAGE/p$n"
         f=$(stage "p$n/$(basename -- "$p")" "$p")
         ARGS+=("$f")
+        STAGED+=("$f")
         n=$((n + 1))
+    done
+    # Every staged copy is still a regular file, not a symlink, right before use.
+    for f in "${STAGED[@]}"; do
+        [ ! -L "$f" ] && [ -f "$f" ] || die "staged copy $f is not a regular file"
     done
     log "netinstall -i $SETUP_IFACE ${NI_FLAGS[*]} files: ${NI_FILES[*]} packages: ${PKGS[*]}"
     "$NETINSTALL" -i "$SETUP_IFACE" "${ARGS[@]}"
