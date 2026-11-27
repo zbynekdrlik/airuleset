@@ -161,7 +161,10 @@ nm)
         [[ $1 =~ $OWN_RE ]] || bad "bad profile $1 (new profiles are mknlm-*)"
         [ "$2" = "$SETUP_IFACE" ] || bad "bad interface $2 (only $SETUP_IFACE)"
         ADD_NAME=$1
-        CMD=(nmcli connection add type ethernet con-name "$1" ifname "$2")
+        # Inert until modify says otherwise: no address, no default route, no autoconnect.
+        CMD=(nmcli connection add type ethernet con-name "$1" ifname "$2"
+             ipv4.method disabled ipv6.method link-local ipv4.never-default yes
+             connection.autoconnect no)
         ;;
     delete)
         [ $# -eq 1 ] || usage
