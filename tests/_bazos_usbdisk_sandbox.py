@@ -71,8 +71,15 @@ elif tool == "blockdev":
 elif tool == "journalctl":
     print(st.get("kernel", ""), end="")
 elif tool == "dd":
-    for _ in range(st.get("dd_errors", 0)):
+    if "conv=noerror" in a:
+        sys.exit("dd stub: conv=noerror would retry a dead region forever")
+    fail = st.get("dd_fail_at")
+    if fail is not None:
+        # GNU dd without noerror: the error, then the count up to it, exit 1.
+        sys.stderr.write("%%d bytes copied\r" %% fail)
         sys.stderr.write("dd: error reading '/dev/sda': Input/output error\n")
+        sys.stderr.write("%%d bytes (8 MB, 8 MiB) copied, 0.1 s, 84 MB/s\n" %% fail)
+        sys.exit(1)
     n = st.get("dd_bytes", st["size"])
     sys.stderr.write("%%d bytes copied\r%%d bytes (17 MB, 16 MiB) copied, 0.2 s, 84 MB/s\n" %% (n // 2, n))
     sys.stderr.write("%%d bytes (17 MB, 16 MiB) copied, 0.2 s, 84 MB/s\n" %% n)

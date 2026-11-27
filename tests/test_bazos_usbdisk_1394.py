@@ -138,8 +138,10 @@ class NewActionsArgv(Script):
 
     def test_readtest_only_reads(self):
         sec = self._section("readtest")
-        for needle in ("if=/dev/$D", "of=/dev/null", "iflag=direct", "conv=noerror"):
+        for needle in ("if=/dev/$D", "of=/dev/null", "iflag=direct"):
             self.assertIn(needle, sec)
+        # Live 27.11.: noerror retried a dead region until dd hung in D state.
+        self.assertNotIn("noerror", sec)
         self.assertNotIn("of=/dev/$", sec)
         self.assertNotIn('of="/dev/$', sec)
 
@@ -186,22 +188,27 @@ class Behaviour(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         dd = self.sb.calls("dd")
         self.assertEqual(len(dd), 1)
-        for arg in ("if=/dev/sda", "of=/dev/null", "bs=4M", "iflag=direct", "conv=noerror"):
+        for arg in ("if=/dev/sda", "of=/dev/null", "bs=4M", "iflag=direct"):
             self.assertIn(arg, dd[0])
+        self.assertFalse([a for a in dd[0] if "noerror" in a], dd[0])
         self.assertIn("bytes=16777216", r.stdout)
-        self.assertIn("dd_read_errors=0", r.stdout)
+        self.assertIn("failed_at=none", r.stdout)
         self.assertIn("kernel_io_errors=0", r.stdout)
         self.assertIn("result=OK", r.stdout)
         self.assertIn("MB/s=", r.stdout)
         self.assertIn("bytes copied", r.stderr)
         self.assertIn("result=OK", self.sb.log_text())
 
-    def test_readtest_counts_read_errors(self):
-        self.sb.set(dd_errors=2, dd_rc=1,
-                    kernel="blk_update_request: I/O error, dev sda, sector 8 op 0x0\n")
+    def test_readtest_stops_at_the_first_read_error(self):
+        self.sb.set(dd_fail_at=8388608,
+                    kernel="blk_update_request: I/O error, dev sda, sector 16384 op 0x0\n")
         r = self.sb.run("readtest", "S1234")
         self.assertEqual(r.returncode, 1)
-        self.assertIn("dd_read_errors=2", r.stdout)
+        dd = self.sb.calls("dd")
+        self.assertEqual(len(dd), 1)
+        self.assertFalse([a for a in dd[0] if "noerror" in a], dd[0])
+        self.assertIn("failed_at=8388608", r.stdout)
+        self.assertIn("bytes=8388608", r.stdout)
         self.assertIn("kernel_io_errors=1", r.stdout)
         self.assertIn("dd_rc=1", r.stdout)
         self.assertIn("result=ERRORS", r.stdout)
