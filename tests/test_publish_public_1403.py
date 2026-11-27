@@ -83,13 +83,63 @@ class TestPublishPublic(unittest.TestCase):
         self.assertEqual(rc, 0, log)
         self.assertIn("/access/apps", fake.writes[0][1])
 
-    def test_cli_exposes_the_flag(self):
+    def test_dry_run_public_writes_nothing(self):
+        fake = FakeCF(SOURCES)
+        rc, log = self._publish(HOST, fake, dry_run=True, public=True)
+        self.assertEqual(rc, 0, log)
+        self.assertEqual(fake.writes, [])
+        self.assertEqual(log.count("[would]"), 2)
+
+    def test_path_scoped_access_app_under_the_host_stops(self):
+        app = {"id": "p1", "domain": HOST + "/admin", "policies": []}
+        fake = FakeCF(SOURCES + [app])
+        rc, log = self._publish(HOST, fake, dry_run=False, public=True)
+        self.assertEqual(rc, 1, log)
+        self.assertEqual(fake.writes, [])
+
+    def test_longer_host_with_the_same_prefix_is_not_a_hit(self):
+        app = {"id": "o1", "domain": "listenx.newlevel.media", "policies": []}
+        fake = FakeCF(SOURCES + [app])
+        rc, log = self._publish(HOST, fake, dry_run=True, public=True)
+        self.assertEqual(rc, 0, log)
+
+    def test_paged_access_listing_fails_closed(self):
+        fake = FakeCF(SOURCES)
+
+        def paged(method, path, body):
+            st, b = fake(method, path, body)
+            if "/access/apps" in path and method == "GET":
+                b["result_info"] = {"total_count": len(b["result"]) + 5}
+            return st, b
+        a, t, d = _clients(fake)
+        a._transport = paged
+        out = io.StringIO()
+        rc = pa.publish(HOST, TUN, "http://localhost:8099", access_client=a,
+                        tunnel_client=t, dns_client=d, out=out, dry_run=False,
+                        public=True)
+        self.assertEqual(rc, 1, out.getvalue())
+        self.assertEqual(fake.writes, [])
+        self.assertIn("paged", out.getvalue())
+
+    def test_cli_forwards_public_to_publish(self):
         import argparse
         sub = argparse.ArgumentParser().add_subparsers()
-        p = pa.register_parser(sub)
-        args = p.parse_args([HOST, "--tunnel", TUN, "--origin", "http://x", "--public"])
-        self.assertTrue(args.public)
-
+        args = pa.register_parser(sub).parse_args(
+            [HOST, "--tunnel", TUN, "--origin", "http://localhost:8099",
+             "--public", "--apply"])
+        fake = FakeCF(SOURCES)
+        args._clients = _clients(fake)
+        args._is_worktree_fn = lambda: False
+        out = io.StringIO()
+        old, sys.stdout = sys.stdout, out
+        try:
+            rc = pa.cmd_publish_app(args)
+        finally:
+            sys.stdout = old
+        self.assertEqual(rc, 0, out.getvalue())
+        self.assertTrue(fake.writes)
+        self.assertFalse(any("/access/apps" in p for _m, p, _b in fake.writes))
+        self.assertIn("PUBLIC", out.getvalue())
 
 if __name__ == "__main__":
     unittest.main()
