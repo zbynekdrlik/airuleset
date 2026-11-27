@@ -243,7 +243,8 @@ def on_main_states(oids, instances, version_at):
         return {}
     if instances is None:
         return {int(n): ts.RELEASED for n in oids}
-    rows = [i for i in instances if isinstance(i, dict)]
+    rows = [i for i in instances if isinstance(i, dict)
+            and i.get("configured", True)]   # #1399: no key here = not judged here
     prods = [i.get("prod_version") for i in rows]
     if not prods or not all(prods):   # #1399: on main, live state not told = M
         return {int(n): ts.PENDING for n in oids}
@@ -412,8 +413,10 @@ def refresh(root, slug, numbers, *, gh_fn, merged=(), handed=None, home=None,
     decl = deploy.get("decl") if isinstance(deploy, dict) else None
     states = on_main_states(
         oids, None if decl is None else (decl.get("instances") or []),
-        lambda oid: (version_at_fn or _default_version_at)(
-            root, (decl or {}).get("version_file"), oid))
+        lambda oid: version_at_fn(root, (decl or {}).get("version_file"), oid)
+        if version_at_fn else _default_version_at(
+            root, (decl or {}).get("version_file"), oid,
+            main_ref=(decl or {}).get("main_ref") or "origin/main"))
     # Read every refresh, never reused: a close+reopen by the self-close guard
     # inside any reuse window would read C again (delta re-review). It runs
     # only when a live (C) candidate exists.
@@ -476,19 +479,23 @@ def _default_deploy(root, slug):
     An unreadable registry, or fewer PROD reads than declared instances
     (the 20 s fetch budget, a fork clone the reader cannot place), gives no
     instances: unknown, never a partial "every instance runs it"."""
+    import cli_release_backfill
     from watchdog import deploy_state as ds
     decl, known = ds.deploy_declaration(root, slug=slug or None)
     if not known:
         return {"instances": [], "version_file": None}
     if decl is None:
         return None
+    main_ref = cli_release_backfill.canonical_main_ref(root, slug)
+    if main_ref is None:      # a fork without canonical refs: main unknown
+        return {"instances": [], "version_file": None}
     declared = [i for i in decl.get("instances") or [] if isinstance(i, dict)]
-    instances = ds.fetch_deploy_state(root) or []
+    instances = ds.fetch_deploy_state(root, main_ref=main_ref) or []
     return {"instances": instances if len(instances) >= len(declared) else [],
-            "version_file": decl.get("main_version_file")}
+            "version_file": decl.get("main_version_file"), "main_ref": main_ref}
 
 
-def _default_version_at(root, version_file, oid):
+def _default_version_at(root, version_file, oid, main_ref="origin/main"):
     """The version that SHIPPED commit `oid`: the version file at the first
     commit on origin/main's first-parent chain that contains it (the release
     merge). None (unknown) when the fix sits ON that chain (a bump-at-cut
@@ -496,7 +503,7 @@ def _default_version_at(root, version_file, oid):
     main, is not a commit hash, or git cannot tell (review round 2)."""
     if not version_file or not isinstance(oid, str) or not _OID_RE.fullmatch(oid):
         return None
-    rng = "%s..origin/main" % oid
+    rng = "%s..%s" % (oid, main_ref)   # #1399: a fork's canonical main
     chain = _git_lines(root, "log", "--first-parent", "--reverse",
                        "--format=%H %P", rng)
     after = _git_lines(root, "rev-list", "--ancestry-path", rng)

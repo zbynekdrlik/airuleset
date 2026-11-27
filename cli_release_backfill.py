@@ -93,12 +93,18 @@ def _write(path, text):
         pass
 
 
+def canonical_main_ref(root, slug):
+    """`<prefix>/main` of the canonical release train (a fork's `upstream/main`),
+    or None for a fork clone without canonical refs."""
+    prefix, _ = rs._canonical_ref_prefix(root, slug, rs._default_remote_slug(root, "origin"),
+                                         rs._default_remote_slug, rs._default_ref_exists)
+    return None if prefix is None else "%s/main" % prefix
+
+
 def on_main_fn(root, slug):
     """`is_ancestor_fn(oid, root)` against the canonical `<prefix>/main`, or None
     for a fork clone without canonical refs (no C, never a false one)."""
-    prefix, _ = rs._canonical_ref_prefix(root, slug, rs._default_remote_slug(root, "origin"),
-                                         rs._default_remote_slug, rs._default_ref_exists)
-    if prefix is None:
+    main_ref = canonical_main_ref(root, slug)
+    if main_ref is None:
         return None
-    main_ref = "%s/main" % prefix
     return lambda oid, r: rs._default_is_ancestor(oid, r, main_ref)

@@ -346,16 +346,18 @@
         {
           "name": "montalu",
           "version_source": {
-            "type": "manifest_url",
-            "url": "TODO-PROVISIONING: montalu PROD version endpoint (erp.montalu.cloud /json/2 or version-on-dashboard read)"
+            "type": "odoo_json2",
+            "url": "https://erp.montalu.cloud",
+            "key_file": "~/.secrets/montalu-handover-api-key.env"
           },
           "deploy_window": null
         },
         {
           "name": "slovnormal",
           "version_source": {
-            "type": "manifest_url",
-            "url": "TODO-PROVISIONING: slovnormal PROD version endpoint"
+            "type": "odoo_json2",
+            "url": "https://erp.slovnormal.sk",
+            "key_file": "~/.secrets/slovnormal-handover-api-key.env"
           },
           "deploy_window": {
             "open_start": "19:00",
@@ -367,8 +369,9 @@
         {
           "name": "miva",
           "version_source": {
-            "type": "manifest_url",
-            "url": "TODO-PROVISIONING: miva PROD version endpoint"
+            "type": "odoo_json2",
+            "url": "https://erp.miva.cloud",
+            "key_file": "~/.secrets/miva-handover-api-key.env"
           },
           "deploy_window": {
             "open_start": "23:00",

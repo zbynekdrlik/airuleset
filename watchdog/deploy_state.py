@@ -23,6 +23,7 @@ import subprocess
 import time
 from pathlib import Path
 from watchdog import release_watch
+from watchdog.deploy_state_json2 import _fetch_odoo_json2, _key_path, source_configured  # noqa: F401,E501 (#1399)
 
 log = logging.getLogger(__name__)
 
@@ -168,17 +169,11 @@ def read_main_version(cwd, version_file, ref="origin/main"):
 # PROD-version reader
 # ---------------------------------------------------------------------------
 
-def read_prod_version(version_source, timeout=15):
-    """Read the PROD version from a declared ``version_source``.
-
-    ``version_source`` is a dict with:
-      - ``type``: ``"manifest_url"`` -- HTTP GET, parse for version
-      - ``url``: the URL to fetch
-
-    Or a simple string URL (shorthand for manifest_url).
-
-    Returns the version string, or None on any error (fail-safe).
-    """
+def read_prod_version(version_source, timeout=15, opener=None):
+    """The PROD version from ``version_source`` (None on any error): a dict
+    ``{type: manifest_url, url}`` (HTTP GET, JSON version) or ``{type:
+    odoo_json2, url, key_file}`` (#1399, `deploy_state_json2`), or a plain URL
+    string (shorthand for manifest_url)."""
     if isinstance(version_source, str):
         version_source = {"type": "manifest_url", "url": version_source}
     if not isinstance(version_source, dict):
@@ -189,6 +184,8 @@ def read_prod_version(version_source, timeout=15):
 
     if src_type == "manifest_url" and url:
         return _fetch_version_from_url(url, timeout=timeout)
+    if src_type == "odoo_json2" and url:
+        return _fetch_odoo_json2(url, _key_path(version_source), timeout, opener, _strip_odoo_prefix)
 
     return None
 
@@ -407,12 +404,13 @@ def deploy_declaration(cwd, registry_path=None, slug=None):
 
 
 def fetch_deploy_state(cwd, registry_path=None, home=None, now_dt=None,
-                       time_fn=None, budget_s=None):
+                       time_fn=None, budget_s=None, main_ref="origin/main"):
     """The deploy-state producer: reads the registry, fetches versions and
     windows, returns a list of per-instance dicts for ``_deploy_watch_classify``.
     Returns ``None`` when the project has no ``deploy_state`` declaration
     (undeclared -> decision-log + no action); each returned dict is
-    ``{instance, main_version, prod_version, window_open, window_passed}``."""
+    ``{instance, main_version, prod_version, window_open, window_passed,
+    configured}`` (#1399: ``main_ref`` = canonical main, no key = unconfigured)."""
     ds_decl, _known = deploy_declaration(cwd, registry_path)
     if ds_decl is None:
         return None
@@ -422,7 +420,7 @@ def fetch_deploy_state(cwd, registry_path=None, home=None, now_dt=None,
         return None
 
     version_file = ds_decl.get("main_version_file")
-    main_ver = read_main_version(cwd, version_file)
+    main_ver = read_main_version(cwd, version_file, ref=main_ref)
 
     # #1041 review-2 (🟡-1) — bound the per-instance network loop's TOTAL wall-clock
     # so a multi-instance repo cannot run the sweep into the systemd kill; an instance
@@ -441,7 +439,8 @@ def fetch_deploy_state(cwd, registry_path=None, home=None, now_dt=None,
             break
         name = inst.get("name", "unknown")
         vs = inst.get("version_source")
-        prod_ver = read_prod_version(vs) if vs else None
+        configured = source_configured(vs) if vs else True
+        prod_ver = read_prod_version(vs) if vs and configured else None
         window_spec = inst.get("deploy_window")
         w_open, w_passed = evaluate_deploy_window(
             window_spec, now_dt=now_dt)
@@ -451,6 +450,7 @@ def fetch_deploy_state(cwd, registry_path=None, home=None, now_dt=None,
             "prod_version": prod_ver,
             "window_open": w_open,
             "window_passed": w_passed,
+            "configured": configured,
         })
 
     return results if results else None
