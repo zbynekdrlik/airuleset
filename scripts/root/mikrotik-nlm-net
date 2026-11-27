@@ -24,12 +24,16 @@ LOG=/var/log/mikrotik-nlm-net.log
 ROOT_UID=0
 ROOT_GID=0
 STAGE_PARENT=/run
+# Root-only list of the connection UUIDs add-ethernet created: only those
+# mknlm-* profiles are the account's to change or delete.
+STATE_DIR=/var/lib/mikrotik-nlm-net
 ACCOUNT=mikrotik-nlm
 NETINSTALL=/opt/mikrotik-nlm/netinstall-cli
 SETUP_IFACE=enp39s0
 CAPTURE_IFACES=" enp38s0 enp38s0.70 enp39s0 "
 PROFILES=" dev1-lan dante-vlan router2-backup mikrotik-pz-setup "
 OWN_RE='^mknlm-[a-z0-9-]{1,30}$'
+UUID_RE='^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
 MODIFY_KEYS=" ipv4.method ipv4.addresses ipv4.gateway ipv4.dns ipv4.routes ipv4.route-metric ipv4.never-default ipv4.ignore-auto-dns ipv6.method connection.autoconnect "
 VALUE_RE='^[A-Za-z0-9./:, _-]{0,200}$'
 # "]" first and "-" last are literal inside a POSIX bracket expression.
@@ -104,6 +108,7 @@ ACTION=${1:-}
 [ $# -ge 1 ] || usage
 shift
 CMD=()
+OWN_NAME=   # an mknlm-* profile this run acts on, resolved to its UUID as root
 case "$ACTION" in
 capture)
     [ $# -ge 2 ] || usage
@@ -134,29 +139,34 @@ nm)
     up|down)
         [ $# -eq 1 ] || usage
         check_profile "$1"
+        if [[ $1 =~ $OWN_RE ]]; then OWN_NAME=$1; fi
         CMD=(nmcli connection "$SUB" id "$1")
         ;;
     reapply)
         [ $# -eq 1 ] || usage
         check_profile "$1"
-        CMD=(reapply "$1")
+        if [[ $1 =~ $OWN_RE ]]; then OWN_NAME=$1; fi
+        CMD=(reapply id "$1")
         ;;
     modify)
         [ $# -eq 3 ] || usage
         check_profile "$1"
         in_list "$2" "$MODIFY_KEYS" || bad "bad key $2"
         [[ $3 =~ $VALUE_RE ]] && [[ $3 != -* ]] && value_ok "$2" "$3" || bad "bad value for $2: $3"
+        if [[ $1 =~ $OWN_RE ]]; then OWN_NAME=$1; fi
         CMD=(nmcli connection modify id "$1" "$2" "$3")
         ;;
     add-ethernet)
         [ $# -eq 2 ] || usage
         [[ $1 =~ $OWN_RE ]] || bad "bad profile $1 (new profiles are mknlm-*)"
         [ "$2" = "$SETUP_IFACE" ] || bad "bad interface $2 (only $SETUP_IFACE)"
+        ADD_NAME=$1
         CMD=(nmcli connection add type ethernet con-name "$1" ifname "$2")
         ;;
     delete)
         [ $# -eq 1 ] || usage
         [[ $1 =~ $OWN_RE ]] || bad "bad profile $1 (only mknlm-* can be deleted)"
+        OWN_NAME=$1
         CMD=(nmcli connection delete id "$1")
         ;;
     disconnect)
@@ -211,6 +221,32 @@ esac
 log() { printf '%s uid=%s %s\n' "$(date -Is)" "${SUDO_UID:-?}" "$*" >>"$LOG"; }
 die() { echo "mikrotik-nlm-net: $*" >&2; log "$ACTION refused: $*"; exit 1; }
 
+OWNED=$STATE_DIR/owned
+# The state dir (0700) and its list (0600), root-owned, never symlinks;
+# created when missing, then locked for the rest of the run.
+state_ready() {
+    if [ -L "$STATE_DIR" ]; then die "$STATE_DIR is a symlink"; fi
+    [ -e "$STATE_DIR" ] || install -d -m 0700 -o "$ROOT_UID" -g "$ROOT_GID" "$STATE_DIR"
+    [ -d "$STATE_DIR" ] && [ "$(stat -c '%u %a' "$STATE_DIR")" = "$ROOT_UID 700" ] ||
+        die "$STATE_DIR is not a root 0700 directory"
+    if [ -L "$OWNED" ]; then die "$OWNED is a symlink"; fi
+    [ -e "$OWNED" ] || install -m 0600 -o "$ROOT_UID" -g "$ROOT_GID" /dev/null "$OWNED"
+    [ -f "$OWNED" ] && [ "$(stat -c '%u %a' "$OWNED")" = "$ROOT_UID 600" ] ||
+        die "$OWNED is not a root 0600 file"
+    exec 9<"$OWNED"
+    flock -x 9
+}
+uuids_named() { nmcli -g connection.uuid connection show id "$1" 2>/dev/null | sed '/^$/d' || true; }
+# The single UUID named $1, which add-ethernet must have recorded.
+owned_uuid() {
+    local -a u
+    mapfile -t u < <(uuids_named "$1")
+    [ "${#u[@]}" -eq 1 ] || die "$1 names ${#u[@]} connections, not one"
+    [[ ${u[0]} =~ $UUID_RE ]] || die "$1 has no plain uuid"
+    grep -qxF -- "${u[0]}" "$OWNED" || die "$1 was not created by mikrotik-nlm-net"
+    echo "${u[0]}"
+}
+
 case "$ACTION" in
 capture)
     log "capture $IFACE ${SECONDS_}s filter: $*"
@@ -222,14 +258,41 @@ capture)
     [ "$rc" -eq 0 ] || [ "$rc" -eq 124 ] || die "tcpdump rc=$rc"
     ;;
 nm|addr)
+    if [ "$ACTION" = nm ] && [ "$SUB" = add-ethernet ]; then
+        state_ready
+        mapfile -t existing < <(uuids_named "$ADD_NAME")
+        [ "${#existing[@]}" -eq 0 ] || die "a connection named $ADD_NAME already exists"
+    elif [ -n "$OWN_NAME" ]; then
+        state_ready
+        U=$(owned_uuid "$OWN_NAME")
+        for i in "${!CMD[@]}"; do
+            if [ "${CMD[$i]}" = id ] && [ "${CMD[$((i + 1))]:-}" = "$OWN_NAME" ]; then
+                CMD[i]=uuid
+                CMD[i + 1]=$U
+            fi
+        done
+    fi
     if [ "${CMD[0]}" = reapply ]; then
-        mapfile -t devs < <(nmcli -g GENERAL.DEVICES connection show id "${CMD[1]}" | tr ',' '\n' | sed '/^$/d')
-        [ "${#devs[@]}" -eq 1 ] || die "profile ${CMD[1]} is active on ${#devs[@]} devices"
+        mapfile -t devs < <(nmcli -g GENERAL.DEVICES connection show "${CMD[1]}" "${CMD[2]}" | tr ',' '\n' | sed '/^$/d')
+        [ "${#devs[@]}" -eq 1 ] || die "profile ${CMD[2]} is active on ${#devs[@]} devices"
         in_list "${devs[0]}" "$CAPTURE_IFACES" || die "device ${devs[0]} is not allow-listed"
         CMD=(nmcli device reapply "${devs[0]}")
     fi
     log "${CMD[*]}"
     "${CMD[@]}"
+    if [ "$ACTION" = nm ] && [ "$SUB" = add-ethernet ]; then
+        mapfile -t made < <(uuids_named "$ADD_NAME")
+        [ "${#made[@]}" -eq 1 ] && [[ ${made[0]} =~ $UUID_RE ]] ||
+            die "added $ADD_NAME but cannot read back its one uuid"
+        printf '%s\n' "${made[0]}" >>"$OWNED"
+        log "owned + ${made[0]} $ADD_NAME"
+    elif [ "$ACTION" = nm ] && [ "$SUB" = delete ]; then
+        NEW=$(mktemp "$STATE_DIR/owned.XXXXXX")
+        { grep -vxF -- "$U" "$OWNED" || true; } >"$NEW"
+        chmod 0600 "$NEW"
+        mv -f -- "$NEW" "$OWNED"
+        log "owned - $U $OWN_NAME"
+    fi
     ;;
 netinstall)
     [ ! -L "$NETINSTALL" ] && [ -f "$NETINSTALL" ] || die "$NETINSTALL is not a regular file"
