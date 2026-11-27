@@ -37,9 +37,9 @@
     "stack": "house"
   },
   {
-    "name": "mikrotik",
+    "name": "mikrotik-nlm",
     "host": "dev1",
-    "path": "~/devel/mikrotik",
+    "path": "/home/mikrotik-nlm/devel/mikrotik",
     "branch_model": "2-branch",
     "default_branch": "main",
     "work_branch": "dev",
@@ -47,7 +47,7 @@
       "no-git"
     ],
     "onboarded": "2026-03-20",
-    "account": "newlevel",
+    "account": "mikrotik-nlm",
     "stack": "config"
   },
   {

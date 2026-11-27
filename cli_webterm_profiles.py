@@ -421,7 +421,7 @@ def marek_inventory():
         fohmixer_entry(WEBTERM_MAREK_IDENTITY),   # #1183 project account
         varos_entry(WEBTERM_MAREK_IDENTITY),      # #1220 project account
         *(dev1_project_entry(a, WEBTERM_MAREK_IDENTITY)            # #1267, #1270 owner 30.10.
-          for a in ("wall-bridge", "songplayer", "dstack", "dasio", "iemmixer", "dcontroller", "dsync", "intercom", "obs", "shading", "vstack", "nlch-finances", "tuke", "mikrotik-pz", "devbridge", "fleet-backup", "companion-updater", "restreamer", "wall-songs", "bazos")),
+          for a in ("wall-bridge", "songplayer", "dstack", "dasio", "iemmixer", "dcontroller", "dsync", "intercom", "obs", "shading", "vstack", "nlch-finances", "tuke", "mikrotik-pz", "devbridge", "fleet-backup", "companion-updater", "restreamer", "wall-songs", "bazos", "mikrotik-nlm")),
         {
             "id": "dev1",
             "label": "dev1 (marek sessions)",
@@ -708,6 +708,7 @@ def zbynek_inventory():
         dev1_project_entry("restreamer", WEBTERM_ZBYNEK_IDENTITY, "owner"),   # #1373
         dev1_project_entry("wall-songs", WEBTERM_ZBYNEK_IDENTITY, "owner"),   # #1390
         dev1_project_entry("bazos", WEBTERM_ZBYNEK_IDENTITY, "owner"),   # #1394
+        dev1_project_entry("mikrotik-nlm", WEBTERM_ZBYNEK_IDENTITY, "owner"),   # #1401
         {
             "id": "dev1",
             "label": "dev1",

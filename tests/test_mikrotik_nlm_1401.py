@@ -5,8 +5,11 @@ Its root needs (tcpdump, NetworkManager profiles, an address on enp39s0, a rare
 netinstall) go through ONE root-owned tool `/usr/local/sbin/mikrotik-nlm-net`
 (the #1394 bazos-usbdisk ARGS pattern), never raw `sudo nmcli` / `sudo tcpdump`:
 tcpdump `-z` runs a command as root and nmcli's full surface is root too.
-Declared pending: the root bootstrap, the tab flip and the cutover of the
-existing `mikrotik` registry row are later live steps.
+Declared pending first; flipped live 27.11. after the root bootstrap on dev1,
+with the owner + marek tab after bazos, the old newlevel `mikrotik` registry
+row renamed onto the account (LEGACY_CEILING 19 -> 18) and every dev1 peer
+link of `mikrotik` renamed with its topic. The pending path keeps its
+coverage through a REMOTE_HOSTS patch.
 """
 import io
 import os
@@ -20,6 +23,7 @@ from unittest import mock
 import cli_account_bootstrap as bootstrap
 import cli_account_hardening as hardening
 import cli_account_policy as policy
+import cli_accounts
 import cli_drop_lanes as drop
 import cli_fleet
 import cli_peer_channel as cpc
@@ -81,39 +85,74 @@ class Declaration(unittest.TestCase):
                                              declared=bootstrap.SERVICE_ACCOUNTS))
 
 
-class PendingAccount(unittest.TestCase):
+INFRA_TOPIC = ("airuleset infra: accounts, permissions, peer links, tooling. Ask or "
+               "report here; airuleset decides and a ticket alone wakes no session")
 
-    def test_pending_full_authority_fleet_entry_on_dev1(self):
+
+def _pending():
+    """REMOTE_HOSTS with mikrotik-nlm marked pending again (the state before
+    its root bootstrap), so the skip paths keep their coverage."""
+    return mock.patch.object(cli_fleet, "REMOTE_HOSTS", [
+        dict(h, pending=True) if h.get("user") == ACCT else h
+        for h in cli_fleet.REMOTE_HOSTS])
+
+
+def _mint_all():
+    out = io.StringIO()
+    with mock.patch.object(pgt, "mint_account", return_value=0) as m, \
+            mock.patch.object(ci_sync, "run_after_mint", return_value=0), \
+            redirect_stdout(out):
+        rc = pgt.cmd_project_gh_token(mock.Mock(
+            action="mint", account=None, all=True, dry_run=False, key=None))
+    with mock.patch.object(ci_sync, "sync_account", return_value=0) as s:
+        ci_sync.sync_all(run=lambda *a, **k: None)
+    return rc, [c.args[0] for c in m.call_args_list], out.getvalue(), \
+        [c.args[0] for c in s.call_args_list]
+
+
+class LiveAccount(unittest.TestCase):
+    """Live 27.11.: root bootstrap ran on dev1 (uid 1023, sudo -l lists only
+    the tool), airuleset installed as the account, checkout copied."""
+
+    def test_live_full_authority_fleet_entry_on_dev1(self):
         (entry,) = [h for h in cli_fleet.REMOTE_HOSTS if h.get("user") == ACCT]
         self.assertEqual(entry["name"], "mikrotik-nlm@dev1")
         self.assertEqual(entry["host"], "100.104.8.125")
-        self.assertIs(entry["pending"], True)
-        self.assertTrue(bootstrap.is_pending(ACCT))
+        self.assertIs(entry["pending"], False)
+        self.assertFalse(bootstrap.is_pending(ACCT))
         self.assertIn(ACCT, cli_fleet.FULL_AUTHORITY_USERS)
 
-    def test_unattended_paths_skip_it(self):
-        out = io.StringIO()
-        with mock.patch.object(pgt, "mint_account", return_value=0) as m, \
-                mock.patch.object(ci_sync, "run_after_mint", return_value=0), \
-                redirect_stdout(out):
-            rc = pgt.cmd_project_gh_token(mock.Mock(
-                action="mint", account=None, all=True, dry_run=False, key=None))
-        with mock.patch.object(ci_sync, "sync_account", return_value=0) as s:
-            ci_sync.sync_all(run=lambda *a, **k: None)
+    def test_mint_all_and_secret_sync_reach_it_live(self):
+        rc, minted, out, synced = _mint_all()
         self.assertEqual(rc, 0)
-        self.assertIn("project-gh-token: %s: SKIPPED — pending" % ACCT, out.getvalue())
-        self.assertNotIn(ACCT, [c.args[0] for c in m.call_args_list])
-        self.assertNotIn(ACCT, [c.args[0] for c in s.call_args_list])
-        self.assertNotIn(ACCT, cpc.accounts_for_host("dev1"))
+        self.assertIn(ACCT, minted)
+        self.assertNotIn("%s: SKIPPED" % ACCT, out)
+        self.assertIn(ACCT, synced)
+        self.assertIn(ACCT, cpc.accounts_for_host("dev1"))
 
-    def test_no_dashboard_tab_while_pending(self):
-        for human, tabs in w.WEBTERM_DASHBOARD_TABS.items():
-            self.assertNotIn(ACCT, tabs, human)
+    def test_unattended_paths_skip_it_while_pending(self):
+        with _pending():
+            self.assertTrue(bootstrap.is_pending(ACCT))
+            rc, minted, out, synced = _mint_all()
+            accts = cpc.accounts_for_host("dev1")
+        self.assertEqual(rc, 0)
+        self.assertIn("project-gh-token: %s: SKIPPED — pending" % ACCT, out)
+        self.assertNotIn(ACCT, minted)
+        self.assertNotIn(ACCT, synced)
+        self.assertNotIn(ACCT, accts)
+
+    def test_the_tab_follows_bazos_for_the_owner_and_marek_only(self):
+        for human in ("zbynek", "marek"):
+            tabs = w.WEBTERM_DASHBOARD_TABS[human]
+            self.assertEqual(tabs.index(ACCT), tabs.index("bazos") + 1)
+        for human in ("david", "dominika", "timo"):
+            self.assertNotIn(ACCT, w.WEBTERM_DASHBOARD_TABS[human])
         for inv in (profiles.marek_inventory(), profiles.zbynek_inventory()):
-            self.assertEqual([e for e in inv if e["id"] == ACCT], [])
+            (entry,) = [e for e in inv if e["id"] == ACCT]
+            self.assertEqual(entry["user"], ACCT)
 
     def test_alias_does_not_read_as_the_snv_project(self):
-        # The 8-char cut "mikrotik" is the existing SNV project's name.
+        # The 8-char cut "mikrotik" was the SNV project's old name.
         self.assertEqual(short_target_alias(ACCT, "mikrotik-nlm-dev1"), "mt-nlm")
 
     def test_drop_port_is_fixed_and_free(self):
@@ -121,12 +160,34 @@ class PendingAccount(unittest.TestCase):
         self.assertEqual(list(drop._GENERATED_DROP_PORTS.values()).count(8919), 1)
         self.assertNotIn(8919, drop._RESERVED_PORTS)
 
-    def test_existing_mikrotik_project_row_untouched(self):
+    def test_registry_row_moved_to_the_account(self):
         import json
         reg = json.loads((ROOT / "projects-registry.json").read_text(encoding="utf-8"))
-        (row,) = [r for r in reg if r["name"] == "mikrotik"]
-        self.assertEqual(row["account"], "newlevel")
-        self.assertEqual([r for r in reg if r["name"] == ACCT], [])
+        self.assertEqual([r for r in reg if r["name"] == "mikrotik"], [])
+        (row,) = [r for r in reg if r["name"] == ACCT]
+        self.assertEqual(row, {
+            "name": ACCT, "host": "dev1", "path": "/home/mikrotik-nlm/devel/mikrotik",
+            "branch_model": "2-branch", "default_branch": "main", "work_branch": "dev",
+            "overrides": ["no-git"], "onboarded": "2026-03-20", "account": ACCT,
+            "stack": "config"})
+        self.assertFalse(cli_accounts.is_legacy_account(ACCT))
+        self.assertNotIn(ACCT, [r["name"] for r in cli_accounts.legacy_inventory(reg)])
+        self.assertEqual(len(cli_accounts.legacy_inventory(reg)), cli_accounts.LEGACY_CEILING)
+        self.assertEqual(cli_accounts.LEGACY_CEILING, 18)
+
+    def test_peer_links_renamed_with_their_topics(self):
+        import json
+        links = json.loads((ROOT / "peer-links.json").read_text(encoding="utf-8"))
+        dev1 = links["hosts"]["dev1"]
+        pairs = sorted(sorted(p) for p in dev1["links"] if ACCT in p)
+        self.assertEqual(pairs, [["airuleset", ACCT], ["camera-box", ACCT], ["dasio", ACCT],
+                                 ["dstack", ACCT], ["fleet-backup", ACCT], ["iemmixer", ACCT]])
+        self.assertEqual(dev1["topics"]["airuleset|mikrotik-nlm"], INFRA_TOPIC)
+        text = json.dumps(links)
+        self.assertNotRegex(text, r'(?<![\w-])mikrotik(?![\w-])')
+        self.assertIn("mikrotik-nlm owns the devices and their credentials",
+                      dev1["topics"]["camera-box|mikrotik-nlm"])
+        self.assertEqual(cpc.validate_links(cpc.load_links(), cpc.load_registry()), [])
 
 
 class Script(unittest.TestCase):

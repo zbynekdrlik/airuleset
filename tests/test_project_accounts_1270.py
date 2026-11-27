@@ -72,7 +72,7 @@ class TestLinks(unittest.TestCase):
 
     def test_iemmixer_talks_to_mikrotik_about_the_network(self):
         # owner 30.10.: "prepoj iemmixer s projektom mikrotik na dev1 newlevel"
-        self.assertIn("VLAN", self.links[frozenset(("iemmixer", "mikrotik"))])
+        self.assertIn("VLAN", self.links[frozenset(("iemmixer", "mikrotik-nlm"))])
 
     def test_songplayer_reports_dante_bugs_to_dante_stack(self):
         self.assertIn("Dante bug", self.links[frozenset(("dstack", "songplayer"))])

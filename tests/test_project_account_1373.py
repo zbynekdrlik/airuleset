@@ -144,7 +144,7 @@ class TestRestreamerAccount(unittest.TestCase):
                          (ACCT, "/home/restreamer/devel/restreamer", "dev1"))
         self.assertEqual((row["branch_model"], row["default_branch"], row["work_branch"]),
                          ("2-branch", "main", "dev"))
-        self.assertEqual(cli_accounts.LEGACY_CEILING, 19)
+        self.assertLessEqual(cli_accounts.LEGACY_CEILING, 19)   # #1401 mikrotik-nlm: 18
 
     def test_peer_links_keep_camera_box_and_add_airuleset(self):
         dev1 = _json("peer-links.json")["hosts"]["dev1"]

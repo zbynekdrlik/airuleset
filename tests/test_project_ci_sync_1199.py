@@ -465,8 +465,8 @@ class TestWiring(unittest.TestCase):
                                   side_effect=lambda **k: order.append("sync") or 0) as s:
             rc = pgt.cmd_project_gh_token(self.ns())
         self.assertEqual(rc, 0)
-        # + dstack, dasio (#1270 live 30.10.), dcontroller (#1273), bazos (#1394 live 23.11.)
-        self.assertEqual(order, ["mint"] * 22 + ["sync"])
+        # + dstack, dasio (#1270 live 30.10.), dcontroller (#1273), bazos (#1394 live 23.11.), mikrotik-nlm (#1401 live 27.11.)
+        self.assertEqual(order, ["mint"] * 23 + ["sync"])
         self.assertEqual(s.call_args.kwargs.get("dry_run"), False)
 
     def test_a_sync_crash_is_loud_but_never_breaks_the_mint(self):
@@ -476,7 +476,7 @@ class TestWiring(unittest.TestCase):
                                   side_effect=RuntimeError("x")), \
                 redirect_stderr(err):
             rc = pgt.cmd_project_gh_token(self.ns())
-        self.assertEqual(m.call_count, 22)
+        self.assertEqual(m.call_count, 23)
         self.assertEqual(rc, 1)
         self.assertIn("secret-sync", err.getvalue())
 
@@ -512,7 +512,7 @@ class TestWiring(unittest.TestCase):
         with mock.patch.object(_sync(), "sync_account", return_value=0) as s:
             _sync().sync_all(run=lambda *a, **k: None)
         self.assertEqual([c.args[0] for c in s.call_args_list],
-                         ["companion-updater", "dasio", "dcontroller", "devbridge", "dstack", "dsync", "fleet-backup", "fohmixer", "iemmixer", "intercom", "mikrotik-pz", "nlch-finances", "obs", "restreamer", "shading", "songplayer", "tuke", "varos", "vstack",
+                         ["companion-updater", "dasio", "dcontroller", "devbridge", "dstack", "dsync", "fleet-backup", "fohmixer", "iemmixer", "intercom", "mikrotik-nlm", "mikrotik-pz", "nlch-finances", "obs", "restreamer", "shading", "songplayer", "tuke", "varos", "vstack",
                           "wall-bridge", "wall-songs"])
 
 
