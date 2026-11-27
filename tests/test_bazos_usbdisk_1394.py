@@ -13,6 +13,7 @@ from pathlib import Path
 import cli_account_bootstrap as bootstrap
 import cli_account_hardening as hardening
 import cli_account_policy as policy
+from _bazos_usbdisk_sandbox import Sandbox
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "scripts" / "root" / "bazos-usbdisk"
@@ -114,6 +115,128 @@ class Script(unittest.TestCase):
         self.assertLess(um.index("umount -- "), um.index('safe_dir "$dir"'))
         mo = src[src.index("\nmount)\n"):src.index("\numount)\n")]
         self.assertLess(mo.index("findmnt -rn --mountpoint"), mo.index('safe_dir "$dir"'))
+
+
+class NewActionsArgv(Script):
+
+    def test_new_actions_refuse_bad_argv_with_2(self):
+        for args in (("smart",), ("smart", "../sda"), ("smart", "S1234", "x"),
+                     ("readtest",), ("readtest", "S12;rm"), ("readtest", "S1234", "x")):
+            with self.subTest(args=args):
+                self.assertEqual(self._run(*args).returncode, 2)
+
+    def _section(self, name):
+        src = SCRIPT.read_text()
+        start = src.index("\n%s)\n" % name)
+        return src[start:src.index("\n    ;;\n", start)]
+
+    def test_new_actions_resolve_the_disk_first(self):
+        for name in ("smart", "readtest"):
+            with self.subTest(name=name):
+                sec = self._section(name)
+                self.assertIn('D=$(disk_for "$SERIAL")', sec.split("\n")[1])
+
+    def test_readtest_only_reads(self):
+        sec = self._section("readtest")
+        for needle in ("if=/dev/$D", "of=/dev/null", "iflag=direct", "conv=noerror"):
+            self.assertIn(needle, sec)
+        self.assertNotIn("of=/dev/$", sec)
+        self.assertNotIn('of="/dev/$', sec)
+
+
+class Behaviour(unittest.TestCase):
+
+    def setUp(self):
+        self.sb = Sandbox(self)
+
+    def test_smart_walks_the_d_chain_to_jmicron(self):
+        self.sb.set(smart_rc={"auto": 1, "sat": 2, "sntasmedia": 4})
+        r = self.sb.run("smart", "S1234")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("SMART via sntjmicron rc=0", r.stdout)
+        self.assertNotIn("SMART via sat", r.stdout)
+        calls = self.sb.calls("smartctl")
+        self.assertEqual(calls[0], ["-a", "/dev/sda"])
+        self.assertEqual(calls[-1], ["-a", "-d", "sntjmicron", "/dev/sda"])
+        self.assertIn("smart S1234 /dev/sda", self.sb.log_text())
+
+    def test_smart_health_bits_still_count_as_read(self):
+        self.sb.set(smart_rc={"auto": 8})
+        r = self.sb.run("smart", "S1234")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(len(self.sb.calls("smartctl")), 1)
+
+    def test_smart_fails_loud_when_no_type_reads(self):
+        self.sb.set(smart_rc={"auto": 2, "sat": 2, "sntasmedia": 2, "sntjmicron": 2})
+        r = self.sb.run("smart", "S1234")
+        self.assertEqual(r.returncode, 1)
+        self.assertEqual(len(self.sb.calls("smartctl")), 4)
+
+    def test_root_and_unknown_serials_touch_no_device(self):
+        for action in ("smart", "readtest"):
+            for serial in ("ROOTSER1", "NOPE1234"):
+                with self.subTest(action=action, serial=serial):
+                    r = self.sb.run(action, serial)
+                    self.assertEqual(r.returncode, 1)
+                    for tool in ("smartctl", "dd", "blockdev"):
+                        self.assertEqual(self.sb.calls(tool), [])
+
+    def test_readtest_clean_disk(self):
+        r = self.sb.run("readtest", "S1234")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        dd = self.sb.calls("dd")
+        self.assertEqual(len(dd), 1)
+        for arg in ("if=/dev/sda", "of=/dev/null", "bs=4M", "iflag=direct", "conv=noerror"):
+            self.assertIn(arg, dd[0])
+        self.assertIn("bytes=16777216", r.stdout)
+        self.assertIn("dd_read_errors=0", r.stdout)
+        self.assertIn("kernel_io_errors=0", r.stdout)
+        self.assertIn("result=OK", r.stdout)
+        self.assertIn("MB/s=", r.stdout)
+        self.assertIn("bytes copied", r.stderr)
+        self.assertIn("result=OK", self.sb.log_text())
+
+    def test_readtest_counts_read_errors(self):
+        self.sb.set(dd_errors=2, dd_rc=1,
+                    kernel="blk_update_request: I/O error, dev sda, sector 8 op 0x0\n")
+        r = self.sb.run("readtest", "S1234")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("dd_read_errors=2", r.stdout)
+        self.assertIn("kernel_io_errors=1", r.stdout)
+        self.assertIn("dd_rc=1", r.stdout)
+        self.assertIn("result=ERRORS", r.stdout)
+        self.assertIn("result=ERRORS", self.sb.log_text())
+
+    def test_readtest_short_read_is_incomplete(self):
+        self.sb.set(dd_bytes=4194304)
+        r = self.sb.run("readtest", "S1234")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("result=INCOMPLETE", r.stdout)
+
+    def test_readtest_refuses_rw_mount(self):
+        self.sb.set(mounts={"sda2": "rw,nosuid,nodev"})
+        r = self.sb.run("readtest", "S1234")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("read-write", r.stderr)
+        self.assertEqual(self.sb.calls("dd"), [])
+
+    def test_readtest_allows_ro_mount(self):
+        self.sb.set(mounts={"sda1": "ro,nosuid,nodev,noexec"})
+        r = self.sb.run("readtest", "S1234")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(len(self.sb.calls("dd")), 1)
+
+    def test_list_and_info_show_blkid(self):
+        for args in (("list",), ("info", "S1234")):
+            with self.subTest(args=args):
+                r = self.sb.run(*args)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertIn('/dev/sda1: PARTLABEL="LDM metadata partition"', r.stdout)
+                self.assertIn("/dev/sda2:", r.stdout)
+        probed = {c[-1] for c in self.sb.calls("blkid")}
+        self.assertEqual(probed, {"/dev/sda", "/dev/sda1", "/dev/sda2"})
+        for c in self.sb.calls("blkid"):
+            self.assertEqual(c[:-1], ["-c", "/dev/null", "-s", "TYPE", "-s", "PARTLABEL", "-s", "LABEL"])
 
 
 if __name__ == "__main__":
