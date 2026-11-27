@@ -30,5 +30,22 @@ class SandboxRuns(unittest.TestCase):
         self.assertTrue(any(c.startswith("staged ") and c.endswith(" PKG") for c in sb.calls()))
 
 
+class ExactListMatch(unittest.TestCase):
+    """Review 1: a multi-word argument matched the space-joined allow-list."""
+
+    def test_multi_word_arguments_exit_2(self):
+        sb = Sandbox(self)
+        for args in (("nm", "up", "dev1-lan dante-vlan"),
+                     ("nm", "show", "dante-vlan router2-backup"),
+                     ("nm", "modify", "dev1-lan", "ipv4.method ipv4.addresses", "manual"),
+                     ("capture", "enp38s0 enp39s0", "5"),
+                     ("capture", "enp38s0\tenp39s0", "5"),
+                     ("nm", "up", " dev1-lan")):
+            with self.subTest(args=args):
+                self.assertEqual(sb.run(*args).returncode, 2)
+        self.assertEqual(sb.nm_calls(), [])
+        self.assertEqual(sb.calls(), [])
+
+
 if __name__ == "__main__":
     unittest.main()
