@@ -186,5 +186,20 @@ class OwnedProfiles(unittest.TestCase):
         self.assertEqual([c for c in sb.nm_calls() if c[:2] == ["connection", "add"]], [])
 
 
+class AddDefaults(unittest.TestCase):
+    """Review 4: a bare `connection add` is ipv4 auto + autoconnect yes, so
+    a new profile could grab enp39s0 and a default route on its own."""
+
+    def test_add_ethernet_creates_an_inert_profile(self):
+        sb = Sandbox(self, STATE_DIR=lambda d: d / "state-parent" / "mikrotik-nlm-net")
+        res = sb.run("nm", "add-ethernet", "mknlm-lab", "enp39s0")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        (add,) = [c for c in sb.nm_calls() if c[:2] == ["connection", "add"]]
+        self.assertEqual(add, ["connection", "add", "type", "ethernet", "con-name", "mknlm-lab",
+                               "ifname", "enp39s0", "ipv4.method", "disabled",
+                               "ipv6.method", "link-local", "ipv4.never-default", "yes",
+                               "connection.autoconnect", "no"])
+
+
 if __name__ == "__main__":
     unittest.main()
