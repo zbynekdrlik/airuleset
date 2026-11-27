@@ -23,6 +23,15 @@ VENUE_BYPASS_APPS = {
         "gets the venue-LAN bypass' (answer 'ano')",
 }
 
+# host -> where the owner confirmed it is published PUBLIC: NO Access app at all
+# (issue 1403). The app itself must limit what this hostname serves. A public
+# host never also gets the venue bypass (there is no Access app to hold it).
+PUBLIC_APPS = {
+    "listen.newlevel.media":
+        "owner 27.11.2026, issue 1403 comment 'ROZHODNUTÉ ... PUBLIC, no "
+        "Cloudflare Access app' (answer 'ano'); presenter guest page, port 8099",
+}
+
 # The venue egress IPs come from presenter's own bypass policies, kept fresh
 # hourly by presenter#977's egress_sync from a box on each venue's LAN.
 # The path-scoped `<host>/healthz` apps are NOT sources (they bypass everyone).

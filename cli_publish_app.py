@@ -24,6 +24,10 @@ The order is fixed, and a failed step stops the chain:
      (`cli_drop_golive.ensure_cname_create_only`); an existing A/AAAA record or
      a CNAME pointing elsewhere is a conflict, never overwritten.
 
+`--public` (issue 1403) replaces step 1: only a host in the owner-confirmed
+`cli_venue_bypass_apps.PUBLIC_APPS` table, and the host must have NO Access app
+(an existing one stops the chain, untouched). The app limits what it serves.
+
 Dry-run by default (reads only, prints the plan). `--apply` writes, and is
 refused from a git worktree checkout (#1115). Idempotent: a second run reports
 every step unchanged.
@@ -48,6 +52,11 @@ REFUSE_BYPASS = (
     "(owner 19.11.2026, issue 1370). Default = Cloudflare Access only. Ask "
     "airuleset (gh issue create -R zbynekdrlik/airuleset) to record the owner's "
     "confirmation in the table; nothing was changed.")
+
+REFUSE_PUBLIC = (
+    "REFUSED: %s is not in PUBLIC_APPS (cli_venue_bypass_apps.py). A public app "
+    "(no Cloudflare Access) is an opt-in PER APP that the OWNER confirms (issue "
+    "1403). Default = Cloudflare Access only; nothing was changed.")
 
 
 def validate(host, tunnel_id, origin, zone=ZONE):
@@ -139,6 +148,24 @@ def step_access(client, host, *, dry_run, out, allow_precedence=1):
     return True, app
 
 
+def step_no_access(client, host, *, out):
+    """`--public`: there must be NO Access app on the host (one would make the
+    "public" app a login page). An existing app is left untouched and stops."""
+    app, (st, body) = client.find_app_by_domain(host)
+    if st != 200:
+        print("  [ERROR] access: cannot read Access apps (HTTP %s): %s"
+              % (st, wa._first_err(body)), file=out)
+        return False
+    if app is not None:
+        print("  [ERROR] access: %s has an Access app (id %s) but is declared "
+              "PUBLIC — left UNTOUCHED; resolve by hand" % (host, app.get("id")),
+              file=out)
+        return False
+    print("  [ok] access: none — PUBLIC by owner confirmation: %s"
+          % table.PUBLIC_APPS[host], file=out)
+    return True
+
+
 def step_bypass(client, host, app, *, dry_run, out):
     try:
         ips = vb.source_ips(vb._apps_by_domain(vb.list_apps(client)))
@@ -226,10 +253,11 @@ def step_dns(client, host, tunnel_id, *, dry_run, out, zone=ZONE):
 
 def publish(host, tunnel_id, origin, *, origin_server_name=None, venue_bypass=False,
             dry_run=True, access_client, tunnel_client, dns_client, out=None,
-            apps_table=None):
+            apps_table=None, public=False, public_table=None):
     """Run the four steps in order; returns the exit code."""
     out = out if out is not None else sys.stdout
     apps_table = table.VENUE_BYPASS_APPS if apps_table is None else apps_table
+    public_table = table.PUBLIC_APPS if public_table is None else public_table
     host = (host or "").strip().lower()
     tunnel_id = (tunnel_id or "").strip().lower()
     err = validate(host, tunnel_id, origin)
@@ -239,10 +267,18 @@ def publish(host, tunnel_id, origin, *, origin_server_name=None, venue_bypass=Fa
     if venue_bypass and host not in apps_table:
         print("publish-app: " + REFUSE_BYPASS % host, file=out)
         return 2
+    if public and (venue_bypass or host not in public_table):
+        print("publish-app: " + (REFUSE_PUBLIC % host if host not in public_table
+                                 else "REFUSED: --public and --venue-bypass "
+                                      "exclude each other"), file=out)
+        return 2
     print("publish-app %s [%s]" % (host, "DRY-RUN (no writes)" if dry_run else "APPLY"),
           file=out)
-    ok, app = step_access(access_client, host, dry_run=dry_run, out=out,
-                          allow_precedence=2 if venue_bypass else 1)
+    if public:
+        ok, app = step_no_access(access_client, host, out=out), None
+    else:
+        ok, app = step_access(access_client, host, dry_run=dry_run, out=out,
+                              allow_precedence=2 if venue_bypass else 1)
     if ok and venue_bypass:
         ok = step_bypass(access_client, host, app, dry_run=dry_run, out=out)
     if ok:
@@ -297,6 +333,7 @@ def cmd_publish_app(args):
     return publish(host, args.tunnel, args.origin,
                    origin_server_name=getattr(args, "origin_server_name", None),
                    venue_bypass=getattr(args, "venue_bypass", False),
+                   public=getattr(args, "public", False),
                    dry_run=dry_run, access_client=access, tunnel_client=tunnel,
                    dns_client=dns_client)
 
@@ -315,6 +352,9 @@ def register_parser(sub):
     p.add_argument("--venue-bypass", dest="venue_bypass", action="store_true",
                    help="add the venue-LAN bypass (only for a host in "
                         "VENUE_BYPASS_APPS — the owner confirms each app)")
+    p.add_argument("--public", action="store_true",
+                   help="NO Access app (only for a host in PUBLIC_APPS — the "
+                        "owner confirms each app, issue 1403)")
     p.add_argument("--apply", action="store_true",
                    help="write (default: read and print the plan)")
     return p
