@@ -92,6 +92,18 @@ BAZOS_USB_SUDO = {
     "system_packages": ["smartmontools"],
 }
 
+# #1401 (design 27.11.2026): mikrotik-nlm's dev1 root needs (tcpdump, its
+# NetworkManager profiles, an address on enp39s0, netinstall) go through one
+# root-owned tool (source scripts/root/mikrotik-nlm-net), never raw sudo
+# tcpdump (-z runs a command as root) or nmcli (its full surface is root).
+MIKROTIK_NLM_NET_SUDO = {
+    "sudo": "commands",
+    "sudo_reason": "MikroTik network work on dev1: bounded tcpdump, allow-listed "
+                   "NetworkManager profiles, enp39s0 address, netinstall (#1401)",
+    "sudo_commands": ["/usr/local/sbin/mikrotik-nlm-net ARGS"],
+    "system_packages": ["tcpdump"],
+}
+
 
 def _validate_sudo_commands(account, reason, cmds):
     """#1186 ``sudo: "commands"``: a one-line reason plus a non-empty list of

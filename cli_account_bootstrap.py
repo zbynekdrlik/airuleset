@@ -393,6 +393,14 @@ SERVICE_ACCOUNTS = {
         "tmux_session": "mikrotik-pz",
         "webterm_sessions": {h: {"preferred": "mikrotik-pz", "start_dir_chain": ["devel/mikrotik-pz"]} for h in ("zbynek", "marek")},
     },
+    # #1401: the SNV/PZ MikroTik network work leaves newlevel; one root tool, no raw nmcli/tcpdump.
+    "mikrotik-nlm": {
+        "host": "dev1", **policy.MIKROTIK_NLM_NET_SUDO,
+        "repo": "zbynekdrlik/network", "github_app": True, "repo_secrets": [],
+        "secrets": ["pp-mikrotik-ro"],   # shared with camera-box: a copy
+        "project_dir": "devel/mikrotik", "tmux_session": "mikrotik-nlm",
+        "webterm_sessions": {h: {"preferred": "mikrotik-nlm", "start_dir_chain": ["devel/mikrotik"]} for h in ("zbynek", "marek")},
+    },
     # #1320 (owner 13.11.): devbridge (Worldline TIM SDK bridge) leaves `newlevel`
     # for its own account, so it can get a peer bridge to david3 on subdev.
     "devbridge": {

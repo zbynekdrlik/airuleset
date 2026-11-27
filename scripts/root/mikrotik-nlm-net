@@ -1,0 +1,223 @@
+#!/bin/bash
+# mikrotik-nlm-net — root-owned network helper for the mikrotik-nlm account (#1401).
+# Installed root:root 0755 at /usr/local/sbin/mikrotik-nlm-net; the account runs
+# it through one sudoers line, never raw `sudo tcpdump` (-z runs a command as root)
+# or `sudo nmcli` (its whole surface is root). Every argument is checked against
+# an allow-list BEFORE anything runs; bad input exits 2.
+#
+#   mikrotik-nlm-net capture IFACE SECONDS [BPF...]   pcap on stdout
+#   mikrotik-nlm-net nm show [PROFILE]
+#   mikrotik-nlm-net nm up|down|reapply PROFILE
+#   mikrotik-nlm-net nm modify PROFILE KEY VALUE
+#   mikrotik-nlm-net nm add-ethernet mknlm-NAME enp39s0
+#   mikrotik-nlm-net nm delete mknlm-NAME
+#   mikrotik-nlm-net nm disconnect enp39s0
+#   mikrotik-nlm-net addr add|del A.B.C.D/N            on enp39s0
+#   mikrotik-nlm-net netinstall [-r] [-e] [-b] [-k FILE] [-s FILE] [-a IP] PKG.npk...
+set -euo pipefail
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+umask 022
+
+LOG=/var/log/mikrotik-nlm-net.log
+ACCOUNT=mikrotik-nlm
+NETINSTALL=/opt/mikrotik-nlm/netinstall-cli
+SETUP_IFACE=enp39s0
+CAPTURE_IFACES=" enp38s0 enp38s0.70 enp39s0 "
+PROFILES=" dev1-lan dante-vlan router2-backup mikrotik-pz-setup "
+OWN_RE='^mknlm-[a-z0-9-]{1,30}$'
+MODIFY_KEYS=" ipv4.method ipv4.addresses ipv4.gateway ipv4.dns ipv4.routes ipv4.route-metric ipv4.never-default ipv4.ignore-auto-dns ipv6.method connection.autoconnect "
+VALUE_RE='^[A-Za-z0-9./:, _-]{0,200}$'
+# "]" first and "-" last are literal inside a POSIX bracket expression.
+BPF_RE='^[][A-Za-z0-9.:/_()!<>=&|*+ -]{1,200}$'
+FILE_RE='^[A-Za-z0-9._/+-]{1,255}$'
+
+usage() {
+    echo "usage: mikrotik-nlm-net capture IFACE SECONDS [BPF...] | nm ... | addr add|del CIDR | netinstall ARGS" >&2
+    exit 2
+}
+bad() { echo "mikrotik-nlm-net: $*" >&2; exit 2; }
+
+in_list() { [[ "$2" == *" $1 "* ]]; }
+check_profile() {
+    in_list "$1" "$PROFILES" || [[ $1 =~ $OWN_RE ]] || bad "bad profile $1"
+}
+ipv4_ok() {
+    local IFS=. o
+    [[ $1 =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]] || return 1
+    for o in $1; do
+        [[ $o =~ ^(0|[1-9][0-9]{0,2})$ ]] && [ "$o" -le 255 ] || return 1
+    done
+}
+cidr_ok() {
+    [[ $1 == */* ]] || return 1
+    ipv4_ok "${1%/*}" && [[ ${1#*/} =~ ^([0-9]|[12][0-9]|3[0-2])$ ]]
+}
+# A user-named input file: plain path, a regular file, never a symlink.
+file_ok() {
+    [[ $1 =~ $FILE_RE ]] && [[ $1 != *..* ]] && [ ! -L "$1" ] && [ -f "$1" ]
+}
+
+ACTION=${1:-}
+[ $# -ge 1 ] || usage
+shift
+CMD=()
+case "$ACTION" in
+capture)
+    [ $# -ge 2 ] || usage
+    IFACE=$1 SECONDS_=$2
+    shift 2
+    in_list "$IFACE" "$CAPTURE_IFACES" || bad "bad interface $IFACE"
+    [[ $SECONDS_ =~ ^[1-9][0-9]{0,2}$ ]] && [ "$SECONDS_" -le 600 ] || bad "bad seconds (1..600)"
+    for w in "$@"; do
+        [[ $w != -* ]] || bad "bad filter word $w (no tcpdump flags)"
+        [[ $w =~ $BPF_RE ]] || bad "bad filter word $w"
+    done
+    CMD=(timeout "$SECONDS_" tcpdump -i "$IFACE" -U -w - -- "$@")
+    ;;
+nm)
+    SUB=${1:-}
+    [ $# -ge 1 ] || usage
+    shift
+    case "$SUB" in
+    show)
+        [ $# -le 1 ] || usage
+        if [ $# -eq 1 ]; then
+            check_profile "$1"
+            CMD=(nmcli connection show id "$1")
+        else
+            CMD=(nmcli connection show)
+        fi
+        ;;
+    up|down)
+        [ $# -eq 1 ] || usage
+        check_profile "$1"
+        CMD=(nmcli connection "$SUB" id "$1")
+        ;;
+    reapply)
+        [ $# -eq 1 ] || usage
+        check_profile "$1"
+        CMD=(reapply "$1")
+        ;;
+    modify)
+        [ $# -eq 3 ] || usage
+        check_profile "$1"
+        in_list "$2" "$MODIFY_KEYS" || bad "bad key $2"
+        [[ $3 =~ $VALUE_RE ]] && [[ $3 != -* ]] || bad "bad value (A-Z a-z 0-9 . / : , space _ -, max 200)"
+        CMD=(nmcli connection modify id "$1" "$2" "$3")
+        ;;
+    add-ethernet)
+        [ $# -eq 2 ] || usage
+        [[ $1 =~ $OWN_RE ]] || bad "bad profile $1 (new profiles are mknlm-*)"
+        [ "$2" = "$SETUP_IFACE" ] || bad "bad interface $2 (only $SETUP_IFACE)"
+        CMD=(nmcli connection add type ethernet con-name "$1" ifname "$2")
+        ;;
+    delete)
+        [ $# -eq 1 ] || usage
+        [[ $1 =~ $OWN_RE ]] || bad "bad profile $1 (only mknlm-* can be deleted)"
+        CMD=(nmcli connection delete id "$1")
+        ;;
+    disconnect)
+        [ $# -eq 1 ] || usage
+        [ "$1" = "$SETUP_IFACE" ] || bad "bad interface $1 (only $SETUP_IFACE)"
+        CMD=(nmcli device disconnect "$1")
+        ;;
+    *) usage ;;
+    esac
+    ;;
+addr)
+    [ $# -eq 2 ] || usage
+    case "$1" in add|del) ;; *) usage ;; esac
+    cidr_ok "$2" || bad "bad address $2 (A.B.C.D/N)"
+    CMD=(ip addr "$1" "$2" dev "$SETUP_IFACE")
+    ;;
+netinstall)
+    # netinstall-cli: -r reinstall/reset, -e empty config, -b discard branding,
+    # -k keyfile, -s user script, -a client IP; -i is always ours.
+    NI_FLAGS=() NI_FILES=() PKGS=() seen=" "
+    while [ $# -gt 0 ]; do
+        case "$1" in
+        -r|-e|-b)
+            in_list "$1" "$seen" && bad "bad flag $1 (twice)"
+            seen+="$1 "; NI_FLAGS+=("$1"); shift ;;
+        -k|-s)
+            in_list "$1" "$seen" && bad "bad flag $1 (twice)"
+            [ $# -ge 2 ] || bad "bad flag $1 (needs a file)"
+            file_ok "$2" || bad "bad file for $1: $2"
+            seen+="$1 "; NI_FILES+=("$1" "$2"); shift 2 ;;
+        -a)
+            in_list "$1" "$seen" && bad "bad flag $1 (twice)"
+            [ $# -ge 2 ] && ipv4_ok "$2" || bad "bad flag -a (needs an IPv4 address)"
+            seen+="$1 "; NI_FLAGS+=("$1" "$2"); shift 2 ;;
+        -*) bad "bad flag $1 (allowed: -r -e -b -k FILE -s FILE -a IP)" ;;
+        *) break ;;
+        esac
+    done
+    [ $# -ge 1 ] || bad "bad package: none given"
+    for p in "$@"; do
+        [[ $p == *.npk ]] && [[ $(basename -- "$p") =~ ^[A-Za-z0-9._+-]+\.npk$ ]] ||
+            bad "bad package $p (a .npk file)"
+        file_ok "$p" || bad "bad package $p (a regular file, not a symlink)"
+        PKGS+=("$p")
+    done
+    ;;
+*) usage ;;
+esac
+
+[ "$(id -u)" -eq 0 ] || { echo "mikrotik-nlm-net: run it with sudo" >&2; exit 1; }
+
+log() { printf '%s uid=%s %s\n' "$(date -Is)" "${SUDO_UID:-?}" "$*" >>"$LOG"; }
+die() { echo "mikrotik-nlm-net: $*" >&2; log "$ACTION refused: $*"; exit 1; }
+
+case "$ACTION" in
+capture)
+    log "capture $IFACE ${SECONDS_}s filter: $*"
+    set +e
+    "${CMD[@]}"
+    rc=$?
+    set -e
+    # timeout ends a full-length capture with 124: that is the normal end.
+    [ "$rc" -eq 0 ] || [ "$rc" -eq 124 ] || die "tcpdump rc=$rc"
+    ;;
+nm|addr)
+    if [ "${CMD[0]}" = reapply ]; then
+        mapfile -t devs < <(nmcli -g GENERAL.DEVICES connection show id "${CMD[1]}" | tr ',' '\n' | sed '/^$/d')
+        [ "${#devs[@]}" -eq 1 ] || die "profile ${CMD[1]} is active on ${#devs[@]} devices"
+        in_list "${devs[0]}" "$CAPTURE_IFACES" || die "device ${devs[0]} is not allow-listed"
+        CMD=(nmcli device reapply "${devs[0]}")
+    fi
+    log "${CMD[*]}"
+    "${CMD[@]}"
+    ;;
+netinstall)
+    [ ! -L "$NETINSTALL" ] && [ -f "$NETINSTALL" ] || die "$NETINSTALL is not a regular file"
+    [ "$(stat -c '%u %g' "$NETINSTALL")" = "0 0" ] || die "$NETINSTALL is not root:root"
+    (( 8#$(stat -c '%a' "$NETINSTALL") & 8#022 )) && die "$NETINSTALL is group/other-writable"
+    [ "$(stat -c '%u' "$(dirname "$NETINSTALL")")" = 0 ] || die "$(dirname "$NETINSTALL") is not root-owned"
+    (( 8#$(stat -c '%a' "$(dirname "$NETINSTALL")") & 8#022 )) && die "$(dirname "$NETINSTALL") is group/other-writable"
+    # Input files are READ AS THE ACCOUNT into a root-only stage dir, so root
+    # never opens a path the account could not read itself.
+    STAGE=$(mktemp -d /run/mikrotik-nlm-net.XXXXXX)
+    trap 'rm -rf -- "$STAGE"' EXIT
+    stage() {
+        local dst="$STAGE/$1"
+        runuser -u mikrotik-nlm -- cat -- "$2" >"$dst" || die "cannot read $2 as $ACCOUNT"
+        echo "$dst"
+    }
+    ARGS=("${NI_FLAGS[@]}")
+    i=0
+    while [ "$i" -lt "${#NI_FILES[@]}" ]; do
+        f=$(stage "opt$i" "${NI_FILES[$((i + 1))]}")
+        ARGS+=("${NI_FILES[$i]}" "$f")
+        i=$((i + 2))
+    done
+    n=0
+    for p in "${PKGS[@]}"; do
+        mkdir -m 0700 "$STAGE/p$n"
+        f=$(stage "p$n/$(basename -- "$p")" "$p")
+        ARGS+=("$f")
+        n=$((n + 1))
+    done
+    log "netinstall -i $SETUP_IFACE ${NI_FLAGS[*]} files: ${NI_FILES[*]} packages: ${PKGS[*]}"
+    "$NETINSTALL" -i "$SETUP_IFACE" "${ARGS[@]}"
+    ;;
+esac
