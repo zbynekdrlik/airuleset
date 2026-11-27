@@ -168,7 +168,7 @@ MAX_TOTAL = 14000
 # #1235: linux-box-swap — remote probes quote the command (ssh box 'free -h').
 # #1333: house-stack — the `Architektúra:` section lives in the quoted body.
 RAW_BASH_MATCH_TOPICS = {"cloudflare-api-tokens", "odoo-client-board-stages",
-                         "linux-box-swap", "house-stack"}
+                         "linux-box-swap", "house-stack", "dante-naming"}
 
 # #1333 ROZHODNUTÉ 2: these topics reach only a checkout whose registry `stack`
 # is `house` -- or an unregistered repo, the moment a new app's stack is chosen.
