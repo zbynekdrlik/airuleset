@@ -75,8 +75,9 @@ done
 
 
 class Sandbox:
-    """One sandboxed copy. ``consts`` maps a constant name to the value the
-    copy gets; every name must be assigned on exactly one script line."""
+    """One sandboxed copy. ``extra_consts`` maps a constant name to the value
+    the copy gets (a callable gets the sandbox dir); every name must be
+    assigned on exactly one script line."""
 
     def __init__(self, testcase, **extra_consts):
         self._tmp = tempfile.TemporaryDirectory()
@@ -103,7 +104,7 @@ class Sandbox:
         consts = {"LOG": str(self.log), "NETINSTALL": str(self.netinstall),
                   "STAGE_PARENT": str(d / "stage"), "ROOT_UID": str(os.getuid()),
                   "ROOT_GID": str(os.getgid())}
-        consts.update({k: str(v) for k, v in extra_consts.items()})
+        consts.update({k: str(v(d) if callable(v) else v) for k, v in extra_consts.items()})
         src = SCRIPT.read_text()
         assert src.count(PINNED_PATH) == 1
         src = src.replace(PINNED_PATH, "export PATH=%s:/usr/sbin:/usr/bin:/sbin:/bin\n" % (d / "bin"))

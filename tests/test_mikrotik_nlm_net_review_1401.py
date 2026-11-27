@@ -103,5 +103,88 @@ class ModifyValuesPerKey(unittest.TestCase):
         self.assertEqual(len(GOOD_VALUES), 10)
 
 
+ACTIONS = ({"up", "down", "modify", "delete"}, "reapply")
+
+
+def _acted(calls):
+    """nmcli calls that change state (not the read-only lookups)."""
+    return [c for c in calls if (c[:1] == ["connection"] and c[1:2] and c[1] in ACTIONS[0])
+            or c[:2] == ["device", ACTIONS[1]]]
+
+
+class OwnedProfiles(unittest.TestCase):
+    """Review 3: any connection NAMED mknlm-* was the account's to change or
+    delete, also one somebody else created. Only UUIDs that add-ethernet
+    created (a root-only list) count."""
+
+    def _sb(self):
+        sb = Sandbox(self, STATE_DIR=lambda d: d / "state-parent" / "mikrotik-nlm-net")
+        self.state = sb.dir / "state-parent" / "mikrotik-nlm-net"
+        return sb
+
+    def test_add_records_the_uuid_and_the_lifecycle_uses_it(self):
+        sb = self._sb()
+        res = sb.run("nm", "add-ethernet", "mknlm-lab", "enp39s0")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        (uuid,) = [u for u, n in sb.connections().items() if n == "mknlm-lab"]
+        owned = self.state / "owned"
+        self.assertEqual(owned.read_text().split(), [uuid])
+        self.assertEqual(oct(owned.stat().st_mode & 0o777), "0o600")
+        self.assertEqual(oct(self.state.stat().st_mode & 0o777), "0o700")
+        for args, want in ((("up", "mknlm-lab"), ["connection", "up", "uuid", uuid]),
+                           (("down", "mknlm-lab"), ["connection", "down", "uuid", uuid]),
+                           (("modify", "mknlm-lab", "ipv4.method", "manual"),
+                            ["connection", "modify", "uuid", uuid, "ipv4.method", "manual"]),
+                           (("reapply", "mknlm-lab"), ["device", "reapply", "enp39s0"])):
+            with self.subTest(args=args):
+                res = sb.run("nm", *args)
+                self.assertEqual(res.returncode, 0, res.stderr)
+                self.assertEqual(sb.nm_calls()[-1], want)
+        res = sb.run("nm", "delete", "mknlm-lab")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(sb.nm_calls()[-1], ["connection", "delete", "uuid", uuid])
+        self.assertEqual(owned.read_text().split(), [])
+        self.assertNotIn(uuid, sb.connections())
+
+    def test_a_foreign_mknlm_connection_is_refused(self):
+        sb = self._sb()
+        sb.set_connections({"11111111-2222-3333-4444-555555555555": "mknlm-foreign"})
+        for args in (("up", "mknlm-foreign"), ("down", "mknlm-foreign"),
+                     ("modify", "mknlm-foreign", "ipv4.method", "manual"),
+                     ("reapply", "mknlm-foreign"), ("delete", "mknlm-foreign")):
+            with self.subTest(args=args):
+                self.assertEqual(sb.run("nm", *args).returncode, 1)
+        self.assertEqual(_acted(sb.nm_calls()), [])
+        self.assertIn("mknlm-foreign", sb.connections().values())
+
+    def test_a_name_shared_with_a_foreign_connection_is_refused(self):
+        sb = self._sb()
+        self.assertEqual(sb.run("nm", "add-ethernet", "mknlm-lab", "enp39s0").returncode, 0)
+        conns = sb.connections()
+        conns["11111111-2222-3333-4444-555555555555"] = "mknlm-lab"
+        sb.set_connections(conns)
+        self.assertEqual(sb.run("nm", "up", "mknlm-lab").returncode, 1)
+        self.assertEqual(_acted(sb.nm_calls()), [])
+
+    def test_add_refuses_an_existing_name(self):
+        sb = self._sb()
+        sb.set_connections({"11111111-2222-3333-4444-555555555555": "mknlm-lab"})
+        self.assertEqual(sb.run("nm", "add-ethernet", "mknlm-lab", "enp39s0").returncode, 1)
+        self.assertEqual([c for c in sb.nm_calls() if c[:2] == ["connection", "add"]], [])
+        self.assertFalse((self.state / "owned").exists() and (self.state / "owned").read_text().strip())
+
+    def test_a_symlinked_state_dir_or_list_is_refused(self):
+        sb = self._sb()
+        target = sb.dir / "elsewhere"
+        target.mkdir(mode=0o700)
+        self.state.symlink_to(target)
+        self.assertEqual(sb.run("nm", "add-ethernet", "mknlm-lab", "enp39s0").returncode, 1)
+        self.state.unlink()
+        self.state.mkdir(mode=0o700)
+        (self.state / "owned").symlink_to(sb.dir / "list")
+        self.assertEqual(sb.run("nm", "add-ethernet", "mknlm-lab", "enp39s0").returncode, 1)
+        self.assertEqual([c for c in sb.nm_calls() if c[:2] == ["connection", "add"]], [])
+
+
 if __name__ == "__main__":
     unittest.main()
