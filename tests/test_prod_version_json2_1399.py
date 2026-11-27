@@ -203,5 +203,55 @@ class CanonicalMainVersion(unittest.TestCase):
         self.assertEqual(out["instances"], [])
 
 
+
+class ReviewRound1(unittest.TestCase):
+
+    def test_a_redirect_never_carries_the_key_to_another_host(self):
+        import http.server
+        import threading
+        hits = []
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                hits.append((self.server.server_port, self.headers.get("Authorization")))
+                if self.server.server_port == first.server_port:
+                    self.send_response(302)
+                    self.send_header("Location", "http://127.0.0.1:%d/x" % second.server_port)
+                    self.end_headers()
+                    return
+                body = json.dumps([{"latest_version": "19.0.9.9.9"}]).encode()
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            do_GET = do_POST
+
+            def log_message(self, *a):
+                pass
+        first = http.server.HTTPServer(("127.0.0.1", 0), H)
+        second = http.server.HTTPServer(("127.0.0.1", 0), H)
+        for srv in (first, second):
+            threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                vs = {"type": "odoo_json2", "key_file": _key(tmp, "secret-k"),
+                      "url": "http://127.0.0.1:%d" % first.server_port}
+                self.assertIsNone(ds.read_prod_version(vs, timeout=5))
+        finally:
+            first.shutdown()
+            second.shutdown()
+        self.assertEqual([port for port, _a in hits], [first.server_port])
+
+    def test_no_slug_reads_no_main_version(self):
+        orig = ds.deploy_declaration
+        ds.deploy_declaration = lambda root, slug=None: (
+            {"main_version_file": "v.py", "instances": [{"name": "a"}]}, True)
+        try:
+            out = f._default_deploy("/r", None)
+        finally:
+            ds.deploy_declaration = orig
+        self.assertEqual(out["instances"], [])
+
 if __name__ == "__main__":
     unittest.main()
