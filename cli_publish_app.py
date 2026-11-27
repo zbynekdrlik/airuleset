@@ -148,21 +148,31 @@ def step_access(client, host, *, dry_run, out, allow_precedence=1):
     return True, app
 
 
+def _covers(domain, host):
+    """True when an Access app on `domain` gates `host` or a path under it."""
+    d = (domain or "").strip().lower().rstrip("/")
+    return d == host or d.startswith(host + "/")
+
+
 def step_no_access(client, host, *, out):
-    """`--public`: there must be NO Access app on the host (one would make the
-    "public" app a login page). An existing app is left untouched and stops."""
-    app, (st, body) = client.find_app_by_domain(host)
-    if st != 200:
-        print("  [ERROR] access: cannot read Access apps (HTTP %s): %s"
-              % (st, wa._first_err(body)), file=out)
+    """`--public`: there must be NO Access app on the host or on any path under
+    it (one would make the "public" app a login page, or gate part of it). The
+    listing is the paged-guarded `list_apps`, so a partial listing fails closed.
+    An existing app is left untouched and stops the chain."""
+    try:
+        apps = vb.list_apps(client)
+    except vb.SourceError as e:
+        print("  [ERROR] access: %s" % e, file=out)
         return False
-    if app is not None:
-        print("  [ERROR] access: %s has an Access app (id %s) but is declared "
-              "PUBLIC — left UNTOUCHED; resolve by hand" % (host, app.get("id")),
-              file=out)
+    hits = [a for a in apps if _covers(a.get("domain"), host)]
+    if hits:
+        print("  [ERROR] access: %s is declared PUBLIC but has Access app(s) %s — "
+              "left UNTOUCHED; resolve by hand"
+              % (host, ", ".join("%s (id %s)" % (a.get("domain"), a.get("id"))
+                                 for a in hits)), file=out)
         return False
-    print("  [ok] access: none — PUBLIC by owner confirmation: %s"
-          % table.PUBLIC_APPS[host], file=out)
+    print("  [ok] access: no Access app on %s or its paths — PUBLIC by owner "
+          "confirmation: %s" % (host, table.PUBLIC_APPS[host]), file=out)
     return True
 
 
