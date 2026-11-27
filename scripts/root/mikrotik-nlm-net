@@ -19,6 +19,11 @@ export PATH=/usr/sbin:/usr/bin:/sbin:/bin
 umask 022
 
 LOG=/var/log/mikrotik-nlm-net.log
+# The owner every root-side file must have, and where netinstall input is
+# staged (tests run a copy with these lines swapped for a sandbox).
+ROOT_UID=0
+ROOT_GID=0
+STAGE_PARENT=/run
 ACCOUNT=mikrotik-nlm
 NETINSTALL=/opt/mikrotik-nlm/netinstall-cli
 SETUP_IFACE=enp39s0
@@ -190,13 +195,13 @@ nm|addr)
     ;;
 netinstall)
     [ ! -L "$NETINSTALL" ] && [ -f "$NETINSTALL" ] || die "$NETINSTALL is not a regular file"
-    [ "$(stat -c '%u %g' "$NETINSTALL")" = "0 0" ] || die "$NETINSTALL is not root:root"
+    [ "$(stat -c '%u %g' "$NETINSTALL")" = "$ROOT_UID $ROOT_GID" ] || die "$NETINSTALL is not root:root"
     (( 8#$(stat -c '%a' "$NETINSTALL") & 8#022 )) && die "$NETINSTALL is group/other-writable"
-    [ "$(stat -c '%u' "$(dirname "$NETINSTALL")")" = 0 ] || die "$(dirname "$NETINSTALL") is not root-owned"
+    [ "$(stat -c '%u' "$(dirname "$NETINSTALL")")" = "$ROOT_UID" ] || die "$(dirname "$NETINSTALL") is not root-owned"
     (( 8#$(stat -c '%a' "$(dirname "$NETINSTALL")") & 8#022 )) && die "$(dirname "$NETINSTALL") is group/other-writable"
     # Input files are READ AS THE ACCOUNT into a root-only stage dir, so root
     # never opens a path the account could not read itself.
-    STAGE=$(mktemp -d /run/mikrotik-nlm-net.XXXXXX)
+    STAGE=$(mktemp -d "$STAGE_PARENT/mikrotik-nlm-net.XXXXXX")
     trap 'rm -rf -- "$STAGE"' EXIT
     stage() {
         local dst="$STAGE/$1"
