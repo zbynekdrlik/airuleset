@@ -244,5 +244,50 @@ class BoundedStaging(unittest.TestCase):
         self.assertLess(body.index("staged copy"), body.index('"$NETINSTALL" -i'))
 
 
+class SafeLog(unittest.TestCase):
+    """Review 6: root appended to $LOG without looking at it, so a symlink
+    there (or a log someone else owns) made root write where it points."""
+
+    def _sb(self, **extra):
+        return Sandbox(self, STATE_DIR=lambda d: d / "state-parent" / "mikrotik-nlm-net", **extra)
+
+    def _ip_calls(self, sb):
+        return [c for c in sb.calls() if c.startswith("ip ")]
+
+    def test_a_missing_log_is_created_root_only(self):
+        sb = self._sb()
+        self.assertFalse(sb.log.exists())
+        res = sb.run("addr", "add", "192.168.88.2/24")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(oct(sb.log.stat().st_mode & 0o777), "0o600")
+        self.assertIn("ip addr add 192.168.88.2/24 dev enp39s0", sb.log.read_text())
+
+    def test_a_symlinked_log_is_refused_and_never_written(self):
+        sb = self._sb()
+        target = sb.dir / "victim"
+        target.write_text("keep\n")
+        sb.log.symlink_to(target)
+        res = sb.run("addr", "add", "192.168.88.2/24")
+        self.assertEqual(res.returncode, 1)
+        self.assertEqual(target.read_text(), "keep\n")
+        self.assertEqual(self._ip_calls(sb), [])
+
+    def test_a_log_owned_by_someone_else_or_not_a_file_is_refused(self):
+        sb = self._sb(ROOT_UID=99999)
+        sb.log.write_text("")
+        self.assertEqual(sb.run("addr", "add", "192.168.88.2/24").returncode, 1)
+        sb2 = self._sb()
+        sb2.log.mkdir()
+        self.assertEqual(sb2.run("addr", "add", "192.168.88.2/24").returncode, 1)
+        self.assertEqual(self._ip_calls(sb) + self._ip_calls(sb2), [])
+
+    def test_a_symlinked_state_dir_is_refused_for_every_action(self):
+        sb = self._sb()
+        (sb.dir / "elsewhere").mkdir()
+        (sb.dir / "state-parent" / "mikrotik-nlm-net").symlink_to(sb.dir / "elsewhere")
+        self.assertEqual(sb.run("addr", "add", "192.168.88.2/24").returncode, 1)
+        self.assertEqual(self._ip_calls(sb), [])
+
+
 if __name__ == "__main__":
     unittest.main()
