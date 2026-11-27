@@ -201,5 +201,48 @@ class AddDefaults(unittest.TestCase):
                                "connection.autoconnect", "no"])
 
 
+class BoundedStaging(unittest.TestCase):
+    """Review 5: staging read an unbounded file with no time limit, and the
+    staged copy was used without a second look."""
+
+    def _sb(self):
+        return Sandbox(self, MAX_STAGE_BYTES=16, STAGE_TIMEOUT=2)
+
+    def _pkg(self, sb, size):
+        pkg = sb.dir / "routeros.npk"
+        pkg.write_bytes(b"x" * size)
+        return pkg
+
+    def test_a_file_at_the_cap_is_staged(self):
+        sb = self._sb()
+        res = sb.run("netinstall", "-r", str(self._pkg(sb, 16)))
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertTrue(any(c.startswith("staged ") and c.endswith(" " + "x" * 16) for c in sb.calls()))
+
+    def test_a_file_over_the_cap_is_refused(self):
+        sb = self._sb()
+        for opt in ([], ["-s"]):
+            with self.subTest(opt=opt):
+                big = str(self._pkg(sb, 17))
+                args = ["netinstall", "-r"] + (opt + [big] if opt else []) + [big]
+                res = sb.run(*args)
+                self.assertEqual(res.returncode, 1, res.stderr)
+                self.assertIn("larger than", res.stderr)
+        self.assertEqual([c for c in sb.calls() if c.startswith("netinstall ")], [])
+
+    def test_a_read_that_hangs_is_cut_off(self):
+        sb = self._sb()
+        (sb.dir / "bin" / "runuser").write_text("#!/bin/bash\nexec sleep 30\n")
+        res = sb.run("netinstall", "-r", str(self._pkg(sb, 4)))
+        self.assertEqual(res.returncode, 1, res.stderr)
+        self.assertEqual([c for c in sb.calls() if c.startswith("netinstall ")], [])
+
+    def test_the_staged_copies_are_rechecked_before_use(self):
+        src = (Sandbox(self).script).read_text()
+        body = src[src.index("\nnetinstall)\n    [ ! -L"):]
+        self.assertIn("timeout \"$STAGE_TIMEOUT\" runuser -u mikrotik-nlm -- cat --", body)
+        self.assertLess(body.index("staged copy"), body.index('"$NETINSTALL" -i'))
+
+
 if __name__ == "__main__":
     unittest.main()
