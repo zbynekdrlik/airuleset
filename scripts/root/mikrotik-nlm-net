@@ -223,6 +223,14 @@ esac
 
 [ "$(id -u)" -eq 0 ] || { echo "mikrotik-nlm-net: run it with sudo" >&2; exit 1; }
 
+# Before root writes anything: the log is a root-owned regular file (created
+# 0600 when missing), and neither it nor the state dir is a symlink.
+early_fail() { echo "mikrotik-nlm-net: $*" >&2; exit 1; }
+if [ -L "$LOG" ]; then early_fail "$LOG is a symlink"; fi
+[ -e "$LOG" ] || install -m 0600 -o "$ROOT_UID" -g "$ROOT_GID" /dev/null "$LOG"
+[ -f "$LOG" ] && [ "$(stat -c '%u' -- "$LOG")" = "$ROOT_UID" ] || early_fail "$LOG is not a root-owned file"
+if [ -L "$STATE_DIR" ]; then early_fail "$STATE_DIR is a symlink"; fi
+
 log() { printf '%s uid=%s %s\n' "$(date -Is)" "${SUDO_UID:-?}" "$*" >>"$LOG"; }
 die() { echo "mikrotik-nlm-net: $*" >&2; log "$ACTION refused: $*"; exit 1; }
 
