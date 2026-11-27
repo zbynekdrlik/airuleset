@@ -8,6 +8,7 @@ Stdlib only; never prints or logs the key.
 import json
 import logging
 import os
+import urllib.request
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -33,7 +34,6 @@ def _fetch_odoo_json2(base_url, key_path, timeout=15, opener=None,
                       strip=lambda v: v):
     """company_base ``latest_version`` over ``/json/2`` with a bearer key; None
     on a missing key, any HTTP/JSON error or an empty result (never a guess)."""
-    import urllib.request
     try:
         key = Path(key_path).read_text().strip()
     except OSError:
@@ -49,7 +49,7 @@ def _fetch_odoo_json2(base_url, key_path, timeout=15, opener=None,
                  "Content-Type": "application/json; charset=utf-8",
                  "User-Agent": "airuleset-deploy-watch/1.0"})
     try:
-        with (opener or urllib.request.urlopen)(req, timeout=timeout) as resp:
+        with (opener or _no_redirect_open)(req, timeout=timeout) as resp:
             if resp.status != 200:
                 return None
             data = json.loads(resp.read(65536).decode("utf-8", errors="replace"))
@@ -62,3 +62,15 @@ def _fetch_odoo_json2(base_url, key_path, timeout=15, opener=None,
         if isinstance(v, str) and v.strip():
             return strip(v.strip())
     return None
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Never follow a redirect: urllib would copy the bearer header to the new
+    host (review #1399). A redirect then reads as a failed read (None)."""
+
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+def _no_redirect_open(req, timeout=15):
+    return urllib.request.build_opener(_NoRedirect).open(req, timeout=timeout)

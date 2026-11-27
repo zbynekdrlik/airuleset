@@ -486,8 +486,8 @@ def _default_deploy(root, slug):
         return {"instances": [], "version_file": None}
     if decl is None:
         return None
-    main_ref = cli_release_backfill.canonical_main_ref(root, slug)
-    if main_ref is None:      # a fork without canonical refs: main unknown
+    main_ref = cli_release_backfill.canonical_main_ref(root, slug) if slug else None
+    if main_ref is None:      # no slug, or a fork without canonical refs
         return {"instances": [], "version_file": None}
     declared = [i for i in decl.get("instances") or [] if isinstance(i, dict)]
     instances = ds.fetch_deploy_state(root, main_ref=main_ref) or []
