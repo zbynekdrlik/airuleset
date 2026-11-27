@@ -69,8 +69,10 @@ class Declaration(unittest.TestCase):
         out = hardening.render_sudo_step(ACCT, self.spec)
         self.assertIn("mikrotik-nlm ALL=(root) NOPASSWD: /usr/local/sbin/mikrotik-nlm-net\n", out)
         self.assertNotIn('mikrotik-nlm-net ""', out)
-        self.assertNotIn("nmcli", out)
-        self.assertNotIn("tcpdump", out)
+        # The one rule line: never a raw nmcli/tcpdump grant (the reason comment
+        # may name the tools it wraps).
+        rules = [ln for ln in out.splitlines() if "NOPASSWD:" in ln]
+        self.assertEqual(rules, ["mikrotik-nlm ALL=(root) NOPASSWD: /usr/local/sbin/mikrotik-nlm-net"])
 
     def test_script_path_is_not_claimed_by_mikrotik_pz(self):
         # mikrotik-pz must never get mikrotik-nlm's tool (longest-name ownership).
