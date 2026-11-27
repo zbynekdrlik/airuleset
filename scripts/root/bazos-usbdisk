@@ -7,7 +7,7 @@
 #   bazos-usbdisk list               usb disks + blkid of each partition
 #   bazos-usbdisk info   SERIAL     SMART identity + health + blkid
 #   bazos-usbdisk smart  SERIAL     full smartctl -a (read-only)
-#   bazos-usbdisk readtest SERIAL   read the whole disk to /dev/null, count errors
+#   bazos-usbdisk readtest SERIAL   read the whole disk to /dev/null, stop at the first error
 #   bazos-usbdisk mount  SERIAL     every filesystem read-only under /mnt/bazos/SERIAL/
 #   bazos-usbdisk umount SERIAL
 #   bazos-usbdisk wipe   SERIAL LABEL   zero the whole disk, then one empty GPT/NTFS partition
@@ -152,14 +152,17 @@ readtest)
     T0=$(date +%s.%N)
     set +e
     # stdin closed: runs fine in the background; progress goes to stderr too.
-    dd if=/dev/$D of=/dev/null bs=4M iflag=direct conv=noerror status=progress \
+    # Stop at the first failed read: skipping errors retried a dead region
+    # until dd hung in D state (live 27.11.).
+    dd if=/dev/$D of=/dev/null bs=4M iflag=direct status=progress \
         </dev/null 2> >(tee "$DDERR" >&2)
     rc=$?
     wait $!
     set -e
     T1=$(date +%s.%N)
     BYTES=$(tr '\r' '\n' <"$DDERR" | awk '/^[0-9]+ bytes/ {b = $1} END {print b + 0}')
-    ERRS=$(grep -c 'error reading' "$DDERR" || true)
+    # dd stops at the first failed read; BYTES is the offset where it failed.
+    if [ "$rc" -eq 0 ]; then FAILED_AT=none; else FAILED_AT=$BYTES; fi
     if KMSG=$(journalctl -k -o cat --no-pager --since "@${T0%.*}"); then
         KERR=$(printf '%s\n' "$KMSG" | grep -cE "(I/O|medium) error, dev $D," || true)
     else
@@ -167,14 +170,14 @@ readtest)
     fi
     SECS=$(awk -v a="$T0" -v b="$T1" 'BEGIN {printf "%.1f", b - a}')
     MBS=$(awk -v n="$BYTES" -v a="$T0" -v b="$T1" 'BEGIN {d = b - a; printf "%.1f", (d > 0 ? n / d / 1e6 : 0)}')
-    if [ "$rc" -ne 0 ] || [ "$ERRS" -ne 0 ] || { [ "$KERR" != unknown ] && [ "$KERR" -ne 0 ]; }; then
+    if [ "$rc" -ne 0 ] || { [ "$KERR" != unknown ] && [ "$KERR" -ne 0 ]; }; then
         RESULT=ERRORS
     elif [ "$BYTES" -ne "$SIZE" ]; then
         RESULT=INCOMPLETE
     else
         RESULT=OK
     fi
-    SUMMARY="bytes=$BYTES size=$SIZE seconds=$SECS MB/s=$MBS dd_read_errors=$ERRS kernel_io_errors=$KERR dd_rc=$rc result=$RESULT"
+    SUMMARY="bytes=$BYTES size=$SIZE seconds=$SECS MB/s=$MBS failed_at=$FAILED_AT kernel_io_errors=$KERR dd_rc=$rc result=$RESULT"
     log "readtest $SERIAL /dev/$D $SUMMARY"
     echo "readtest $SERIAL /dev/$D $SUMMARY"
     [ "$RESULT" = OK ] || exit 1
