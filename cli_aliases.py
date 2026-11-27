@@ -23,6 +23,10 @@ import re
 # local constant (not a lazy import) to preserve cli_aliases.py's
 # stdlib-only / import-light contract for the webterm connect path.
 _OWNER_ALIAS_USERS = frozenset({"newlevel", "airuleset"})
+# Project accounts whose 8-char cut reads badly or clashes: "mikrotik" is the
+# SNV project (#1310, #1401), "companio" (#1363), "wall-son" (#1390).
+_NAMED_ALIASES = {"mikrotik-pz": "mt-pz", "mikrotik-nlm": "mt-nlm",
+                  "companion-updater": "comp", "wall-songs": "wsongs"}
 
 
 def short_target_alias(user, box_name):
@@ -70,12 +74,8 @@ def short_target_alias(user, box_name):
     user = (user or "").strip()
     if user == "gatekeeper":
         return "gk"
-    if user == "mikrotik-pz":
-        return "mt-pz"   # #1310: the 8-char cut "mikrotik" reads as the SNV project
-    if user == "companion-updater":
-        return "comp"   # #1363: the 8-char cut "companio" reads badly
-    if user == "wall-songs":
-        return "wsongs"   # #1390: the 8-char cut "wall-son" reads badly
+    if user in _NAMED_ALIASES:
+        return _NAMED_ALIASES[user]
     mo = re.match(r"^david(\d*)$", user)
     if mo:
         return "d" + (mo.group(1) or "1")   # base `david` == d1

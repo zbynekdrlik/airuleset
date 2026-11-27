@@ -193,14 +193,14 @@ class TestMinterSkipsPending(unittest.TestCase):
 
     def test_mint_all_skips_pending_accounts_loudly(self):
         self.assertEqual(pgt.github_app_accounts(),
-                         ["bazos", "companion-updater", "dasio", "dcontroller", "devbridge", "dstack", "dsync", "fleet-backup", "fohmixer", "iemmixer", "intercom", "mikrotik-pz", "nlch-finances", "obs", "restreamer", "shading", "songplayer", "tuke", "varos", "vstack",
+                         ["bazos", "companion-updater", "dasio", "dcontroller", "devbridge", "dstack", "dsync", "fleet-backup", "fohmixer", "iemmixer", "intercom", "mikrotik-nlm", "mikrotik-pz", "nlch-finances", "obs", "restreamer", "shading", "songplayer", "tuke", "varos", "vstack",
                           "wall-bridge", "wall-songs"])
         with _pending(), \
                 mock.patch.object(ci_sync, "run_after_mint", return_value=0):
             rc, minted, out = self._mint_all()
         self.assertEqual(rc, 0)
         self.assertEqual(minted, ["bazos", "companion-updater", "dasio", "dcontroller", "devbridge", "dstack", "dsync", "fleet-backup", "fohmixer", "iemmixer", "intercom", "mikrotik-pz", "nlch-finances", "obs", "restreamer", "shading", "tuke", "varos", "vstack", "wall-songs"])
-        for acct in NEW:
+        for acct in NEW + ("mikrotik-nlm",):   # #1401: really pending
             self.assertIn("project-gh-token: %s: SKIPPED — pending" % acct, out)
 
     def test_a_live_account_is_minted_again(self):
@@ -224,7 +224,7 @@ class TestMinterSkipsPending(unittest.TestCase):
                                   side_effect=lambda a: a == "varos"):
             ci_sync.sync_all(run=lambda *a, **k: None)
         self.assertEqual([c.args[0] for c in s.call_args_list],
-                         ["companion-updater", "dasio", "dcontroller", "devbridge", "dstack", "dsync", "fleet-backup", "fohmixer", "iemmixer", "intercom", "mikrotik-pz", "nlch-finances", "obs", "restreamer", "shading", "songplayer", "tuke", "vstack",
+                         ["companion-updater", "dasio", "dcontroller", "devbridge", "dstack", "dsync", "fleet-backup", "fohmixer", "iemmixer", "intercom", "mikrotik-nlm", "mikrotik-pz", "nlch-finances", "obs", "restreamer", "shading", "songplayer", "tuke", "vstack",
                           "wall-bridge", "wall-songs"])
 
 
