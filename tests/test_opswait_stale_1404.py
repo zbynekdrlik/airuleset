@@ -79,5 +79,17 @@ class Target(unittest.TestCase):
         self.assertIn("2026-11-26", out[7])
 
 
+class Doctrine(unittest.TestCase):
+    def test_w_bullet_states_the_window_the_timer_and_the_retriage(self):
+        import re
+        text = (REPO_ROOT / "modules" / "core" / "statusline-vocabulary.md").read_text(
+            encoding="utf-8")
+        bullet = re.search(r"(?m)^- `· W N`.*$", text).group(0)
+        for token in (">3 d old", "a passed `Ops-wait-target:`", "`w-triage`",
+                      "unarmed sessions", "every 3 d", "#1404"):
+            self.assertIn(token, bullet)
+        self.assertNotIn(">7 d", bullet)
+
+
 if __name__ == "__main__":
     unittest.main()
