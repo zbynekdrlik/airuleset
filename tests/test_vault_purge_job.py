@@ -358,13 +358,13 @@ class TheUnwiredGuardHasTeeth(unittest.TestCase):
                # the new one; the anchor grew a last line, the mutation target
                # vault_purge=None is untouched.
                # #1163 + #1176 re-pins: watch_triggers_enabled / checkout_freshness_enabled joined the last line.
-               # #1203 re-pin: model_restore_enabled=False (Job 54) on a NEW last line. #1306: task_hygiene_enabled=False removed.
+               # #1203 re-pin: model_restore_enabled=False (Job 54) on a NEW last line. #1306: task_hygiene_enabled=False removed. #1404: +triage_notice_enabled.
                "             gh_rate_fetch=None,\n"
                "             bounceflip_fetch=None, cred_mtime_fn=None, "
                "proc_start_fn=None,\n"
                "             erp_heartbeat_enabled=False, "
                "watch_triggers_enabled=False, checkout_freshness_enabled=False,\n"
-               "             model_restore_enabled=False):")
+               "             model_restore_enabled=False, triage_notice_enabled=False):")
         self.assertIn(old, src, "the mutation target moved; re-pin it")
         # Mutate ONLY the guard's default (`vault_purge=None` ->
         # `vault_purge=lambda: []`) and keep every other param intact — a

@@ -115,6 +115,7 @@ MACHINE_NUDGE_KINDS = frozenset({
     # #1163 Job 52 — a DECLARED watch trigger slot (steer=watch window), staged,
     # exempt from the daily cap (the owner's schedule is its bound), 60-min floor.
     "watch-trigger", "checkout-lag",  # + #1176 Job 53 rule-lag notice (stream profile)
+    "w-triage",  # #1404 Job 55 W/I re-triage notice (every profile)
 })
 
 # #1023 addendum (owner, 2026-09-14) — RECOVERY revivals: identities that REVIVE a

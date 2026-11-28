@@ -2334,6 +2334,7 @@ from watchdog import erp_heartbeat as erp_heartbeat  # noqa: E402,F401
 from watchdog import watch_triggers as watch_triggers  # noqa: E402,F401  (#1163 Job 52)
 from watchdog import checkout_freshness as checkout_freshness  # noqa: E402,F401  (#1176 Job 53)
 from watchdog import model_restore as model_restore  # noqa: E402,F401  (#1203 Job 54)
+from watchdog import triage_notice as triage_notice  # noqa: E402,F401  (#1404 Job 55)
 
 
 # #535 — job 34, per-box cross-target conformance check. Extracted to
@@ -2613,8 +2614,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
              gh_rate_fetch=None,
              bounceflip_fetch=None, cred_mtime_fn=None, proc_start_fn=None,
              erp_heartbeat_enabled=False, watch_triggers_enabled=False, checkout_freshness_enabled=False,
-             model_restore_enabled=False):
-    """Scan every `claude` pane once. 54 numbered jobs per poll — 45 LIVE and 9
+             model_restore_enabled=False, triage_notice_enabled=False):
+    """Scan every `claude` pane once. 55 numbered jobs per poll — 46 LIVE and 9
     RETIRED (12, 18, 23 removed in #132; 15, 17 in #102; 26 in #402; 46 in
     #1137; 49 in #1306; 14 in #1084 — the slot stays registered as a
     journal-only tombstone), whose numbers are kept addressable so historical log lines
@@ -3467,6 +3468,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
       (54) MODEL RESTORE (#1203) — `model_restore_enabled`, not on a paused box: a pane on a Claude Code model
           FALLBACK gets `/model <MANAGED_MODEL>` (always-on `model-restore` kind), one resume line, and ONE
           RESTORED journal line naming the fallback window (#1137: no ticket). `model_restore.run_job` SSOT.
+      (55) W/I RE-TRIAGE (#1404) — `triage_notice_enabled`, not on a paused box: an unarmed project pane gets one `w-triage` notice per 3 days naming its rotting W / hidden-U I tickets. `triage_notice.py` SSOT.
 
     PAUSED BOX (#851/#1032): when `box_paused` is True — the box's OWN fleet entry
     carries `paused` (a stream the owner froze), resolved once in `cmd_watchdog`
@@ -5697,6 +5699,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
          "checkout-freshness error", min_budget=checkout_freshness.MIN_BUDGET_S)
     _add("model_restore", lambda: model_restore_enabled and not box_paused, lambda: model_restore.run_job(now, state, panes, run=run, sleep_fn=sleep_fn, projects_dir=projects_dir, dry_run=dry_run, handled=compact_handled_this_sweep, budget_left=remaining_budget_s),   # Job 54 (#1203); full sweeps only
          "model-restore error", min_budget=model_restore.MIN_BUDGET_S)
+    _add("triage_notice", lambda: triage_notice_enabled and not box_paused, lambda: triage_notice.run_job(now, state, panes, run=run, sleep_fn=sleep_fn, projects_dir=projects_dir, dry_run=dry_run, handled=compact_handled_this_sweep, budget_left=remaining_budget_s), "triage-notice error", min_budget=triage_notice.MIN_BUDGET_S)   # Job 55 (#1404)
 
     # --- EXECUTE THE STANDALONE REGISTRY (#433 step 16) — literal order. ONE
     # try/except = the SAME per-job isolation boundary; `err` logs a raise with
@@ -5746,9 +5749,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
         else:
             logs.append("sweep: full (%s)"
                         % ("cadence" if _elapsed_since_full >= 0 else "clock-skew"))
-    # #1084: the "compact-pending ignored" decision line is gone with the
-    # request read above — a pending /compact never influences the sweep cadence
-    # any more (machine compacts removed in code).
+    # #1084: the "compact-pending ignored" decision line is gone with the request read
+    # above — a pending /compact never influences the sweep cadence (machine compacts removed).
     # #1055 P3 (b) — deliver_discord_replies is `calm_ok=True` and runs on EVERY
     # calm sweep (it is the reply-routing recovery path — a ❓ answer, a
     # completion-card reply #298, or a remembered #449 channel must be picked up

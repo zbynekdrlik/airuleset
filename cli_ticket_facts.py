@@ -24,8 +24,9 @@ Facts no label can give (#1141 slice 3), read into a
   version or an unparseable release version leaves the ticket out (unknown).
 - `wait_unbacked` (#1298): for the PLAIN `ops-wait` W rows only
   (`cli_ticket_state.plain_ops_wait`), why the row has no valid third-party
-  wait (`gates.opswait.unbacked_reason`: no `Waiting-on:` line, or one older
-  than 7 days with no newer cited push) — such a row counts in I. Read from
+  wait (`gates.opswait.unbacked_reason`: no `Waiting-on:` line, one older
+  than 3 days with no newer cited push, or a passed own `Ops-wait-target:`
+  date, #1404) — such a row counts in I. Read from
   the SAME batched W comment prefetch the `--ops-wait` stale tags use
   (`cli_quals._ops_wait_prefetch_comments`, O(quals) GraphQL pages, no
   per-row call); a row missing from it (>100 comments, a failed page) is

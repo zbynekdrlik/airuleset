@@ -50,6 +50,9 @@ LIVE_STREAM = {"bounce", "goal-guard",
                "working-stall"}
 LIVE_CONTROLLER = {"queue-arrival"}
 LIVE_WORKSTATION = set()
+# #1404 (owner 28.11.2026): the W/I re-triage notice is ON for every session.
+for _live in (LIVE_GK, LIVE_STREAM, LIVE_CONTROLLER, LIVE_WORKSTATION):
+    _live.add("w-triage")
 
 
 def _plain(seg):
@@ -299,7 +302,7 @@ class TestFooter(unittest.TestCase):
             _write_state(home, {"on": ["card"]})
             np.apply_profile(home=home, user="airuleset")
             self.assertEqual(self._seg(home),
-                             "nudges controller +1 -1 · recovery on")
+                             "nudges controller +1 -%d · recovery on" % len(LIVE_CONTROLLER))
 
     def test_no_count_fraction_once_a_profile_is_recorded(self):
         with TemporaryDirectory() as home:
@@ -324,7 +327,7 @@ class TestStatus(unittest.TestCase):
             _write_state(home, {"on": sorted(LIVE_STREAM)})
             np.apply_profile(home=home, user="david1")
             out = self._status(home, "david1")
-            self.assertIn("profile: stream (8 kinds)", out)
+            self.assertIn("profile: stream (%d kinds)" % len(LIVE_STREAM), out)
             self.assertIn("deviation: none", out)
             self.assertIn("nudges: ON", out)     # fleet parser shape kept
 
@@ -376,7 +379,7 @@ class TestStatus(unittest.TestCase):
     def test_status_before_first_apply_names_the_declared_profile(self):
         with TemporaryDirectory() as home:
             out = self._status(home, "gatekeeper")
-            self.assertIn("profile: gk (8 kinds)", out)
+            self.assertIn("profile: gk (%d kinds)" % len(LIVE_GK), out)
 
 
 class TestVocabulary(unittest.TestCase):
