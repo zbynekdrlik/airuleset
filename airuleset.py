@@ -8215,7 +8215,7 @@ def cmd_watchdog(args):
                     health_probes=box_health_probes(_current_user()),
                     health_probe_fetch=_watchdog_health_probe_fetch,
                     watch_triggers_enabled=True, checkout_freshness_enabled=True,  # #1163 Job 52 (steer=watch window) + #1176 Job 53 (managed checkouts)
-                    model_restore_enabled=True,  # #1203 Job 54 (undo a Claude Code model fallback)
+                    model_restore_enabled=True, triage_notice_enabled=True,  # #1203 Job 54 + #1404 Job 55 (W/I re-triage)
                     # #1040 — one shared gh-rate reading per sweep: refreshes the
                     # 60s-cached `gh api rate_limit` (the FREE, non-counting
                     # endpoint), records the once-per-episode exhaustion alert,

@@ -630,15 +630,15 @@ def box_paused_reason(user, hostname=None):
 # baseline = each type's LIVE set read on 28.9 (the rollout changes nothing).
 # cli_nudge_profiles resolves a box's profile (an entry's `nudge_profile` wins).
 _NUDGE_CORE = ("goal-guard", "partition-audit", "queue-arrival", "release-gap",
-               "u-freshness")
+               "u-freshness", "w-triage")   # w-triage: #1404, every project session
 # B9 fix (26.10.2026): job 4's `working-stall` stuck-check joins gk + stream.
 NUDGE_PROFILES = {
     "gk": frozenset(_NUDGE_CORE + ("infra-priority", "watch-trigger",
                                    "working-stall")),
     "stream": frozenset(_NUDGE_CORE + ("bounce", "checkout-lag",   # + #1176 census
                                        "working-stall")),
-    "controller": frozenset({"queue-arrival"}),
-    "workstation": frozenset(),
+    "controller": frozenset({"queue-arrival", "w-triage"}),
+    "workstation": frozenset({"w-triage"}),
 }
 
 

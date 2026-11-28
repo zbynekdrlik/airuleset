@@ -135,8 +135,10 @@ def record(entry, buckets):
     """The footer cache fields of the fact buckets: `merged_unreleased` (M,
     #1083), `pipeline` (P) and `done` (C), each with its `_numbers` list,
     `open_numbers` (I, #1342: the loop-question Stop gate tells the asked
-    ticket from other work) and `conflicts` + `conflicts_numbers`."""
+    ticket from other work), `ops_wait_numbers` (W, #1404: the triage notice
+    reads its scope from here) and `conflicts` + `conflicts_numbers`."""
     entry["open_numbers"] = sorted(int(n) for n in buckets["I"])
+    entry["ops_wait_numbers"] = sorted(int(n) for n in buckets["W"])
     for key, bucket in (("merged_unreleased", "M"), ("pipeline", "P"),
                         ("done", "C")):
         entry[key] = len(buckets[bucket])
