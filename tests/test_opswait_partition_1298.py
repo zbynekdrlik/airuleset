@@ -236,7 +236,7 @@ class Doctrine(unittest.TestCase):
         bullet = re.search(r"(?m)^- `· W N`.*$", text).group(0)
         self.assertIn("`Waiting-on: <3rd party> — <event> — <check>`", bullet)
         self.assertIn("#1298", bullet)
-        self.assertIn(">7 d old → `I`", bullet)
+        self.assertIn(">3 d old", bullet)   # #1404: was >7 d
         self.assertNotIn("own tracking", bullet)   # our own wait is no W
 
 
