@@ -149,7 +149,7 @@ if [ -z "$N" ]; then
     case "$OD_N" in ''|*[!0-9]*) OD_N=0 ;; esac
     # #1335: the FINAL message is judged too (an owner / person-at-a-machine
     # step), so its own words open the gate even when the transcript has none.
-    OD_WORDS='next|alš|slot|owner|zby(n[^e]|[^n])|zbynek([^d]|$)|your|potrebuj|tvoj|teba|tebe|vlastn|niekto|fyzick|mus|treba|stoj|someone|somebody|person|physical|manual|on.site|hands|bud|you|technik|miest|human'
+    OD_WORDS='next|alš|ALŠ|owner|zby(n[^e]|[^n])|zbynek([^d]|$)|your|potrebuj|tvoj|teba|tebe|vlastn|niekto|fyzick|mus|treba|stoj|someone|somebody|person|physical|manual|on.site|hands|bud|you|technik|miest|human'
     if { [ -n "$OD_TP" ] && [ -f "$OD_TP" ] \
             && LC_ALL=C grep -qiE "$OD_WORDS|body-file|body=@" <(tail -c 4000000 "$OD_TP" 2>/dev/null); } \
             || LC_ALL=C grep -qiE "$OD_WORDS" <<<"$MSG"; then

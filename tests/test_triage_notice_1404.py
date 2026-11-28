@@ -47,7 +47,7 @@ ROWS = {
     10: _row(["ops-wait"], [_c("2026-11-20T08:00:00Z", GOOD, login="relay")]),   # 8 d old
     11: _row(["ops-wait"], [_c("2026-11-27T08:00:00Z", GOOD, login="relay")]),   # fresh
     12: _row(["ops-wait"], [_c("2026-11-27T08:00:00Z", GOOD, login="relay"),
-                            _c("2026-11-21T08:00:00Z",
+                            _c("2026-11-27T09:00:00Z",
                                "Ops-wait-target: Hetzner reply by 2026-11-25")]),  # passed
     13: _row(["ops-wait", "needs-owner-action"], []),                             # U already
     127: _row([], [_c("2026-11-26T07:03:29Z", FOH)]),                             # U?
@@ -314,9 +314,9 @@ class Fetch(unittest.TestCase):
         self.assertEqual(sorted(rows), [127])
         self.assertEqual(rows[127]["labels"], ["bug"])
         gh = [a for a in calls if a[0] == "gh"]
-        self.assertEqual(len(gh), 1)
-        self.assertIn("owner=zbynekdrlik", gh[0])
-        self.assertIn("i127: issue(number: 127)", " ".join(gh[0]))
+        self.assertEqual(len(gh), 2)                   # one W chunk, one I chunk
+        self.assertIn("owner=zbynekdrlik", gh[1])
+        self.assertIn("i127: issue(number: 127)", " ".join(gh[1]))
 
     def test_errors_are_unknown(self):
         run, _ = _runner({"errors": [{"message": "x"}]})

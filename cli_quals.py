@@ -1364,7 +1364,8 @@ def _norm_ages(res):
         res.setdefault("own_final_reminder", None)
         res.setdefault("own_target", None)           # #881
         res.setdefault("own_target_event", None)     # #944
-        res.setdefault("waiting_on", None)           # #1298
+        res.setdefault("waiting_on", None)           # #1298 (#1404: + own_target_ts below)
+        res.setdefault("own_target_ts", None)
         return res
     if isinstance(res, (tuple, list)) and len(res) >= 2:
         return {"own": res[0], "any": res[1],
@@ -1511,7 +1512,7 @@ def _ages_from_comments(comments, self_login):
             "own_cited": own_cited, "own_oldest": own_oldest,
             "own_final_reminder": own_final_reminder,
             "own_target": own_target,
-            "own_target_event": own_target_event,
+            "own_target_event": own_target_event, "own_target_ts": own_target_ts or None,
             "waiting_on": waiting_on}
 
 

@@ -81,7 +81,7 @@ class Target(unittest.TestCase):
     def test_the_same_evidence_through_the_footer_read(self):
         """The fact the footer reads (`read_wait`) parses the SAME comments the
         triage notice reads: an own target comment that passed moves the row."""
-        comments = [_c("2026-11-28T08:00:00Z", GOOD, login="hetzner-relay"),
+        comments = [_c("2026-11-18T08:00:00Z", GOOD, login="hetzner-relay"),
                     _c("2026-11-20T08:00:00Z",
                        "Ops-wait-target: Hetzner reply by 2026-11-26")]
         ages = cli_quals._ages_from_comments(comments, ME)

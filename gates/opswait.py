@@ -164,6 +164,10 @@ def has_valid_waiting_on(text):
     return any(not problem for _rest, problem in waiting_on_lines(text))
 
 
+def _ts(v):
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
 def _target_passed(target, now):
     """The `YYYY-MM-DD` target when it lies before today (UTC, the
     `cli_quals._converge_flagged` prong-1 rule), else "" (#1404). A future
@@ -178,15 +182,19 @@ def _target_passed(target, now):
 def unbacked_reason(ages, now, max_age=STALE_S):
     """The READ-TIME verdict for one plain ops-wait ticket from its comment
     ages (`cli_quals._ages_from_comments`: `waiting_on` = newest comment with a
-    valid line, `own_cited` = newest cited own push). None = unknown (the
+    valid line, `own_cited` = newest cited own push, `own_target` /
+    `own_target_ts` = the newest own `Ops-wait-target:` date and its comment
+    time, #1404). None = unknown (the
     comments were not read: the row keeps W), "" = backed (stays W), else the
     one-line reason it counts in I."""
     if not isinstance(ages, dict):
         return None
-    passed = _target_passed(ages.get("own_target"), now)
-    if passed:
-        return "its `Ops-wait-target:` date %s has passed" % passed
     line_ts = ages.get("waiting_on")
+    passed = _target_passed(ages.get("own_target"), now)
+    tgt_ts = ages.get("own_target_ts")
+    if passed and not (_ts(tgt_ts) and _ts(line_ts) and tgt_ts < line_ts):
+        # a target posted BEFORE the newest wait line never overrides it
+        return "its `Ops-wait-target:` date %s has passed" % passed
     if not isinstance(line_ts, (int, float)) or isinstance(line_ts, bool):
         return "no valid `Waiting-on: <third party> — <event> — <check>` line"
     anchor = line_ts

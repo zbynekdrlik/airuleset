@@ -15,26 +15,33 @@ pane), at most once per REPEAT_S and only when there is something to triage:
 
 - W rot: a plain `ops-wait` ticket whose wait is unbacked — no valid
   `Waiting-on:` line, one older than 3 days with no newer cited push, or a
-  passed own `Ops-wait-target:` date (`gates.opswait.unbacked_reason`, the
-  SAME predicate and the same comment parse `cli_quals._ages_from_comments`
-  the footer fact `wait_unbacked` uses);
+  passed own `Ops-wait-target:` date not older than that line
+  (`gates.opswait.unbacked_reason`, the SAME predicate and the same comment
+  parse `cli_quals._ages_from_comments` the footer fact `wait_unbacked` uses);
 - a hidden owner step: an I ticket with no U label whose newest OWN comment
   states a wait on a person / on-site slot / owner window
   (`gates.ownerdep.owner_dependency`, the Stop gates' detector).
 
 The candidate SET is the footer cache's own partition (`open_numbers` = I,
-`ops_wait_numbers` = W), so a shared-repo stream judges only its slice; the
-ONE batched read (a GraphQL alias query over exactly those numbers, chunked)
-runs only when a notice could go now (kind on, root not told / checked
-recently, a ready unarmed pane). `gh issue list --json comments` is not used:
-it 502s on a busy repo (#1067). The notice is a machine nudge of kind
-`w-triage` (`send_verified` makes it the #1157 pointer row, a registered
-machine prefix, never read as the owner) through the shared idle-pane gate
-set (`watchdog.idle_pane`), the `nudge_gate` floor and the B9 pane budget.
-An armed `/goal` pane is skipped: Job 20 already re-checks its W. The leaf
-only SURFACES: setting / clearing labels stays the session's judgment (#547).
-A dry run reads (so `watchdog --once --dry-run` shows what it would name) but
-types and records nothing.
+`ops_wait_numbers` = W), so a shared-repo stream judges only its slice; an
+idle session's stale / missing cache kicks ONE detached footer refresh
+(`statusbar._spawn_refresh`, guarded) and is judged on a later sweep. The ONE
+batched read (a GraphQL alias query over exactly those numbers: W rows with
+the full comment cap, I rows with their newest few comments, chunked, bounded
+by the sweep budget) runs only when a notice could go now: kind on, root not
+told / checked / failed recently, no armed pane in the root, a pane that
+passes the owner-stop latch + day budget (`nudge_gate.pre_send_hold`) and the
+shared idle-pane gate set (`watchdog.idle_pane`). `gh issue list --json
+comments` is not used: it 502s on a busy repo (#1067). The notice is a machine
+nudge of kind `w-triage` (`send_verified` makes it the #1157 `nudge:` pointer
+row, a registered machine prefix, never read as the owner). Any outcome other
+than a delivery holds the root for FAIL_S, so nothing re-reads gh every sweep;
+a hold is journalled once per reason (`nudge_gate.first_hold`). An armed (or
+unknown) `/goal` pane is left to Job 20. The leaf only SURFACES: setting /
+clearing labels stays the session's judgment (#547). Known limit: an armed
+session's hidden-U check is not run here (Job 20 covers its W only). A dry run
+reads (so `watchdog --once --dry-run` shows what it would name) but types and
+records nothing.
 """
 import json
 import os
@@ -45,14 +52,17 @@ STATE_KEY = "triage_notice"
 DAY_S = 24 * 3600
 REPEAT_S = 3 * DAY_S          # a project told once is told again after 3 days at the earliest
 CHECK_S = DAY_S               # a read that found nothing is repeated daily at most
-FAIL_S = 3600                 # a failed read is retried hourly at most
+FAIL_S = 3600                 # a failed read / an undelivered notice waits an hour
 KEEP_S = 7 * DAY_S            # records older than this (and no live pane) are pruned
 CACHE_MAX_AGE_S = DAY_S       # the footer cache only scopes the read; labels are re-read live
-MIN_BUDGET_S = 60             # one GraphQL read (30 s cap) + one verified delivery
+MIN_BUDGET_S = 60             # one GraphQL chunk (30 s cap) + one verified delivery
+CHUNK_BUDGET_S = 35           # a chunk starts only with this much sweep budget left
 KIND_OFF_LOG_S = 3600
-MAX_NUMBERS = 150             # tickets read per project per notice
-CHUNK = 25                    # aliases per GraphQL request (#1188: parent page size = cost)
-COMMENT_CAP = 100             # newest comments per ticket; a longer thread's W check is unknown
+MAX_NUMBERS = 150             # tickets read per project per notice (W first, then the newest I)
+CHUNK = 25                    # I aliases per request (#1188: parent page size = cost)
+W_CHUNK = 10                  # W aliases per request (each carries up to COMMENT_CAP bodies)
+COMMENT_CAP = 100             # newest comments per W ticket; a longer thread's W check is unknown
+I_COMMENTS = 10               # newest comments per I ticket (only the newest own one is judged)
 NUDGE_MAX_CHARS = 700         # the #714 size cap
 U_LABELS = frozenset({"needs-answer", "needs-decision", "needs-owner-action"})
 _LANE_DIR = os.sep + os.path.join(".claude", "worktrees") + os.sep
@@ -71,10 +81,12 @@ def _ints(values):
 # --------------------------------------------------------------------------- #
 # Scope: the footer cache of the pane's checkout.
 # --------------------------------------------------------------------------- #
-def cache_of(cwd, home=None, now=None):
+def cache_of(cwd, home=None, now=None, refresh=None):
     """`(root, i_numbers, w_numbers)` from the footer cache of `cwd` (or of its
     nearest parent up to the git checkout root, the key the footer writes), or
-    None: a lane worktree pane, no cache, a failed / stale cache."""
+    None: a lane worktree pane, no checkout, no / a failed / a stale cache. A
+    checkout whose cache is missing or unusable calls `refresh(path)` (the
+    production wiring kicks one guarded detached footer refresh)."""
     import time
     import statusbar
     if not cwd or _LANE_DIR in os.path.realpath(cwd) + os.sep:
@@ -85,15 +97,29 @@ def cache_of(cwd, home=None, now=None):
         cache = statusbar._load(statusbar.cache_dir(home) / (statusbar.cwd_key(path) + ".json"))
         if isinstance(cache, dict):
             break
-        if os.path.exists(os.path.join(path, ".git")) or os.path.dirname(path) == path:
+        if os.path.exists(os.path.join(path, ".git")):
+            if refresh is not None:
+                refresh(os.path.abspath(cwd))        # no cache yet: the footer's own key
             return None
+        if os.path.dirname(path) == path:
+            return None                              # not inside a checkout: never refresh
         path = os.path.dirname(path)
     ts = _num(cache.get("ts"))
     if ts is None or not 0 <= now - ts <= CACHE_MAX_AGE_S or cache.get("stale_since") \
             or not isinstance(cache.get("open_numbers"), list):
+        if refresh is not None:
+            refresh(path)
         return None
     return (str(cache.get("root") or path), _ints(cache.get("open_numbers")),
             _ints(cache.get("ops_wait_numbers")))
+
+
+def read_order(w_numbers, i_numbers):
+    """`(w, i)` capped at MAX_NUMBERS: every W first (oldest first), then the
+    NEWEST I tickets."""
+    w = sorted(w_numbers)[:MAX_NUMBERS]
+    i = sorted(set(i_numbers) - set(w), reverse=True)[:MAX_NUMBERS - len(w)]
+    return w, i
 
 
 # --------------------------------------------------------------------------- #
@@ -139,7 +165,7 @@ def candidates(rows, i_numbers, self_login, now):
         comments = row.get("comments") if isinstance(row.get("comments"), list) else []
         if cli_ticket_state.plain_ops_wait({"labels": [{"name": x} for x in names]}):
             total = _num(row.get("total"))
-            if total is None or total > COMMENT_CAP:
+            if total is None or total > COMMENT_CAP or len(comments) < min(total, COMMENT_CAP):
                 continue                               # an old anchor may be missing: unknown
             reason = opswait.unbacked_reason(cli_quals._ages_from_comments(
                 comments, self_login), now)
@@ -197,17 +223,41 @@ def _hold(rec, now):
         t = _num(rec.get(key))
         if t is not None and 0 <= now - t < window:
             return "%s %d min ago" % ({"at": "told", "checked": "checked",
-                                       "failed": "read failed"}[key], (now - t) // 60)
+                                       "failed": "held"}[key], (now - t) // 60)
     return None
 
 
-def triage_job(now, state, panes, *, scope, ready, armed, fetch, self_login, deliver,
+def _hold_log(logs, state, root, why, now):
+    """Journal a hold once per (root, reason) episode (B9: never every sweep)."""
+    from watchdog import nudge_gate
+    if nudge_gate.first_hold(state, root, NUDGE_KIND, why, now):
+        logs.append("w-triage: %s hold:%s" % (root, why))
+
+
+def _pick_pane(own, ready, armed, held):
+    """`(pick, why)`: the first pane of the root that may be typed into now, or
+    None and the reason. Any armed (or unknown) pane leaves the root to Job 20."""
+    if any(armed(cwd) is not False for _pid, cwd in own):
+        return None, "armed-goal (Job 20)"
+    why = "no-pane"
+    for pid, cwd in own:
+        why = held(pid)
+        if why:
+            continue
+        ok, why, sid, tpath = ready(pid, cwd)
+        if ok:
+            return (pid, sid, tpath), ""
+    return None, why
+
+
+def triage_job(now, state, panes, *, scope, ready, armed, held, fetch, self_login, deliver,
                mark_sent, nudges_enabled, handled=None, dry_run=False):
     """One pass; returns journal lines. Injected deps (wiring in `run_job`):
       scope(cwd) -> (root, i_numbers, w_numbers) | None   the footer cache
+      armed(cwd) -> True | False | None                     an armed /goal (Job 20's)
+      held(pid) -> why | None                               owner-stop latch / day budget
       ready(pid, cwd) -> (ok, why, sid, tpath)              the shared gate set
-      armed(tpath) -> bool                                  an armed /goal (Job 20's)
-      fetch(root, numbers) -> {n: row} | None               the ONE batched read
+      fetch(root, w_numbers, i_numbers) -> {n: row} | None  the ONE batched read
       self_login() -> str | None                            own comment identity
       deliver(pid, tpath, text) -> SendOutcome
       mark_sent(state, sid, kind, now); nudges_enabled(kind) -> bool
@@ -230,29 +280,20 @@ def triage_job(now, state, panes, *, scope, ready, armed, fetch, self_login, del
                 state[STATE_KEY + "_kindoff"] = now
         return logs
     store = dict(state.get(STATE_KEY) if isinstance(state.get(STATE_KEY), dict) else {})
-    read_done = False
     for root in sorted(groups):
         (root, i_nums, w_nums), own = groups[root]
         if _hold(store.get(root), now):
             continue                                   # quiet: holds would journal every sweep
-        pick = None
-        for pid, cwd in own:
-            ok, why, sid, tpath = ready(pid, cwd)
-            if ok and armed(tpath):
-                why, ok = "armed-goal (Job 20)", False
-            if ok:
-                pick = (pid, sid, tpath)
-                break
+        pick, why = _pick_pane(own, ready, armed, held)
         if pick is None:
-            logs.append("w-triage: %s hold:%s" % (root, why))
+            _hold_log(logs, state, root, why, now)
             continue
-        if read_done:
-            logs.append("w-triage: %s hold:one-read-per-sweep" % root)
-            continue
-        read_done = True
-        numbers = sorted(i_nums | w_nums)[:MAX_NUMBERS]
+        w_list, i_list = read_order(w_nums, i_nums)
+        if len(w_nums | i_nums) > len(w_list) + len(i_list):
+            logs.append("w-triage: %s reads %d of %d ticket(s) (W first, newest I)"
+                        % (root, len(w_list) + len(i_list), len(w_nums | i_nums)))
         try:
-            rows = fetch(root, numbers)
+            rows = fetch(root, w_list, i_list)
         except Exception as exc:  # noqa: BLE001 -- a read error is journalled, retried hourly
             logs.append("w-triage: %s read raised %r" % (root, exc))
             rows = None
@@ -260,37 +301,46 @@ def triage_job(now, state, panes, *, scope, ready, armed, fetch, self_login, del
             if not dry_run:
                 store[root] = {"failed": now}
             logs.append("w-triage: %s read failed (retry in %d min)" % (root, FAIL_S // 60))
-            continue
-        w, u = candidates(rows, i_nums, self_login(), now)
+            break                                      # one read per sweep
+        login = self_login()
+        if not login:
+            logs.append("w-triage: %s U? check skipped: no own gh login" % root)
+        w, u = candidates(rows, set(i_list), login, now)
+        pid, sid, tpath = pick
         if not (w or u):
             if not dry_run:
                 store[root] = {"checked": now}
             logs.append("w-triage: %s nothing to triage (%d read)" % (root, len(rows)))
-            continue
-        pid, sid, tpath = pick
-        if dry_run:
+        elif dry_run:
             logs.append("w-triage: %s -> %s would tell (W %s; U? %s) [dry-run]" % (
                 root, pid, [n for n, _ in w], [n for n, _ in u]))
-            continue
-        if handled is not None:
-            handled.add(sid)
-        try:
-            outcome = deliver(pid, tpath, notice_text(w, u))
-        except Exception as exc:  # noqa: BLE001 -- keys may be in: at-most-once
-            logs.append("w-triage: %s delivery raised %r" % (root, exc))
-            outcome = None
-        kind = idle_pane.outcome_kind(outcome)
-        if kind in idle_pane.DELIVERED or kind in idle_pane.TYPED_NOT_DELIVERED:
-            mark_sent(state, sid, NUDGE_KIND, now)
-        if kind in idle_pane.DELIVERED:
-            store[root] = {"at": now}
-        logs.append("w-triage: %s -> %s %s (W %s; U? %s)" % (
-            root, pid, kind, [n for n, _ in w], [n for n, _ in u]))
+        else:
+            logs.append(_deliver(state, store, root, pick, w, u, deliver, mark_sent, handled,
+                                 now, idle_pane))
+        break                                          # one read per sweep
     if not dry_run:
         state[STATE_KEY] = {k: r for k, r in store.items() if k in groups or (
             isinstance(r, dict) and any(_num(v) is not None and now - v < KEEP_S
                                         for v in r.values()))}
     return logs
+
+
+def _deliver(state, store, root, pick, w, u, deliver, mark_sent, handled, now, idle_pane):
+    """Type the notice; record the outcome; return the journal line."""
+    pid, sid, tpath = pick
+    if handled is not None:
+        handled.add(sid)
+    try:
+        outcome = deliver(pid, tpath, notice_text(w, u))
+    except Exception as exc:  # noqa: BLE001 -- keys may be in: at-most-once
+        outcome, kind = None, "raised %r" % (exc,)
+    else:
+        kind = idle_pane.outcome_kind(outcome)
+    if kind in idle_pane.DELIVERED or kind in idle_pane.TYPED_NOT_DELIVERED:
+        mark_sent(state, sid, NUDGE_KIND, now)
+    store[root] = {"at": now} if kind in idle_pane.DELIVERED else {"failed": now}
+    return "w-triage: %s -> %s %s (W %s; U? %s)" % (
+        root, pid, kind, [n for n, _ in w], [n for n, _ in u])
 
 
 # --------------------------------------------------------------------------- #
@@ -300,10 +350,10 @@ _ISSUE_GQL = ("i%d: issue(number: %d) { state labels(first: 50) { nodes { name }
               "comments(last: %d) { totalCount nodes { author { login } createdAt body } } }")
 
 
-def _query(numbers):
+def _query(numbers, last):
     return ("query($owner: String!, $name: String!) { rateLimit { cost remaining } "
             "repository(owner: $owner, name: $name) { %s } }"
-            % " ".join(_ISSUE_GQL % (n, n, COMMENT_CAP) for n in numbers))
+            % " ".join(_ISSUE_GQL % (n, n, last) for n in numbers))
 
 
 def parse_rows(data, numbers):
@@ -328,28 +378,33 @@ def parse_rows(data, numbers):
     return out
 
 
-def fetch_rows(root, numbers, runner=None):
-    """The ONE batched read for `root`'s `numbers`: `{n: row}`, or None when the
-    slug is unresolvable, the gh-rate backoff holds, or any chunk fails.
-    Refuses under pytest unless a `runner` seam is given (no real gh in tests)."""
+def fetch_rows(root, w_numbers, i_numbers, runner=None, budget_left=None):
+    """The ONE batched read for `root`: `{n: row}`, or None when the slug is
+    unresolvable, the gh-rate backoff holds, the sweep budget runs short or any
+    chunk fails. Refuses under pytest unless a `runner` seam is given (no real
+    gh in tests)."""
     from gates import ghread
     from watchdog import disk_guard_escalation
     if runner is None and disk_guard_escalation.running_under_pytest():
-        return None
-    slug = (ghread.canonical_slug(root, runner=runner) or "").strip()
-    if not _SLUG_RX.match(slug):
         return None
     if runner is None:
         import cli_gh_rate
         if cli_gh_rate.current_gh_backoff(status=cli_gh_rate._load_cache()) > 0:
             return None
+    slug = (ghread.canonical_slug(root, runner=runner) or "").strip()
+    if not _SLUG_RX.match(slug):
+        return None
     import cli_gh_rate_cost
     owner, name = slug.split("/", 1)
+    chunks = [(w_numbers[i:i + W_CHUNK], COMMENT_CAP) for i in range(0, len(w_numbers), W_CHUNK)]
+    chunks += [(i_numbers[i:i + CHUNK], I_COMMENTS) for i in range(0, len(i_numbers), CHUNK)]
     out = {}
-    for i in range(0, len(numbers), CHUNK):
-        chunk = numbers[i:i + CHUNK]
+    for chunk, last in chunks:
+        left = budget_left() if budget_left is not None else None
+        if left is not None and left < CHUNK_BUDGET_S:
+            return None
         rc, raw, _err = ghread._run(
-            ["gh", "api", "graphql", "-f", "query=" + _query(chunk), "-f", "owner=" + owner,
+            ["gh", "api", "graphql", "-f", "query=" + _query(chunk, last), "-f", "owner=" + owner,
              "-f", "name=" + name], root, 30, None if runner else ghread._gh_env(), runner)
         try:
             data = json.loads(raw) if rc == 0 else None
@@ -363,13 +418,31 @@ def fetch_rows(root, numbers, runner=None):
     return out
 
 
+def _armed(state, projects_dir, cwd):
+    """True / False / None for the pane at `cwd`: Job 20's persisted goal_mark
+    first (it survives past the 4 MB transcript tail), the transcript scan as
+    the fallback (`one_glance.resolve_goal_armed`)."""
+    import watchdog
+    from watchdog import one_glance, session_status
+    tinfo = watchdog.find_active_transcript(projects_dir, cwd)
+    tpath = tinfo[0] if isinstance(tinfo, (tuple, list)) else tinfo
+    if not tpath:
+        return None
+    sid = os.path.basename(str(tpath))
+    sid = sid[:-len(".jsonl")] if sid.endswith(".jsonl") else sid
+    marks = state.get("goal_mark") if isinstance(state.get("goal_mark"), dict) else {}
+    return one_glance.resolve_goal_armed(marks.get(sid),
+                                         session_status.goal_armed_from_transcript(tpath))[0]
+
+
 def run_job(now, state, panes, *, run, sleep_fn, projects_dir, dry_run=False, handled=None,
             budget_left=None):
     """The production wiring: the shared `watchdog.idle_pane` gates and delivery,
     resolved at call time (every `watchdog.<name>` seam stays effective); held
     while the sweep has less than MIN_BUDGET_S left."""
+    import statusbar
     import watchdog
-    from watchdog import idle_pane, session_status
+    from watchdog import idle_pane, nudge_gate
     left = budget_left() if budget_left is not None else None
     if left is not None and left < MIN_BUDGET_S:
         return []
@@ -381,12 +454,18 @@ def run_job(now, state, panes, *, run, sleep_fn, projects_dir, dry_run=False, ha
         return idle_pane.pane_ready(pid, cwd, NUDGE_KIND, projects_dir=projects_dir,
                                     handled=handled, state=state, now=now, **ready_deps)
 
+    def held(pid):
+        hold = nudge_gate.pre_send_hold(state, pid, NUDGE_KIND, now)
+        return hold[0] if hold else None
+
     def self_login():
         import cli_quals
         return cli_quals._stream_self_login()
 
+    refresh = None if dry_run else statusbar._spawn_refresh
     return triage_job(
-        now, state, panes, scope=lambda cwd: cache_of(cwd, now=now), ready=ready,
-        armed=lambda tpath: session_status.goal_armed_from_transcript(tpath) is True,
-        fetch=fetch_rows, self_login=self_login, deliver=deliver, mark_sent=mark_sent,
+        now, state, panes, scope=lambda cwd: cache_of(cwd, now=now, refresh=refresh),
+        ready=ready, armed=lambda cwd: _armed(state, projects_dir, cwd), held=held,
+        fetch=lambda root, w, i: fetch_rows(root, w, i, budget_left=budget_left),
+        self_login=self_login, deliver=deliver, mark_sent=mark_sent,
         nudges_enabled=watchdog.nudges_enabled, handled=handled, dry_run=dry_run) + jl

@@ -155,10 +155,12 @@ _PRESENCE = (
     r"\bke[ďd]\s+pr[íi]de[šs]\s+k\b",
     r"\bnext\s+time\s+you['’]re\s+(?:at|in\s+front\s+of)\b",
     r"\b(?:waiting|blocked)\s+(?:on|for)\s+you\b",
-    # #1404 (dasio 25.-28.11.): an on-site slot / a person at a machine, never a free queue slot
-    r"\b(?:wait(?:s|ing)?|blocked|parked)\s+(?:for|on|until)\s+(?:the\s+|a\s+)?next\s+"
-    r"(?:[\w-]+\s+){0,2}(?:slot|window|visit)\b",
-    r"\b[čc]ak\w*\s+na\s+[ďd]alš\w*\s+(?:[\w-]+\s+){0,2}(?:slot|okn|term[íi]n|n[áa]v[šs]tev)\w*",
+    # #1404 (dasio 25.-28.11.): an ON-SITE slot (FOH / venue / in person / the owner's window)
+    # or a person at a machine; a release / CI / maintenance / runner window stays W or work
+    r"\b(?:wait(?:s|ing)?|blocked|parked)\s+(?:for|on|until)\s+(?:the\s+|a\s+)?next\s+(?:[\w-]+\s+)?"
+    r"(?:on[- ]?site|foh|venue|in[- ]person|hands[- ]on|owner['’]?s?|your)\s+(?:[\w-]+\s+)?(?:slot|window|visit)\b",
+    r"\b[čc]ak\w*\s+na\s+[ďd]alš\w*\s+(?:[\w-]+\s+)?(?:foh|on[- ]?site|osobn\w*|tvoj\w*|ownerov\w*)\s+"
+    r"(?:[\w-]+\s+)?(?:slot|okn|term[íi]n|n[áa]v[šs]tev)\w*",
     r"\b(?:wait(?:s|ing)?|blocked)\s+(?:for|on)\s+(?:someone|somebody|a\s+person)\s+(?:at|on[- ]site)\b",
     r"\b(?:only|then(?:\s+[\w-]+)?)\s+with\s+(?:someone|somebody|a\s+person)\s+(?:on[- ]site|physically|"
     r"at\s+the\s+(?:[\w-]+\s+){0,2}"
