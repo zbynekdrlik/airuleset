@@ -155,6 +155,14 @@ _PRESENCE = (
     r"\bke[ďd]\s+pr[íi]de[šs]\s+k\b",
     r"\bnext\s+time\s+you['’]re\s+(?:at|in\s+front\s+of)\b",
     r"\b(?:waiting|blocked)\s+(?:on|for)\s+you\b",
+    # #1404 (dasio 25.-28.11.): an on-site slot / a person at a machine, never a free queue slot
+    r"\b(?:wait(?:s|ing)?|blocked|parked)\s+(?:for|on|until)\s+(?:the\s+|a\s+)?next\s+"
+    r"(?:[\w-]+\s+){0,2}(?:slot|window|visit)\b",
+    r"\b[čc]ak\w*\s+na\s+[ďd]alš\w*\s+(?:[\w-]+\s+){0,2}(?:slot|okn|term[íi]n|n[áa]v[šs]tev)\w*",
+    r"\b(?:wait(?:s|ing)?|blocked)\s+(?:for|on)\s+(?:someone|somebody|a\s+person)\s+(?:at|on[- ]site)\b",
+    r"\b(?:only|then(?:\s+[\w-]+)?)\s+with\s+(?:someone|somebody|a\s+person)\s+(?:on[- ]site|physically|"
+    r"at\s+the\s+(?:[\w-]+\s+){0,2}"
+    r"(?:pc|box|rig|machine|computer|desk|console|mixer)\b)",
     r"\bI\s+need\s+you\s+to\b",
     r"\byou\s+(?:need|have)\s+to\s+(?:physically|power|plug|replug|unplug|reboot|restart|press|"
     r"log\s+in|swap|replace)\b",
