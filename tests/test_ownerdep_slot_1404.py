@@ -29,7 +29,9 @@ DASIO = (
     "change, done only with someone at the PC or the owner's word.",
     "Plan: on mbc, a 60 s stack-trace ring before and after Ndu Start 4 + reboot, then "
     "FOH with someone on site.",
-    "Blocked on the next on-site window at FOH.",
+    "Blocked on the next FOH window.",          # round 2: "on-site" alone also fits a vendor
+    "Next step: waiting for your next on-site visit.",
+    "Parked until the owner's next in-person slot.",
     "Waiting for someone at the FOH PC for ~45 min, outside a service.",
     "Čaká na ďalší FOH slot (reštart karty).",
     "ČAKÁ NA ĎALŠÍ FOH TERMÍN.",
@@ -55,6 +57,16 @@ NOT_A_WAIT = (
     "Čakám na ďalší slot GitHub runnera.",
     "Čakám na ďalší release termín.",
     "Waiting-on: Hetzner — waiting for the next maintenance window — status.hetzner.com",
+    # review round 2: a third party at a place, or its own on-site visit
+    "Waiting for someone at Hetzner to replace the disk.",
+    "Blocked on somebody at GitHub support to answer the ticket.",
+    "Waiting on a person at the vendor to confirm the RMA.",
+    "Blocked until the next on-site visit by the Hetzner tech.",
+    "Parked until the next on-site slot of the Cloudflare engineer.",
+    "Waiting for the next venue maintenance window (venue IT schedules it).",
+    "Waiting for the next hands-on lab slot booked by the school.",
+    "Čakám na ďalšiu osobnú návštevu technika Hetzneru.",
+    "Waiting for the next in-person visit from the vendor.",
 )
 
 

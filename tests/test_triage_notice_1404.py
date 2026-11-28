@@ -185,6 +185,23 @@ class Job(_Job):
         self.assertEqual(len(self.reads), 1)
         self.assertEqual(state[tn.STATE_KEY]["/d/dasio"], {"failed": NOW})
 
+    def test_kind_off_never_computes_the_scope(self):
+        self.kind_on = False
+        calls = []
+        self.scope_map = {"/d/dasio": ("/d/dasio", I_NUMS, set())}
+        orig = self.scope_map.get
+        self.scope_map = type("M", (dict,), {"get": lambda s, k: calls.append(k) or orig(k)})(
+            self.scope_map)
+        self._run({})
+        self.assertEqual(calls, [])
+
+    def test_a_partial_read_with_nothing_found_is_retried_soon(self):
+        self.rows = tn.Partial({11: ROWS[11]})
+        state = {}
+        logs = self._run(state)
+        self.assertEqual(state[tn.STATE_KEY]["/d/dasio"], {"failed": NOW})
+        self.assertIn("partial", " ".join(logs))
+
     def test_w_first_then_the_newest_i(self):
         w, i = tn.read_order({1, 2}, set(range(100, 400)))
         self.assertEqual(w, [1, 2])
@@ -270,6 +287,38 @@ class Scope(unittest.TestCase):
         tn.cache_of(nogit, home=self.home, now=NOW, refresh=kicked.append)
         self.assertEqual(len(kicked), 2)       # never for a dir outside a checkout
 
+    def test_a_fresh_but_unusable_cache_never_kicks(self):
+        kicked = []
+        self._cache(self.repo, open_numbers=None)
+        self.assertIsNone(tn.cache_of(self.repo, home=self.home, now=NOW, refresh=kicked.append))
+        self._cache(self.repo, stale_since=NOW - 60)
+        self.assertIsNone(tn.cache_of(self.repo, home=self.home, now=NOW, refresh=kicked.append))
+        self.assertEqual(kicked, [])
+
+    def test_a_refresh_kick_is_throttled_per_checkout(self):
+        spawned = []
+        state = {}
+        for t in (NOW, NOW + 60, NOW + tn.FAIL_S - 1):
+            tn.kick_refresh(state, "/d/dasio", t, spawned.append)
+        self.assertEqual(spawned, ["/d/dasio"])
+        tn.kick_refresh(state, "/d/dasio", NOW + tn.FAIL_S + 1, spawned.append)
+        self.assertEqual(len(spawned), 2)
+
+    def test_the_real_kick_refuses_under_pytest(self):
+        from unittest import mock
+        from watchdog import disk_guard_escalation as dge
+        spawned = []
+        with mock.patch.object(dge, "running_under_pytest", return_value=True):
+            tn.kick_refresh({}, "/d/dasio", NOW, None)
+        with mock.patch("statusbar._spawn_refresh", spawned.append), \
+                mock.patch.object(dge, "running_under_pytest", return_value=True):
+            tn.kick_refresh({}, "/d/dasio", NOW, None)
+        self.assertEqual(spawned, [])
+
+    def test_a_box_without_goal_jobs_never_skips_as_armed(self):
+        state = {"goal_mark": {"s1": {"mark": {"state": "set"}}}}
+        self.assertFalse(tn._armed(state, "/p", "/d/dasio", goal_off=True))
+
     def test_stale_failed_or_lane_is_none(self):
         self._cache(self.repo, ts=NOW - 2 * DAY)
         self.assertIsNone(tn.cache_of(self.repo, home=self.home, now=NOW))
@@ -348,6 +397,15 @@ class Fetch(unittest.TestCase):
         self.assertIsNone(tn.fetch_rows("/d/dasio", [1], [2], runner=run,
                                         budget_left=lambda: 10))
         self.assertEqual([a for a in calls if a[0] == "gh"], [])
+
+    def test_a_budget_cut_keeps_what_was_read(self):
+        node = {"state": "OPEN", "labels": {"nodes": []},
+                "comments": {"totalCount": 0, "nodes": []}}
+        run, calls = _runner({"data": {"repository": {"i1": node}}})
+        left = iter([100, 10])
+        rows = tn.fetch_rows("/d/dasio", [1], [2], runner=run, budget_left=lambda: next(left))
+        self.assertEqual(sorted(rows), [1])
+        self.assertTrue(rows.partial)
 
     def test_i_rows_read_few_comments_w_rows_the_full_cap(self):
         run, calls = _runner({"data": {"repository": {}}})
