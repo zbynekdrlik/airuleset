@@ -253,5 +253,45 @@ class ReviewRound1(unittest.TestCase):
             ds.deploy_declaration = orig
         self.assertEqual(out["instances"], [])
 
+
+class PrReadWithoutChecks(unittest.TestCase):
+    """Live david3 28.11.: the stream App token gets FORBIDDEN on
+    `statusCheckRollup`, gh exits 1, so the whole PR read was None and no
+    ticket could ever reach C. The PR list itself is readable."""
+
+    def _payload(self, with_checks):
+        head = {"committedDate": "2026-11-28T00:00:00Z"}
+        if with_checks:
+            head["statusCheckRollup"] = {"state": "PENDING"}
+        return json.dumps({"data": {"repository": {"pullRequests": {
+            "pageInfo": {"hasNextPage": False, "endCursor": None},
+            "nodes": [{"number": 7, "title": "fix #41", "body": "", "isDraft": False,
+                       "closingIssuesReferences": {"nodes": [{"number": 42}]},
+                       "commits": {"nodes": [{"commit": head}]}}]}},
+            "rateLimit": {"cost": 1, "remaining": 4000}}})
+
+    def test_forbidden_checks_fall_back_to_the_pr_list(self):
+        calls = []
+
+        def gh(args):
+            q = next(a for a in args if a.startswith("query="))
+            calls.append("statusCheckRollup" in q)
+            return "" if "statusCheckRollup" in q else self._payload(False)
+        got = f.read_prs("o/r", gh, now=0)
+        self.assertEqual(got, {41: False, 42: False})
+        self.assertEqual(calls, [True, False])
+
+    def test_a_readable_full_query_is_not_retried(self):
+        calls = []
+
+        def gh(args):
+            calls.append(1)
+            return self._payload(True)
+        self.assertEqual(f.read_prs("o/r", gh, now=1795800000), {41: True, 42: True})
+        self.assertEqual(len(calls), 1)
+
+    def test_both_failing_is_unknown(self):
+        self.assertIsNone(f.read_prs("o/r", lambda a: "", now=0))
+
 if __name__ == "__main__":
     unittest.main()
