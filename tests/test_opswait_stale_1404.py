@@ -66,6 +66,18 @@ class Target(unittest.TestCase):
             self.assertEqual(opswait.unbacked_reason(
                 {"waiting_on": NOW - 3600, "own_target": bad}, NOW), "", bad)
 
+    def test_an_older_target_never_overrides_a_newer_wait(self):
+        """The notice's remedy (a fresh `Waiting-on:` line) must back the ticket
+        again: a target counts only when its comment is not older than the
+        newest valid line (review round 1)."""
+        comments = [_c("2026-10-01T08:00:00Z", "Ops-wait-target: vendor firmware by 2026-10-10"),
+                    _c("2026-11-27T08:00:00Z", GOOD, login="relay")]
+        ages = cli_quals._ages_from_comments(comments, ME)
+        self.assertEqual(opswait.unbacked_reason(ages, NOW), "")
+        newer = comments + [_c("2026-11-27T09:00:00Z", "Ops-wait-target: reply by 2026-11-26")]
+        self.assertIn("2026-11-26", opswait.unbacked_reason(
+            cli_quals._ages_from_comments(newer, ME), NOW))
+
     def test_the_same_evidence_through_the_footer_read(self):
         """The fact the footer reads (`read_wait`) parses the SAME comments the
         triage notice reads: an own target comment that passed moves the row."""

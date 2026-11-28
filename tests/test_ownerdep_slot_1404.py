@@ -32,6 +32,7 @@ DASIO = (
     "Blocked on the next on-site window at FOH.",
     "Waiting for someone at the FOH PC for ~45 min, outside a service.",
     "Čaká na ďalší FOH slot (reštart karty).",
+    "ČAKÁ NA ĎALŠÍ FOH TERMÍN.",
 )
 NOT_A_WAIT = (
     "The next FOH slot went fine: all four steps done 27.11.",
@@ -39,6 +40,21 @@ NOT_A_WAIT = (
     "The scheduler hands each job the next free slot in the queue.",
     "Paired with someone at the PC earlier; nothing is left for them.",
     "Waiting for the next CI run to finish.",
+    # review round 1 (#1404): third-party / machine windows stay W or work
+    "Waiting for the next release window (Thursday cut) before merging.",
+    "Parked until the next maintenance window at Hetzner.",
+    "Blocked on the next deploy window; CI is green.",
+    "Waiting for the next free runner slot on GitHub Actions.",
+    "Waiting on the next CI slot.",
+    "waits for the next cron window (03:00)",
+    "Waiting until the next rate-limit window resets.",
+    "Waiting for the next visit of the Hetzner tech (third party).",
+    "Blocked until the next CI slot frees up on the self-hosted runner.",
+    "Čaká na ďalšie okno CI.",
+    "Čaká na ďalší termín vydania (release).",
+    "Čakám na ďalší slot GitHub runnera.",
+    "Čakám na ďalší release termín.",
+    "Waiting-on: Hetzner — waiting for the next maintenance window — status.hetzner.com",
 )
 
 
@@ -53,11 +69,12 @@ class Corpus(unittest.TestCase):
 
     def test_hook_prefilter_stays_a_superset(self):
         words = re.search(r"OD_WORDS='([^']+)'", HOOK.read_text(encoding="utf-8")).group(1)
-        rx = re.compile(words, re.IGNORECASE)
+        # `LC_ALL=C grep -i` folds ASCII only: model it with a BYTES regex
+        rx = re.compile(words.encode("utf-8"), re.IGNORECASE)
         for text in DASIO:
-            self.assertTrue(rx.search(text), text)
+            self.assertTrue(rx.search(text.encode("utf-8")), text)
 
-    def test_no_quadratic_scan(self):
+    def test_long_repeated_runs_stay_linear(self):
         long_line = "waiting for the next " + "x-" * 40000 + " slot"
         start = time.monotonic()
         ownerdep.owner_dependency(long_line + "\n" + "with someone at the " + "a " * 40000)
