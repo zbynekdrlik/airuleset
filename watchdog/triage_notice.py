@@ -24,8 +24,9 @@ pane), at most once per REPEAT_S and only when there is something to triage:
 
 The candidate SET is the footer cache's own partition (`open_numbers` = I,
 `ops_wait_numbers` = W), so a shared-repo stream judges only its slice; an
-idle session's stale / missing cache kicks ONE detached footer refresh
-(`statusbar._spawn_refresh`, guarded) and is judged on a later sweep. The ONE
+idle session's old / missing cache kicks ONE detached footer refresh
+(`statusbar._spawn_refresh`, at most hourly per checkout) and is judged on a
+later sweep. The ONE
 batched read (a GraphQL alias query over exactly those numbers: W rows with
 the full comment cap, I rows with their newest few comments, chunked, bounded
 by the sweep budget) runs only when a notice could go now: kind on, root not
@@ -105,13 +106,46 @@ def cache_of(cwd, home=None, now=None, refresh=None):
             return None                              # not inside a checkout: never refresh
         path = os.path.dirname(path)
     ts = _num(cache.get("ts"))
-    if ts is None or not 0 <= now - ts <= CACHE_MAX_AGE_S or cache.get("stale_since") \
-            or not isinstance(cache.get("open_numbers"), list):
+    if ts is None or not 0 <= now - ts <= CACHE_MAX_AGE_S:
         if refresh is not None:
-            refresh(path)
+            refresh(path)                            # an old cache: an idle session
         return None
+    if cache.get("stale_since") or not isinstance(cache.get("open_numbers"), list):
+        return None                                  # a fresh failed refresh: no kick (#1404 r2)
     return (str(cache.get("root") or path), _ints(cache.get("open_numbers")),
             _ints(cache.get("ops_wait_numbers")))
+
+
+def kick_refresh(state, path, now, spawn):
+    """Kick ONE detached footer refresh for `path`, at most once per FAIL_S per
+    checkout (the `statusbar._spawn_refresh` guard alone is 30 s, shorter than
+    a sweep). `spawn=None` is the real `statusbar._spawn_refresh`, refused under
+    pytest. Never raises."""
+    from watchdog import disk_guard_escalation
+    kicks = state.get(STATE_KEY + "_kick")
+    kicks = kicks if isinstance(kicks, dict) else {}
+    last = _num(kicks.get(path))
+    if last is not None and 0 <= now - last < FAIL_S:
+        return
+    if spawn is None:
+        if disk_guard_escalation.running_under_pytest():
+            return
+        import statusbar
+        spawn = statusbar._spawn_refresh
+    kicks = {k: v for k, v in kicks.items() if _num(v) is not None and 0 <= now - v < KEEP_S}
+    kicks[path] = now
+    state[STATE_KEY + "_kick"] = kicks
+    try:
+        spawn(path)
+    except Exception:  # noqa: BLE001 -- a failed kick only delays the notice
+        return
+
+
+class Partial(dict):
+    """The rows a budget-cut read got before it stopped (`partial` is True)."""
+    partial = True
+
+
 
 
 def read_order(w_numbers, i_numbers):
@@ -264,20 +298,22 @@ def triage_job(now, state, panes, *, scope, ready, armed, held, fetch, self_logi
     At most ONE read per sweep (the rest wait for the next sweep)."""
     from watchdog import idle_pane
     logs = []
+    if not panes:
+        return logs
+    if not nudges_enabled(NUDGE_KIND):                 # before any scope read or refresh kick
+        last = _num(state.get(STATE_KEY + "_kindoff"))
+        if last is None or last > now or now - last >= KIND_OFF_LOG_S:
+            logs.append("w-triage: skip:kind-off (stage: airuleset.py nudges on --kind %s)"
+                        % NUDGE_KIND)
+            if not dry_run:
+                state[STATE_KEY + "_kindoff"] = now
+        return logs
     groups = {}
-    for pid, cwd in panes or []:
+    for pid, cwd in panes:
         sc = scope(cwd)
         if sc and (sc[1] or sc[2]):
             groups.setdefault(sc[0], (sc, []))[1].append((pid, cwd))
     if not groups:
-        return logs
-    if not nudges_enabled(NUDGE_KIND):
-        last = _num(state.get(STATE_KEY + "_kindoff"))
-        if last is None or last > now or now - last >= KIND_OFF_LOG_S:
-            logs.append("w-triage: skip:kind-off (%d project(s); stage: airuleset.py nudges "
-                        "on --kind %s)" % (len(groups), NUDGE_KIND))
-            if not dry_run:
-                state[STATE_KEY + "_kindoff"] = now
         return logs
     store = dict(state.get(STATE_KEY) if isinstance(state.get(STATE_KEY), dict) else {})
     for root in sorted(groups):
@@ -305,11 +341,15 @@ def triage_job(now, state, panes, *, scope, ready, armed, held, fetch, self_logi
         login = self_login()
         if not login:
             logs.append("w-triage: %s U? check skipped: no own gh login" % root)
+        partial = getattr(rows, "partial", False)
+        if partial:
+            logs.append("w-triage: %s partial read (%d of %d, sweep budget)"
+                        % (root, len(rows), len(w_list) + len(i_list)))
         w, u = candidates(rows, set(i_list), login, now)
         pid, sid, tpath = pick
         if not (w or u):
-            if not dry_run:
-                store[root] = {"checked": now}
+            if not dry_run:                            # an unread tail is retried soon
+                store[root] = {"failed" if partial else "checked": now}
             logs.append("w-triage: %s nothing to triage (%d read)" % (root, len(rows)))
         elif dry_run:
             logs.append("w-triage: %s -> %s would tell (W %s; U? %s) [dry-run]" % (
@@ -402,7 +442,7 @@ def fetch_rows(root, w_numbers, i_numbers, runner=None, budget_left=None):
     for chunk, last in chunks:
         left = budget_left() if budget_left is not None else None
         if left is not None and left < CHUNK_BUDGET_S:
-            return None
+            return Partial(out) if out else None     # keep what was read (#1404 r2)
         rc, raw, _err = ghread._run(
             ["gh", "api", "graphql", "-f", "query=" + _query(chunk, last), "-f", "owner=" + owner,
              "-f", "name=" + name], root, 30, None if runner else ghread._gh_env(), runner)
@@ -418,10 +458,14 @@ def fetch_rows(root, w_numbers, i_numbers, runner=None, budget_left=None):
     return out
 
 
-def _armed(state, projects_dir, cwd):
+def _armed(state, projects_dir, cwd, goal_off=False):
     """True / False / None for the pane at `cwd`: Job 20's persisted goal_mark
     first (it survives past the 4 MB transcript tail), the transcript scan as
-    the fallback (`one_glance.resolve_goal_armed`)."""
+    the fallback (`one_glance.resolve_goal_armed`). On a box whose goal jobs
+    are off (`~/.claude/watchdog-disable-goal`) Job 20 never runs, so no pane
+    is left to it: False."""
+    if goal_off:
+        return False
     import watchdog
     from watchdog import one_glance, session_status
     tinfo = watchdog.find_active_transcript(projects_dir, cwd)
@@ -440,7 +484,6 @@ def run_job(now, state, panes, *, run, sleep_fn, projects_dir, dry_run=False, ha
     """The production wiring: the shared `watchdog.idle_pane` gates and delivery,
     resolved at call time (every `watchdog.<name>` seam stays effective); held
     while the sweep has less than MIN_BUDGET_S left."""
-    import statusbar
     import watchdog
     from watchdog import idle_pane, nudge_gate
     left = budget_left() if budget_left is not None else None
@@ -462,10 +505,12 @@ def run_job(now, state, panes, *, run, sleep_fn, projects_dir, dry_run=False, ha
         import cli_quals
         return cli_quals._stream_self_login()
 
-    refresh = None if dry_run else statusbar._spawn_refresh
+    goal_off = bool(watchdog._owner_disabled("goal"))
+    refresh = None if dry_run else (lambda path: kick_refresh(state, path, now, None))
     return triage_job(
         now, state, panes, scope=lambda cwd: cache_of(cwd, now=now, refresh=refresh),
-        ready=ready, armed=lambda cwd: _armed(state, projects_dir, cwd), held=held,
+        ready=ready, armed=lambda cwd: False if goal_off else _armed(state, projects_dir, cwd),
+        held=held,
         fetch=lambda root, w, i: fetch_rows(root, w, i, budget_left=budget_left),
         self_login=self_login, deliver=deliver, mark_sent=mark_sent,
         nudges_enabled=watchdog.nudges_enabled, handled=handled, dry_run=dry_run) + jl
