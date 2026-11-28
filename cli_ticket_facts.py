@@ -83,6 +83,9 @@ _PR_QUERY = (
     "closingIssuesReferences(first:20){nodes{number repository{nameWithOwner}}}"
     " commits(last:1){nodes{commit{committedDate statusCheckRollup{state}}}}}}}"
     " rateLimit{cost remaining}}" % PR_PAGE_SIZE)
+# #1399: a stream App token gets FORBIDDEN on statusCheckRollup (no checks
+# permission) and gh exits 1; the same list without it still proves C's veto.
+_PR_QUERY_NO_CHECKS = _PR_QUERY.replace(" statusCheckRollup{state}", "")
 
 
 def cache_path(root, home=None):
@@ -168,6 +171,18 @@ def pipeline_numbers(payload, now=None):
 
 
 def read_prs(slug, gh_fn, now=None):
+    """`_read_prs` with the full query, else without check runs (#1399: P is
+    then never shown, an open linked PR still keeps C open)."""
+    got = _read_prs(slug, gh_fn, now, _PR_QUERY)
+    if got is _GH_FAILED:   # only a refused answer is retried, never a cap
+        got = _read_prs(slug, gh_fn, now, _PR_QUERY_NO_CHECKS)
+    return None if got is _GH_FAILED else got
+
+
+_GH_FAILED = object()
+
+
+def _read_prs(slug, gh_fn, now, query):
     """The open PRs in pages of PR_PAGE_SIZE (`gh_fn(args) -> stdout`, "" on
     any error), merged into one payload → the `open_pr_states` map. None when
     the slug or any page is unusable, or more than PR_MAX_PAGES pages exist
@@ -179,13 +194,13 @@ def read_prs(slug, gh_fn, now=None):
         return None
     nodes, cursor, more = [], None, False
     for _page in range(PR_MAX_PAGES):
-        args = ["api", "graphql", "-f", "query=" + _PR_QUERY,
+        args = ["api", "graphql", "-f", "query=" + query,
                 "-f", "owner=" + owner, "-f", "name=" + name]
         raw = gh_fn(args + (["-f", "cursor=" + cursor] if cursor else []))
         try:
             payload = json.loads(raw)
         except (TypeError, ValueError):
-            return None
+            return _GH_FAILED if _page == 0 else None
         cli_gh_rate_cost.record_query_cost("ticket-facts-prs", payload)
         prs = _dig(payload, "data", "repository", "pullRequests")
         if not isinstance(_dig(prs, "nodes"), list):
