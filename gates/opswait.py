@@ -32,7 +32,8 @@ Two halves share the parse:
   gated. Log ~/.claude/opswait-gate.log; bypass `# airuleset:opswait-ok
   <reason>` (the reason is logged).
 - READ TIME (`unbacked_reason`): a plain ops-wait row whose newest valid line
-  is missing, or older than `STALE_S` (7 days) with no newer cited own push,
+  is missing, or older than `STALE_S` (3 days, #1404) with no newer cited own
+  push, or whose own `Ops-wait-target: <event> by <date>` date has passed,
   counts in I, not W (`cli_ticket_state.classify`, fact `wait_unbacked`, read
   by `cli_ticket_facts` from the W comment prefetch).
 
@@ -56,7 +57,7 @@ from gates.shellcmd import split_top_level
 OPS_WAIT_LABEL = "ops-wait"
 BYPASS_MARKER = "airuleset:opswait-ok"
 FRESH_S = 30 * 60               # a ticket comment counts this long at label time
-STALE_S = 7 * 24 * 3600         # read time: an older line needs a newer cited push
+STALE_S = 3 * 24 * 3600         # read time: an older line needs a newer cited push (#1404)
 
 # The line: start of a line (indent, a `- ` bullet and `**` bold allowed, never
 # a `>` quote), the key (`Waiting-on` / `Waiting on`), a colon.
@@ -163,6 +164,17 @@ def has_valid_waiting_on(text):
     return any(not problem for _rest, problem in waiting_on_lines(text))
 
 
+def _target_passed(target, now):
+    """The `YYYY-MM-DD` target when it lies before today (UTC, the
+    `cli_quals._converge_flagged` prong-1 rule), else "" (#1404). A future
+    target never extends the `STALE_S` window: it only brings a ticket back
+    sooner."""
+    if not isinstance(target, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", target):
+        return ""
+    today = datetime.fromtimestamp(now, timezone.utc).strftime("%Y-%m-%d")
+    return target if target < today else ""
+
+
 def unbacked_reason(ages, now, max_age=STALE_S):
     """The READ-TIME verdict for one plain ops-wait ticket from its comment
     ages (`cli_quals._ages_from_comments`: `waiting_on` = newest comment with a
@@ -171,6 +183,9 @@ def unbacked_reason(ages, now, max_age=STALE_S):
     one-line reason it counts in I."""
     if not isinstance(ages, dict):
         return None
+    passed = _target_passed(ages.get("own_target"), now)
+    if passed:
+        return "its `Ops-wait-target:` date %s has passed" % passed
     line_ts = ages.get("waiting_on")
     if not isinstance(line_ts, (int, float)) or isinstance(line_ts, bool):
         return "no valid `Waiting-on: <third party> — <event> — <check>` line"
@@ -430,8 +445,8 @@ def block_message(blocks):
         "  Waiting-on: <third party> — <the concrete event> — <how you check it>",
         "Waiting on the OWNER is U: `--add-label needs-owner-action` (his manual "
         "step) or `needs-answer` (his answer). Work you can do yourself stays in "
-        "I: no parking label. The line is re-read later: none or >7 d old "
-        "counts in I.",
+        "I: no parking label. The line is re-read later: none or >3 d old, "
+        "or a passed `Ops-wait-target:` date, counts in I.",
         "Bypass (rare, logged): `# %s <reason>`." % BYPASS_MARKER,
     ]
     return "\n".join(lines)

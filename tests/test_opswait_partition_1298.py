@@ -1,6 +1,6 @@
 """W membership is a derived fact (#1298): a plain `ops-wait` ticket whose
-newest valid `Waiting-on:` line is missing, or older than 7 days with no newer
-cited own push, counts in I, not W.
+newest valid `Waiting-on:` line is missing, or older than 3 days (#1404, was
+7) with no newer cited own push, counts in I, not W.
 
 Read side: `gates.opswait.unbacked_reason` (pure) over the comment ages
 (`cli_quals._ages_from_comments`, new `waiting_on` key) → the fact
@@ -43,13 +43,13 @@ class Reason(unittest.TestCase):
 
     def test_fresh_line_is_backed(self):
         self.assertEqual(opswait.unbacked_reason(
-            {"waiting_on": _NOW - 6 * DAY}, _NOW), "")
+            {"waiting_on": _NOW - 2 * DAY}, _NOW), "")
 
-    def test_the_seven_day_boundary(self):
+    def test_the_window_boundary(self):   # #1404: 3 days (owner 28.11.2026)
         self.assertEqual(opswait.unbacked_reason(
-            {"waiting_on": _NOW - 7 * DAY}, _NOW), "")
+            {"waiting_on": _NOW - 3 * DAY}, _NOW), "")
         self.assertTrue(opswait.unbacked_reason(
-            {"waiting_on": _NOW - 7 * DAY - 1}, _NOW))
+            {"waiting_on": _NOW - 3 * DAY - 1}, _NOW))
 
     def test_an_older_cited_push_does_not_age_a_fresh_line(self):
         ages = {"waiting_on": _NOW - 2 * DAY, "own_cited": _NOW - 9 * DAY}
